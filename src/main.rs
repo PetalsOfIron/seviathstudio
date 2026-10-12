@@ -1,0 +1,29 @@
+// SeviathStudio — native Rust version (egui). Being ported from the Svelte app tab by tab.
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // no console window in release builds
+
+mod app;
+mod canvas;
+mod colorpick;
+mod doc;
+mod icons;
+mod paint;
+mod snake;
+mod tabs;
+mod theme;
+mod view;
+mod widgets;
+
+#[cfg(test)]
+mod screens;
+
+fn main() -> eframe::Result<()> {
+    let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_title("SeviathStudio")
+            .with_inner_size([1440.0, 900.0])
+            .with_min_inner_size([960.0, 600.0]),
+        ..Default::default()
+    };
+    eframe::run_native("SeviathStudio", options, Box::new(|cc| Ok(Box::new(app::SeviathApp::new(cc)))))
+}

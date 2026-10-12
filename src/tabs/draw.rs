@@ -1,0 +1,1032 @@
+// Draw tab: tool strip, brush panel, canvas, and the right column (Color → Sub view → Layers).
+// Painting itself arrives with the brush engine; this is the layout and all panel state.
+
+use eframe::egui::{
+    self, Align, Align2, Color32, CornerRadius, CursorIcon, Event, FontId, Key, Layout, Margin, Modifiers,
+    MouseWheelUnit, Panel, PointerButton, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, Ui, UiBuilder, Vec2,
+    ecolor::Hsva, pos2, vec2,
+};
+
+use crate::canvas::{self as cv, CanvasRenderer};
+use crate::colorpick;
+use crate::doc::{Blend, Document, Layer, LayerKind};
+use crate::icons::{self, Icon};
+use crate::paint::{self, DabParams, StrokeState};
+use crate::snake;
+use crate::theme::*;
+use crate::view::View;
+use crate::widgets::{self, icon_button, section_title, segmented, slider_row};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tool {
+    Brush,
+    Eraser,
+    Smudge,
+    Fill,
+    Gradient,
+    Picker,
+    Select,
+    Lasso,
+    Move,
+    Pen,
+    Shape,
+    Text,
+    Hand,
+    Zoom,
+}
+
+/// Tools in groups; a thin line separates the groups in the strip.
+const TOOL_GROUPS: &[&[Tool]] = &[
+    &[Tool::Brush, Tool::Eraser, Tool::Smudge],
+    &[Tool::Fill, Tool::Gradient, Tool::Picker],
+    &[Tool::Select, Tool::Lasso, Tool::Move],
+    &[Tool::Pen, Tool::Shape, Tool::Text],
+    &[Tool::Hand, Tool::Zoom],
+];
+
+impl Tool {
+    pub fn name(self) -> &'static str {
+        match self {
+            Tool::Brush => "Brush",
+            Tool::Eraser => "Eraser",
+            Tool::Smudge => "Smudge & blur",
+            Tool::Fill => "Fill",
+            Tool::Gradient => "Gradient",
+            Tool::Picker => "Color picker",
+            Tool::Select => "Selection",
+            Tool::Lasso => "Lasso",
+            Tool::Move => "Move & transform",
+            Tool::Pen => "Vector pen",
+            Tool::Shape => "Shapes",
+            Tool::Text => "Text",
+            Tool::Hand => "Hand (pan)",
+            Tool::Zoom => "Zoom",
+        }
+    }
+
+    fn key(self) -> (Modifiers, Key, &'static str) {
+        match self {
+            Tool::Brush => (Modifiers::NONE, Key::B, "B"),
+            Tool::Eraser => (Modifiers::NONE, Key::E, "E"),
+            Tool::Smudge => (Modifiers::NONE, Key::S, "S"),
+            Tool::Fill => (Modifiers::NONE, Key::G, "G"),
+            Tool::Gradient => (Modifiers::SHIFT, Key::G, "Shift+G"),
+            Tool::Picker => (Modifiers::NONE, Key::I, "I"),
+            Tool::Select => (Modifiers::NONE, Key::M, "M"),
+            Tool::Lasso => (Modifiers::NONE, Key::L, "L"),
+            Tool::Move => (Modifiers::NONE, Key::V, "V"),
+            Tool::Pen => (Modifiers::NONE, Key::P, "P"),
+            Tool::Shape => (Modifiers::NONE, Key::U, "U"),
+            Tool::Text => (Modifiers::NONE, Key::T, "T"),
+            Tool::Hand => (Modifiers::NONE, Key::H, "H"),
+            Tool::Zoom => (Modifiers::NONE, Key::Z, "Z"),
+        }
+    }
+
+    fn icon(self) -> Icon {
+        match self {
+            Tool::Brush => Icon::Brush,
+            Tool::Eraser => Icon::Eraser,
+            Tool::Smudge => Icon::Smudge,
+            Tool::Fill => Icon::Fill,
+            Tool::Gradient => Icon::Gradient,
+            Tool::Picker => Icon::Picker,
+            Tool::Select => Icon::Select,
+            Tool::Lasso => Icon::Lasso,
+            Tool::Move => Icon::Move,
+            Tool::Pen => Icon::Pen,
+            Tool::Shape => Icon::Shape,
+            Tool::Text => Icon::Text,
+            Tool::Hand => Icon::Hand,
+            Tool::Zoom => Icon::Zoom,
+        }
+    }
+}
+
+/// Brush categories and preset names, same as the web version's brush.ts.
+pub const CATEGORIES: &[(&str, &[&str])] = &[
+    ("Pens", &["Pen", "Ink", "G-pen", "Maru pen", "Gel pen", "Fineliner", "Brush pen", "Dip pen", "Double line pen", "Sumi ink brush", "Calligraphy", "Anime lineart", "Hair strands"]),
+    ("Pencils", &["Pencil", "Soft pencil 2B", "Dark pencil 6B", "Mechanical", "Colored pencil", "Charcoal", "Pastel", "Wax crayon", "Rough pencil"]),
+    ("Markers", &["Marker", "Highlighter", "Alcohol marker", "Outline marker"]),
+    ("Paint", &["Oil paint", "Acrylic", "Gouache", "Oil flat", "Oil filbert", "Oil fan", "Palette knife", "Impasto", "Gouache flat", "Dry gouache", "Outlined gouache", "Fuzzy bristle", "Dry brush", "Paint mix", "Cel shade", "Flat chisel", "Gloss highlight"]),
+    ("Watercolor", &["Watercolor", "Watercolor wash", "Watercolor bloom", "Transparent watercolor", "Dark rim watercolor", "Wet blending watercolor", "Dry watercolor", "Granulating watercolor", "Flat wash brush", "Watercolor liner", "Bleeding watercolor", "Mottled wash", "Dried ring watercolor", "Salt watercolor", "Watercolor splatter", "Watercolor dots"]),
+    ("Airbrush", &["Soft round", "Airbrush", "Hard airbrush", "Grainy airbrush", "Spray paint", "Splatter", "Soft blush"]),
+    ("Blend", &["Blender", "Smudge", "Bristle blender", "Hair blend", "Fur blend", "Finger tip", "Textured blend", "Soft blur", "Water blend"]),
+    ("Textures", &["Hair texture", "Fur texture", "Skin texture", "Cloth / linen", "Denim", "Knit wool", "Leather", "Scales", "Wood grain", "Stone / concrete", "Canvas oil", "Watercolor paper", "Grunge texture", "Crosshatch shading", "Halftone shading"]),
+    ("Rough & particles", &["Grunge stamp", "Dust particles", "Speckle spray", "Rough rock", "Splotch", "Crosshatch", "Dry scratch", "Particle sparkle"]),
+    ("Nature & FX", &["Leaves", "Grass", "Clouds", "Sparkles", "Hearts", "Confetti", "Scale stamps", "Glass sparkle", "Fur", "Hair strands brush"]),
+    ("My brushes", &[]),
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SubTab {
+    Navigator,
+    References,
+}
+
+pub struct DrawState {
+    pub tool: Tool,
+    category: usize,
+    brush: usize,
+    pub size: f32,
+    opacity: f32,
+    flow: f32,
+    hardness: f32,
+    spacing: f32,
+    stabilizer: f32,
+    pub primary: Color32,
+    secondary: Color32,
+    hsv: Hsva,
+    color_old: Color32,
+    color_committed: Color32,
+    hex: String,
+    swatches: Vec<Color32>,
+    subview_open: bool,
+    subview_tab: SubTab,
+    subview_h: f32,
+    pub doc: Document,
+    active: usize,
+    layer_counter: usize,
+    view: View,
+    view_ready: bool,
+    renderer: CanvasRenderer,
+    stroke: StrokeState,
+    rotate_raw: f32,
+    canvas_rect: Rect,
+    cursor_doc: Option<Pos2>,
+    notice: Option<&'static str>,
+}
+
+impl Default for DrawState {
+    fn default() -> Self {
+        Self {
+            tool: Tool::Brush,
+            category: 0,
+            brush: 0,
+            size: 8.0,
+            opacity: 95.0,
+            flow: 90.0,
+            hardness: 85.0,
+            spacing: 6.0,
+            stabilizer: 20.0,
+            primary: Color32::from_rgb(34, 34, 34),
+            secondary: Color32::WHITE,
+            hsv: Hsva::from(Color32::from_rgb(34, 34, 34)),
+            color_old: Color32::from_rgb(34, 34, 34),
+            color_committed: Color32::from_rgb(34, 34, 34),
+            hex: "#222222".into(),
+            swatches: vec![
+                Color32::from_rgb(34, 34, 34),
+                Color32::WHITE,
+                Color32::from_rgb(46, 191, 113),
+                Color32::from_rgb(160, 228, 96),
+                Color32::from_rgb(214, 168, 76),
+                Color32::from_rgb(222, 64, 86),
+                Color32::from_rgb(92, 150, 240),
+                Color32::from_rgb(172, 122, 240),
+                Color32::from_rgb(245, 205, 180),
+                Color32::from_rgb(120, 80, 60),
+            ],
+            subview_open: true,
+            subview_tab: SubTab::Navigator,
+            subview_h: 170.0,
+            doc: Document::new(3000, 4000),
+            active: 0,
+            layer_counter: 1,
+            view: View::default(),
+            view_ready: false,
+            renderer: CanvasRenderer::default(),
+            stroke: StrokeState::default(),
+            rotate_raw: 0.0,
+            canvas_rect: Rect::NOTHING,
+            cursor_doc: None,
+            notice: None,
+        }
+    }
+}
+
+impl DrawState {
+    pub fn status(&self) -> String {
+        let mut s = format!(
+            "{} · {} · {}×{} px · {:.0}%",
+            self.tool.name(),
+            CATEGORIES[self.category].1.get(self.brush).copied().unwrap_or("—"),
+            self.doc.w,
+            self.doc.h,
+            self.view.zoom * 100.0
+        );
+        if self.view.angle.abs() > 0.001 {
+            s += &format!(" · {:.0}°", self.view.angle_deg());
+        }
+        if self.view.flip {
+            s += " · mirrored";
+        }
+        if let Some(p) = self.cursor_doc {
+            if p.x >= 0.0 && p.y >= 0.0 && p.x < self.doc.w as f32 && p.y < self.doc.h as f32 {
+                s += &format!(" · x {:.0}  y {:.0}", p.x, p.y);
+            }
+        }
+        s
+    }
+
+    /// Short message for the status bar (e.g. why a stroke didn't paint).
+    pub fn notice(&self) -> Option<&'static str> {
+        self.notice
+    }
+
+    pub fn ui(&mut self, ui: &mut Ui) {
+        self.shortcuts(ui.ctx());
+
+        Panel::left("draw_tools")
+            .exact_size(56.0)
+            .resizable(false)
+            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(8, 10)))
+            .show(ui, |ui| self.tool_strip(ui));
+
+        Panel::left("draw_brush")
+            .resizable(true)
+            .default_size(270.0)
+            .size_range(230.0..=440.0)
+            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::same(10)))
+            .show(ui, |ui| self.brush_panel(ui));
+
+        Panel::right("draw_right")
+            .resizable(true)
+            .default_size(290.0)
+            .size_range(250.0..=480.0)
+            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::same(10)))
+            .show(ui, |ui| self.right_panel(ui));
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(BG))
+            .show(ui, |ui| self.canvas(ui));
+    }
+
+    /// Rotation back to 0°.
+    pub fn straighten(&mut self) {
+        self.view.set_angle(0.0);
+    }
+
+    fn doc_size(&self) -> Vec2 {
+        vec2(self.doc.w as f32, self.doc.h as f32)
+    }
+
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        ctx.input_mut(|i| {
+            // Shift+G before G, so the plain G doesn't steal it.
+            let mut tools: Vec<Tool> = TOOL_GROUPS.iter().flat_map(|g| g.iter().copied()).collect();
+            tools.sort_by_key(|t| if t.key().0 == Modifiers::NONE { 1 } else { 0 });
+            for t in tools {
+                let (m, k, _) = t.key();
+                if i.consume_key(m, k) {
+                    self.tool = t;
+                }
+            }
+            if i.consume_key(Modifiers::NONE, Key::X) {
+                std::mem::swap(&mut self.primary, &mut self.secondary);
+                self.hex = hex_of(self.primary);
+            }
+            if i.consume_key(Modifiers::NONE, Key::OpenBracket) {
+                self.size = (self.size / 1.15).max(1.0);
+            }
+            if i.consume_key(Modifiers::NONE, Key::CloseBracket) {
+                self.size = (self.size * 1.15).min(1000.0);
+            }
+            // View: Ctrl+0 fit, Ctrl+Alt+0 100%, Ctrl+= / Ctrl+- zoom, F mirror.
+            let c = self.view.screen_center;
+            if i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::Num0) {
+                self.view.set_zoom(1.0);
+            }
+            if i.consume_key(Modifiers::COMMAND, Key::Num0) {
+                self.view.fit(self.canvas_rect, vec2(self.doc.w as f32, self.doc.h as f32));
+            }
+            if i.consume_key(Modifiers::COMMAND, Key::Equals) || i.consume_key(Modifiers::COMMAND, Key::Plus) {
+                self.view.zoom_at(c, 1.25);
+            }
+            if i.consume_key(Modifiers::COMMAND, Key::Minus) {
+                self.view.zoom_at(c, 0.8);
+            }
+            if i.consume_key(Modifiers::NONE, Key::F) {
+                self.view.flip = !self.view.flip;
+            }
+        });
+    }
+
+    fn tool_strip(&mut self, ui: &mut Ui) {
+        ui.spacing_mut().item_spacing.y = 4.0;
+        ui.vertical_centered(|ui| {
+            for (gi, group) in TOOL_GROUPS.iter().enumerate() {
+                if gi > 0 {
+                    let (r, _) = ui.allocate_exact_size(vec2(30.0, 7.0), Sense::hover());
+                    ui.painter().line_segment([r.left_center(), r.right_center()], Stroke::new(1.0, LINE));
+                }
+                for &tool in group.iter() {
+                    let tip = format!("{} ({})", tool.name(), tool.key().2);
+                    if icon_button(ui, tool.icon(), self.tool == tool, 36.0, &tip).clicked() {
+                        self.tool = tool;
+                    }
+                }
+            }
+        });
+
+        ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
+            let (rect, resp) = ui.allocate_exact_size(Vec2::splat(38.0), Sense::click());
+            let p = ui.painter();
+            let back = Rect::from_min_size(rect.min + vec2(14.0, 14.0), Vec2::splat(22.0));
+            let front = Rect::from_min_size(rect.min, Vec2::splat(22.0));
+            p.rect_filled(back, CornerRadius::same(5), self.secondary);
+            p.rect_stroke(back, CornerRadius::same(5), Stroke::new(1.5, LINE), StrokeKind::Outside);
+            p.rect_filled(front, CornerRadius::same(5), self.primary);
+            p.rect_stroke(front, CornerRadius::same(5), Stroke::new(1.5, GOLD), StrokeKind::Outside);
+            if resp.on_hover_text("Main and second color — click or press X to swap").clicked() {
+                std::mem::swap(&mut self.primary, &mut self.secondary);
+                self.hex = hex_of(self.primary);
+            }
+        });
+    }
+
+    fn brush_panel(&mut self, ui: &mut Ui) {
+        section_title(ui, "Brush");
+        ui.add_space(2.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            for (i, (name, _)) in CATEGORIES.iter().enumerate() {
+                if widgets::chip(ui, name, self.category == i).clicked() {
+                    self.category = i;
+                    self.brush = 0;
+                }
+            }
+        });
+        ui.add_space(6.0);
+
+        let brushes = CATEGORIES[self.category].1;
+        egui::ScrollArea::vertical()
+            .id_salt("brush_list")
+            .max_height(ui.available_height() * 0.5)
+            .show(ui, |ui| {
+                if brushes.is_empty() {
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new("Your saved and imported brushes will appear here.")
+                            .color(TEXT_DIM)
+                            .italics(),
+                    );
+                    return;
+                }
+                let w = ((ui.available_width() - 6.0) / 2.0).floor();
+                egui::Grid::new("brush_grid").spacing(vec2(6.0, 6.0)).show(ui, |ui| {
+                    for (i, name) in brushes.iter().enumerate() {
+                        if brush_card(ui, name, self.category, w, self.brush == i, self.primary).clicked() {
+                            self.brush = i;
+                        }
+                        if i % 2 == 1 {
+                            ui.end_row();
+                        }
+                    }
+                });
+            });
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(vec2(72.0, 18.0), Sense::hover());
+            ui.painter().text(r.left_center(), Align2::LEFT_CENTER, "Size", FontId::proportional(12.5), TEXT_DIM);
+            ui.add(egui::Slider::new(&mut self.size, 1.0..=1000.0).logarithmic(true).suffix(" px").max_decimals(1));
+        });
+        ui.horizontal(|ui| {
+            ui.add_space(80.0);
+            ui.spacing_mut().item_spacing.x = 3.0;
+            for v in [1.0f32, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0] {
+                if widgets::chip(ui, &format!("{v}"), (self.size - v).abs() < 0.01).clicked() {
+                    self.size = v;
+                }
+            }
+        });
+        slider_row(ui, "Opacity", &mut self.opacity, 0.0..=100.0, "%");
+        slider_row(ui, "Flow", &mut self.flow, 0.0..=100.0, "%");
+        slider_row(ui, "Hardness", &mut self.hardness, 0.0..=100.0, "%");
+        slider_row(ui, "Spacing", &mut self.spacing, 1.0..=200.0, "%");
+        slider_row(ui, "Stabilizer", &mut self.stabilizer, 0.0..=100.0, "");
+    }
+
+    fn right_panel(&mut self, ui: &mut Ui) {
+        egui::ScrollArea::vertical().id_salt("right_col").show(ui, |ui| {
+            card().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                self.color_section(ui);
+            });
+            ui.add_space(8.0);
+            card().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                self.subview_section(ui);
+            });
+            ui.add_space(8.0);
+            card().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                self.layers_section(ui);
+            });
+        });
+    }
+
+    fn color_section(&mut self, ui: &mut Ui) {
+        section_title(ui, "Color");
+        let before = self.primary;
+        colorpick::picker(ui, &mut self.primary, &mut self.hsv);
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            if colorpick::compare(ui, self.color_old, self.primary).clicked() {
+                self.primary = self.color_old;
+            }
+            ui.label(RichText::new("HEX").color(TEXT_DIM).size(12.0));
+            let r = ui.add(egui::TextEdit::singleline(&mut self.hex).desired_width(76.0).char_limit(7));
+            if r.lost_focus() {
+                match parse_hex(&self.hex) {
+                    Some(c) => self.primary = c,
+                    None => self.hex = hex_of(self.primary),
+                }
+            } else if !r.has_focus() && parse_hex(&self.hex) != Some(self.primary) {
+                // Color changed elsewhere (picker tool, swatch, swap): follow it.
+                self.hex = hex_of(self.primary);
+            }
+            if ui.button("Save").on_hover_text("Add this color to the swatches").clicked() && !self.swatches.contains(&self.primary) {
+                self.swatches.push(self.primary);
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            let mut remove = None;
+            for (i, c) in self.swatches.iter().enumerate() {
+                let (r, resp) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::click());
+                ui.painter().rect_filled(r, CornerRadius::same(4), *c);
+                let edge = if *c == self.primary { VENOM } else { LINE };
+                ui.painter().rect_stroke(r, CornerRadius::same(4), Stroke::new(1.0, edge), StrokeKind::Inside);
+                let resp = resp.on_hover_text("Click: use · Right-click: remove");
+                if resp.clicked() {
+                    self.primary = *c;
+                }
+                if resp.secondary_clicked() {
+                    remove = Some(i);
+                }
+            }
+            if let Some(i) = remove {
+                self.swatches.remove(i);
+            }
+        });
+        if self.primary != before {
+            self.hex = hex_of(self.primary);
+        }
+        // "Before" swatch: the color you had before the last finished change.
+        if !ui.input(|i| i.pointer.any_down()) && self.primary != self.color_committed {
+            self.color_old = self.color_committed;
+            self.color_committed = self.primary;
+        }
+    }
+
+    fn subview_section(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            section_title(ui, "Sub view");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let label = if self.subview_open { "Hide" } else { "Show" };
+                if widgets::chip(ui, label, false).clicked() {
+                    self.subview_open = !self.subview_open;
+                }
+            });
+        });
+        if !self.subview_open {
+            return;
+        }
+        segmented(ui, &mut self.subview_tab, &[(SubTab::Navigator, "Navigator"), (SubTab::References, "References")]);
+        ui.add_space(4.0);
+
+        let w = ui.available_width();
+        let (rect, resp) = ui.allocate_exact_size(vec2(w, self.subview_h), Sense::click_and_drag());
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, CornerRadius::same(6), BG);
+        match self.subview_tab {
+            SubTab::Navigator => {
+                let size = self.doc_size();
+                let z = ((rect.width() - 16.0) / size.x).min((rect.height() - 16.0) / size.y);
+                let page = Rect::from_center_size(rect.center(), size * z);
+                match self.renderer.thumb() {
+                    Some(t) => {
+                        p.image(t.id(), page, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                    }
+                    None => {
+                        p.rect_filled(page, 0.0, self.doc.paper);
+                    }
+                }
+                // Where the canvas is looking right now (rotated with the view).
+                if self.canvas_rect.is_positive() {
+                    let quad: Vec<Pos2> =
+                        self.view.visible_quad(self.canvas_rect).iter().map(|d| page.min + d.to_vec2() * z).collect();
+                    p.add(Shape::closed_line(quad, Stroke::new(1.5, VENOM)));
+                }
+                if let Some(pt) = resp.interact_pointer_pos() {
+                    self.view.center = ((pt - page.min) / z).to_pos2();
+                }
+                resp.on_hover_text("Whole drawing. Click or drag to move the view there.")
+                    .on_hover_cursor(CursorIcon::Grab);
+            }
+            SubTab::References => {
+                p.text(
+                    rect.center(),
+                    Align2::CENTER_CENTER,
+                    "Reference images arrive with file opening",
+                    FontId::proportional(12.0),
+                    TEXT_DIM,
+                );
+            }
+        }
+
+        // Drag the grip under the preview to resize the docked sub view.
+        let (grip, gresp) = ui.allocate_exact_size(vec2(w, 10.0), Sense::drag());
+        let gresp = gresp.on_hover_cursor(CursorIcon::ResizeVertical);
+        if gresp.dragged() {
+            self.subview_h = (self.subview_h + gresp.drag_delta().y).clamp(90.0, 600.0);
+        }
+        let gc = if gresp.hovered() || gresp.dragged() { EMERALD } else { LINE };
+        ui.painter().line_segment(
+            [pos2(grip.center().x - 18.0, grip.center().y), pos2(grip.center().x + 18.0, grip.center().y)],
+            Stroke::new(3.0, gc),
+        );
+    }
+
+    /// What affects the composited picture; when it changes the canvas is redrawn.
+    fn layer_sig(&self) -> (Vec<(bool, u32, Blend, bool, LayerKind)>, Color32) {
+        let v = self.doc.layers.iter().map(|l| (l.visible, l.opacity.to_bits(), l.blend, l.clip, l.kind)).collect();
+        (v, self.doc.paper)
+    }
+
+    fn layers_section(&mut self, ui: &mut Ui) {
+        let before = self.layer_sig();
+        self.layers_section_inner(ui);
+        if self.layer_sig() != before {
+            self.doc.mark_all_dirty();
+        }
+    }
+
+    fn layers_section_inner(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            section_title(ui, "Layers");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let can_delete = self.doc.layers[self.active].kind != LayerKind::Paper && self.doc.layers.len() > 1;
+                if icon_button(ui, Icon::Trash, false, 26.0, "Delete layer").clicked() && can_delete {
+                    self.doc.layers.remove(self.active);
+                    self.active = self.active.min(self.doc.layers.len() - 1);
+                }
+                if icon_button(ui, Icon::Folder, false, 26.0, "New folder").clicked() {
+                    self.layer_counter += 1;
+                    let name = format!("Folder {}", self.layer_counter);
+                    self.doc.layers.insert(self.active, Layer::new(&name, LayerKind::Group));
+                }
+                if icon_button(ui, Icon::Pen, false, 26.0, "New vector layer").clicked() {
+                    self.layer_counter += 1;
+                    let name = format!("Vector {}", self.layer_counter);
+                    self.doc.layers.insert(self.active, Layer::new(&name, LayerKind::Vector));
+                }
+                if icon_button(ui, Icon::Plus, false, 26.0, "New layer").clicked() {
+                    self.layer_counter += 1;
+                    let name = format!("Layer {}", self.layer_counter);
+                    self.doc.layers.insert(self.active, Layer::new(&name, LayerKind::Raster));
+                }
+            });
+        });
+
+        let w = ui.available_width();
+        let paper = self.doc.paper;
+        for i in 0..self.doc.layers.len() {
+            let selected = i == self.active;
+            let (row, resp) = ui.allocate_exact_size(vec2(w, 46.0), Sense::click());
+            let layer = &mut self.doc.layers[i];
+            {
+                let p = ui.painter();
+                let bg = if selected { EMERALD_DEEP.gamma_multiply(0.55) } else if resp.hovered() { HOVER } else { RAISED };
+                p.rect_filled(row, CornerRadius::same(8), bg);
+                if selected {
+                    p.rect_stroke(row, CornerRadius::same(8), Stroke::new(1.0, EMERALD), StrokeKind::Inside);
+                }
+                let thumb = Rect::from_min_size(row.min + vec2(36.0, 6.0), Vec2::splat(34.0));
+                match layer.kind {
+                    LayerKind::Paper => {
+                        p.rect_filled(thumb, CornerRadius::same(4), paper);
+                    }
+                    LayerKind::Group => {
+                        p.rect_filled(thumb, CornerRadius::same(4), CARD);
+                        icons::paint(p, thumb.shrink(7.0), Icon::Folder, GOLD);
+                    }
+                    _ => checker(p, thumb),
+                }
+                if layer.kind == LayerKind::Vector {
+                    icons::paint(p, thumb.shrink(9.0), Icon::Pen, EMERALD);
+                }
+                let tx = thumb.right() + 10.0;
+                let name_col = if layer.visible { TEXT } else { TEXT_DIM };
+                p.text(pos2(tx, row.top() + 15.0), Align2::LEFT_CENTER, &layer.name, FontId::proportional(13.0), name_col);
+                let mut sub = match layer.kind {
+                    LayerKind::Paper => "Background".to_owned(),
+                    LayerKind::Group => "Folder".to_owned(),
+                    LayerKind::Vector => format!("Vector · {}", layer.blend.name()),
+                    LayerKind::Raster => layer.blend.name().to_owned(),
+                };
+                if layer.opacity < 100.0 {
+                    sub += &format!(" · {:.0}%", layer.opacity);
+                }
+                if layer.clip {
+                    sub += " · clipped";
+                }
+                p.text(pos2(tx, row.top() + 32.0), Align2::LEFT_CENTER, sub, FontId::proportional(11.0), TEXT_DIM);
+                if layer.locked {
+                    let lr = Rect::from_center_size(pos2(row.right() - 16.0, row.center().y), Vec2::splat(14.0));
+                    icons::paint(p, lr, Icon::Lock, GOLD);
+                }
+                if layer.clip {
+                    p.line_segment(
+                        [pos2(row.left() + 32.0, row.top() + 8.0), pos2(row.left() + 32.0, row.bottom() - 8.0)],
+                        Stroke::new(2.0, VENOM),
+                    );
+                }
+            }
+            // Eye toggle on top of the row.
+            let eye = Rect::from_center_size(pos2(row.left() + 17.0, row.center().y), Vec2::splat(24.0));
+            let eresp = ui.interact(eye, ui.id().with(("eye", i)), Sense::click());
+            let eye_icon = if layer.visible { Icon::Eye } else { Icon::EyeOff };
+            let ecol = if eresp.hovered() { VENOM } else if layer.visible { TEXT } else { TEXT_DIM };
+            icons::paint(ui.painter(), eye.shrink(4.0), eye_icon, ecol);
+            if eresp.on_hover_text("Show / hide").clicked() {
+                layer.visible = !layer.visible;
+            } else if resp.clicked() {
+                self.active = i;
+            }
+            ui.add_space(2.0);
+        }
+
+        ui.add_space(6.0);
+        if self.doc.layers[self.active].kind == LayerKind::Paper {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Paper color").color(TEXT_DIM).size(12.5));
+                egui::color_picker::color_edit_button_srgba(ui, &mut self.doc.paper, egui::color_picker::Alpha::Opaque);
+            });
+            ui.label(RichText::new("Hide the paper (eye) to work on transparency.").color(TEXT_DIM).size(11.5));
+            return;
+        }
+        let layer = &mut self.doc.layers[self.active];
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Blend").color(TEXT_DIM).size(12.5));
+            egui::ComboBox::from_id_salt("blend")
+                .selected_text(layer.blend.name())
+                .width(150.0)
+                .show_ui(ui, |ui| {
+                    for b in Blend::ALL {
+                        ui.selectable_value(&mut layer.blend, b, b.name()).on_hover_text(b.about());
+                    }
+                });
+        });
+        ui.label(RichText::new(layer.blend.about()).color(TEXT_DIM).size(11.5));
+        slider_row(ui, "Opacity", &mut layer.opacity, 0.0..=100.0, "%");
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut layer.clip, "Clipping mask");
+            ui.checkbox(&mut layer.lock_alpha, "Lock alpha");
+            ui.checkbox(&mut layer.locked, "Lock");
+        });
+    }
+
+    fn canvas(&mut self, ui: &mut Ui) {
+        let rect = ui.max_rect();
+        self.canvas_rect = rect;
+        let resp = ui.allocate_rect(rect, Sense::click_and_drag());
+        self.view.screen_center = rect.center();
+        if !self.view_ready {
+            self.view.fit(rect, self.doc_size());
+            self.view_ready = true;
+        }
+        let ctx = ui.ctx().clone();
+        let (space, rkey, alt, shift, primary_down, events) = ctx.input(|i| {
+            (
+                i.key_down(Key::Space),
+                i.key_down(Key::R),
+                i.modifiers.alt,
+                i.modifiers.shift,
+                i.pointer.primary_down(),
+                i.events.clone(),
+            )
+        });
+        let hover = resp.hover_pos();
+
+        // ---- Zoom (wheel / pinch) and rotate (Alt+wheel / trackpad twist), around the pointer.
+        if let Some(hp) = hover {
+            let mut factor = 1.0f32;
+            let mut turn = 0.0f32;
+            for e in &events {
+                match e {
+                    Event::MouseWheel { unit, delta, modifiers, .. } => {
+                        let dy = match unit {
+                            MouseWheelUnit::Point => delta.y,
+                            MouseWheelUnit::Line => delta.y * 40.0,
+                            MouseWheelUnit::Page => delta.y * 400.0,
+                        };
+                        if modifiers.alt {
+                            turn += dy * 0.0033;
+                        } else {
+                            factor *= (dy * 0.0045).exp();
+                        }
+                    }
+                    Event::Zoom(f) => factor *= *f,
+                    Event::Rotate(a) => turn += *a,
+                    _ => {}
+                }
+            }
+            if factor != 1.0 {
+                self.view.zoom_at(hp, factor);
+            }
+            if turn != 0.0 {
+                self.view.rotate(turn);
+            }
+        }
+
+        // ---- Pan: middle drag, Space + drag, or the Hand tool.
+        let primary_drag = resp.dragged_by(PointerButton::Primary);
+        let nav_key = space || rkey;
+        if resp.dragged_by(PointerButton::Middle)
+            || (primary_drag && ((space && !rkey) || (self.tool == Tool::Hand && !rkey)))
+        {
+            self.view.pan(resp.drag_delta());
+        }
+
+        // ---- Rotate: R + drag around the middle of the canvas, Shift snaps to 15°.
+        if resp.drag_started() {
+            self.rotate_raw = self.view.angle;
+        }
+        if primary_drag && rkey {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let c = rect.center();
+                let prev = p - resp.drag_delta();
+                let mut da = (p - c).angle() - (prev - c).angle();
+                if da > std::f32::consts::PI {
+                    da -= std::f32::consts::TAU;
+                } else if da < -std::f32::consts::PI {
+                    da += std::f32::consts::TAU;
+                }
+                self.rotate_raw += da;
+                let step = 15f32.to_radians();
+                let a = if shift { (self.rotate_raw / step).round() * step } else { self.rotate_raw };
+                self.view.set_angle(a);
+            }
+        }
+
+        // ---- Zoom tool: click to zoom in (Alt: out), drag sideways to scrub.
+        if self.tool == Tool::Zoom && !nav_key {
+            if resp.clicked() {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    self.view.zoom_at(p, if alt { 1.0 / 1.5 } else { 1.5 });
+                }
+            } else if primary_drag {
+                if let Some(o) = ctx.input(|i| i.pointer.press_origin()) {
+                    self.view.zoom_at(o, (resp.drag_delta().x * 0.01).exp());
+                }
+            }
+        }
+
+        // ---- Painting and color picking.
+        let painting_tool = matches!(self.tool, Tool::Brush | Tool::Eraser);
+        let pressed_here = resp.is_pointer_button_down_on() && primary_down;
+        let picking = self.tool == Tool::Picker || (painting_tool && alt);
+        if picking && pressed_here && !nav_key {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let d = self.view.screen_to_doc(p);
+                if d.x >= 0.0 && d.y >= 0.0 && d.x < self.doc.w as f32 && d.y < self.doc.h as f32 {
+                    if let Some(c) = self.renderer.pixel(d.x as usize, d.y as usize) {
+                        let [r, g, b, _] = c.to_srgba_unmultiplied();
+                        self.primary = Color32::from_rgb(r, g, b);
+                        self.hex = hex_of(self.primary);
+                    }
+                }
+            }
+        } else if painting_tool && !nav_key && pressed_here {
+            if !self.doc.layers[self.active].paintable() {
+                self.notice = Some(match self.doc.layers[self.active].kind {
+                    _ if self.doc.layers[self.active].locked => "This layer is locked.",
+                    LayerKind::Raster => "This layer can't be painted.",
+                    LayerKind::Vector => "Vector layers are drawn with the vector pen (coming soon). Pick a pixel layer to paint.",
+                    _ => "Pick a pixel layer to paint on.",
+                });
+            } else {
+                self.notice = None;
+                let prm = DabParams {
+                    radius: self.size / 2.0,
+                    hardness: self.hardness / 100.0,
+                    alpha: (self.opacity / 100.0) * (self.flow / 100.0),
+                    color: self.primary,
+                    erase: self.tool == Tool::Eraser,
+                    spacing: (self.spacing / 100.0).max(0.02),
+                };
+                let mut pts: Vec<Pos2> = Vec::new();
+                if !self.stroke.active() {
+                    if let Some(o) = ctx.input(|i| i.pointer.press_origin()) {
+                        pts.push(o);
+                    }
+                }
+                // Every pointer sample of this frame, so fast strokes stay smooth.
+                pts.extend(events.iter().filter_map(|e| if let Event::PointerMoved(p) = e { Some(*p) } else { None }));
+                for sp in pts {
+                    let d = self.view.screen_to_doc(sp);
+                    paint::stroke_to(&mut self.doc, self.active, &mut self.stroke, d, &prm);
+                }
+            }
+        }
+        if !primary_down && self.stroke.active() {
+            self.stroke.end();
+        }
+
+        // ---- Draw.
+        self.renderer.sync(&ctx, &mut self.doc);
+        let p = ui.painter_at(rect);
+        snake::scales(&p, rect, EMERALD.gamma_multiply(0.045));
+        let quad = cv::page_quad(&self.view, &self.doc);
+        let shadow: Vec<Pos2> = quad.iter().map(|q| *q + vec2(0.0, 8.0)).collect();
+        p.add(Shape::convex_polygon(shadow, Color32::from_black_alpha(90), Stroke::NONE));
+        self.renderer.paint(&p, &self.view, &self.doc);
+        p.add(Shape::closed_line(quad, Stroke::new(1.0, Color32::from_black_alpha(80))));
+
+        // ---- Cursor.
+        self.cursor_doc = hover.map(|h| self.view.screen_to_doc(h));
+        if let Some(hp) = hover {
+            let dragging = resp.dragged();
+            let icon = if space || resp.dragged_by(PointerButton::Middle) || self.tool == Tool::Hand {
+                if dragging { CursorIcon::Grabbing } else { CursorIcon::Grab }
+            } else if rkey {
+                CursorIcon::AllScroll
+            } else {
+                match self.tool {
+                    Tool::Zoom if alt => CursorIcon::ZoomOut,
+                    Tool::Zoom => CursorIcon::ZoomIn,
+                    Tool::Brush | Tool::Eraser if !alt => CursorIcon::None,
+                    Tool::Move => CursorIcon::Move,
+                    Tool::Text => CursorIcon::Text,
+                    _ => CursorIcon::Crosshair,
+                }
+            };
+            ctx.set_cursor_icon(icon);
+            if icon == CursorIcon::None {
+                let r = (self.size / 2.0 * self.view.zoom).max(1.5);
+                p.circle_stroke(hp, r, Stroke::new(2.2, Color32::from_black_alpha(150)));
+                p.circle_stroke(hp, r, Stroke::new(1.0, Color32::from_white_alpha(230)));
+                if r > 6.0 {
+                    p.circle_filled(hp, 1.2, Color32::from_white_alpha(230));
+                }
+            }
+        }
+
+        self.view_bar(ui, rect);
+    }
+
+    /// Floating bar at the bottom of the canvas: zoom, fit, rotation and mirror.
+    fn view_bar(&mut self, ui: &mut Ui, rect: Rect) {
+        let bar = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 30.0), vec2(372.0, 38.0));
+        let c = rect.center();
+        ui.scope_builder(UiBuilder::new().max_rect(bar), |ui| {
+            egui::Frame::new()
+                .fill(PANEL.gamma_multiply(0.96))
+                .stroke(Stroke::new(1.0, LINE))
+                .corner_radius(CornerRadius::same(19))
+                .inner_margin(Margin::symmetric(10, 3))
+                .show(ui, |ui| {
+                    ui.horizontal_centered(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        if icon_button(ui, Icon::ZoomOut, false, 28.0, "Zoom out (Ctrl+-)").clicked() {
+                            self.view.zoom_at(c, 0.8);
+                        }
+                        let z = format!("{:.0}%", self.view.zoom * 100.0);
+                        if ui
+                            .add(egui::Button::new(RichText::new(z).size(12.5)).frame(false).min_size(vec2(50.0, 24.0)))
+                            .on_hover_text("Click: actual pixels, 100% (Ctrl+Alt+0)")
+                            .clicked()
+                        {
+                            self.view.set_zoom(1.0);
+                        }
+                        if icon_button(ui, Icon::ZoomIn, false, 28.0, "Zoom in (Ctrl+=) · wheel zooms at the pointer").clicked() {
+                            self.view.zoom_at(c, 1.25);
+                        }
+                        if icon_button(ui, Icon::Fit, false, 28.0, "Fit the page (Ctrl+0)").clicked() {
+                            self.view.fit(rect, self.doc_size());
+                        }
+                        let (r, _) = ui.allocate_exact_size(vec2(10.0, 22.0), Sense::hover());
+                        ui.painter().line_segment([r.center_top(), r.center_bottom()], Stroke::new(1.0, LINE));
+                        let step = 15f32.to_radians();
+                        if icon_button(ui, Icon::RotateLeft, false, 28.0, "Rotate left 15° · R + drag rotates freely").clicked() {
+                            self.view.rotate(-step);
+                        }
+                        let a = format!("{:.0}°", self.view.angle_deg());
+                        if ui
+                            .add(egui::Button::new(RichText::new(a).size(12.5)).frame(false).min_size(vec2(42.0, 24.0)))
+                            .on_hover_text("Click: straighten (0°)")
+                            .clicked()
+                        {
+                            self.view.set_angle(0.0);
+                        }
+                        if icon_button(ui, Icon::RotateRight, false, 28.0, "Rotate right 15°").clicked() {
+                            self.view.rotate(step);
+                        }
+                        if icon_button(ui, Icon::Flip, self.view.flip, 28.0, "Mirror the view (F) — only the view, not the drawing").clicked() {
+                            self.view.flip = !self.view.flip;
+                        }
+                    });
+                });
+        });
+    }
+}
+
+/// A brush card: preview stroke on a dark tile, name underneath. The preview shape follows the category.
+fn brush_card(ui: &mut Ui, name: &str, category: usize, w: f32, selected: bool, color: Color32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 62.0), Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return resp;
+    }
+    let p = ui.painter();
+    let bg = if resp.hovered() { HOVER } else { RAISED };
+    p.rect_filled(rect, CornerRadius::same(8), bg);
+    p.rect_stroke(
+        rect,
+        CornerRadius::same(8),
+        Stroke::new(if selected { 1.5 } else { 1.0 }, if selected { EMERALD } else { LINE }),
+        StrokeKind::Inside,
+    );
+
+    // Preview on a light strip so dark colors stay visible.
+    let strip = Rect::from_min_max(rect.min + vec2(5.0, 5.0), pos2(rect.right() - 5.0, rect.top() + 38.0));
+    p.rect_filled(strip, CornerRadius::same(5), Color32::from_rgb(236, 240, 236));
+    let col = if color.r() as u32 + color.g() as u32 + color.b() as u32 > 680 { Color32::from_rgb(40, 40, 40) } else { color };
+    let (max_w, alpha, grain) = match category {
+        0 => (3.2, 1.0, false),     // pens
+        1 => (2.4, 0.75, true),     // pencils
+        2 => (5.0, 0.55, false),    // markers
+        3 => (6.5, 0.95, false),    // paint
+        4 => (7.0, 0.35, false),    // watercolor
+        5 => (9.0, 0.12, false),    // airbrush
+        6 => (6.0, 0.25, false),    // blend
+        7 | 8 => (5.0, 0.8, true),  // textures, rough
+        _ => (4.0, 0.9, true),      // nature & fx
+    };
+    let seed = name.bytes().fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+    let n = 40;
+    for i in 0..=n {
+        let t = i as f32 / n as f32;
+        let x = strip.left() + 10.0 + t * (strip.width() - 20.0);
+        let y = strip.center().y + (t * std::f32::consts::TAU).sin() * 6.0;
+        let taper = (t * std::f32::consts::PI).sin().powf(0.6);
+        let r = (max_w * taper).max(0.6);
+        if grain {
+            let h = seed.wrapping_add(i * 2654435761) >> 16;
+            let jitter = vec2(((h % 7) as f32 - 3.0) * 0.4, ((h / 7 % 7) as f32 - 3.0) * 0.4);
+            p.circle_filled(pos2(x, y) + jitter, r * 0.8, col.gamma_multiply(alpha * 0.8));
+        } else {
+            p.circle_filled(pos2(x, y), r, col.gamma_multiply(alpha));
+        }
+    }
+    let name_col = if selected { VENOM } else { TEXT };
+    p.text(
+        pos2(rect.center().x, rect.bottom() - 11.0),
+        Align2::CENTER_CENTER,
+        name,
+        FontId::proportional(11.5),
+        name_col,
+    );
+    resp.on_hover_text(name)
+}
+
+fn checker(p: &egui::Painter, r: Rect) {
+    let a = Color32::from_rgb(200, 200, 200);
+    let b = Color32::from_rgb(240, 240, 240);
+    p.rect_filled(r, 0.0, b);
+    let s = (r.width().min(r.height()) / 4.0).max(4.0);
+    let p = p.with_clip_rect(r.intersect(p.clip_rect()));
+    let mut y = r.top();
+    let mut row = 0;
+    while y < r.bottom() {
+        let mut x = r.left() + if row % 2 == 0 { 0.0 } else { s };
+        while x < r.right() {
+            p.rect_filled(Rect::from_min_size(pos2(x, y), Vec2::splat(s)), 0.0, a);
+            x += 2.0 * s;
+        }
+        y += s;
+        row += 1;
+    }
+}
+
+fn hex_of(c: Color32) -> String {
+    format!("#{:02X}{:02X}{:02X}", c.r(), c.g(), c.b())
+}
+
+fn parse_hex(s: &str) -> Option<Color32> {
+    let s = s.trim().trim_start_matches('#');
+    let full = match s.len() {
+        3 => s.chars().flat_map(|c| [c, c]).collect::<String>(),
+        6 => s.to_owned(),
+        _ => return None,
+    };
+    let v = u32::from_str_radix(&full, 16).ok()?;
+    Some(Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
+}
