@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import ColorWheel from './lib/ColorWheel.svelte';
 
   // Document size (will be selectable when creating a new project later)
   const DOC_W = 2000;
   const DOC_H = 1400;
   const MAX_HISTORY = 50;
 
+  type Tool = 'brush' | 'eraser' | 'picker';
   type Layer = {
     id: number;
     name: string;
@@ -22,9 +24,12 @@
     | { type: 'move'; from: number; to: number };
 
   // Tool settings
-  let tool = $state<'brush' | 'eraser'>('brush');
+  let tool = $state<Tool>('brush');
   let color = $state('#222222');
   let size = $state(16);
+  let altDown = $state(false);
+  // Holding Alt temporarily switches to the color picker
+  let activeTool = $derived<Tool>(altDown ? 'picker' : tool);
 
   // Layers: index 0 is the bottom layer
   let layers = $state<Layer[]>([]);
@@ -37,13 +42,15 @@
   let undoCount = $state(0);
   let redoCount = $state(0);
 
-  // View: zoom and pan
+  // View: zoom, pan, rotation and flip
   const MIN_ZOOM = 0.05;
   const MAX_ZOOM = 32;
   let stage = $state<HTMLElement>();
   let zoom = $state(1);
   let panX = $state(0);
   let panY = $state(0);
+  let rotation = $state(0); // degrees
+  let flipped = $state(false);
   let spaceDown = $state(false);
   let panning = $state(false);
   let panStart = { x: 0, y: 0, px: 0, py: 0 };
@@ -55,6 +62,7 @@
 
   // Stroke state
   let drawing = false;
+  let picking = false;
   let last: Point = { x: 0, y: 0, p: 0.5 };
   let hasRect = false;
   let minX = 0, minY = 0, maxX = 0, maxY = 0;
@@ -70,7 +78,7 @@
   const activeIndex = () => layers.findIndex((l) => l.id === activeId);
 
   onMount(() => {
-    viewCtx = view!.getContext('2d')!;
+    viewCtx = view!.getContext('2d', { willReadFrequently: true })!;
     const backup = document.createElement('canvas');
     backup.width = DOC_W;
     backup.height = DOC_H;
@@ -86,75 +94,14 @@
     stage!.addEventListener('wheel', onWheel, { passive: false });
     window.addEventListener('keydown', onKey);
     window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', releaseKeys);
     return () => {
       stage?.removeEventListener('wheel', onWheel);
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', releaseKeys);
     };
   });
-
-  // ---------- Zoom and pan ----------
-
-  function fitToScreen() {
-    if (!stage) return;
-    const r = stage.getBoundingClientRect();
-    zoom = Math.min((r.width - 32) / DOC_W, (r.height - 32) / DOC_H);
-    panX = (r.width - DOC_W * zoom) / 2;
-    panY = (r.height - DOC_H * zoom) / 2;
-  }
-
-  // Zoom so that the point under (sx, sy) stays under the cursor
-  function zoomAt(newZoom: number, sx: number, sy: number) {
-    newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newZoom));
-    const docX = (sx - panX) / zoom;
-    const docY = (sy - panY) / zoom;
-    zoom = newZoom;
-    panX = sx - docX * zoom;
-    panY = sy - docY * zoom;
-  }
-
-  function zoomCenter(factor: number) {
-    if (!stage) return;
-    const r = stage.getBoundingClientRect();
-    zoomAt(zoom * factor, r.width / 2, r.height / 2);
-  }
-
-  function onWheel(e: WheelEvent) {
-    e.preventDefault();
-    const r = stage!.getBoundingClientRect();
-    const factor = Math.exp(-e.deltaY * 0.0015);
-    zoomAt(zoom * factor, e.clientX - r.left, e.clientY - r.top);
-  }
-
-  // Middle mouse button or Space + drag moves the canvas
-  function onPointerDown(e: PointerEvent) {
-    if (e.button === 1 || spaceDown) {
-      e.preventDefault();
-      stage!.setPointerCapture(e.pointerId);
-      panning = true;
-      panStart = { x: e.clientX, y: e.clientY, px: panX, py: panY };
-      return;
-    }
-    if (e.button !== 0) return;
-    down(e);
-  }
-
-  function onPointerMove(e: PointerEvent) {
-    if (panning) {
-      panX = panStart.px + (e.clientX - panStart.x);
-      panY = panStart.py + (e.clientY - panStart.y);
-      return;
-    }
-    move(e);
-  }
-
-  function onPointerUp() {
-    if (panning) {
-      panning = false;
-      return;
-    }
-    up();
-  }
 
   // Redraw when layer visibility, opacity or order changes
   $effect(() => {
@@ -183,15 +130,180 @@
     });
   }
 
+  // ---------- View transform ----------
+  // The canvas is drawn at (panX, panY), scaled by zoom, then rotated and
+  // flipped around its own center. These two functions convert between
+  // stage (screen) coordinates and document (pixel) coordinates.
+
+  function docFromStage(sx: number, sy: number) {
+    const cx = (DOC_W * zoom) / 2;
+    const cy = (DOC_H * zoom) / 2;
+    const x = sx - panX - cx;
+    const y = sy - panY - cy;
+    const a = (-rotation * Math.PI) / 180;
+    let rx = x * Math.cos(a) - y * Math.sin(a);
+    const ry = x * Math.sin(a) + y * Math.cos(a);
+    if (flipped) rx = -rx;
+    return { x: (rx + cx) / zoom, y: (ry + cy) / zoom };
+  }
+
+  // Where a document point lands on the stage, ignoring pan
+  function stageFromDocNoPan(dx: number, dy: number) {
+    const cx = (DOC_W * zoom) / 2;
+    const cy = (DOC_H * zoom) / 2;
+    let x = dx * zoom - cx;
+    const y = dy * zoom - cy;
+    if (flipped) x = -x;
+    const a = (rotation * Math.PI) / 180;
+    return {
+      x: cx + x * Math.cos(a) - y * Math.sin(a),
+      y: cy + x * Math.sin(a) + y * Math.cos(a),
+    };
+  }
+
+  // Run a view change while keeping the document point under (sx, sy) in place
+  function keepPoint(sx: number, sy: number, change: () => void) {
+    const d = docFromStage(sx, sy);
+    change();
+    const p = stageFromDocNoPan(d.x, d.y);
+    panX = sx - p.x;
+    panY = sy - p.y;
+  }
+
+  function stageCenter() {
+    const r = stage!.getBoundingClientRect();
+    return { x: r.width / 2, y: r.height / 2 };
+  }
+
+  function toDoc(clientX: number, clientY: number) {
+    const r = stage!.getBoundingClientRect();
+    return docFromStage(clientX - r.left, clientY - r.top);
+  }
+
+  // ---------- Zoom, pan, rotate, flip ----------
+
+  function fitToScreen() {
+    if (!stage) return;
+    const r = stage.getBoundingClientRect();
+    const a = (rotation * Math.PI) / 180;
+    const bw = Math.abs(DOC_W * Math.cos(a)) + Math.abs(DOC_H * Math.sin(a));
+    const bh = Math.abs(DOC_W * Math.sin(a)) + Math.abs(DOC_H * Math.cos(a));
+    zoom = Math.min((r.width - 32) / bw, (r.height - 32) / bh);
+    panX = r.width / 2 - (DOC_W * zoom) / 2;
+    panY = r.height / 2 - (DOC_H * zoom) / 2;
+  }
+
+  function zoomAt(newZoom: number, sx: number, sy: number) {
+    keepPoint(sx, sy, () => {
+      zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newZoom));
+    });
+  }
+
+  function zoomCenter(factor: number) {
+    if (!stage) return;
+    const c = stageCenter();
+    zoomAt(zoom * factor, c.x, c.y);
+  }
+
+  function rotateAt(deg: number, sx: number, sy: number) {
+    keepPoint(sx, sy, () => {
+      rotation = (((rotation + deg) % 360) + 540) % 360 - 180; // keep in -180..180
+    });
+  }
+
+  function rotateBy(deg: number) {
+    if (!stage) return;
+    const c = stageCenter();
+    rotateAt(deg, c.x, c.y);
+  }
+
+  function resetRotation() {
+    rotateBy(-rotation);
+  }
+
+  function toggleFlip() {
+    if (!stage) return;
+    const c = stageCenter();
+    keepPoint(c.x, c.y, () => {
+      flipped = !flipped;
+    });
+  }
+
+  function onWheel(e: WheelEvent) {
+    e.preventDefault();
+    const r = stage!.getBoundingClientRect();
+    const sx = e.clientX - r.left;
+    const sy = e.clientY - r.top;
+    if (e.shiftKey) {
+      // Shift + wheel rotates (some browsers report it as horizontal scroll)
+      const d = e.deltaY || e.deltaX;
+      rotateAt(d > 0 ? 5 : -5, sx, sy);
+    } else {
+      zoomAt(zoom * Math.exp(-e.deltaY * 0.0015), sx, sy);
+    }
+  }
+
+  // ---------- Pointer input ----------
+
+  function onPointerDown(e: PointerEvent) {
+    // Middle mouse button or Space + drag moves the canvas
+    if (e.button === 1 || spaceDown) {
+      e.preventDefault();
+      stage!.setPointerCapture(e.pointerId);
+      panning = true;
+      panStart = { x: e.clientX, y: e.clientY, px: panX, py: panY };
+      return;
+    }
+    if (e.button !== 0) return;
+    if (activeTool === 'picker') {
+      stage!.setPointerCapture(e.pointerId);
+      picking = true;
+      pickColor(e);
+      return;
+    }
+    down(e);
+  }
+
+  function onPointerMove(e: PointerEvent) {
+    if (panning) {
+      panX = panStart.px + (e.clientX - panStart.x);
+      panY = panStart.py + (e.clientY - panStart.y);
+      return;
+    }
+    if (picking) {
+      pickColor(e);
+      return;
+    }
+    move(e);
+  }
+
+  function onPointerUp() {
+    if (panning) {
+      panning = false;
+      return;
+    }
+    if (picking) {
+      picking = false;
+      return;
+    }
+    up();
+  }
+
+  // Takes the color you see on screen (all visible layers combined)
+  function pickColor(e: PointerEvent) {
+    const d = toDoc(e.clientX, e.clientY);
+    const x = Math.floor(d.x);
+    const y = Math.floor(d.y);
+    if (x < 0 || y < 0 || x >= DOC_W || y >= DOC_H || !viewCtx) return;
+    const [r, g, b] = viewCtx.getImageData(x, y, 1, 1).data;
+    color = '#' + [r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('');
+  }
+
   // ---------- Drawing ----------
 
   function point(e: PointerEvent): Point {
-    const r = view!.getBoundingClientRect();
-    return {
-      x: (e.clientX - r.left) * (DOC_W / r.width),
-      y: (e.clientY - r.top) * (DOC_H / r.height),
-      p: e.pointerType === 'mouse' ? 0.5 : e.pressure || 0.01,
-    };
+    const d = toDoc(e.clientX, e.clientY);
+    return { x: d.x, y: d.y, p: e.pointerType === 'mouse' ? 0.5 : e.pressure || 0.01 };
   }
 
   function down(e: PointerEvent) {
@@ -373,11 +485,16 @@
   // ---------- Shortcuts ----------
 
   function onKey(e: KeyboardEvent) {
+    // Don't trigger shortcuts while typing in text or number fields
     const target = e.target as HTMLInputElement;
-    if (target.tagName === 'INPUT' && target.type === 'text') return;
+    if (target.tagName === 'INPUT' && (target.type === 'text' || target.type === 'number')) return;
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
-    if (key === ' ') {
+
+    if (key === 'alt') {
+      e.preventDefault();
+      altDown = true;
+    } else if (key === ' ') {
       e.preventDefault();
       spaceDown = true;
     } else if (mod && key === '0') {
@@ -402,11 +519,31 @@
       tool = 'brush';
     } else if (!mod && key === 'e') {
       tool = 'eraser';
+    } else if (!mod && key === 'i') {
+      tool = 'picker';
+    } else if (!mod && key === '4') {
+      rotateBy(-15);
+    } else if (!mod && key === '6') {
+      rotateBy(15);
+    } else if (!mod && key === '5') {
+      resetRotation();
+    } else if (!mod && key === 'm') {
+      toggleFlip();
     }
   }
 
   function onKeyUp(e: KeyboardEvent) {
     if (e.key === ' ') spaceDown = false;
+    if (e.key === 'Alt') {
+      e.preventDefault();
+      altDown = false;
+    }
+  }
+
+  // Keys held while switching windows would otherwise stay "stuck"
+  function releaseKeys() {
+    spaceDown = false;
+    altDown = false;
   }
 </script>
 
@@ -414,16 +551,24 @@
   <header class="toolbar">
     <strong>SeviathStudio</strong>
     <div class="group">
-      <button class:on={tool === 'brush'} onclick={() => (tool = 'brush')}>Brush (B)</button>
-      <button class:on={tool === 'eraser'} onclick={() => (tool = 'eraser')}>Eraser (E)</button>
+      <button class:on={activeTool === 'brush'} onclick={() => (tool = 'brush')}>Brush (B)</button>
+      <button class:on={activeTool === 'eraser'} onclick={() => (tool = 'eraser')}>Eraser (E)</button>
+      <button class:on={activeTool === 'picker'} onclick={() => (tool = 'picker')} title="Color picker (I, or hold Alt)">Picker (I)</button>
     </div>
-    <label>Color <input type="color" bind:value={color} /></label>
+    <div class="current-color" style="background: {color}" title={color}></div>
     <label>Size <input type="range" min="1" max="200" bind:value={size} /> {size}px</label>
     <div class="group">
       <button onclick={undo} disabled={undoCount === 0}>↶ Undo</button>
       <button onclick={redo} disabled={redoCount === 0}>↷ Redo</button>
     </div>
-    <div class="group zoom">
+
+    <div class="group view">
+      <button onclick={() => rotateBy(-15)} title="Rotate left (4)">⟲</button>
+      <button class="value" onclick={resetRotation} title="Reset rotation (5)">{Math.round(rotation)}°</button>
+      <button onclick={() => rotateBy(15)} title="Rotate right (6)">⟳</button>
+      <button class:on={flipped} onclick={toggleFlip} title="Flip horizontally (M)">⇋ Flip</button>
+    </div>
+    <div class="group">
       <button onclick={() => zoomCenter(1 / 1.25)} title="Zoom out (Ctrl -)">−</button>
       <span class="zoom-value">{Math.round(zoom * 100)}%</span>
       <button onclick={() => zoomCenter(1.25)} title="Zoom in (Ctrl +)">+</button>
@@ -436,6 +581,7 @@
     class="stage"
     class:pan={spaceDown}
     class:panning
+    class:picker={activeTool === 'picker'}
     bind:this={stage}
     onpointerdown={onPointerDown}
     onpointermove={onPointerMove}
@@ -447,11 +593,14 @@
       width={DOC_W}
       height={DOC_H}
       class:pixelated={zoom >= 2}
-      style="width: {DOC_W * zoom}px; height: {DOC_H * zoom}px; transform: translate({panX}px, {panY}px);"
+      style="width: {DOC_W * zoom}px; height: {DOC_H * zoom}px; transform-origin: {(DOC_W * zoom) / 2}px {(DOC_H * zoom) / 2}px; transform: translate({panX}px, {panY}px) rotate({rotation}deg) scaleX({flipped ? -1 : 1});"
     ></canvas>
   </main>
 
   <aside class="panel">
+    <div class="panel-head">Color</div>
+    <ColorWheel bind:color />
+
     <div class="panel-head">Layers</div>
 
     <div class="layer-list">
@@ -504,7 +653,7 @@
 <style>
   .app {
     display: grid;
-    grid-template-columns: 1fr 260px;
+    grid-template-columns: 1fr 248px;
     grid-template-rows: 56px 1fr;
     height: 100vh;
     font-family: system-ui, sans-serif;
@@ -515,14 +664,23 @@
     grid-column: 1 / -1;
     display: flex;
     align-items: center;
-    gap: 20px;
+    gap: 16px;
     padding: 0 16px;
     background: #1e1e24;
     border-bottom: 1px solid #333;
+    overflow-x: auto;
+    white-space: nowrap;
   }
   .group {
     display: flex;
+    align-items: center;
     gap: 6px;
+  }
+  .view {
+    margin-left: auto;
+  }
+  .value {
+    min-width: 52px;
   }
   label {
     display: flex;
@@ -546,9 +704,12 @@
     border-color: #00b5c8;
     color: #111;
   }
-  .zoom {
-    align-items: center;
-    margin-left: auto;
+  .current-color {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    border: 1px solid #555;
+    flex-shrink: 0;
   }
   .zoom-value {
     min-width: 48px;
@@ -563,6 +724,9 @@
     touch-action: none;
     cursor: crosshair;
   }
+  .stage.picker {
+    cursor: copy;
+  }
   .stage.pan {
     cursor: grab;
   }
@@ -573,7 +737,6 @@
     position: absolute;
     top: 0;
     left: 0;
-    transform-origin: 0 0;
     background: #fff;
     box-shadow: 0 0 0 1px #333, 0 8px 24px rgba(0, 0, 0, 0.5);
   }
@@ -588,12 +751,14 @@
     background: #1e1e24;
     border-left: 1px solid #333;
     min-height: 0;
+    overflow-y: auto;
   }
   .panel-head {
     font-weight: 600;
   }
   .layer-list {
     flex: 1;
+    min-height: 80px;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
