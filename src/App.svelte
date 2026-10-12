@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import ColorWheel from './lib/ColorWheel.svelte';
   import BrushPanel from './lib/BrushPanel.svelte';
+  import AdjustColors from './lib/AdjustColors.svelte';
   import { PRESETS, settingsOf, getDab, getPaper, type BrushSettings } from './lib/brush';
 
   // Document size (will be selectable when creating a new project later)
@@ -16,14 +17,63 @@
     canvas: HTMLCanvasElement;
     visible: boolean;
     opacity: number;
+    blend: BlendMode;
+    clip: boolean; // clipping mask: only shows on top of the layer below
+    lockAlpha: boolean; // paint only where the layer already has paint
   };
   type Rect = { x: number; y: number; w: number; h: number };
+
+  // Layer blend modes and the canvas operation that draws each one
+  const BLEND_MODES = {
+    Normal: 'source-over',
+    Multiply: 'multiply',
+    Screen: 'screen',
+    Overlay: 'overlay',
+    Add: 'lighter',
+    'Soft light': 'soft-light',
+    'Hard light': 'hard-light',
+    'Color dodge': 'color-dodge',
+    'Color burn': 'color-burn',
+    Darken: 'darken',
+    Lighten: 'lighten',
+    Difference: 'difference',
+    Exclusion: 'exclusion',
+    Hue: 'hue',
+    Saturation: 'saturation',
+    Color: 'color',
+    Luminosity: 'luminosity',
+  } as const;
+  type BlendMode = keyof typeof BLEND_MODES;
+  const BLEND_NAMES = Object.keys(BLEND_MODES) as BlendMode[];
+  const opOf = (b: BlendMode) => BLEND_MODES[b] as GlobalCompositeOperation;
+
+  // What each mode does, shown under the blend menu
+  const BLEND_HINTS: Record<BlendMode, string> = {
+    Normal: 'Covers what is below.',
+    Multiply: 'Darkens. Good for shadows. White does nothing.',
+    Screen: 'Lightens. Good for light. Black does nothing.',
+    Overlay: 'Light colors lighten, dark colors darken. 50% gray does nothing.',
+    Add: 'Strong glow. Use a light color on a dark area.',
+    'Soft light': 'Gentle Overlay: soft light and shade.',
+    'Hard light': 'Strong Overlay, based on this layer\'s colors.',
+    'Color dodge': 'Bright glow and shine. Use a mid-to-light color.',
+    'Color burn': 'Deep, saturated shadows.',
+    Darken: 'Picks the darker of the two colors. The same color changes nothing; for shadows use Multiply.',
+    Lighten: 'Picks the lighter of the two colors. The same color changes nothing; for light use Screen or Add.',
+    Difference: 'Subtracts colors. Mostly for effects.',
+    Exclusion: 'Softer Difference.',
+    Hue: 'Takes only the hue from this layer.',
+    Saturation: 'Takes only the saturation from this layer.',
+    Color: 'Recolors what is below, keeps its shading.',
+    Luminosity: 'Takes only the brightness from this layer.',
+  };
   type Point = { x: number; y: number; p: number };
   type HistoryEntry =
     | { type: 'pixels'; layerId: number; rect: Rect; before: ImageData; after: ImageData }
     | { type: 'add'; layer: Layer; index: number }
     | { type: 'delete'; layer: Layer; index: number }
-    | { type: 'move'; from: number; to: number };
+    | { type: 'move'; from: number; to: number }
+    | { type: 'merge'; upper: Layer; upperIndex: number; lowerId: number; before: ImageData; after: ImageData };
 
   // Tool settings
   let tool = $state<Tool>('brush');
@@ -34,6 +84,9 @@
   // Holding Alt temporarily switches to the color picker
   let activeTool = $derived<Tool>(altDown ? 'picker' : tool);
 
+  // Paper: the background under all layers. Hide it to see (and later export) transparency.
+  let paper = $state({ visible: true, color: '#ffffff' });
+
   // Layers: index 0 is the bottom layer
   let layers = $state<Layer[]>([]);
   let activeId = $state(0);
@@ -43,6 +96,14 @@
   const undoStack: HistoryEntry[] = [];
   const redoStack: HistoryEntry[] = [];
   let undoCount = $state(0);
+  // Bumped whenever layer pixels change, so the layer thumbnails redraw
+  let thumbTick = $state(0);
+  // Which layer's name is being edited (null = none)
+  let renamingId = $state<number | null>(null);
+  // Adjust colors dialog for the active layer
+  let adjusting = $state(false);
+  // Right-click menu on a layer
+  let layerMenu = $state<{ x: number; y: number } | null>(null);
   let redoCount = $state(0);
 
   // View: zoom, pan, rotation and flip
@@ -66,7 +127,11 @@
   // That way stroke opacity works like in Photoshop/CSP (overlapping dabs don't get darker).
   let strokeCtx: CanvasRenderingContext2D;
   let scratchCtx: CanvasRenderingContext2D;
+  let groupCtx: CanvasRenderingContext2D; // a clipping group: base layer + layers clipped to it
+  let clipCtx: CanvasRenderingContext2D; // one clipped layer, cut to the base's shape
   let texturedCtx: CanvasRenderingContext2D; // the stroke with paper grain applied
+  let backupCtx: CanvasRenderingContext2D; // the layer before a color-mixing stroke (for undo)
+  let tintCtx: CanvasRenderingContext2D; // small canvas used to color one brush tip
   let paperPattern: CanvasPattern | null = null;
   let nextId = 1;
 
@@ -75,6 +140,12 @@
   let picking = false;
   let strokeLayerId = 0;
   let strokeTool: Tool = 'brush';
+  // Color-mixing brushes paint straight onto the layer so they can pick up its colors
+  let directStroke = false;
+  let mixRGB = [0, 0, 0];
+  let lastSample = { x: -1e9, y: -1e9 };
+  // The paper grain shifts a little for every new stroke, so painting over an area fills it in
+  let grainOffset = { x: 0, y: 0 };
   let last: Point = { x: 0, y: 0, p: 0.5 };
   let lastRaw: Point = { x: 0, y: 0, p: 0.5 };
   let ropeEnd: Point = { x: 0, y: 0, p: 0.5 }; // stabilizer: where the rope pulls the brush
@@ -91,8 +162,20 @@
 
   function makeLayer(): Layer {
     const id = nextId++;
-    return { id, name: `Layer ${id}`, canvas: makeCanvas(), visible: true, opacity: 1 };
+    return {
+      id,
+      name: `Layer ${id}`,
+      canvas: makeCanvas(),
+      visible: true,
+      opacity: 1,
+      blend: 'Normal',
+      clip: false,
+      lockAlpha: false,
+    };
   }
+
+  // A plain copy of a layer's settings (history keeps these, not the live proxies)
+  const copyLayer = (l: Layer): Layer => ({ ...l });
 
   const activeIndex = () => layers.findIndex((l) => l.id === activeId);
 
@@ -100,7 +183,11 @@
     viewCtx = view!.getContext('2d', { willReadFrequently: true })!;
     strokeCtx = makeCanvas().getContext('2d')!;
     scratchCtx = makeCanvas().getContext('2d')!;
+    groupCtx = makeCanvas().getContext('2d')!;
+    clipCtx = makeCanvas().getContext('2d')!;
     texturedCtx = makeCanvas().getContext('2d')!;
+    backupCtx = makeCanvas().getContext('2d', { willReadFrequently: true })!;
+    tintCtx = document.createElement('canvas').getContext('2d')!;
     paperPattern = texturedCtx.createPattern(getPaper(), 'repeat');
 
     const first = makeLayer();
@@ -127,7 +214,11 @@
     for (const l of layers) {
       l.visible;
       l.opacity;
+      l.blend;
+      l.clip;
     }
+    paper.visible;
+    paper.color;
     render();
   });
 
@@ -137,32 +228,78 @@
     frame = requestAnimationFrame(() => {
       frame = 0;
       const ctx = viewCtx!;
+      const strokeView = drawing && !directStroke ? previewStrokeLayer() : null;
+      const surface = (l: Layer) => (strokeView && l.id === strokeLayerId ? strokeView : l.canvas);
+
       ctx.globalAlpha = 1;
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, DOC_W, DOC_H);
-      for (const l of layers) {
-        if (!l.visible) continue;
-        if (drawing && l.id === strokeLayerId) {
-          // Show the layer with the unfinished stroke on top of it
-          const s = scratchCtx;
-          s.globalCompositeOperation = 'source-over';
-          s.globalAlpha = 1;
-          s.clearRect(0, 0, DOC_W, DOC_H);
-          s.drawImage(l.canvas, 0, 0);
-          s.globalAlpha = brush.opacity;
-          s.globalCompositeOperation = strokeTool === 'eraser' ? 'destination-out' : 'source-over';
-          s.drawImage(strokeSource(), 0, 0);
-          s.globalCompositeOperation = 'source-over';
-          s.globalAlpha = 1;
-          ctx.globalAlpha = l.opacity;
-          ctx.drawImage(s.canvas, 0, 0);
-        } else {
-          ctx.globalAlpha = l.opacity;
-          ctx.drawImage(l.canvas, 0, 0);
+      ctx.globalCompositeOperation = 'source-over';
+      if (paper.visible) {
+        ctx.fillStyle = paper.color;
+        ctx.fillRect(0, 0, DOC_W, DOC_H);
+      } else {
+        // transparent: the checkerboard behind the canvas shows through
+        ctx.clearRect(0, 0, DOC_W, DOC_H);
+      }
+
+      // Walk up the stack; each normal layer may have clipped layers right above it
+      let i = 0;
+      while (i < layers.length) {
+        const base = layers[i];
+        let j = i + 1;
+        while (j < layers.length && layers[j].clip) j++;
+        const clipped = layers.slice(i + 1, j).filter((c) => c.visible);
+
+        if (base.visible) {
+          let image: CanvasImageSource = surface(base);
+          if (clipped.length) {
+            const g = groupCtx;
+            g.globalAlpha = 1;
+            g.globalCompositeOperation = 'source-over';
+            g.clearRect(0, 0, DOC_W, DOC_H);
+            g.drawImage(image, 0, 0);
+            for (const c of clipped) {
+              // cut the clipped layer to the base layer's shape, then blend it on
+              const t = clipCtx;
+              t.globalCompositeOperation = 'source-over';
+              t.clearRect(0, 0, DOC_W, DOC_H);
+              t.drawImage(surface(c), 0, 0);
+              t.globalCompositeOperation = 'destination-in';
+              t.drawImage(image, 0, 0);
+              t.globalCompositeOperation = 'source-over';
+              g.globalAlpha = c.opacity;
+              g.globalCompositeOperation = opOf(c.blend);
+              g.drawImage(t.canvas, 0, 0);
+            }
+            g.globalAlpha = 1;
+            g.globalCompositeOperation = 'source-over';
+            image = g.canvas;
+          }
+          ctx.globalAlpha = base.opacity;
+          ctx.globalCompositeOperation = opOf(base.blend);
+          ctx.drawImage(image, 0, 0);
         }
+        i = j;
       }
       ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
     });
+  }
+
+  // The layer being painted on, with the unfinished stroke shown on top of it
+  function previewStrokeLayer(): HTMLCanvasElement | null {
+    const l = layers.find((x) => x.id === strokeLayerId);
+    if (!l) return null;
+    const s = scratchCtx;
+    s.globalCompositeOperation = 'source-over';
+    s.globalAlpha = 1;
+    s.clearRect(0, 0, DOC_W, DOC_H);
+    s.drawImage(l.canvas, 0, 0);
+    s.globalAlpha = brush.opacity;
+    s.globalCompositeOperation = strokeTool === 'eraser' ? 'destination-out' : 'source-over';
+    s.drawImage(strokeSource(l), 0, 0);
+    s.globalCompositeOperation = 'source-over';
+    s.globalAlpha = 1;
+    return s.canvas;
   }
 
   // ---------- View transform ----------
@@ -341,7 +478,8 @@
     const x = Math.floor(d.x);
     const y = Math.floor(d.y);
     if (x < 0 || y < 0 || x >= DOC_W || y >= DOC_H || !viewCtx) return;
-    const [r, g, b] = viewCtx.getImageData(x, y, 1, 1).data;
+    const [r, g, b, a] = viewCtx.getImageData(x, y, 1, 1).data;
+    if (a === 0) return; // nothing there (transparent)
     color = '#' + [r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('');
   }
 
@@ -364,6 +502,17 @@
     strokeTool = activeTool;
     strokeCtx.clearRect(0, 0, DOC_W, DOC_H);
     resetDabs();
+    grainOffset = { x: Math.random() * 256, y: Math.random() * 256 };
+
+    directStroke = strokeTool === 'brush' && brush.mix > 0;
+    if (directStroke) {
+      backupCtx.clearRect(0, 0, DOC_W, DOC_H);
+      backupCtx.drawImage(layer.canvas, 0, 0);
+      mixRGB = hexRGB(color);
+      lastSample = { x: -1e9, y: -1e9 };
+      // start with the color that's already under the brush
+      sampleCanvas(layer, pt, brush.mix);
+    }
 
     // Shift + click: straight line from where the last stroke ended
     if (e.shiftKey && lastEnd && lastEnd.layerId === layer.id) {
@@ -428,7 +577,7 @@
   // Adds the finished stroke to the layer and records it for undo
   function finishStroke(endPt: Point) {
     drawing = false;
-    shapeEnds();
+    if (!directStroke) shapeEnds();
     const layer = layers.find((l) => l.id === strokeLayerId);
     if (!layer || !hasRect) {
       render();
@@ -446,15 +595,28 @@
 
     // Undo stores only the area you drew on, not the whole layer
     const ctx = layer.canvas.getContext('2d', { willReadFrequently: true })!;
-    const before = ctx.getImageData(x, y, w, h);
-    ctx.globalAlpha = brush.opacity;
-    ctx.globalCompositeOperation = strokeTool === 'eraser' ? 'destination-out' : 'source-over';
-    ctx.drawImage(strokeSource(), 0, 0);
-    ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = 'source-over';
+    let before: ImageData;
+    if (directStroke) {
+      // already painted onto the layer; the backup holds how it was before
+      before = backupCtx.getImageData(x, y, w, h);
+      if (layer.lockAlpha) {
+        ctx.globalCompositeOperation = 'destination-in';
+        ctx.drawImage(backupCtx.canvas, 0, 0);
+        ctx.globalCompositeOperation = 'source-over';
+      }
+    } else {
+      before = ctx.getImageData(x, y, w, h);
+      ctx.globalAlpha = brush.opacity;
+      ctx.globalCompositeOperation = strokeTool === 'eraser' ? 'destination-out' : 'source-over';
+      ctx.drawImage(strokeSource(layer), 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+    }
     const after = ctx.getImageData(x, y, w, h);
+    directStroke = false;
 
     push({ type: 'pixels', layerId: layer.id, rect: { x, y, w, h }, before, after });
+    thumbTick++;
     lastEnd = { layerId: layer.id, pt: endPt };
     strokeCtx.clearRect(0, 0, DOC_W, DOC_H);
     render();
@@ -467,19 +629,29 @@
 
   // The stroke as it should be added to the layer: with paper grain worn into it if the
   // brush has texture. The grain pattern is fixed to the canvas, so it never slides.
-  function strokeSource(): HTMLCanvasElement {
-    if (brush.texture <= 0 || !paperPattern) return strokeCtx.canvas;
+  function strokeSource(layer: Layer): HTMLCanvasElement {
+    const useTexture = brush.texture > 0 && paperPattern;
+    const useLock = layer.lockAlpha && strokeTool !== 'eraser';
+    if (!useTexture && !useLock) return strokeCtx.canvas;
     const t = texturedCtx;
     t.globalCompositeOperation = 'source-over';
     t.globalAlpha = 1;
     t.clearRect(0, 0, DOC_W, DOC_H);
     t.drawImage(strokeCtx.canvas, 0, 0);
-    t.globalCompositeOperation = 'destination-out';
-    t.globalAlpha = brush.texture;
-    t.fillStyle = paperPattern;
-    t.fillRect(0, 0, DOC_W, DOC_H);
+    if (useTexture) {
+      t.globalCompositeOperation = 'destination-out';
+      t.globalAlpha = brush.texture;
+      paperPattern!.setTransform(new DOMMatrix().translate(grainOffset.x, grainOffset.y));
+      t.fillStyle = paperPattern!;
+      t.fillRect(0, 0, DOC_W, DOC_H);
+      t.globalAlpha = 1;
+    }
+    if (useLock) {
+      // Lock alpha: keep the stroke only where the layer already has paint
+      t.globalCompositeOperation = 'destination-in';
+      t.drawImage(layer.canvas, 0, 0);
+    }
     t.globalCompositeOperation = 'source-over';
-    t.globalAlpha = 1;
     return t.canvas;
   }
 
@@ -506,12 +678,81 @@
   }
 
   function drawDab(pt: Point, factor: number) {
+    if (directStroke) {
+      drawMixDab(pt, factor);
+      return;
+    }
     const r = Math.max(radiusAt(pt.p) * factor, 0.3);
     const tip = getDab(strokeTool === 'eraser' ? '#000000' : color, brush.hardness);
     // Light pressure still leaves some paint (25%), like a real pencil or pen
     strokeCtx.globalAlpha = brush.flow * (brush.opacityPressure ? 0.25 + 0.75 * pt.p : 1);
     strokeCtx.drawImage(tip, pt.x - r, pt.y - r, r * 2, r * 2);
     strokeCtx.globalAlpha = 1;
+    grow(pt.x - r - 2, pt.y - r - 2, pt.x + r + 2, pt.y + r + 2);
+  }
+
+  // ---------- Color mixing ----------
+
+  function hexRGB(hex: string) {
+    const n = parseInt(hex.replace('#', ''), 16) || 0;
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
+  // Reads the average color under the brush and mixes it into the paint on the brush
+  function sampleCanvas(layer: Layer, pt: Point, amount: number) {
+    const ctx = layer.canvas.getContext('2d', { willReadFrequently: true })!;
+    const r = Math.max(1, Math.min(4, Math.round(radiusAt(pt.p) * 0.3)));
+    const x = Math.round(pt.x) - r;
+    const y = Math.round(pt.y) - r;
+    if (x + 2 * r < 0 || y + 2 * r < 0 || x >= DOC_W || y >= DOC_H) return;
+    const d = ctx.getImageData(x, y, r * 2 + 1, r * 2 + 1).data;
+    let R = 0, G = 0, B = 0, A = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      const a = d[i + 3];
+      R += d[i] * a;
+      G += d[i + 1] * a;
+      B += d[i + 2] * a;
+      A += a;
+    }
+    // empty (transparent) areas don't change the paint
+    if (A / (d.length / 4) < 20) return;
+    const canvasRGB = [R / A, G / A, B / A];
+    for (let i = 0; i < 3; i++) mixRGB[i] += (canvasRGB[i] - mixRGB[i]) * amount;
+  }
+
+  function drawMixDab(pt: Point, factor: number) {
+    const layer = layers.find((l) => l.id === strokeLayerId);
+    if (!layer) return;
+    const r = Math.max(radiusAt(pt.p) * factor, 0.5);
+
+    // Pick up color every so often (reading pixels is slow, so not on every dab)
+    if (Math.hypot(pt.x - lastSample.x, pt.y - lastSample.y) >= Math.max(1, r * 0.4)) {
+      // fresh paint from the brush slowly comes back, unless mix is 100%
+      const brushRGB = hexRGB(color);
+      for (let i = 0; i < 3; i++) mixRGB[i] += (brushRGB[i] - mixRGB[i]) * (1 - brush.mix) * 0.3;
+      sampleCanvas(layer, pt, brush.mix * 0.5);
+      lastSample = { x: pt.x, y: pt.y };
+    }
+
+    // Color one brush tip with the mixed color
+    const size = Math.ceil(r * 2) + 2;
+    const t = tintCtx;
+    if (t.canvas.width < size || t.canvas.height < size) {
+      t.canvas.width = size;
+      t.canvas.height = size;
+    }
+    t.globalCompositeOperation = 'source-over';
+    t.clearRect(0, 0, size, size);
+    t.drawImage(getDab('#ffffff', brush.hardness), 0, 0, r * 2, r * 2);
+    t.globalCompositeOperation = 'source-in';
+    t.fillStyle = `rgb(${mixRGB[0]}, ${mixRGB[1]}, ${mixRGB[2]})`;
+    t.fillRect(0, 0, size, size);
+    t.globalCompositeOperation = 'source-over';
+
+    const ctx = layer.canvas.getContext('2d', { willReadFrequently: true })!;
+    ctx.globalAlpha = brush.opacity * brush.flow * (brush.opacityPressure ? 0.25 + 0.75 * pt.p : 1);
+    ctx.drawImage(t.canvas, 0, 0, r * 2, r * 2, pt.x - r, pt.y - r, r * 2, r * 2);
+    ctx.globalAlpha = 1;
     grow(pt.x - r - 2, pt.y - r - 2, pt.x + r + 2, pt.y + r + 2);
   }
 
@@ -630,9 +871,126 @@
     if (layers.length <= 1) return;
     const index = activeIndex();
     const l = layers[index];
-    const copy: Layer = { id: l.id, name: l.name, canvas: l.canvas, visible: l.visible, opacity: l.opacity };
+    const copy = copyLayer(l);
     removeAt(index);
     push({ type: 'delete', layer: copy, index });
+  }
+
+  // A new layer above, already set up for shading: clipped to the layer below with a blend mode
+  function addShadingLayer(kind: 'shadow' | 'light') {
+    const l = makeLayer();
+    l.name = kind === 'shadow' ? 'Shadow' : 'Light';
+    l.blend = kind === 'shadow' ? 'Multiply' : 'Add';
+    l.clip = true;
+    const index = activeIndex() + 1;
+    insertAt(l, index);
+    push({ type: 'add', layer: l, index });
+  }
+
+  function duplicateLayer() {
+    const src = activeLayer;
+    if (!src) return;
+    const l = { ...makeLayer(), name: src.name + ' copy', visible: src.visible, opacity: src.opacity, blend: src.blend, clip: src.clip, lockAlpha: src.lockAlpha };
+    l.canvas.getContext('2d')!.drawImage(src.canvas, 0, 0);
+    const index = activeIndex() + 1;
+    insertAt(l, index);
+    push({ type: 'add', layer: l, index });
+  }
+
+  // Merges the active layer into the one below, keeping how it looked
+  function mergeDown() {
+    const index = activeIndex();
+    if (index <= 0) return;
+    const upper = layers[index];
+    const lower = layers[index - 1];
+    const ctx = lower.canvas.getContext('2d', { willReadFrequently: true })!;
+    const before = ctx.getImageData(0, 0, DOC_W, DOC_H);
+
+    if (upper.visible) {
+      let image: CanvasImageSource = upper.canvas;
+      if (upper.clip) {
+        // a clipped layer only shows inside the lower layer's shape
+        const t = clipCtx;
+        t.globalCompositeOperation = 'source-over';
+        t.clearRect(0, 0, DOC_W, DOC_H);
+        t.drawImage(upper.canvas, 0, 0);
+        t.globalCompositeOperation = 'destination-in';
+        t.drawImage(lower.canvas, 0, 0);
+        t.globalCompositeOperation = 'source-over';
+        image = t.canvas;
+      }
+      ctx.globalAlpha = upper.opacity;
+      ctx.globalCompositeOperation = opOf(upper.blend);
+      ctx.drawImage(image, 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+    }
+
+    const after = ctx.getImageData(0, 0, DOC_W, DOC_H);
+    const copy = copyLayer(upper);
+    removeAt(index);
+    activeId = lower.id;
+    push({ type: 'merge', upper: copy, upperIndex: index, lowerId: lower.id, before, after });
+    thumbTick++;
+    render();
+  }
+
+  // Makes the whole layer transparent (undoable)
+  function clearLayer() {
+    const layer = activeLayer;
+    if (!layer) return;
+    const ctx = layer.canvas.getContext('2d', { willReadFrequently: true })!;
+    const before = ctx.getImageData(0, 0, DOC_W, DOC_H);
+    ctx.clearRect(0, 0, DOC_W, DOC_H);
+    const after = ctx.getImageData(0, 0, DOC_W, DOC_H);
+    push({ type: 'pixels', layerId: layer.id, rect: { x: 0, y: 0, w: DOC_W, h: DOC_H }, before, after });
+    thumbTick++;
+    render();
+  }
+
+  function finishAdjust(result: { before: ImageData; after: ImageData } | null) {
+    const layer = activeLayer;
+    adjusting = false;
+    if (result && layer) {
+      push({ type: 'pixels', layerId: layer.id, rect: { x: 0, y: 0, w: DOC_W, h: DOC_H }, before: result.before, after: result.after });
+    }
+    thumbTick++;
+    render();
+  }
+
+  // Svelte action: focus a text field and select its text as soon as it appears
+  function focusSelect(node: HTMLInputElement) {
+    node.focus();
+    node.select();
+  }
+
+  let nameBeforeRename = '';
+  function startRename(layer: Layer) {
+    nameBeforeRename = layer.name;
+    activeId = layer.id;
+    renamingId = layer.id;
+  }
+
+  function endRename(layer: Layer, keep: boolean) {
+    if (!keep) layer.name = nameBeforeRename;
+    if (!layer.name.trim()) layer.name = nameBeforeRename || `Layer ${layer.id}`;
+    renamingId = null;
+  }
+
+  function openLayerMenu(e: MouseEvent, id: number) {
+    e.preventDefault();
+    activeId = id;
+    // keep the menu inside the window
+    layerMenu = {
+      x: Math.min(e.clientX, window.innerWidth - 240),
+      y: Math.min(e.clientY, window.innerHeight - 400),
+    };
+  }
+
+  // Runs a menu action and closes the menu
+  function menuDo(action: () => void) {
+    layerMenu = null;
+    action();
   }
 
   // +1 = up, -1 = down
@@ -674,7 +1032,18 @@
       case 'move':
         reverse ? moveRaw(e.to, e.from) : moveRaw(e.from, e.to);
         break;
+      case 'merge': {
+        const lower = layers.find((l) => l.id === e.lowerId);
+        lower?.canvas.getContext('2d')!.putImageData(reverse ? e.before : e.after, 0, 0);
+        if (reverse) insertAt(e.upper, e.upperIndex);
+        else {
+          removeAt(e.upperIndex);
+          activeId = e.lowerId;
+        }
+        break;
+      }
     }
+    thumbTick++;
   }
 
   function undo() {
@@ -695,6 +1064,22 @@
     render();
   }
 
+  // ---------- Thumbnails ----------
+
+  // Svelte action: draws a small preview of a layer, again whenever `tick` changes
+  function thumb(node: HTMLCanvasElement, args: { layer: Layer; tick: number }) {
+    const draw = ({ layer }: { layer: Layer; tick: number }) => {
+      const ctx = node.getContext('2d')!;
+      ctx.clearRect(0, 0, node.width, node.height);
+      const scale = Math.min(node.width / DOC_W, node.height / DOC_H);
+      const w = DOC_W * scale;
+      const h = DOC_H * scale;
+      ctx.drawImage(layer.canvas, (node.width - w) / 2, (node.height - h) / 2, w, h);
+    };
+    draw(args);
+    return { update: draw };
+  }
+
   // ---------- Shortcuts ----------
 
   function onKey(e: KeyboardEvent) {
@@ -703,8 +1088,16 @@
     if (target.tagName === 'INPUT' && (target.type === 'text' || target.type === 'number')) return;
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
+    if (adjusting) return; // the dialog handles its own keys
+    if (mod && key === 'u') {
+      e.preventDefault();
+      if (activeLayer) adjusting = true;
+      return;
+    }
 
-    if (key === 'alt') {
+    if (key === 'escape' && layerMenu) {
+      layerMenu = null;
+    } else if (key === 'alt') {
       e.preventDefault();
       altDown = true;
     } else if (key === ' ') {
@@ -835,6 +1228,7 @@
     onpointerleave={() => (hover.on = false)}
   >
     <canvas
+      class="doc-view"
       bind:this={view}
       width={DOC_W}
       height={DOC_H}
@@ -861,10 +1255,12 @@
         <div
           class="layer"
           class:active={layer.id === activeId}
+          class:clipped={layer.clip}
           role="button"
           tabindex="0"
           onclick={() => (activeId = layer.id)}
           onkeydown={(e) => e.key === 'Enter' && (activeId = layer.id)}
+          oncontextmenu={(e) => openLayerMenu(e, layer.id)}
         >
           <button
             class="eye"
@@ -874,34 +1270,137 @@
               layer.visible = !layer.visible;
             }}>{layer.visible ? '👁' : '—'}</button
           >
-          <input class="name" type="text" bind:value={layer.name} />
-          <span class="pct">{Math.round(layer.opacity * 100)}%</span>
+          {#if layer.clip}<span class="clip-mark" title="Clipped to the layer below">↳</span>{/if}
+          <canvas class="thumb" width="40" height="40" use:thumb={{ layer, tick: thumbTick }}></canvas>
+          <div class="layer-text">
+            {#if renamingId === layer.id}
+              <input
+                class="name editing"
+                type="text"
+                bind:value={layer.name}
+                use:focusSelect
+                onclick={(e) => e.stopPropagation()}
+                onblur={() => endRename(layer, true)}
+                onkeydown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === 'Enter') endRename(layer, true);
+                  if (e.key === 'Escape') endRename(layer, false);
+                }}
+              />
+            {:else}
+              <span
+                class="name"
+                role="textbox"
+                tabindex="-1"
+                title="Double-click to rename"
+                ondblclick={() => startRename(layer)}>{layer.name}</span
+              >
+            {/if}
+            <span class="sub">
+              {layer.blend}{layer.opacity < 1 ? ` · ${Math.round(layer.opacity * 100)}%` : ''}{layer.lockAlpha ? ' · 🔒' : ''}
+            </span>
+          </div>
         </div>
       {/each}
+      <div class="layer paper-row" title="Paper is the background, not a drawing layer. Click the square to change its color, the eye to hide it (transparent).">
+        <button class="eye" title="Show / hide paper (hidden = transparent background)" onclick={() => (paper.visible = !paper.visible)}
+          >{paper.visible ? '👁' : '—'}</button
+        >
+        <input class="paper-color" type="color" bind:value={paper.color} title="Paper color" />
+        <div class="layer-text">
+          <span class="name">Paper</span>
+          <span class="sub">{paper.visible ? 'Background' : 'Hidden · transparent'}</span>
+        </div>
+      </div>
     </div>
 
     {#if activeLayer}
-      <label class="opacity">
-        Opacity
-        <input
-          type="range"
-          min="0"
-          max="1"
-          step="0.01"
-          value={activeLayer.opacity}
-          oninput={(e) => (activeLayer!.opacity = +e.currentTarget.value)}
-        />
-      </label>
+      <div class="layer-props">
+        <label class="row">
+          <span>Blend</span>
+          <select bind:value={activeLayer.blend}>
+            {#each BLEND_NAMES as b (b)}
+              <option value={b}>{b}</option>
+            {/each}
+          </select>
+        </label>
+        <p class="blend-hint">{BLEND_HINTS[activeLayer.blend]}</p>
+        <label class="row">
+          <span>Opacity</span>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            value={activeLayer.opacity}
+            oninput={(e) => (activeLayer!.opacity = +e.currentTarget.value)}
+          />
+          <span class="val">{Math.round(activeLayer.opacity * 100)}%</span>
+        </label>
+        <div class="toggles">
+          <label title="Show this layer only on top of the layer below (Alt + click in CSP/Photoshop)">
+            <input type="checkbox" bind:checked={activeLayer.clip} /> Clipping mask
+          </label>
+          <label title="Paint only where this layer already has paint">
+            <input type="checkbox" bind:checked={activeLayer.lockAlpha} /> Lock alpha
+          </label>
+        </div>
+      </div>
     {/if}
 
     <div class="layer-buttons">
       <button onclick={addLayer} title="New layer">＋</button>
+      <button onclick={duplicateLayer} title="Duplicate layer">⧉</button>
+      <button onclick={() => (adjusting = true)} title="Adjust colors (Ctrl+U)">🎨</button>
+      <button onclick={mergeDown} disabled={activeIndex() <= 0} title="Merge down">⤓</button>
       <button onclick={() => moveLayer(1)} title="Move up">↑</button>
       <button onclick={() => moveLayer(-1)} title="Move down">↓</button>
       <button onclick={deleteLayer} disabled={layers.length <= 1} title="Delete layer">🗑</button>
     </div>
   </aside>
 </div>
+
+{#if adjusting && activeLayer}
+  <AdjustColors canvas={activeLayer.canvas} layerName={activeLayer.name} onchange={render} ondone={finishAdjust} />
+{/if}
+
+{#if layerMenu && activeLayer}
+  <!-- clicking anywhere outside closes the menu -->
+  <div
+    class="menu-backdrop"
+    role="presentation"
+    onpointerdown={() => (layerMenu = null)}
+    oncontextmenu={(e) => {
+      e.preventDefault();
+      layerMenu = null;
+    }}
+  ></div>
+  <div class="context-menu" role="menu" style="left: {layerMenu.x}px; top: {layerMenu.y}px;">
+    <div class="menu-title">{activeLayer.name}</div>
+    <button role="menuitem" onclick={() => menuDo(addLayer)}>New layer above</button>
+    <button role="menuitem" onclick={() => menuDo(() => addShadingLayer('shadow'))}>New shadow layer (Multiply)</button>
+    <button role="menuitem" onclick={() => menuDo(() => addShadingLayer('light'))}>New light layer (Add)</button>
+    <button role="menuitem" onclick={() => menuDo(duplicateLayer)}>Duplicate</button>
+    <button role="menuitem" onclick={() => menuDo(() => activeLayer && startRename(activeLayer))}>Rename</button>
+    <hr />
+    <button role="menuitem" onclick={() => menuDo(() => (activeLayer!.clip = !activeLayer!.clip))}>
+      {activeLayer.clip ? 'Release clipping mask' : 'Create clipping mask'}
+    </button>
+    <button role="menuitem" onclick={() => menuDo(() => (activeLayer!.lockAlpha = !activeLayer!.lockAlpha))}>
+      {activeLayer.lockAlpha ? '✓ Lock transparent pixels' : 'Lock transparent pixels'}
+    </button>
+    <button role="menuitem" onclick={() => menuDo(() => (activeLayer!.visible = !activeLayer!.visible))}>
+      {activeLayer.visible ? 'Hide layer' : 'Show layer'}
+    </button>
+    <hr />
+    <button role="menuitem" disabled={activeIndex() <= 0} onclick={() => menuDo(mergeDown)}>Merge down</button>
+    <button role="menuitem" onclick={() => menuDo(() => (adjusting = true))}>Adjust colors… (Ctrl+U)</button>
+    <button role="menuitem" onclick={() => menuDo(clearLayer)}>Clear layer (make transparent)</button>
+    <button role="menuitem" class="danger" disabled={layers.length <= 1} onclick={() => menuDo(deleteLayer)}>
+      Delete layer
+    </button>
+  </div>
+{/if}
 
 <style>
   .app {
@@ -999,14 +1498,19 @@
   .stage.panning {
     cursor: grabbing;
   }
-  canvas {
+  .doc-view {
     position: absolute;
     top: 0;
     left: 0;
-    background: #fff;
+    /* checkerboard = transparent areas */
+    background-color: #fff;
+    background-image: linear-gradient(45deg, #ccc 25%, transparent 25%, transparent 75%, #ccc 75%),
+      linear-gradient(45deg, #ccc 25%, transparent 25%, transparent 75%, #ccc 75%);
+    background-size: 16px 16px;
+    background-position: 0 0, 8px 8px;
     box-shadow: 0 0 0 1px #333, 0 8px 24px rgba(0, 0, 0, 0.5);
   }
-  canvas.pixelated {
+  .doc-view.pixelated {
     image-rendering: pixelated;
   }
   .panel {
@@ -1063,15 +1567,149 @@
     border: none;
     color: #eee;
     font: inherit;
+    user-select: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  .pct {
-    color: #999;
+  .name.editing {
+    user-select: text;
+    background: #15151a;
+    border: 1px solid #00b5c8;
+    border-radius: 4px;
+    padding: 1px 4px;
+  }
+  .layer.clipped {
+    margin-left: 14px;
+  }
+  .clip-mark {
+    color: #00b5c8;
+    margin-right: -4px;
+  }
+  .thumb {
+    width: 40px;
+    height: 40px;
+    flex-shrink: 0;
+    border-radius: 4px;
+    background-color: #fff;
+    background-image: linear-gradient(45deg, #ddd 25%, transparent 25%, transparent 75%, #ddd 75%),
+      linear-gradient(45deg, #ddd 25%, transparent 25%, transparent 75%, #ddd 75%);
+    background-size: 10px 10px;
+    background-position: 0 0, 5px 5px;
+  }
+  .layer-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .sub {
+    color: #888;
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .paper-row {
+    cursor: default;
+    user-select: none;
+    margin-top: 4px;
+    border-style: dashed;
+    border-color: #3a3a44;
+  }
+  .paper-color {
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border: 1px solid #444;
+    border-radius: 4px;
+    background: none;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .layer-props {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
     font-size: 12px;
   }
-  .opacity {
-    flex-direction: column;
-    align-items: stretch;
+  .layer-props .row {
+    display: grid;
+    grid-template-columns: 52px 1fr auto;
+    align-items: center;
+    gap: 6px;
+    color: #bbb;
+  }
+  .layer-props select {
+    grid-column: span 2;
+    background: #15151a;
+    color: #eee;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 3px;
+  }
+  .layer-props .val {
+    color: #888;
+    min-width: 32px;
+    text-align: right;
+  }
+  .blend-hint {
+    margin: -2px 0 0;
+    color: #888;
+    font-size: 11px;
+    line-height: 1.35;
+  }
+  .toggles {
+    display: flex;
+    gap: 12px;
+    color: #bbb;
+  }
+  .toggles label {
+    display: flex;
     gap: 4px;
+  }
+  .menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+  }
+  .context-menu {
+    position: fixed;
+    z-index: 51;
+    min-width: 220px;
+    display: flex;
+    flex-direction: column;
+    padding: 4px;
+    background: #2a2a32;
+    border: 1px solid #444;
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    font-family: system-ui, sans-serif;
+    font-size: 13px;
+  }
+  .context-menu button {
+    text-align: left;
+    border: none;
+    background: transparent;
+    padding: 7px 10px;
+    border-radius: 5px;
+  }
+  .context-menu button:hover:not(:disabled) {
+    background: #00b5c8;
+    color: #111;
+  }
+  .context-menu .danger {
+    color: #ff7b7b;
+  }
+  .context-menu hr {
+    border: none;
+    border-top: 1px solid #444;
+    margin: 4px 2px;
+  }
+  .menu-title {
+    padding: 6px 10px 4px;
+    color: #888;
+    font-size: 11px;
   }
   .layer-buttons {
     display: flex;
@@ -1079,5 +1717,6 @@
   }
   .layer-buttons button {
     flex: 1;
+    padding: 6px 0;
   }
 </style>

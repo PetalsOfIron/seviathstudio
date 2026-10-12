@@ -83,6 +83,11 @@
     <input type="range" min="0.02" max="1" step="0.01" bind:value={brush.spacing} />
     <span class="val">{pct(brush.spacing)}</span>
   </label>
+  <label title="0% = clean paint, 100% = only blends the colors already on the layer">
+    <span>Color mix</span>
+    <input type="range" min="0" max="1" step="0.01" bind:value={brush.mix} />
+    <span class="val">{pct(brush.mix)}</span>
+  </label>
   <label>
     <span>Paper texture</span>
     <input type="range" min="0" max="1" step="0.01" bind:value={brush.texture} />
