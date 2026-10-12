@@ -11,12 +11,14 @@
     settingsOf,
     remixBrushes,
     surpriseBrush,
+    keepSizeFeel,
     RANDOM_KINDS,
     type RandomKind,
     renderBrushPreview,
     ensureTip,
     getTipMask,
     getTexture,
+    getTextureColors,
     TEXTURES,
     warmTip,
     type BrushSettings,
@@ -76,12 +78,12 @@
   // 🎲 A random brush, ready to draw with. `part` randomizes only one group of settings.
   const PARTS = {
     tip: ['tip', 'shapeBase', 'sides', 'starInner', 'roundness', 'angle', 'followDirection', 'hardness'],
-    edges: ['edge', 'edgeAmount', 'edgeDetail', 'wetRim', 'grain', 'variants', 'seed', 'streaks', 'deform'],
+    edges: ['edge', 'edgeAmount', 'edgeDetail', 'wetRim', 'grain', 'variants', 'seed', 'streaks', 'deform', 'hollow', 'outlineWidth'],
     random: ['scatter', 'sizeJitter', 'angleJitter', 'opacityJitter', 'colorJitter', 'spacing', 'particles', 'particleSize'],
   } as const;
   let randomKind = $state<RandomKind>('paint');
   const KIND_ICONS: Record<RandomKind, string> = {
-    paint: '🎨', watercolor: '💧', oil: '🖌', gouache: '🟫', dry: '🌾', ink: '🖋', pen: '✒', pencil: '✏', pastel: '🖍', marker: '🖊', airbrush: '💨', texture: '🧵', rough: '🪨', particles: '✴', fx: '✨',
+    paint: '🎨', watercolor: '💧', oil: '🖌', gouache: '🟫', dry: '🌾', ink: '🖋', pen: '✒', pencil: '✏', pastel: '🖍', marker: '🖊', airbrush: '💨', texture: '🧵', rough: '🪨', particles: '✴', fx: '✨', outline: '⭕', fuzzy: '🦔',
   };
   const SHORT: Partial<Record<RandomKind, string>> = { paint: 'Any paint', oil: 'Oil', pencil: 'Pencil', pastel: 'Pastel', ink: 'Ink brush', rough: 'Rough' };
   // build the tip versions in the background whenever the tip or its edges change
@@ -94,11 +96,11 @@
   const kindLabel = (k: RandomKind) => SHORT[k] ?? RANDOM_KINDS.find((x) => x.id === k)?.label ?? k;
   function surprise(part?: keyof typeof PARTS) {
     remixFrom = null;
-    const r = surpriseBrush(randomKind) as Record<string, unknown>;
+    const r = keepSizeFeel(surpriseBrush(randomKind), brush) as Record<string, unknown>;
     if (eraser) r.colorJitter = 0;
     if (!part) {
       // your brush size stays: only the kind of brush changes
-      Object.assign(brush, { tipImage: undefined, tipId: undefined }, r, { size: brush.size });
+      Object.assign(brush, { tipImage: undefined, tipId: undefined }, r);
       preset = 'Random ' + (RANDOM_KINDS.find((k) => k.id === randomKind)?.label.toLowerCase() ?? 'brush'); // save it with ★ to keep it
       return;
     }
@@ -115,8 +117,24 @@
 
   // ---- texture from your own picture
   let texInput = $state<HTMLInputElement>();
+  let wantColors = false; // the picture being picked is for "Keep texture colors"
   function pickTexture() {
+    wantColors = false;
     texInput?.click();
+  }
+  // 🎨 Keep texture colors: paint with your picture's own colors, separate from the texture holes
+  function toggleTexColors() {
+    if (brush.texColor > 0) {
+      brush.texColor = 0;
+      return;
+    }
+    if (brush.texKind !== 'custom' || !brush.texImage) {
+      wantColors = true;
+      texInput?.click();
+      return;
+    }
+    brush.texColor = 1;
+    getTextureColors(brush, () => (brush.texScale = brush.texScale));
   }
   function loadTexture(f: File | undefined) {
     if (!f) return;
@@ -124,7 +142,13 @@
     r.onload = () => {
       brush.texImage = r.result as string;
       brush.texKind = 'custom';
-      if (brush.texture < 0.2) brush.texture = 0.6;
+      if (wantColors) {
+        // colors only: the picture colors the paint, it doesn't wear holes into it
+        brush.texColor = 1;
+        brush.texture = 0;
+        getTextureColors(brush, () => (brush.texScale = brush.texScale));
+      } else if (brush.texture < 0.2) brush.texture = 0.6;
+      wantColors = false;
       getTexture(brush, () => (brush.texScale = brush.texScale)); // redraw the previews once it has loaded
     };
     r.readAsDataURL(f);
@@ -316,6 +340,7 @@
       {#each TEXTURES as t (t.id)}<option value={t.id}>{t.icon} {t.label}</option>{/each}
     </select>
     <button class="mini" onclick={pickTexture} title="Use your own picture as the texture (light parts take paint away)">🖼</button>
+    <button class="mini" class:on={brush.texColor > 0} onclick={toggleTexColors} title="Keep texture colors: paint with the colors of your texture picture (separate from the texture amount)">🎨</button>
   </div>
   <input bind:this={texInput} type="file" accept="image/*" hidden onchange={(e) => loadTexture(e.currentTarget.files?.[0])} />
   <label>
@@ -323,7 +348,14 @@
     <input type="range" min="0" max="1" step="0.01" bind:value={brush.texture} />
     <span class="val">{pct(brush.texture)}</span>
   </label>
-  {#if brush.texture > 0 && (brush.texKind ?? 'paper') !== 'paper'}
+  {#if brush.texColor > 0}
+    <label title="How much the paint takes the picture's colors instead of your brush color">
+      <span>Texture colors</span>
+      <input type="range" min="0.05" max="1" step="0.01" bind:value={brush.texColor} />
+      <span class="val">{pct(brush.texColor)}</span>
+    </label>
+  {/if}
+  {#if (brush.texture > 0 || brush.texColor > 0) && (brush.texKind ?? 'paper') !== 'paper'}
     <label>
       <span>Texture size</span>
       <input type="range" min="0.25" max="4" step="0.05" bind:value={brush.texScale} />
@@ -463,6 +495,18 @@
         <input type="range" min="0" max="1" step="0.01" bind:value={brush.deform} />
         <span class="val">{pct(brush.deform)}</span>
       </label>
+      <label title="Empties the middle of the stroke so only its outline stays: outlined strokes, double lines, rings">
+        <span>Outline only</span>
+        <input type="range" min="0" max="1" step="0.01" bind:value={brush.hollow} />
+        <span class="val">{pct(brush.hollow ?? 0)}</span>
+      </label>
+      {#if brush.hollow > 0}
+        <label title="How thick the outline is">
+          <span>Outline width</span>
+          <input type="range" min="0.04" max="0.6" step="0.01" bind:value={brush.outlineWidth} />
+          <span class="val">{pct(brush.outlineWidth ?? 0.18)}</span>
+        </label>
+      {/if}
       <label title="How many different versions of the tip the brush switches between">
         <span>Variations</span>
         <input type="range" min="1" max="8" step="1" bind:value={brush.variants} />
@@ -878,7 +922,7 @@
   }
   .texrow {
     display: grid;
-    grid-template-columns: 76px 1fr 30px;
+    grid-template-columns: 76px 1fr 30px 30px;
     align-items: center;
     gap: 6px;
     color: #bbb;
@@ -894,6 +938,10 @@
   }
   .mini {
     padding: 3px 0;
+  }
+  .mini.on {
+    background: #00b5c8;
+    border-color: #00b5c8;
   }
   .seg.three {
     grid-template-columns: repeat(3, 1fr);

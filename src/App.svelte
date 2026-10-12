@@ -34,10 +34,13 @@
   import BrushLibrary, { type ShareRequest } from './lib/BrushLibrary.svelte';
   import AccountPanel from './lib/AccountPanel.svelte';
   import FilterDialog from './lib/FilterDialog.svelte';
+  import SubView from './lib/SubView.svelte';
+  import RecorderPanel from './lib/RecorderPanel.svelte';
+  import { recorder } from './lib/recorder.svelte';
   import SettingsDialog, { loadPrefs, savePrefs, mapPressure, comboOf, type Prefs } from './lib/SettingsDialog.svelte';
   import { cloudReady, watchAccount, onPasswordRecovery, type Account } from './lib/cloud';
   import { brushFile, imageToTip, type ImportedBrush } from './lib/brushimport';
-  import { PRESETS, ERASER_PRESETS, surpriseBrush, settingsOf, getDab, getPaper, ensureTip, isShaped, dabShape, stampDab, jitterColor, pickVariant, particleSpread, getTexture, dirTexture, setBrushPerf, brushPerf, previewIsLighter, hasEdgeEffects, hasStrokeEdges, applyStrokeEdges, type BrushSettings, type BrushPreset } from './lib/brush';
+  import { PRESETS, ERASER_PRESETS, surpriseBrush, keepSizeFeel, settingsOf, getDab, getPaper, ensureTip, isShaped, dabShape, stampDab, jitterColor, pickVariant, particleSpread, getTexture, getTextureColors, dirTexture, followsStroke, strokeEdgePad, applyStrokeEdgesDirect, setBrushPerf, brushPerf, previewIsLighter, hasEdgeEffects, hasStrokeEdges, applyStrokeEdges, type BrushSettings, type BrushPreset } from './lib/brush';
 
   // Document size (chosen in New project, or taken from an opened file)
   let docW = $state(2000);
@@ -46,6 +49,23 @@
   // Settings (⚙): brush speed/quality, GPU or CPU, undo steps
   let prefs = $state(loadPrefs());
   let settingsOpen = $state(false);
+  // Sub view (references / navigator) and the session recorder: floating windows
+  let subOpen = $state(readFlag('seviath.subview'));
+  let recOpen = $state(false);
+  function readFlag(k: string) {
+    try {
+      return localStorage.getItem(k) === '1';
+    } catch {
+      return false;
+    }
+  }
+  $effect(() => {
+    try {
+      localStorage.setItem('seviath.subview', subOpen ? '1' : '0');
+    } catch {
+      /* not remembered */
+    }
+  });
   let filterOpen = $state(false);
   let penEraserFrom: Tool | null = null; // tool to go back to after the pen's eraser end
   $effect(() => {
@@ -485,9 +505,27 @@
   let clipCtx: CanvasRenderingContext2D; // one clipped layer, cut to the base's shape
   let texturedCtx: CanvasRenderingContext2D; // the stroke with paper grain applied
   let backupCtx: CanvasRenderingContext2D; // the layer before a color-mixing stroke (for undo)
+  let edgedCtx: CanvasRenderingContext2D; // High quality: the stroke with its finished edges, while drawing
+  let liveEdges = false; // this stroke shows its finished look (edges, rim, deform) while you draw
+  let liveTmp: CanvasRenderingContext2D | null = null;
   let refCtx: CanvasRenderingContext2D; // everything else you see, for brushes that mix with all layers
   let tintCtx: CanvasRenderingContext2D; // small canvas used to color one brush tip
   let paperPattern: CanvasPattern | null = null;
+  let colorPattern: CanvasPattern | null = null; // the texture picture's colors (Keep texture colors)
+  let texPixels: { w: number; h: number; d: Uint8ClampedArray } | null = null; // the same, for color-mixing brushes
+
+  // Color-mixing brushes load their paint from the texture picture at the spot being painted
+  function paintColorAt(x: number, y: number, base: string) {
+    if (!texPixels || brush.texColor <= 0) return base;
+    const sc = Math.max(0.25, brush.texScale ?? 1);
+    const { w, h, d } = texPixels;
+    const u = ((Math.floor((x - grainOffset.x) / sc) % w) + w) % w;
+    const v = ((Math.floor((y - grainOffset.y) / sc) % h) + h) % h;
+    const o = (v * w + u) * 4;
+    const [r, g, b] = hexRGB(base);
+    const k = Math.min(1, brush.texColor) * (d[o + 3] / 255);
+    return '#' + [r + (d[o] - r) * k, g + (d[o + 1] - g) * k, b + (d[o + 2] - b) * k].map((c) => Math.round(c).toString(16).padStart(2, '0')).join('');
+  }
   let nextId = 1;
 
   // Stroke state
@@ -594,6 +632,7 @@
     clipCtx = makeCanvas().getContext('2d', cpuCanvases ? { willReadFrequently: true } : undefined)!;
     texturedCtx = makeCanvas().getContext('2d', cpuCanvases ? { willReadFrequently: true } : undefined)!;
     backupCtx = makeCanvas().getContext('2d', { willReadFrequently: true })!;
+    edgedCtx = makeCanvas().getContext('2d')!;
     selCtx = makeCanvas().getContext('2d', cpuCanvases ? { willReadFrequently: true } : undefined)!;
     refCtx = makeCanvas().getContext('2d', { willReadFrequently: true })!;
     paperPattern = texturedCtx.createPattern(getPaper(), 'repeat');
@@ -808,9 +847,10 @@
     s.globalAlpha = 1;
     s.clearRect(A.x, A.y, A.w, A.h);
     blit(l.canvas);
+    if (liveEdges) updateLiveEdges(A);
     s.globalAlpha = brush.opacity;
     s.globalCompositeOperation = strokeTool === 'eraser' ? 'destination-out' : 'source-over';
-    blit(strokeSource(l, A));
+    blit(strokeSource(l, A, liveEdges));
     s.globalCompositeOperation = 'source-over';
     s.globalAlpha = 1;
     return s.canvas;
@@ -845,6 +885,26 @@
       x: cx + x * Math.cos(a) - y * Math.sin(a),
       y: cy + x * Math.sin(a) + y * Math.cos(a),
     };
+  }
+
+  // Navigator: put a document point in the middle of the screen
+  function centerOn(dx: number, dy: number) {
+    if (!stage) return;
+    const c = stageCenter();
+    const p = stageFromDocNoPan(dx, dy);
+    panX = c.x - p.x;
+    panY = c.y - p.y;
+  }
+  // the four corners of the screen, in document pixels (the frame in the navigator)
+  function viewCorners() {
+    if (!stage) return [];
+    const r = stage.getBoundingClientRect();
+    return [docFromStage(0, 0), docFromStage(r.width, 0), docFromStage(r.width, r.height), docFromStage(0, r.height)];
+  }
+  function setZoomCenter(z: number) {
+    if (!stage) return;
+    const c = stageCenter();
+    zoomAt(z, c.x, c.y);
   }
 
   // Run a view change while keeping the document point under (sx, sy) in place
@@ -1133,6 +1193,10 @@
     // the brush texture (paper grain, hair, cloth…). Paper grain shifts a little every stroke so
     // going over an area fills it in; other textures stay put so their pattern lines up.
     paperPattern = texturedCtx.createPattern(getTexture(brush, () => render()), 'repeat');
+    // "Keep texture colors": the paint takes the colors of your texture picture
+    const texCols = brush.texColor > 0 && strokeTool === 'brush' && !isVector(layer) ? getTextureColors(brush, () => render()) : null;
+    colorPattern = texCols ? texturedCtx.createPattern(texCols, 'repeat') : null;
+    texPixels = texCols ? { w: texCols.width, h: texCols.height, d: texCols.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, texCols.width, texCols.height).data } : null;
     strokeZoom = zoom;
     grainOffset = (brush.texKind || 'paper') === 'paper' ? { x: Math.random() * 256, y: Math.random() * 256 } : { x: 0, y: 0 };
 
@@ -1141,6 +1205,9 @@
     vecRaw = [{ ...(e.shiftKey && lastEnd && lastEnd.layerId === layer.id ? lastEnd.pt : pt) }];
     // vector lines are clean lines: no color mixing
     directStroke = strokeTool === 'brush' && brush.mix > 0 && !strokeVector;
+    // High quality: show the finished edges (outline, rim, deform, grain) live while drawing
+    liveEdges = brushPerf.quality === 'high' && !directStroke && !strokeVector && hasStrokeEdges(brush);
+    if (liveEdges) edgedCtx.clearRect(0, 0, docW, docH);
     if (directStroke) {
       backupCtx.clearRect(0, 0, docW, docH);
       backupCtx.drawImage(layer.canvas, 0, 0);
@@ -1319,10 +1386,12 @@
       return;
     }
 
-    const x = Math.max(0, Math.floor(minX));
-    const y = Math.max(0, Math.floor(minY));
-    const w = Math.min(docW, Math.ceil(maxX)) - x;
-    const h = Math.min(docH, Math.ceil(maxY)) - y;
+    // the whole-stroke effects (deform, ragged outline…) can reach a little past the dabs
+    const pad = strokeEdgePad(brush);
+    const x = Math.max(0, Math.floor(minX - pad));
+    const y = Math.max(0, Math.floor(minY - pad));
+    const w = Math.min(docW, Math.ceil(maxX + pad)) - x;
+    const h = Math.min(docH, Math.ceil(maxY + pad)) - y;
     if (w <= 0 || h <= 0) {
       render();
       return;
@@ -1355,10 +1424,12 @@
         ctx.drawImage(backupCtx.canvas, 0, 0);
         ctx.globalCompositeOperation = 'source-over';
       }
+      // the whole stroke gets its outline, rim and grain (only the new paint changes)
+      if (hasStrokeEdges(brush)) applyStrokeEdgesDirect(ctx, before, x, y, brush);
     } else {
       before = ctx.getImageData(x, y, w, h);
-      // wet brushes: the stroke gets its ragged outline and darker rim as it "dries"
-      if (strokeTool !== 'eraser' && hasStrokeEdges(brush)) applyStrokeEdges(strokeCtx, x, y, w, h, brush);
+      // the whole stroke gets its deform, outline (ragged, torn…), rim and grain as it "dries"
+      if (hasStrokeEdges(brush)) applyStrokeEdges(strokeCtx, x, y, w, h, brush);
       ctx.globalAlpha = brush.opacity;
       ctx.globalCompositeOperation = strokeTool === 'eraser' ? 'destination-out' : 'source-over';
       ctx.drawImage(strokeSource(layer, { x, y, w, h }), x, y, w, h, x, y, w, h);
@@ -1367,6 +1438,7 @@
     }
     const after = ctx.getImageData(x, y, w, h);
     directStroke = false;
+    liveEdges = false;
 
     push({ type: 'pixels', layerId: layer.id, rect: { x, y, w, h }, before, after });
     thumbTick++;
@@ -1520,18 +1592,51 @@
 
   // The stroke as it should be added to the layer: with paper grain worn into it if the
   // brush has texture. The grain pattern is fixed to the canvas, so it never slides.
-  function strokeSource(layer: Layer, A: Rect = { x: 0, y: 0, w: docW, h: docH }): HTMLCanvasElement {
+  // High quality: the part of the stroke in area A gets its finished edges right away, so
+  // what you see while drawing is the real stroke (not a lighter preview fixed at pen-up).
+  // The neighbours around A are included so the edges match across pieces.
+  function updateLiveEdges(A: Rect) {
+    if (A.w * A.h > 2_500_000 && A.w >= docW && A.h >= docH) return; // a full redraw keeps what was already done
+    const pad = strokeEdgePad(brush) + Math.ceil(Math.max(4, brush.size) * 0.3) + 3;
+    const B = clampRect({ x: A.x - pad, y: A.y - pad, w: A.w + 2 * pad, h: A.h + 2 * pad });
+    if (!B) return;
+    if (!liveTmp || liveTmp.canvas.width < B.w || liveTmp.canvas.height < B.h) {
+      const c = document.createElement('canvas');
+      c.width = Math.max(B.w, liveTmp?.canvas.width ?? 0);
+      c.height = Math.max(B.h, liveTmp?.canvas.height ?? 0);
+      liveTmp = c.getContext('2d', { willReadFrequently: true })!;
+    }
+    const t = liveTmp;
+    t.clearRect(0, 0, B.w, B.h);
+    t.drawImage(strokeCtx.canvas, B.x, B.y, B.w, B.h, 0, 0, B.w, B.h);
+    applyStrokeEdges(t, 0, 0, B.w, B.h, brush, { x: B.x, y: B.y });
+    edgedCtx.clearRect(A.x, A.y, A.w, A.h);
+    edgedCtx.drawImage(t.canvas, A.x - B.x, A.y - B.y, A.w, A.h, A.x, A.y, A.w, A.h);
+  }
+
+  function strokeSource(layer: Layer, A: Rect = { x: 0, y: 0, w: docW, h: docH }, live = false): HTMLCanvasElement {
+    const src = live ? edgedCtx.canvas : strokeCtx.canvas;
     // hair / fur textures are inside the tip (they follow the stroke), not on the canvas
     const useTexture = brush.texture > 0 && paperPattern && !strokeVector && !dirTexture(brush);
+    const useColors = !!colorPattern && !strokeVector && !directStroke;
     const useLock = layer.lockAlpha && strokeTool !== 'eraser' && !strokeVector;
     const useSel = hasSel && !strokeVector;
-    if (!useTexture && !useLock && !useSel) return strokeCtx.canvas;
+    if (!useTexture && !useColors && !useLock && !useSel) return src;
     const t = texturedCtx;
     t.globalCompositeOperation = 'source-over';
     t.globalAlpha = 1;
     const blit = (img: CanvasImageSource) => t.drawImage(img, A.x, A.y, A.w, A.h, A.x, A.y, A.w, A.h);
     t.clearRect(A.x, A.y, A.w, A.h);
-    blit(strokeCtx.canvas);
+    blit(src);
+    if (useColors) {
+      // the stroke keeps its shape, but its color comes from the texture picture
+      t.globalCompositeOperation = 'source-atop';
+      t.globalAlpha = Math.min(1, brush.texColor);
+      colorPattern!.setTransform(new DOMMatrix().translate(grainOffset.x, grainOffset.y).scale(Math.max(0.25, brush.texScale ?? 1)));
+      t.fillStyle = colorPattern!;
+      t.fillRect(A.x, A.y, A.w, A.h);
+      t.globalAlpha = 1;
+    }
     if (useTexture) {
       t.globalCompositeOperation = 'destination-out';
       t.globalAlpha = brush.texture;
@@ -1726,14 +1831,14 @@
     if (Math.hypot(pt.x - lastSample.x, pt.y - lastSample.y) >= Math.max(1, r * 0.4)) {
       // fresh paint from the brush slowly comes back, unless mix is 100%
       // (painting with the gradient: the paint color follows the gradient along the stroke)
-      const [br, bg, bb] = hexRGB(gradBrush && strokeTool !== 'eraser' ? strokeColorAt(grad.stops, grad.smooth, Math.round(curDabD / 6) * 6, gradBrushLen / strokeZoom, gradBrushRepeat).hex : color);
+      const [br, bg, bb] = hexRGB(paintColorAt(pt.x, pt.y, gradBrush && strokeTool !== 'eraser' ? strokeColorAt(grad.stops, grad.smooth, Math.round(curDabD / 6) * 6, gradBrushLen / strokeZoom, gradBrushRepeat).hex : color));
       const fresh = [br, bg, bb, 1];
       // Color mix % = how much of the paint comes from the canvas, the rest is your color.
       // A pure blender (≈100%) smears what it just picked up; paint mixing reads the layer
       // from before the stroke so it doesn't keep picking up its own fresh paint.
       // with the gradient the brush keeps reloading its new color strongly, so the gradient
       // shows clearly even with mixing paints (oil, acrylic, gouache)
-      const g = gradBrush && strokeTool !== 'eraser' && brush.mix < 0.9;
+      const g = (gradBrush || (texPixels !== null && brush.texColor > 0)) && strokeTool !== 'eraser' && brush.mix < 0.9;
       const reload = g ? Math.max(0.5, 1 - brush.mix) * 0.6 : (1 - brush.mix) * 0.3;
       for (let i = 0; i < 4; i++) mixP[i] += (fresh[i] - mixP[i]) * reload;
       sampleCanvas(layer, pt, brush.mix * (g ? 0.12 : 0.3), brush.mix < 0.9);
@@ -1757,7 +1862,7 @@
     // the tip turned with the stroke (bristles, flat brushes), squashed by roundness
     const ang =
       (brush.angle * Math.PI) / 180 +
-      (brush.followDirection || dirTexture(brush) ? dabDirection(pt, copy) : 0) +
+      (followsStroke(brush) ? dabDirection(pt, copy) : 0) +
       (brush.angleJitter > 0 ? (Math.random() - 0.5) * 2 * Math.PI * brush.angleJitter : 0);
     stampDab(t, tip, r, r, r, ang, brush.roundness); // left: mask
     t.globalAlpha = a;
@@ -3677,6 +3782,7 @@
   }
 
   function onBeforeUnload(e: BeforeUnloadEvent) {
+    if (recorder.busy) e.preventDefault(); // an unsaved session recording would be lost
     if (currentId && saveState !== 'saved') {
       saveNow();
       e.preventDefault();
@@ -3967,6 +4073,7 @@
   function sync() {
     undoCount = undoStack.length;
     redoCount = redoStack.length;
+    recorder.changed(); // timelapse: the picture changed, that's a new video frame
   }
 
   // Undoes (reverse) or redoes an entry. Returns the area that changed (undefined = all).
@@ -4214,7 +4321,7 @@
     randomBrush: () => {
       if (tool !== 'brush') tool = 'brush';
       flushSync();
-      Object.assign(brush, { tipImage: undefined, tipId: undefined }, surpriseBrush('paint'), { size: brush.size });
+      Object.assign(brush, { tipImage: undefined, tipId: undefined }, keepSizeFeel(surpriseBrush('paint'), brush));
       preset = 'Random brush';
     },
     mirror: () => setSymMode(nextMode(sym.mode)),
@@ -4239,6 +4346,8 @@
     flip: () => toggleFlip(),
     settings: () => (settingsOpen = true),
     filters: () => openFilters(),
+    subView: () => (subOpen = !subOpen),
+    record: () => (recOpen = !recOpen),
   };
   let keyAction = $derived(new Map(Object.entries(prefs.keys).filter(([, k]) => k).map(([a, k]) => [k, a])));
   const keyFor = (id: string) => prefs.keys[id] || '';
@@ -4347,6 +4456,10 @@
       {saveState === 'saved' ? '✓ Saved' : saveState === 'saving' ? 'Saving…' : '● Not saved yet'}
     </span>
     <span class="doc-badge" title="Color mode and print resolution (File menu to change)">{colorMode.toUpperCase()} · {docDpi} dpi</span>
+    <button class:on={subOpen} onclick={() => (subOpen = !subOpen)} title="Sub view: your reference pictures (with color picker) and the navigator, in a window you can move">🖼 Sub view</button>
+    <button class="rec-btn" class:on={recOpen} class:live={recorder.state === 'recording'} onclick={() => (recOpen = !recOpen)} title="Record your drawing session as an MP4 video (timelapse or real time)">
+      {recorder.state === 'recording' ? '● REC' : recorder.state === 'paused' ? '❚❚ REC' : '🎥 Record'}
+    </button>
     {#if colorMode === 'cmyk'}
       <button
         class:on={printPreview}
@@ -5098,6 +5211,23 @@
   </svg>
 {/if}
 
+{#if subOpen}
+  <SubView
+    getView={() => view}
+    {docW}
+    {docH}
+    {zoom}
+    corners={viewCorners}
+    {centerOn}
+    setZoom={setZoomCenter}
+    fit={fitToScreen}
+    onpick={(hex) => (color = hex)}
+    onclose={() => (subOpen = false)}
+  />
+{/if}
+{#if recOpen}
+  <RecorderPanel getView={() => view} name={projectName} onclose={() => (recOpen = false)} />
+{/if}
 {#if settingsOpen}
   <SettingsDialog bind:prefs onclose={() => (settingsOpen = false)} />
 {/if}

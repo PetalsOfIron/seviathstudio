@@ -2,7 +2,7 @@
 // Every brush is made of the same settings, so imported brushes (Photoshop, Krita, CSP)
 // and your own saved brushes work exactly like the built-in ones.
 
-export type TipShape = 'round' | 'shape' | 'bristle' | 'chalk' | 'wet' | 'splatter' | 'leaf' | 'grass' | 'star' | 'cloud' | 'strands' | 'speckle' | 'grunge' | 'hatch' | 'image';
+export type TipShape = 'round' | 'shape' | 'bristle' | 'chalk' | 'wet' | 'splatter' | 'leaf' | 'grass' | 'star' | 'cloud' | 'strands' | 'speckle' | 'grunge' | 'hatch' | 'scale' | 'image';
 export type ShapeBase = 'circle' | 'square' | 'rounded' | 'triangle' | 'polygon' | 'star' | 'diamond' | 'heart' | 'crescent' | 'drop';
 export type EdgeStyle = 'smooth' | 'ragged' | 'torn' | 'feathered' | 'bristly' | 'dry';
 
@@ -46,11 +46,14 @@ export type BrushSettings = {
   streaks: number; // 0..1, bristle marks: lines along the stroke, like an oil brush leaves
   antialias: boolean; // smooth edges; off = crisp pixel edges (pixel art, clean flats)
   deform: number; // 0..1, bends and warps the tip shape (every version differently)
+  hollow: number; // 0..1, outline only: the middle of the stroke empties out (double lines, outlined strokes)
+  outlineWidth: number; // 0.05..0.6, how thick that outline is (× brush size)
   particles: number; // 0 = off; else how many separate small dabs make up each dab (spray, dust, sparkle)
   particleSize: number; // 0.05..0.8, size of each particle (× brush size)
   texKind: string; // which texture the paint takes ('paper', 'hair', 'skin', 'cloth', … or 'custom')
   texImage?: string; // your own texture picture (PNG data URL) for 'custom'
   texScale: number; // 0.25..4, size of the texture
+  texColor: number; // 0..1, paint with the texture picture's own colors (0 = off, the brush color only)
   seed: number; // changes the random pattern of edges and grain
 };
 
@@ -80,10 +83,13 @@ export const EXTRA_DEFAULTS = {
   streaks: 0,
   antialias: true,
   deform: 0,
+  hollow: 0,
+  outlineWidth: 0.18,
   particles: 0,
   particleSize: 0.25,
   texKind: 'paper',
   texScale: 1,
+  texColor: 0,
 };
 
 const BASE: BrushSettings = {
@@ -119,6 +125,7 @@ export const TIP_SHAPES: { id: TipShape; label: string }[] = [
   { id: 'speckle', label: 'Speckles' },
   { id: 'grunge', label: 'Grunge' },
   { id: 'hatch', label: 'Hatching' },
+  { id: 'scale', label: 'Scale' },
   { id: 'image', label: 'Image' },
 ];
 
@@ -144,7 +151,7 @@ export const EDGES: { id: EdgeStyle; label: string; about: string }[] = [
   { id: 'dry', label: 'Dry brush', about: 'Streaks with gaps, like a brush running out of paint' },
 ];
 
-export const CATEGORIES = ['Pens', 'Pencils', 'Markers', 'Paint', 'Airbrush', 'Blend', 'Textures', 'Rough & particles', 'Nature & FX', 'My brushes'];
+export const CATEGORIES = ['Pens', 'Pencils', 'Markers', 'Paint', 'Watercolor', 'Airbrush', 'Blend', 'Textures', 'Rough & particles', 'Nature & FX', 'My brushes'];
 
 const b = (name: string, category: string, about: string, s: Partial<BrushSettings>): BrushPreset => ({ ...BASE, ...s, name, category, about });
 
@@ -157,6 +164,9 @@ export const PRESETS: BrushPreset[] = [
   b('Gel pen', 'Pens', 'Smooth, solid and even.', { size: 6, hardness: 0.95, minSize: 0.75, stabilize: 0.3 }),
   b('Fineliner', 'Pens', 'Same width everywhere, like a technical pen.', { size: 4, hardness: 0.95, sizePressure: false, minSize: 1, stabilize: 0.4 }),
   b('Brush pen', 'Pens', 'Soft brush tip with ink: expressive thick-thin lines.', { size: 18, hardness: 0.95, spacing: 0.03, minSize: 0.08, stabilize: 0.4, ends: 'taper', taper: 0.7, texture: 0.05 }),
+  b('Dip pen', 'Pens', 'Steel nib: very thin to bold with pressure, slightly rough ink edge.', { size: 9, hardness: 1, edge: 'ragged', edgeAmount: 0.15, edgeDetail: 0.9, variants: 3, spacing: 0.025, minSize: 0.03, stabilize: 0.5, ends: 'taper', taper: 0.65 }),
+  b('Double line pen', 'Pens', 'Draws two clean parallel lines at once (outline only).', { size: 16, hardness: 1, hollow: 1, outlineWidth: 0.12, spacing: 0.03, sizePressure: false, minSize: 1, stabilize: 0.4 }),
+  b('Sumi ink brush', 'Pens', 'Japanese ink brush: wet, dry-brush ends, rich blacks.', { size: 30, tip: 'bristle', roundness: 0.75, followDirection: true, edge: 'dry', edgeAmount: 0.35, edgeDetail: 0.85, streaks: 0.4, variants: 4, spacing: 0.03, minSize: 0.1, ends: 'taper', taper: 0.6, stabilize: 0.3 }),
   b('Calligraphy', 'Pens', 'Flat nib held at 45°: thin and thick depending on direction.', { size: 22, hardness: 1, spacing: 0.02, minSize: 0.6, roundness: 0.18, angle: 45, stabilize: 0.35 }),
   b('Anime lineart', 'Pens', 'Clean manga/anime line art: sharp, strong taper, steady.', { size: 5, hardness: 1, spacing: 0.025, minSize: 0.05, stabilize: 0.6, ends: 'taper', taper: 0.7 }),
   b('Hair strands', 'Pens', 'Long thin strands for hair: very pointed ends, light pressure stays thin.', { size: 6, hardness: 1, spacing: 0.025, minSize: 0.02, stabilize: 0.45, ends: 'taper', taper: 0.9, opacityPressure: true }),
@@ -168,17 +178,44 @@ export const PRESETS: BrushPreset[] = [
   b('Colored pencil', 'Pencils', 'Waxy colored pencil with paper grain.', { size: 7, hardness: 0.6, minSize: 0.6, opacityPressure: true, texture: 0.55, stabilize: 0.1, opacity: 0.9 }),
   b('Charcoal', 'Pencils', 'Rough, powdery and dark, with a broken edge.', { size: 24, tip: 'chalk', hardness: 0.6, roundness: 0.6, followDirection: true, edge: 'torn', edgeAmount: 0.4, edgeDetail: 0.7, grain: 0.25, variants: 4, spacing: 0.08, minSize: 0.5, opacityPressure: true, texture: 0.6, stabilize: 0.05 }),
   b('Pastel', 'Pencils', 'Soft chalk pastel that catches the paper texture.', { size: 30, tip: 'chalk', hardness: 0.6, edge: 'torn', edgeAmount: 0.3, edgeDetail: 0.5, grain: 0.3, variants: 4, angleJitter: 1, spacing: 0.08, minSize: 0.6, opacityPressure: true, texture: 0.5, mix: 0.1, opacity: 0.9 }),
+  b('Wax crayon', 'Pencils', 'Waxy crayon that skips over the paper grain.', { size: 18, tip: 'chalk', hardness: 0.7, edge: 'torn', edgeAmount: 0.3, grain: 0.35, variants: 4, opacity: 0.95, spacing: 0.06, minSize: 0.7, texture: 0.65, texKind: 'canvas', texScale: 0.6 }),
+  b('Rough pencil', 'Pencils', 'Big, loose sketching pencil with a rough edge.', { size: 14, tip: 'chalk', hardness: 0.6, edge: 'torn', edgeAmount: 0.35, edgeDetail: 0.8, grain: 0.25, variants: 4, minSize: 0.4, opacityPressure: true, texture: 0.5, stabilize: 0.05 }),
   // ---- Markers
   b('Marker', 'Markers', 'Flat, see-through color that does not get darker where it overlaps itself.', { size: 30, opacity: 0.5, hardness: 0.85, sizePressure: false, minSize: 1, ends: 'flat' }),
   b('Highlighter', 'Markers', 'Wide chisel tip, see-through.', { size: 34, opacity: 0.4, hardness: 0.95, sizePressure: false, minSize: 1, roundness: 0.3, angle: 0, ends: 'flat', stabilize: 0.3 }),
   b('Alcohol marker', 'Markers', 'Soft-edged marker that blends a little with what is under it.', { size: 26, opacity: 0.65, flow: 0.5, hardness: 0.55, minSize: 0.7, mix: 0.12, opacityPressure: true }),
+  b('Outline marker', 'Markers', 'Hollow marker: a colored outline around an empty middle.', { size: 30, hardness: 0.95, hollow: 1, outlineWidth: 0.2, sizePressure: false, minSize: 1, ends: 'round', stabilize: 0.3 }),
   // ---- Paint
   b('Oil paint', 'Paint', 'Thick paint with bristle marks; mixes with the paint already there.', { size: 40, tip: 'shape', shapeBase: 'rounded', roundness: 0.35, angle: 90, streaks: 0.6, followDirection: true, edge: 'bristly', edgeAmount: 0.35, edgeDetail: 0.6, variants: 3, spacing: 0.05, flow: 0.9, mix: 0.45, minSize: 0.5, opacityPressure: true, stabilize: 0.1 }),
   b('Acrylic', 'Paint', 'Opaque paint with a little bristle texture.', { size: 34, tip: 'shape', shapeBase: 'square', roundness: 0.3, angle: 90, streaks: 0.4, followDirection: true, spacing: 0.05, mix: 0.2, minSize: 0.5, texture: 0.15, stabilize: 0.1 }),
   b('Gouache', 'Paint', 'Matte, flat and opaque, slightly chalky, with soft uneven edges.', { size: 30, hardness: 0.75, edge: 'ragged', edgeAmount: 0.2, edgeDetail: 0.5, variants: 4, angleJitter: 1, mix: 0.15, minSize: 0.5, texture: 0.15, flow: 0.9 }),
-  b('Watercolor', 'Paint', 'See-through paint with uneven, darker wet edges and paper grain.', { size: 50, tip: 'round', hardness: 0.7, edge: 'ragged', edgeAmount: 0.65, edgeDetail: 0.35, wetRim: 0.7, variants: 6, angleJitter: 1, opacity: 0.75, flow: 0.3, spacing: 0.08, mix: 0, minSize: 0.5, opacityPressure: true, texture: 0.3, stabilize: 0.1 }),
-  b('Watercolor wash', 'Paint', 'Big soft wash for skies and backgrounds.', { size: 140, tip: 'round', hardness: 0.4, edge: 'feathered', edgeAmount: 0.6, edgeDetail: 0.2, wetRim: 0.45, variants: 5, angleJitter: 1, opacity: 0.6, flow: 0.15, mix: 0, sizePressure: false, minSize: 1, texture: 0.25 }),
-  b('Watercolor bloom', 'Paint', 'Drops of water spreading into paint: blotchy cauliflower edges.', { size: 70, tip: 'round', hardness: 0.6, edge: 'ragged', edgeAmount: 0.6, edgeDetail: 0.7, wetRim: 0.8, variants: 8, angleJitter: 1, sizeJitter: 0.3, scatter: 0.25, opacity: 0.7, flow: 0.5, spacing: 0.3, mix: 0, minSize: 0.6, texture: 0.3 }),
+  b('Watercolor', 'Watercolor', 'See-through paint with uneven, darker wet edges and paper grain.', { size: 50, tip: 'round', hardness: 0.7, edge: 'ragged', edgeAmount: 0.65, edgeDetail: 0.35, wetRim: 0.7, variants: 6, angleJitter: 1, opacity: 0.75, flow: 0.3, spacing: 0.08, mix: 0, minSize: 0.5, opacityPressure: true, texture: 0.3, stabilize: 0.1 }),
+  b('Watercolor wash', 'Watercolor', 'Big soft wash for skies and backgrounds.', { size: 140, tip: 'round', hardness: 0.4, edge: 'feathered', edgeAmount: 0.6, edgeDetail: 0.2, wetRim: 0.45, variants: 5, angleJitter: 1, opacity: 0.6, flow: 0.15, mix: 0, sizePressure: false, minSize: 1, texture: 0.25 }),
+  b('Watercolor bloom', 'Watercolor', 'Drops of water spreading into paint: blotchy cauliflower edges.', { size: 70, tip: 'round', hardness: 0.6, edge: 'ragged', edgeAmount: 0.6, edgeDetail: 0.7, wetRim: 0.8, variants: 8, angleJitter: 1, sizeJitter: 0.3, scatter: 0.25, opacity: 0.7, flow: 0.5, spacing: 0.3, mix: 0, minSize: 0.6, texture: 0.3 }),
+  // ---- Watercolor: many different waters, like CSP's set
+  b('Transparent watercolor', 'Watercolor', 'Clear, even glaze with soft edges and no rim: builds up where layers overlap.', { size: 50, hardness: 0.45, edge: 'feathered', edgeAmount: 0.35, edgeDetail: 0.4, wetRim: 0, variants: 3, opacity: 0.45, flow: 0.5, spacing: 0.06, minSize: 0.6, opacityPressure: true, texture: 0.1, texKind: 'watercolor' }),
+  b('Dark rim watercolor', 'Watercolor', 'Strong dark edge where the water dried, light middle.', { size: 55, hardness: 0.7, edge: 'ragged', edgeAmount: 0.5, edgeDetail: 0.4, wetRim: 1, variants: 5, angleJitter: 1, opacity: 0.8, flow: 0.45, spacing: 0.07, minSize: 0.6, texture: 0.2 }),
+  b('Wet blending watercolor', 'Watercolor', 'Wet into wet: blends softly with the color already there.', { size: 60, hardness: 0.35, edge: 'feathered', edgeAmount: 0.7, edgeDetail: 0.3, wetRim: 0.3, variants: 4, angleJitter: 1, opacity: 0.7, flow: 0.45, spacing: 0.08, mix: 0.55, mixRefer: 'layer', minSize: 0.6, opacityPressure: true }),
+  b('Dry watercolor', 'Watercolor', 'Little water: broken, grainy strokes that catch the paper.', { size: 45, hardness: 0.8, edge: 'dry', edgeAmount: 0.55, edgeDetail: 0.7, grain: 0.35, variants: 4, roundness: 0.7, followDirection: true, opacity: 0.8, flow: 0.55, spacing: 0.05, minSize: 0.6, texture: 0.45, texKind: 'watercolor' }),
+  b('Granulating watercolor', 'Watercolor', 'Pigment settles into the paper grain (like ultramarine).', { size: 60, hardness: 0.55, edge: 'ragged', edgeAmount: 0.45, edgeDetail: 0.35, wetRim: 0.6, grain: 0.45, variants: 5, angleJitter: 1, opacity: 0.75, flow: 0.4, spacing: 0.07, minSize: 0.6, texture: 0.55, texKind: 'watercolor', texScale: 0.8 }),
+  b('Flat wash brush', 'Watercolor', 'Wide flat brush for even washes and straight edges.', { size: 70, tip: 'shape', shapeBase: 'rounded', roundness: 0.28, angle: 90, followDirection: true, hardness: 0.75, edge: 'ragged', edgeAmount: 0.3, edgeDetail: 0.5, wetRim: 0.55, variants: 4, opacity: 0.7, flow: 0.4, spacing: 0.05, minSize: 0.8, texture: 0.2 }),
+  b('Watercolor liner', 'Watercolor', 'Thin pointed rigger brush for twigs, hair and details.', { size: 10, hardness: 0.85, edge: 'ragged', edgeAmount: 0.25, edgeDetail: 0.8, wetRim: 0.35, variants: 3, opacity: 0.85, flow: 0.6, spacing: 0.04, minSize: 0.08, ends: 'taper', taper: 0.7, stabilize: 0.35 }),
+  b('Bleeding watercolor', 'Watercolor', 'Paint bleeds out into the wet paper: soft, warped, uneven edges.', { size: 70, hardness: 0.45, edge: 'feathered', edgeAmount: 0.85, edgeDetail: 0.25, wetRim: 0.55, deform: 0.5, variants: 6, angleJitter: 1, opacity: 0.7, flow: 0.35, spacing: 0.08, minSize: 0.6 }),
+  b('Mottled wash', 'Watercolor', 'Patchy, cloudy wash for skies, walls and backgrounds.', { size: 140, tip: 'cloud', hardness: 0.5, edge: 'ragged', edgeAmount: 0.6, edgeDetail: 0.3, wetRim: 0.5, deform: 0.4, variants: 6, angleJitter: 1, sizeJitter: 0.3, opacity: 0.6, flow: 0.3, spacing: 0.12, sizePressure: false, minSize: 1, texture: 0.3, texKind: 'watercolor' }),
+  b('Dried ring watercolor', 'Watercolor', 'Only the dried rim of a puddle stays: a ragged ring of paint around a pale middle.', { size: 60, hardness: 0.7, edge: 'ragged', edgeAmount: 0.6, edgeDetail: 0.45, wetRim: 0.4, hollow: 0.7, outlineWidth: 0.14, variants: 6, angleJitter: 1, opacity: 0.8, flow: 0.45, spacing: 0.07, minSize: 0.6, texture: 0.2, texKind: 'watercolor' }),
+  b('Salt watercolor', 'Watercolor', 'Salt sprinkled into wet paint: speckled, starry light spots.', { size: 70, hardness: 0.55, edge: 'ragged', edgeAmount: 0.5, edgeDetail: 0.3, wetRim: 0.5, grain: 0.6, variants: 5, angleJitter: 1, opacity: 0.8, flow: 0.45, spacing: 0.07, minSize: 0.6, texture: 0.45, texKind: 'stone' }),
+  b('Watercolor splatter', 'Watercolor', 'Drops and spatters of watery paint with dark rims.', { size: 80, tip: 'splatter', hardness: 0.8, edge: 'ragged', edgeAmount: 0.4, wetRim: 0.7, variants: 6, angleJitter: 1, sizeJitter: 0.6, scatter: 1, opacityJitter: 0.4, opacity: 0.8, flow: 0.6, spacing: 0.7, sizePressure: false, minSize: 1, stabilize: 0 }),
+  b('Watercolor dots', 'Watercolor', 'Separate wet dots and blots, each with its own rim.', { size: 60, particles: 7, particleSize: 0.22, hardness: 0.7, edge: 'ragged', edgeAmount: 0.6, wetRim: 0.8, variants: 6, angleJitter: 1, opacityJitter: 0.4, opacity: 0.8, flow: 0.6, spacing: 0.5, scatter: 0.3, sizePressure: false, minSize: 1, stabilize: 0 }),
+  // ---- more paint
+  b('Oil flat', 'Paint', 'Flat bristle brush: square strokes with bristle marks.', { size: 45, tip: 'shape', shapeBase: 'square', roundness: 0.3, angle: 90, followDirection: true, hardness: 0.9, edge: 'bristly', edgeAmount: 0.4, edgeDetail: 0.7, streaks: 0.7, variants: 3, mix: 0.4, mixRefer: 'layer', flow: 0.95, spacing: 0.04, minSize: 0.6 }),
+  b('Oil filbert', 'Paint', 'Rounded flat brush for soft-edged oil strokes.', { size: 45, tip: 'shape', shapeBase: 'drop', roundness: 0.45, angle: 90, followDirection: true, hardness: 0.85, edge: 'ragged', edgeAmount: 0.25, streaks: 0.5, variants: 3, mix: 0.35, mixRefer: 'layer', flow: 0.95, spacing: 0.04, minSize: 0.6 }),
+  b('Oil fan', 'Paint', 'Fan brush: thin bristle streaks for grass, hair and texture.', { size: 60, tip: 'bristle', roundness: 0.15, angle: 90, followDirection: true, edge: 'dry', edgeAmount: 0.5, edgeDetail: 0.9, streaks: 0.8, variants: 3, mix: 0.25, mixRefer: 'layer', flow: 0.9, spacing: 0.04, minSize: 0.7 }),
+  b('Palette knife', 'Paint', 'Thick paint scraped on with a knife: hard edges, smeared color.', { size: 50, tip: 'shape', shapeBase: 'diamond', roundness: 0.35, angle: 90, followDirection: true, hardness: 1, edge: 'torn', edgeAmount: 0.25, edgeDetail: 0.6, variants: 3, mix: 0.6, mixRefer: 'layer', flow: 1, spacing: 0.03, sizePressure: false, minSize: 1 }),
+  b('Impasto', 'Paint', 'Heavy, rich oil paint with deep bristle grooves.', { size: 50, tip: 'bristle', roundness: 0.6, followDirection: true, edge: 'bristly', edgeAmount: 0.5, edgeDetail: 0.6, streaks: 0.9, grain: 0.1, variants: 4, mix: 0.3, mixRefer: 'layer', flow: 1, spacing: 0.035, minSize: 0.6 }),
+  b('Gouache flat', 'Paint', 'Flat, matte gouache strokes with a chalky dry edge.', { size: 40, tip: 'shape', shapeBase: 'rounded', roundness: 0.35, angle: 90, followDirection: true, hardness: 0.8, edge: 'dry', edgeAmount: 0.3, edgeDetail: 0.7, variants: 3, mix: 0.15, mixRefer: 'layer', flow: 0.95, spacing: 0.04, minSize: 0.7, texture: 0.2 }),
+  b('Dry gouache', 'Paint', 'Scratchy, broken gouache from a nearly dry brush.', { size: 40, hardness: 0.85, edge: 'dry', edgeAmount: 0.6, edgeDetail: 0.8, grain: 0.3, roundness: 0.6, followDirection: true, variants: 4, mix: 0.1, mixRefer: 'layer', flow: 0.95, spacing: 0.04, minSize: 0.7, texture: 0.35 }),
+  b('Outlined gouache', 'Paint', 'Opaque paint with an empty middle: a thick outlined stroke.', { size: 40, tip: 'chalk', roundness: 0.8, hardness: 0.85, hollow: 0.85, outlineWidth: 0.22, edge: 'ragged', edgeAmount: 0.35, edgeDetail: 0.7, variants: 4, flow: 0.9, spacing: 0.05, minSize: 0.6, texture: 0.15 }),
+  b('Fuzzy bristle', 'Paint', 'Dense, hairy bristle strokes with fibrous, fuzzy edges.', { size: 60, tip: 'bristle', roundness: 0.7, followDirection: true, hardness: 0.9, edge: 'bristly', edgeAmount: 0.85, edgeDetail: 0.8, deform: 0.25, streaks: 0.4, variants: 6, flow: 0.85, spacing: 0.04, mix: 0.15, mixRefer: 'layer', minSize: 0.5 }),
   b('Dry brush', 'Paint', 'Streaky paint with gaps, like a brush running out of paint.', { size: 44, tip: 'round', hardness: 0.85, roundness: 0.55, followDirection: true, edge: 'dry', edgeAmount: 0.55, edgeDetail: 0.6, variants: 4, spacing: 0.04, mix: 0.15, minSize: 0.6, texture: 0.2 }),
   b('Paint mix', 'Paint', 'Wet paint: your color mixes with the colors already on the canvas.', { size: 40, hardness: 0.5, spacing: 0.08, flow: 0.8, minSize: 0.4, opacityPressure: true, mix: 0.5, stabilize: 0.1 }),
   b('Cel shade', 'Paint', 'Flat anime coloring and shadow shapes: hard edge, no texture, fills cleanly.', { size: 40, hardness: 1, spacing: 0.04, sizePressure: false, minSize: 1, stabilize: 0.25, antialias: true }),
@@ -188,6 +225,7 @@ export const PRESETS: BrushPreset[] = [
   b('Soft round', 'Airbrush', 'Soft edges for shading and smooth color.', { size: 60, flow: 0.35, hardness: 0.2, spacing: 0.08, minSize: 0.2, opacityPressure: true, stabilize: 0 }),
   b('Airbrush', 'Airbrush', 'Very soft spray that builds up slowly.', { size: 150, flow: 0.06, hardness: 0, sizePressure: false, minSize: 1, opacityPressure: true, stabilize: 0 }),
   b('Hard airbrush', 'Airbrush', 'Builds up slowly but keeps a firm edge.', { size: 60, flow: 0.12, hardness: 0.65, sizePressure: false, minSize: 1, opacityPressure: true, stabilize: 0 }),
+  b('Grainy airbrush', 'Airbrush', 'Soft spray with visible grain, for gritty shading.', { size: 120, flow: 0.15, hardness: 0.1, grain: 0.5, edge: 'smooth', variants: 2, spacing: 0.08, sizePressure: false, minSize: 1, opacityPressure: true, texture: 0.35, stabilize: 0 }),
   b('Spray paint', 'Airbrush', 'Grainy spray can.', { size: 90, tip: 'splatter', flow: 0.35, spacing: 0.15, scatter: 0.4, sizeJitter: 0.4, angleJitter: 1, sizePressure: false, minSize: 1, opacityPressure: true, stabilize: 0 }),
   b('Splatter', 'Airbrush', 'Random paint drops.', { size: 70, tip: 'splatter', spacing: 0.7, scatter: 1.4, sizeJitter: 0.8, angleJitter: 1, opacityJitter: 0.3, sizePressure: true, minSize: 0.4, stabilize: 0 }),
   b('Soft blush', 'Airbrush', 'Gentle color for cheeks, glow and soft shading in anime art.', { size: 80, flow: 0.12, hardness: 0.1, spacing: 0.08, sizePressure: false, minSize: 1, opacityPressure: true, opacity: 0.7, stabilize: 0 }),
@@ -195,6 +233,11 @@ export const PRESETS: BrushPreset[] = [
   b('Blender', 'Blend', 'Adds no color. Smears and blends the colors already there.', { size: 50, flow: 0.6, hardness: 0.3, spacing: 0.08, minSize: 0.4, opacityPressure: true, mix: 1, stabilize: 0.1 }),
   b('Smudge', 'Blend', 'Pushes paint along like a finger.', { size: 36, flow: 0.9, hardness: 0.5, spacing: 0.05, minSize: 0.5, mix: 0.95, stabilize: 0.05 }),
   b('Bristle blender', 'Blend', 'Blends with brush marks, like a dry brush.', { size: 46, tip: 'bristle', roundness: 0.6, followDirection: true, flow: 0.7, spacing: 0.05, mix: 0.9, minSize: 0.5 }),
+  b('Hair blend', 'Blend', 'Pulls the colors already there into fine hair strands along your stroke (like CSP hair blending).', { size: 40, tip: 'strands', hardness: 1, followDirection: true, angle: 0, flow: 0.75, spacing: 0.04, mix: 1, minSize: 0.5, opacityPressure: true, ends: 'taper', taper: 0.5, stabilize: 0.15 }),
+  b('Fur blend', 'Blend', 'Fluffs the edge between two colors into short fur.', { size: 34, tip: 'strands', hardness: 1, followDirection: true, angle: 0, flow: 0.8, spacing: 0.08, scatter: 0.25, angleJitter: 0.1, sizeJitter: 0.3, mix: 1, minSize: 0.5, ends: 'taper', taper: 0.4, stabilize: 0 }),
+  b('Finger tip', 'Blend', 'Smooth finger smear: drags paint softly in the stroke direction.', { size: 30, flow: 0.95, hardness: 0.35, spacing: 0.03, mix: 0.97, minSize: 0.6, opacityPressure: true, stabilize: 0.1 }),
+  b('Textured blend', 'Blend', 'Blends with a grainy chalk texture, keeps a painterly look.', { size: 50, tip: 'chalk', flow: 0.6, hardness: 0.6, spacing: 0.06, grain: 0.25, angleJitter: 1, variants: 4, mix: 0.95, minSize: 0.5, opacityPressure: true }),
+  b('Soft blur', 'Blend', 'Very soft blending that just melts edges together.', { size: 80, flow: 0.3, hardness: 0, spacing: 0.08, mix: 1, sizePressure: false, minSize: 1, opacityPressure: true }),
   b('Water blend', 'Blend', 'Softly blends and lightens, like a wet brush.', { size: 60, tip: 'wet', flow: 0.4, hardness: 0.3, mix: 0.85, minSize: 0.5, texture: 0.15 }),
   // ---- Nature & effects
   b('Leaves', 'Nature & FX', 'Scattered leaves in slightly different colors.', { size: 40, tip: 'leaf', spacing: 0.45, scatter: 0.9, sizeJitter: 0.5, angleJitter: 1, colorJitter: 0.35, sizePressure: true, minSize: 0.5, stabilize: 0 }),
@@ -203,6 +246,7 @@ export const PRESETS: BrushPreset[] = [
   b('Sparkles', 'Nature & FX', 'Twinkling stars and glitter.', { size: 40, tip: 'star', spacing: 1.2, scatter: 2, sizeJitter: 0.8, angleJitter: 0.15, opacityJitter: 0.4, minSize: 0.3, stabilize: 0 }),
   b('Hearts', 'Nature & FX', 'Little hearts scattered along the stroke.', { size: 30, tip: 'shape', shapeBase: 'heart', hardness: 1, spacing: 1.1, scatter: 1.2, sizeJitter: 0.6, angleJitter: 0.15, colorJitter: 0.2, minSize: 0.5, stabilize: 0 }),
   b('Confetti', 'Nature & FX', 'Colorful scattered confetti shapes.', { size: 24, tip: 'shape', shapeBase: 'square', hardness: 1, roundness: 0.45, spacing: 0.9, scatter: 1.6, sizeJitter: 0.5, angleJitter: 1, colorJitter: 0.9, minSize: 0.6, stabilize: 0 }),
+  b('Scale stamps', 'Nature & FX', 'Single scales placed one by one along the stroke, with gaps (dragons, fish, armor). Draw along the body.', { size: 34, tip: 'scale', hardness: 1, followDirection: true, angle: 0, spacing: 0.95, sizeJitter: 0.12, angleJitter: 0.02, colorJitter: 0.12, opacityJitter: 0.1, minSize: 0.6, stabilize: 0.2 }),
   b('Glass sparkle', 'Nature & FX', 'Four-point star sparkles for glass, eyes and magic (like the glass spheres).', { size: 26, tip: 'star', spacing: 1.6, scatter: 1.4, sizeJitter: 0.7, angleJitter: 0.05, opacityJitter: 0.3, minSize: 0.3, stabilize: 0 }),
   b('Fur', 'Nature & FX', 'Soft fur: fine hairs that follow your stroke. Use short flicks in the direction the fur grows.', { size: 60, tip: 'strands', hardness: 1, followDirection: true, angle: 0, spacing: 0.14, scatter: 0.3, sizeJitter: 0.3, angleJitter: 0.1, opacityJitter: 0.35, colorJitter: 0.12, flow: 0.85, minSize: 0.55, ends: 'taper', taper: 0.5, stabilize: 0.1 }),
   b('Hair strands brush', 'Nature & FX', 'Many fine strands at once for flowing hair.', { size: 60, tip: 'strands', hardness: 1, followDirection: true, angle: 0, spacing: 0.05, opacityJitter: 0.15, flow: 0.7, minSize: 0.5, ends: 'taper', taper: 0.7, stabilize: 0.35 }),
@@ -216,14 +260,14 @@ export const PRESETS: BrushPreset[] = [
   b('Dry scratch', 'Rough & particles', 'Scratchy, broken dry strokes with bent bristles.', { size: 40, tip: 'bristle', roundness: 0.4, followDirection: true, edge: 'dry', edgeAmount: 0.7, edgeDetail: 0.85, deform: 0.4, grain: 0.15, variants: 5, streaks: 0.5, spacing: 0.04, minSize: 0.6, stabilize: 0.05 }),
   b('Particle sparkle', 'Rough & particles', 'Tiny four-point stars scattered as particles.', { size: 70, tip: 'star', particles: 6, particleSize: 0.22, spacing: 0.9, scatter: 0.4, opacityJitter: 0.4, sizePressure: false, minSize: 1, stabilize: 0 }),
   // ---- Textures: brushes that paint with a surface texture (fixed to the canvas)
-  b('Hair texture', 'Textures', 'Paints with fine hair strands inside: shade hair quickly.', { size: 60, hardness: 0.5, flow: 0.6, texture: 0.75, texKind: 'hair', texScale: 1, minSize: 0.6, opacityPressure: true, stabilize: 0.1 }),
-  b('Fur texture', 'Textures', 'Short fur texture for animals and fluffy clothes.', { size: 60, hardness: 0.45, flow: 0.6, texture: 0.7, texKind: 'fur', texScale: 1, minSize: 0.6, opacityPressure: true }),
+  b('Hair texture', 'Textures', 'Paints with fine hair strands inside: shade hair quickly.', { size: 60, hardness: 0.7, flow: 0.55, texture: 0.95, texKind: 'hair', texScale: 1, minSize: 0.6, opacityPressure: true, ends: 'taper', taper: 0.4, stabilize: 0.15 }),
+  b('Fur texture', 'Textures', 'Short fur texture for animals and fluffy clothes.', { size: 60, hardness: 0.6, flow: 0.55, texture: 0.9, texKind: 'fur', texScale: 1, scatter: 0.1, angleJitter: 0.04, minSize: 0.6, opacityPressure: true, ends: 'taper', taper: 0.3 }),
   b('Skin texture', 'Textures', 'Soft color with subtle pores and mottling for realistic skin.', { size: 70, hardness: 0.2, flow: 0.35, texture: 0.45, texKind: 'skin', texScale: 1, minSize: 0.7, opacityPressure: true }),
   b('Cloth / linen', 'Textures', 'Woven fabric texture for clothes.', { size: 50, hardness: 0.75, flow: 0.8, texture: 0.65, texKind: 'cloth', texScale: 1, minSize: 0.7 }),
   b('Denim', 'Textures', 'Diagonal twill texture for jeans and jackets.', { size: 50, hardness: 0.75, flow: 0.8, texture: 0.6, texKind: 'denim', texScale: 1, minSize: 0.7 }),
   b('Knit wool', 'Textures', 'Knitted sweater texture.', { size: 50, hardness: 0.7, flow: 0.8, texture: 0.65, texKind: 'knit', texScale: 1, minSize: 0.7 }),
   b('Leather', 'Textures', 'Cracked leather grain.', { size: 50, hardness: 0.7, flow: 0.8, texture: 0.55, texKind: 'leather', texScale: 1, minSize: 0.7 }),
-  b('Scales', 'Textures', 'Dragon, fish and snake scales.', { size: 50, hardness: 0.75, flow: 0.85, texture: 0.6, texKind: 'scales', texScale: 1, minSize: 0.7 }),
+  b('Scales', 'Textures', 'Dragon, fish and snake scales with clear gaps, so every scale reads on its own.', { size: 80, hardness: 0.8, flow: 0.95, texture: 1, texKind: 'scales', texScale: 1.5, minSize: 0.8 }),
   b('Wood grain', 'Textures', 'Wood grain for furniture, floors and staffs.', { size: 50, hardness: 0.7, flow: 0.8, texture: 0.6, texKind: 'wood', texScale: 1, minSize: 0.7 }),
   b('Stone / concrete', 'Textures', 'Rough stone and concrete surface.', { size: 60, hardness: 0.6, flow: 0.75, texture: 0.65, texKind: 'stone', texScale: 1, minSize: 0.7 }),
   b('Canvas oil', 'Textures', 'Oil paint on canvas weave.', { size: 45, tip: 'bristle', roundness: 0.6, followDirection: true, streaks: 0.3, edge: 'bristly', edgeAmount: 0.3, variants: 3, mix: 0.3, mixRefer: 'layer', texture: 0.45, texKind: 'canvas', texScale: 1, minSize: 0.5 }),
@@ -473,6 +517,37 @@ function proceduralMask(tip: TipShape, hardness: number): HTMLCanvasElement {
       ctx.putImageData(img, 0, 0);
       return c;
     }
+    case 'scale': {
+      // one scale, pointing along the stroke: solid rim, slightly lighter middle, a ridge line
+      const R2 = m * 0.92;
+      const shape = () => {
+        ctx.beginPath();
+        ctx.moveTo(m - R2 * 0.75, m - R2 * 0.72);
+        ctx.quadraticCurveTo(m + R2 * 0.55, m - R2 * 0.85, m + R2, m);
+        ctx.quadraticCurveTo(m + R2 * 0.55, m + R2 * 0.85, m - R2 * 0.75, m + R2 * 0.72);
+        ctx.quadraticCurveTo(m - R2 * 0.45, m, m - R2 * 0.75, m - R2 * 0.72);
+        ctx.closePath();
+      };
+      shape();
+      ctx.fill();
+      ctx.globalCompositeOperation = 'destination-out';
+      const g = ctx.createRadialGradient(m - R2 * 0.1, m, 0, m - R2 * 0.1, m, R2 * 0.8);
+      g.addColorStop(0, 'rgba(0,0,0,0.35)');
+      g.addColorStop(0.75, 'rgba(0,0,0,0.12)');
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g;
+      shape();
+      ctx.fill();
+      // the ridge down the middle
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.moveTo(m - R2 * 0.45, m);
+      ctx.quadraticCurveTo(m + R2 * 0.3, m, m + R2 * 0.85, m);
+      ctx.stroke();
+      return c;
+    }
     case 'hatch': {
       // parallel pencil hatching lines
       ctx.strokeStyle = '#fff';
@@ -615,11 +690,11 @@ function alphaOf(c: HTMLCanvasElement) {
 }
 
 export function hasEdgeEffects(s: BrushSettings) {
-  return (s.edge && s.edge !== 'smooth') || s.wetRim > 0 || s.grain > 0 || s.streaks > 0 || s.deform > 0;
+  return (s.edge && s.edge !== 'smooth') || s.wetRim > 0 || s.grain > 0 || s.streaks > 0 || s.deform > 0 || dirTexture(s);
 }
 
 function edgeKey(s: BrushSettings) {
-  return [s.edge, s.edgeAmount.toFixed(2), s.edgeDetail.toFixed(2), s.wetRim.toFixed(2), s.grain.toFixed(2), (s.streaks ?? 0).toFixed(2), (s.deform ?? 0).toFixed(2), s.seed, edgeQ()].join(',');
+  return [s.edge, s.edgeAmount.toFixed(2), s.edgeDetail.toFixed(2), s.wetRim.toFixed(2), s.grain.toFixed(2), (s.streaks ?? 0).toFixed(2), (s.deform ?? 0).toFixed(2), dirTexture(s) ? s.texKind + (s.texture ?? 0).toFixed(2) + (s.texScale ?? 1).toFixed(2) : '', s.seed, edgeQ()].join(',');
 }
 
 // Gives any tip a new outline (ragged, torn…), a wet rim and inner grain
@@ -683,9 +758,11 @@ function shapeEdges(full: HTMLCanvasElement, s: BrushSettings, variant: number):
           break;
         }
         case 'dry': {
-          // streaks along the stroke direction (the tip's x axis)
-          const n = fbm(u * 2, v * freq * 1.6, seed);
-          a = orig[i] * (0.35 + 0.65 * smoothstep(amt * 0.6 - 0.12, amt * 0.6 + 0.12, n));
+          // streaks along the stroke direction (the tip's x axis). The gaps are at the same place
+          // in every dab version (brush seed only), and nearly empty, so overlapping dabs keep them
+          const n = noise(v * freq * 1.6, 0.5, Math.round(s.seed) * 7 + 1) * 0.75 + noise(v * freq * 3.3, 1.5, Math.round(s.seed) * 7 + 2) * 0.25;
+          const keep = smoothstep(amt * 0.6 - 0.08, amt * 0.6 + 0.08, n);
+          a = orig[i] * keep * keep * (0.85 + 0.15 * noise(u * 3, v * 4, seed));
           break;
         }
       }
@@ -711,6 +788,19 @@ function shapeEdges(full: HTMLCanvasElement, s: BrushSettings, variant: number):
         out[y * N + x] *= 1 - s.grain * 0.6 * smoothstep(0.45, 0.85, n);
       }
   }
+  // hair / fur textures live inside the tip, lying along the stroke: overlapping dabs line
+  // their strands up into long hairs that bend with the stroke
+  if (dirTexture(s)) {
+    const tex = textureAlpha(s.texKind);
+    // about 35 strands across the tip; gaps go deep so overlapping dabs keep the strands apart
+    const sc = (256 / N) * 0.38 / Math.max(0.25, s.texScale ?? 1);
+    for (let y = 0; y < N; y++)
+      for (let x = 0; x < N; x++) {
+        const tx = Math.floor(x * sc) & 255, ty = Math.floor(y * sc) & 255;
+        const k = 1 - Math.min(1, s.texture * 1.15) * tex[ty * 256 + tx];
+        out[y * N + x] *= k * k;
+      }
+  }
   // bristle marks: grooves across the width of the tip (its x axis). They depend on the
   // brush's seed only, not on the dab version, so they line up into long streaks.
   if (s.streaks > 0) {
@@ -719,7 +809,8 @@ function shapeEdges(full: HTMLCanvasElement, s: BrushSettings, variant: number):
     for (let x = 0; x < N; x++) {
       const u = (x / N) * lines;
       const groove = smoothstep(0.25, 0.75, noise(u, 0.5, ss) * 0.7 + noise(u * 2.3, 1.5, ss + 1) * 0.3);
-      const k = 1 - s.streaks * 0.8 * (1 - groove) * (0.8 + 0.2 * noise(u, variant + 3.5, ss + 2));
+      const k0 = 1 - Math.min(1, s.streaks * 1.1) * (1 - groove) * (0.85 + 0.15 * noise(u, variant + 3.5, ss + 2));
+      const k = k0 * k0; // deep grooves: they survive many overlapping dabs
       for (let y = 0; y < N; y++) out[y * N + x] *= k;
     }
   }
@@ -891,7 +982,7 @@ export function dabShape(s: BrushSettings, r: number, dir: number) {
   let size = r;
   if (s.sizeJitter > 0) size *= 1 - Math.random() * s.sizeJitter;
   let a = (s.angle * Math.PI) / 180;
-  if (s.followDirection) a += dir;
+  if (followsStroke(s)) a += dir;
   if (s.angleJitter > 0) a += (Math.random() - 0.5) * 2 * Math.PI * s.angleJitter;
   let ox = 0, oy = 0;
   if (s.scatter > 0) {
@@ -975,7 +1066,22 @@ export function renderBrushPreview(c: HTMLCanvasElement, s: BrushSettings, color
       carry = d + step - len;
     }
   }
-  if (s.texture > 0) {
+  // the whole-stroke look (outline only, ragged outline, rim, deform), at preview size
+  if (hasStrokeEdges(s)) applyStrokeEdges(t, 0, 0, W, H, { ...s, size });
+  const colors = s.texColor > 0 ? getTextureColors(s) : null;
+  if (colors) {
+    const pat = t.createPattern(colors, 'repeat');
+    if (pat) {
+      pat.setTransform(new DOMMatrix().scale(Math.max(0.25, s.texScale ?? 1) * 0.5));
+      t.globalAlpha = Math.min(1, s.texColor);
+      t.globalCompositeOperation = 'source-atop';
+      t.fillStyle = pat;
+      t.fillRect(0, 0, W, H);
+      t.globalCompositeOperation = 'source-over';
+      t.globalAlpha = 1;
+    }
+  }
+  if (s.texture > 0 && !dirTexture(s)) {
     t.globalAlpha = s.texture;
     t.globalCompositeOperation = 'destination-out';
     const pat = t.createPattern(getTexture(s), 'repeat');
@@ -1046,7 +1152,7 @@ export function getPaper(): HTMLCanvasElement {
 
 const NUMERIC: (keyof BrushSettings)[] = [
   'size', 'opacity', 'flow', 'hardness', 'spacing', 'minSize', 'texture', 'stabilize', 'taper', 'mix', 'roundness', 'angle',
-  'scatter', 'sizeJitter', 'angleJitter', 'opacityJitter', 'colorJitter', 'sides', 'starInner', 'edgeAmount', 'edgeDetail', 'wetRim', 'grain', 'variants', 'streaks', 'deform', 'particles', 'particleSize', 'texScale',
+  'scatter', 'sizeJitter', 'angleJitter', 'opacityJitter', 'colorJitter', 'sides', 'starInner', 'edgeAmount', 'edgeDetail', 'wetRim', 'grain', 'variants', 'streaks', 'deform', 'hollow', 'outlineWidth', 'particles', 'particleSize', 'texScale',
 ];
 
 // Brush remix: a mix of two brushes. t = 0 is all of A, 1 is all of B.
@@ -1064,7 +1170,7 @@ export function remixBrushes(a: BrushSettings, b: BrushSettings, t: number): Bru
 // A surprise brush: random but sensible. Each kind starts from a real medium and then
 // picks a tip form (round, flat, filbert, chisel, fan, bristles, chalk…), an edge and a
 // character, so two random brushes of the same kind still look clearly different.
-export type RandomKind = 'paint' | 'watercolor' | 'oil' | 'gouache' | 'dry' | 'ink' | 'pen' | 'pencil' | 'pastel' | 'marker' | 'airbrush' | 'texture' | 'rough' | 'particles' | 'fx';
+export type RandomKind = 'paint' | 'watercolor' | 'oil' | 'gouache' | 'dry' | 'ink' | 'pen' | 'pencil' | 'pastel' | 'marker' | 'airbrush' | 'texture' | 'rough' | 'particles' | 'fx' | 'outline' | 'fuzzy';
 
 export const RANDOM_KINDS: { id: RandomKind; label: string }[] = [
   { id: 'paint', label: 'Any paint' },
@@ -1080,17 +1186,39 @@ export const RANDOM_KINDS: { id: RandomKind; label: string }[] = [
   { id: 'airbrush', label: 'Airbrush' },
   { id: 'texture', label: 'Texture' },
   { id: 'rough', label: 'Rough / deformed' },
+  { id: 'outline', label: 'Outline / hollow' },
+  { id: 'fuzzy', label: 'Fuzzy bristle' },
   { id: 'particles', label: 'Particles' },
   { id: 'fx', label: 'Effects' },
 ];
 
 type Form = 'round' | 'flat' | 'filbert' | 'chisel' | 'fan' | 'bristle' | 'chalk' | 'wet' | 'cloud' | 'nib' | 'triangle' | 'star';
 
+// Randomizing must not change how thick your line is: the size, the pressure → size setting
+// and the smallest size stay yours, and random size jumps stay small.
+export function keepSizeFeel<T extends Partial<BrushSettings>>(r: T, cur: Pick<BrushSettings, 'size' | 'sizePressure' | 'minSize'>): T {
+  return { ...r, size: cur.size, sizePressure: cur.sizePressure, minSize: cur.minSize, sizeJitter: Math.min(r.sizeJitter ?? 0, 0.12) };
+}
+
 export function surpriseBrush(kind: RandomKind = 'paint'): BrushSettings {
   const R = Math.random;
   const pick = <T,>(xs: T[]) => xs[Math.floor(R() * xs.length)];
   const rr = (a: number, b: number, d = 2) => Math.round((a + R() * (b - a)) * 10 ** d) / 10 ** d;
-  if (kind === 'paint') kind = pick<RandomKind>(['watercolor', 'watercolor', 'oil', 'oil', 'gouache', 'dry', 'pastel', 'ink']);
+  if (kind === 'paint') kind = pick<RandomKind>(['watercolor', 'watercolor', 'oil', 'oil', 'gouache', 'gouache', 'dry', 'pastel', 'ink', 'outline', 'fuzzy']);
+  const r = surpriseBase(kind);
+  // extra twists now and then, so painting brushes don't all come out alike
+  if (r.hollow === 0 && ['gouache', 'oil', 'dry', 'marker', 'pastel', 'ink', 'pen', 'pencil'].includes(kind) && R() < 0.16)
+    Object.assign(r, { hollow: rr(0.55, 1), outlineWidth: rr(0.06, 0.3), opacity: Math.max(r.opacity, 0.8) });
+  if (r.deform === 0 && ['gouache', 'oil', 'dry', 'pastel', 'watercolor'].includes(kind) && R() < 0.22) r.deform = rr(0.1, 0.4);
+  if (['gouache', 'oil', 'dry', 'pastel'].includes(kind) && r.edge !== 'bristly' && R() < 0.15)
+    Object.assign(r, { edge: 'bristly' as EdgeStyle, edgeAmount: rr(0.5, 1), edgeDetail: rr(0.5, 1), variants: Math.max(r.variants, 4) });
+  return r;
+}
+
+function surpriseBase(kind: RandomKind): BrushSettings {
+  const R = Math.random;
+  const pick = <T,>(xs: T[]) => xs[Math.floor(R() * xs.length)];
+  const rr = (a: number, b: number, d = 2) => Math.round((a + R() * (b - a)) * 10 ** d) / 10 ** d;
 
   // the tip itself: not only round
   const form = (f: Form): Partial<BrushSettings> => {
@@ -1140,8 +1268,8 @@ export function surpriseBrush(kind: RandomKind = 'paint'): BrushSettings {
   const mk = (...parts: Partial<BrushSettings>[]): BrushSettings => Object.assign({ ...BASE }, character(), ...parts);
 
   switch (kind) {
-    case 'watercolor':
-      return mk(
+    case 'watercolor': {
+      const wc = mk(
         form(pick<Form>(['round', 'round', 'wet', 'cloud', 'filbert', 'flat'])),
         edged(['ragged', 'ragged', 'ragged', 'feathered'], 1.15),
         {
@@ -1158,6 +1286,47 @@ export function surpriseBrush(kind: RandomKind = 'paint'): BrushSettings {
           mix: 0,
         },
       );
+      // one of several watercolor characters, so random watercolors differ a lot
+      const style = pick(['plain', 'wash', 'dark rim', 'bloom', 'granulating', 'dry', 'liner', 'bleed', 'mottled', 'wet mix', 'flat']);
+      const styles: Record<string, Partial<BrushSettings>> = {
+        plain: {},
+        wash: { hardness: rr(0.1, 0.35), flow: rr(0.12, 0.3), wetRim: rr(0.2, 0.45), edge: 'feathered', edgeAmount: rr(0.5, 0.9) },
+        'dark rim': { wetRim: 1, flow: rr(0.25, 0.4), hardness: rr(0.6, 0.85), edge: 'ragged', edgeAmount: rr(0.3, 0.6) },
+        bloom: { tip: 'cloud', angleJitter: 1, deform: rr(0.3, 0.6), wetRim: rr(0.7, 1), variants: 6, edge: 'ragged', edgeAmount: rr(0.6, 1) },
+        granulating: { texture: rr(0.5, 0.8), texKind: pick(['watercolor', 'watercolor', 'paper', 'canvas', 'stone']), grain: rr(0.15, 0.35), wetRim: rr(0.3, 0.6) },
+        dry: { edge: 'dry', edgeAmount: rr(0.5, 0.9), streaks: rr(0.3, 0.6), followDirection: true, flow: rr(0.5, 0.8), wetRim: rr(0.2, 0.5), grain: rr(0.05, 0.2) },
+        liner: { tip: 'round', roundness: 1, hardness: rr(0.6, 0.85), ends: 'taper', taper: rr(0.5, 0.9), flow: rr(0.4, 0.7), wetRim: rr(0.4, 0.8) },
+        bleed: { edge: 'feathered', edgeAmount: rr(0.7, 1), edgeDetail: rr(0.1, 0.35), deform: rr(0.35, 0.7), hardness: rr(0.3, 0.5), variants: 6 },
+        mottled: { tip: 'cloud', texture: rr(0.3, 0.55), deform: rr(0.2, 0.45), opacityJitter: rr(0.2, 0.45), angleJitter: 1, variants: 6 },
+        'wet mix': { mix: rr(0.4, 0.75), mixRefer: 'layer', flow: rr(0.3, 0.5), wetRim: rr(0.3, 0.6) },
+        flat: { tip: 'shape', shapeBase: 'rounded', roundness: rr(0.15, 0.35), followDirection: true, angle: 90, edge: 'ragged', edgeAmount: rr(0.4, 0.8), wetRim: rr(0.5, 0.9) },
+      };
+      return Object.assign(wc, styles[style]);
+    }
+    case 'outline': {
+      // outlined / hollow strokes: the middle empties, double lines and rims stay
+      const base = surpriseBase(pick<RandomKind>(['gouache', 'marker', 'pen', 'oil', 'ink', 'dry', 'pastel']));
+      return { ...base, hollow: rr(0.65, 1), outlineWidth: pick([rr(0.05, 0.12), rr(0.12, 0.25), rr(0.25, 0.4)]), wetRim: 0, opacity: Math.max(base.opacity, 0.85), spacing: Math.min(base.spacing, 0.1), scatter: 0, particles: 0 };
+    }
+    case 'fuzzy':
+      // dense, hairy bristle masses with fuzzy, fibrous edges
+      return mk(form(pick<Form>(['bristle', 'bristle', 'fan', 'chalk', 'round', 'filbert'])), {
+        size: Math.round(rr(30, 110, 0)),
+        edge: 'bristly',
+        edgeAmount: rr(0.6, 1),
+        edgeDetail: rr(0.55, 1),
+        variants: 6,
+        hardness: rr(0.7, 1),
+        deform: rr(0.1, 0.45),
+        streaks: rr(0.2, 0.6),
+        grain: R() < 0.4 ? rr(0.05, 0.2) : 0,
+        flow: rr(0.65, 1),
+        opacity: rr(0.75, 1),
+        spacing: rr(0.03, 0.07),
+        angleJitter: R() < 0.5 ? 1 : 0,
+        mix: rr(0, 0.35),
+        texture: R() < 0.4 ? rr(0.1, 0.35) : 0,
+      });
     case 'oil':
       return mk(form(pick<Form>(['flat', 'flat', 'filbert', 'filbert', 'fan', 'bristle', 'chisel'])), edged(['bristly', 'bristly', 'ragged', 'smooth'], 0.6), {
         size: Math.round(rr(18, 90, 0)),
@@ -1327,25 +1496,35 @@ export function surpriseBrush(kind: RandomKind = 'paint'): BrushSettings {
 // fixed to the canvas, and paint collecting at the rim with a lighter middle.
 
 export function hasStrokeEdges(s: BrushSettings) {
+  if (s.hollow > 0) return true; // outline only works on any stroke (spaced dabs become rings)
   // spaced-out or scattered dabs already show their own edges
-  if (!brushPerf.strokeEdges || s.spacing > 0.2 || s.scatter > 0.5) return false;
-  return s.wetRim > 0 || s.edge === 'ragged' || s.edge === 'torn' || s.edge === 'feathered';
+  if (s.spacing > 0.2 || s.scatter > 0.5 || s.particles > 0) return false;
+  return (
+    (brushPerf.strokeEdges && s.wetRim > 0) ||
+    s.edge === 'ragged' ||
+    s.edge === 'torn' ||
+    s.edge === 'feathered' ||
+    s.edge === 'bristly' ||
+    s.grain > 0 ||
+    s.deform > 0 ||
+    s.hollow > 0
+  );
 }
 
-export function applyStrokeEdges(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, s: BrushSettings) {
-  if (!hasStrokeEdges(s) || w <= 0 || h <= 0 || w * h > 9_000_000) return;
-  const img = ctx.getImageData(x, y, w, h);
-  const d = img.data;
-  let amax = 0;
-  for (let i = 3; i < d.length; i += 4) if (d[i] > amax) amax = d[i];
-  if (!amax) return;
-  // blurred copies of where the stroke has paint: "how deep inside the stroke is this pixel".
-  // Light paint counts as covered too, so thin glazes are not eaten away.
+// how far a deformed stroke can move outside where it was drawn
+export function strokeEdgePad(s: BrushSettings) {
+  return hasStrokeEdges(s) ? Math.ceil(Math.max(4, s.size) * (0.08 + (s.deform || 0) * 0.35)) + 2 : 0;
+}
+
+// Per pixel, how much of the stroke stays (0..1): the outline (ragged, torn, feathered,
+// bristly), the watercolor rim and grain. `cov` = where the stroke has paint (0..1).
+function edgeFactors(cov: Float32Array, w: number, h: number, x: number, y: number, s: BrushSettings): Float32Array {
+  const f = new Float32Array(w * h).fill(1);
   const cover = document.createElement('canvas');
   cover.width = w;
   cover.height = h;
   const cimg = new ImageData(w, h);
-  for (let i = 3; i < d.length; i += 4) cimg.data[i] = Math.min(255, (d[i] * 3 * 255) / amax);
+  for (let i = 0; i < cov.length; i++) cimg.data[i * 4 + 3] = Math.min(255, cov[i] * 3 * 255);
   cover.getContext('2d')!.putImageData(cimg, 0, 0);
   const blurAlpha = (r: number) => {
     const c = document.createElement('canvas');
@@ -1360,41 +1539,160 @@ export function applyStrokeEdges(ctx: CanvasRenderingContext2D, x: number, y: nu
     return out;
   };
   const size = Math.max(4, s.size);
-  const ragged = s.edge === 'ragged' || s.edge === 'torn' || s.edge === 'feathered';
-  const near = ragged ? blurAlpha(Math.max(1.5, size * (s.edge === 'feathered' ? 0.2 : 0.12))) : null;
-  const deep = s.wetRim > 0 ? blurAlpha(Math.max(2, size * 0.12)) : null;
+  const edgy = s.edge === 'ragged' || s.edge === 'torn' || s.edge === 'feathered' || s.edge === 'bristly';
+  const near = edgy ? blurAlpha(Math.max(1.5, size * (s.edge === 'feathered' ? 0.2 : s.edge === 'bristly' ? 0.08 : 0.12))) : null;
+  const deep = brushPerf.strokeEdges && s.wetRim > 0 ? blurAlpha(Math.max(2, size * 0.12)) : null;
   const amt = Math.max(0, Math.min(1, s.edgeAmount));
   const scale = size * (0.9 - Math.max(0, Math.min(1, s.edgeDetail)) * 0.75); // px per noise cell
   const seed = Math.round(s.seed) * 31 + 5;
-  const soft = s.edge === 'torn' ? 0.05 : s.edge === 'feathered' ? 0.3 : 0.12;
+  const soft = s.edge === 'torn' || s.edge === 'bristly' ? 0.05 : s.edge === 'feathered' ? 0.3 : 0.12;
+  const grain = Math.max(0, Math.min(1, s.grain));
+  // outline only: how far inside the stroke each pixel is
+  const hollow = Math.max(0, Math.min(1, s.hollow || 0));
+  const inner = hollow > 0 ? blurAlpha(Math.max(1, size * Math.max(0.05, Math.min(0.6, s.outlineWidth || 0.18)) * 0.55)) : null;
   for (let j = 0, p = 0; j < h; j++) {
     for (let i = 0; i < w; i++, p++) {
-      const k = p * 4 + 3;
-      if (!d[k]) continue;
-      let f = 1;
-      // deep inside or far outside the edge the noise can't change anything: skip it
-      if (near && near[p] <= 0.5 - soft - amt * 1.3) f = 0;
-      else if (near && near[p] < 0.5 + soft + amt * 1.3) {
-        // big wobbles plus a fine fringe, both fixed to the canvas
-        const n = (fbm((x + i) / scale, (y + j) / scale, seed) - 0.5) * 0.75 + (noise((x + i) / (scale * 0.18), (y + j) / (scale * 0.18), seed + 3) - 0.5) * 0.45;
-        f = smoothstep(0.5 - soft, 0.5 + soft, near[p] + n * amt * (s.edge === 'torn' ? 1.6 : 1.3));
+      if (cov[p] <= 0) continue;
+      let k = 1;
+      if (near) {
+        if (near[p] <= 0.5 - soft - amt * 1.3) k = 0;
+        else if (near[p] < 0.5 + soft + amt * 1.3) {
+          // big wobbles plus a fine fringe, both fixed to the canvas; bristly = fine hairs
+          const fine = s.edge === 'bristly' ? 0.07 : 0.18;
+          const n =
+            (fbm((x + i) / scale, (y + j) / scale, seed) - 0.5) * (s.edge === 'bristly' ? 0.3 : 0.75) +
+            (noise((x + i) / (scale * fine), (y + j) / (scale * fine), seed + 3) - 0.5) * (s.edge === 'bristly' ? 1.1 : 0.45);
+          k = smoothstep(0.5 - soft, 0.5 + soft, near[p] + n * amt * (s.edge === 'torn' || s.edge === 'bristly' ? 1.6 : 1.3));
+        }
       }
       if (deep) {
         const dp = deep[p];
         // lighter middle, and a darker line where the paint collected at the rim
         const rim = smoothstep(0.12, 0.45, dp) * (1 - smoothstep(0.55, 0.9, dp));
-        f *= (1 - s.wetRim * 0.6 * smoothstep(0.55, 0.97, dp)) * (1 + s.wetRim * 0.6 * rim);
+        k *= (1 - s.wetRim * 0.6 * smoothstep(0.55, 0.97, dp)) * (1 + s.wetRim * 0.6 * rim);
       }
-      if (f !== 1) d[k] = Math.min(255, Math.round(d[k] * f));
+      if (inner) k *= 1 - hollow * smoothstep(0.72, 0.97, inner[p]);
+      if (grain > 0) {
+        // fine grain fixed to the canvas, so it shows however much the dabs overlap
+        const g = noise((x + i) / 1.7, (y + j) / 1.7, seed + 7) * 0.55 + noise((x + i) / 4.5, (y + j) / 4.5, seed + 9) * 0.45;
+        k *= 1 - grain * 0.85 * smoothstep(0.42, 0.78, g);
+      }
+      f[p] = k;
     }
   }
+  return f;
+}
+
+// Moves the paint around with a smooth canvas-fixed warp (deform), colors included
+function deformPixels(d: Uint8ClampedArray, w: number, h: number, x: number, y: number, s: BrushSettings) {
+  const amp = Math.max(4, s.size) * s.deform * 0.32;
+  const cell = Math.max(6, s.size * 1.3);
+  const seed = Math.round(s.seed) * 17 + 3;
+  const src = new Uint8ClampedArray(d);
+  for (let j = 0; j < h; j++)
+    for (let i = 0; i < w; i++) {
+      const u = (x + i) / cell, v = (y + j) / cell;
+      const sx = Math.round(i + (fbm(u, v, seed) - 0.5) * 2 * amp);
+      const sy = Math.round(j + (fbm(u + 7.3, v + 2.1, seed + 1) - 0.5) * 2 * amp);
+      const o = (j * w + i) * 4;
+      if (sx < 0 || sy < 0 || sx >= w || sy >= h) {
+        d[o + 3] = 0;
+        continue;
+      }
+      const q = (sy * w + sx) * 4;
+      d[o] = src[q];
+      d[o + 1] = src[q + 1];
+      d[o + 2] = src[q + 2];
+      d[o + 3] = src[q + 3];
+    }
+}
+
+// A finished stroke on its own canvas: deform, outline, rim and grain for the whole stroke
+// `at` = where this piece sits on the canvas, when ctx holds only a piece of the stroke
+// (the live High-quality preview), so the pattern still lines up with the finished stroke.
+export function applyStrokeEdges(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, s: BrushSettings, at?: { x: number; y: number }) {
+  if (!hasStrokeEdges(s) || w <= 0 || h <= 0 || w * h > 9_000_000) return;
+  const img = ctx.getImageData(x, y, w, h);
+  const d = img.data;
+  const wx = at ? at.x : x, wy = at ? at.y : y;
+  if (s.deform > 0) deformPixels(d, w, h, wx, wy, s);
+  let amax = 0;
+  for (let i = 3; i < d.length; i += 4) if (d[i] > amax) amax = d[i];
+  if (!amax) return ctx.putImageData(img, x, y);
+  const cov = new Float32Array(w * h);
+  for (let i = 0; i < cov.length; i++) cov[i] = d[i * 4 + 3] / amax;
+  const f = edgeFactors(cov, w, h, wx, wy, s);
+  for (let i = 0; i < cov.length; i++) if (f[i] !== 1) d[i * 4 + 3] = Math.min(255, Math.round(d[i * 4 + 3] * f[i]));
   ctx.putImageData(img, x, y);
+}
+
+// A finished color-mixing stroke (painted straight onto the layer): only the new paint gets
+// the outline, rim and grain; `before` is the layer as it was before the stroke
+export function applyStrokeEdgesDirect(ctx: CanvasRenderingContext2D, before: ImageData, x: number, y: number, s: BrushSettings) {
+  const w = before.width, h = before.height;
+  if (!hasStrokeEdges(s) || w <= 0 || h <= 0 || w * h > 9_000_000) return;
+  const after = ctx.getImageData(x, y, w, h);
+  const a = after.data, b = before.data;
+  const cov = new Float32Array(w * h);
+  let cmax = 0;
+  for (let i = 0; i < cov.length; i++) {
+    const o = i * 4;
+    const c = Math.max(Math.abs(a[o] - b[o]), Math.abs(a[o + 1] - b[o + 1]), Math.abs(a[o + 2] - b[o + 2]), Math.abs(a[o + 3] - b[o + 3])) / 255;
+    cov[i] = c;
+    if (c > cmax) cmax = c;
+  }
+  if (!cmax) return;
+  for (let i = 0; i < cov.length; i++) cov[i] = Math.min(1, cov[i] / cmax);
+  // deform: move the new paint (and where it is) with the warp, the old paint stays put
+  if (s.deform > 0) {
+    const moved = new Uint8ClampedArray(a);
+    deformPixels(moved, w, h, x, y, s);
+    const covPx = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < cov.length; i++) covPx[i * 4 + 3] = Math.round(cov[i] * 255);
+    deformPixels(covPx, w, h, x, y, s);
+    for (let i = 0; i < cov.length; i++) {
+      const m = covPx[i * 4 + 3] / 255, o = i * 4;
+      for (let c = 0; c < 4; c++) a[o + c] = b[o + c] + (moved[o + c] - b[o + c]) * m;
+      cov[i] = m;
+    }
+  }
+  const f = edgeFactors(cov, w, h, x, y, s);
+  for (let i = 0; i < cov.length; i++) {
+    if (f[i] === 1) continue;
+    const o = i * 4;
+    for (let c = 0; c < 4; c++) a[o + c] = b[o + c] + (a[o + c] - b[o + c]) * Math.min(1, f[i]);
+  }
+  ctx.putImageData(after, x, y);
 }
 
 // ---------- Brush textures ----------
 // The texture a brush paints with: paint is worn away where the texture is light (alpha = how
 // much is taken away), the same way the paper grain works. Textures repeat seamlessly and
 // stay fixed to the canvas, so hair, skin or cloth patterns line up across strokes.
+
+// Looks that only make sense along the stroke (bristle marks, dry streaks, hair textures)
+// turn with it even when "Tip turns with the stroke" is off
+export function followsStroke(s: BrushSettings) {
+  return s.followDirection || dirTexture(s) || s.streaks > 0 || s.edge === 'dry' || s.edge === 'bristly';
+}
+
+// Hair and fur textures follow the stroke direction (they are part of the tip), the others
+// stay fixed to the canvas like paper
+const DIRECTIONAL = new Set(['hair', 'fur']);
+export function dirTexture(s: Pick<BrushSettings, 'texKind' | 'texture'>) {
+  return (s.texture ?? 0) > 0 && DIRECTIONAL.has(s.texKind ?? '');
+}
+const texAlphas = new Map<string, Float32Array>();
+function textureAlpha(id: string): Float32Array {
+  let a = texAlphas.get(id);
+  if (a) return a;
+  const c = getTexture({ texKind: id });
+  const d = c.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, 256, 256).data;
+  a = new Float32Array(256 * 256);
+  for (let i = 0; i < a.length; i++) a[i] = d[i * 4 + 3] / 255;
+  texAlphas.set(id, a);
+  return a;
+}
 
 export const TEXTURES: { id: string; label: string; icon: string }[] = [
   { id: 'paper', label: 'Paper grain', icon: '📄' },
@@ -1487,12 +1785,12 @@ function makeTexture(id: string): HTMLCanvasElement {
         case 'hair': {
           // long fine strands (stretched noise), slightly wavy
           const n = pnoise(u * 4, v * 96 + Math.sin(u * TAU * 2) * 2, 96, 12) * 0.65 + pnoise(u * 8, v * 180, 180, 13) * 0.35;
-          a = smoothstep(0.35, 0.8, n) * 0.95;
+          a = smoothstep(0.42, 0.62, n);
           break;
         }
         case 'fur': {
           const n = pnoise(u * 16, v * 64, 64, 14) * 0.6 + pnoise(u * 32, v * 128, 128, 15) * 0.4;
-          a = smoothstep(0.3, 0.85, n) * 0.85 + pfbm(u, v, 4, 16) * 0.15;
+          a = smoothstep(0.38, 0.62, n) * 0.9 + pfbm(u, v, 4, 16) * 0.1;
           break;
         }
         case 'skin': {
@@ -1520,12 +1818,26 @@ function makeTexture(id: string): HTMLCanvasElement {
           break;
         }
         case 'scales': {
-          const sc = 12;
-          const row = Math.floor(v * sc);
-          const off = row % 2 ? 0.5 : 0;
-          const fx = u * sc + off - Math.floor(u * sc + off) - 0.5, fy = v * sc - row;
-          const d = Math.hypot(fx, fy * 1.1);
-          a = smoothstep(0.4, 0.5, d) * 0.8 + smoothstep(0.2, 0.5, d) * 0.15;
+          // fish / dragon scales in overlapping rows, each with a clear gap around it,
+          // so every scale reads on its own (6 across, 10 rows, tiles seamlessly)
+          const X = u * 6, Y = v * 6;
+          const r0 = Math.floor(Y / 0.6);
+          let best = -1, bd = 9;
+          for (let r = r0 - 1; r <= r0 + 1; r++) {
+            const off = ((r % 2) + 2) % 2 ? 0.5 : 0;
+            const cy = r * 0.6;
+            for (const cx of [Math.floor(X - off) + off + 0.5 - 1, Math.floor(X - off) + off + 0.5, Math.floor(X - off) + off + 0.5 + 1]) {
+              const dd = Math.hypot(X - cx, (Y - cy) * 1.05) / 0.56;
+              // upper rows lie on top: the first (highest) scale that covers the pixel wins
+              if (dd < 1 && (best < 0 || r < best)) {
+                best = r;
+                bd = dd;
+              }
+            }
+          }
+          const gap = best < 0 ? 1 : smoothstep(0.84, 0.9, bd);
+          const shade = best < 0 ? 0 : smoothstep(0.35, 0.84, bd) * 0.35;
+          a = gap + (1 - gap) * shade;
           break;
         }
         case 'wood': {
@@ -1596,6 +1908,36 @@ function customTexture(src: string, onReady?: () => void): HTMLCanvasElement | n
     img.src = src;
   }
   return null;
+}
+
+// Your texture picture in its own colors (for "Keep texture colors")
+function customTextureColors(src: string, onReady?: () => void): HTMLCanvasElement | null {
+  const key = 'customc:' + src.length + ':' + src.slice(-48);
+  const have = textures.get(key);
+  if (have) return have;
+  if (!texLoading.has(key)) {
+    texLoading.add(key);
+    const img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, 512 / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(img.width * k));
+      c.height = Math.max(1, Math.round(img.height * k));
+      c.getContext('2d')!.drawImage(img, 0, 0, c.width, c.height);
+      textures.set(key, c);
+      texLoading.delete(key);
+      onReady?.();
+    };
+    img.onerror = () => texLoading.delete(key);
+    img.src = src;
+  }
+  return null;
+}
+
+// The colored texture the paint takes when "Keep texture colors" is on. Only your own pictures
+// have colors; the built-in textures are grayscale, so they give null.
+export function getTextureColors(s: Pick<BrushSettings, 'texKind' | 'texImage'>, onReady?: () => void): HTMLCanvasElement | null {
+  return s.texKind === 'custom' && s.texImage ? customTextureColors(s.texImage, onReady) : null;
 }
 
 export function getTexture(s: Pick<BrushSettings, 'texKind' | 'texImage'>, onReady?: () => void): HTMLCanvasElement {
