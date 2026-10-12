@@ -73,7 +73,13 @@
     | { type: 'add'; layer: Layer; index: number }
     | { type: 'delete'; layer: Layer; index: number }
     | { type: 'move'; from: number; to: number }
-    | { type: 'merge'; upper: Layer; upperIndex: number; lowerId: number; before: ImageData; after: ImageData };
+    | { type: 'merge'; upper: Layer; upperIndex: number; lowerId: number; before: ImageData; after: ImageData }
+    | { type: 'paper'; before: PaperState; after: PaperState }
+    | { type: 'layerProps'; layerId: number; before: LayerProps; after: LayerProps };
+
+  type PaperState = { exists: boolean; visible: boolean; color: string };
+  // The settings of a layer that can be undone (everything except its pixels)
+  type LayerProps = Pick<Layer, 'name' | 'visible' | 'opacity' | 'blend' | 'clip' | 'lockAlpha'>;
 
   // Tool settings
   let tool = $state<Tool>('brush');
@@ -85,7 +91,86 @@
   let activeTool = $derived<Tool>(altDown ? 'picker' : tool);
 
   // Paper: the background under all layers. Hide it to see (and later export) transparency.
-  let paper = $state({ visible: true, color: '#ffffff' });
+  let paper = $state({ exists: true, visible: true, color: '#ffffff' });
+  const PAPER_ID = -1; // activeId when the paper is selected
+  // A short message shown over the canvas (e.g. "can't draw on paper")
+  let notice = $state('');
+  let noticeTimer = 0;
+  function deletePaper() {
+    changePaper(() => (paper.exists = false));
+    if (activeId === PAPER_ID) activeId = layers[layers.length - 1]?.id ?? 0;
+  }
+
+  function addPaper() {
+    changePaper(() => {
+      paper.exists = true;
+      paper.visible = true;
+    });
+    activeId = PAPER_ID;
+  }
+
+  // ---------- Undoable settings changes ----------
+  // Each change is recorded as "before" and "after", so undo can switch back.
+
+  const paperState = (): PaperState => ({ exists: paper.exists, visible: paper.visible, color: paper.color });
+  const propsOf = (l: Layer): LayerProps => ({
+    name: l.name,
+    visible: l.visible,
+    opacity: l.opacity,
+    blend: l.blend,
+    clip: l.clip,
+    lockAlpha: l.lockAlpha,
+  });
+  const same = (a: object, b: object) => JSON.stringify(a) === JSON.stringify(b);
+
+  function changePaper(change: () => void) {
+    const before = paperState();
+    change();
+    const after = paperState();
+    if (!same(before, after)) push({ type: 'paper', before, after });
+  }
+
+  function changeLayer(layer: Layer | undefined, change: () => void) {
+    if (!layer) return;
+    const before = propsOf(layer);
+    change();
+    const after = propsOf(layer);
+    if (!same(before, after)) push({ type: 'layerProps', layerId: layer.id, before, after });
+  }
+
+  // Sliders and color pickers change continuously while dragging: remember the value
+  // when the drag starts, and record one undo step when it ends.
+  let dragStart: { kind: 'paper'; state: PaperState } | { kind: 'layer'; id: number; props: LayerProps } | null = null;
+
+  function beginPaperDrag() {
+    if (!dragStart) dragStart = { kind: 'paper', state: paperState() };
+  }
+  function endPaperDrag() {
+    if (dragStart?.kind === 'paper') {
+      const after = paperState();
+      if (!same(dragStart.state, after)) push({ type: 'paper', before: dragStart.state, after });
+    }
+    dragStart = null;
+  }
+  function beginLayerDrag(layer: Layer) {
+    if (!dragStart) dragStart = { kind: 'layer', id: layer.id, props: propsOf(layer) };
+  }
+  function endLayerDrag() {
+    if (dragStart?.kind === 'layer') {
+      const l = layers.find((x) => x.id === (dragStart as { id: number }).id);
+      if (l) {
+        const after = propsOf(l);
+        if (!same(dragStart.props, after)) push({ type: 'layerProps', layerId: l.id, before: dragStart.props, after });
+      }
+    }
+    dragStart = null;
+  }
+
+  function showNotice(text: string) {
+    notice = text;
+    clearTimeout(noticeTimer);
+    noticeTimer = window.setTimeout(() => (notice = ''), 2200);
+  }
 
   // Layers: index 0 is the bottom layer
   let layers = $state<Layer[]>([]);
@@ -217,6 +302,7 @@
       l.blend;
       l.clip;
     }
+    paper.exists;
     paper.visible;
     paper.color;
     render();
@@ -233,7 +319,7 @@
 
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';
-      if (paper.visible) {
+      if (paper.exists && paper.visible) {
         ctx.fillStyle = paper.color;
         ctx.fillRect(0, 0, DOC_W, DOC_H);
       } else {
@@ -492,8 +578,16 @@
   }
 
   function down(e: PointerEvent) {
+    if (activeId === PAPER_ID) {
+      showNotice("Paper can't be drawn on. Select a layer or press ＋ to add one.");
+      return;
+    }
     const layer = activeLayer;
-    if (!layer || !layer.visible) return;
+    if (!layer) return;
+    if (!layer.visible) {
+      showNotice('This layer is hidden. Show it (👁) to draw on it.');
+      return;
+    }
     const pt = point(e);
 
     drawing = true;
@@ -870,6 +964,7 @@
   function deleteLayer() {
     if (layers.length <= 1) return;
     const index = activeIndex();
+    if (index < 0) return;
     const l = layers[index];
     const copy = copyLayer(l);
     removeAt(index);
@@ -972,9 +1067,16 @@
   }
 
   function endRename(layer: Layer, keep: boolean) {
-    if (!keep) layer.name = nameBeforeRename;
-    if (!layer.name.trim()) layer.name = nameBeforeRename || `Layer ${layer.id}`;
+    if (renamingId === null) return;
     renamingId = null;
+    if (!keep || !layer.name.trim()) {
+      layer.name = nameBeforeRename || `Layer ${layer.id}`;
+      return;
+    }
+    if (layer.name !== nameBeforeRename) {
+      const after = propsOf(layer);
+      push({ type: 'layerProps', layerId: layer.id, before: { ...after, name: nameBeforeRename }, after });
+    }
   }
 
   function openLayerMenu(e: MouseEvent, id: number) {
@@ -997,7 +1099,7 @@
   function moveLayer(dir: 1 | -1) {
     const from = activeIndex();
     const to = from + dir;
-    if (to < 0 || to >= layers.length) return;
+    if (from < 0 || to < 0 || to >= layers.length) return;
     moveRaw(from, to);
     push({ type: 'move', from, to });
   }
@@ -1032,6 +1134,14 @@
       case 'move':
         reverse ? moveRaw(e.to, e.from) : moveRaw(e.from, e.to);
         break;
+      case 'paper':
+        Object.assign(paper, reverse ? e.before : e.after);
+        break;
+      case 'layerProps': {
+        const l = layers.find((x) => x.id === e.layerId);
+        if (l) Object.assign(l, reverse ? e.before : e.after);
+        break;
+      }
       case 'merge': {
         const lower = layers.find((l) => l.id === e.lowerId);
         lower?.canvas.getContext('2d')!.putImageData(reverse ? e.before : e.after, 0, 0);
@@ -1235,6 +1345,9 @@
       class:pixelated={zoom >= 2}
       style="width: {DOC_W * zoom}px; height: {DOC_H * zoom}px; transform-origin: {(DOC_W * zoom) / 2}px {(DOC_H * zoom) / 2}px; transform: translate({panX}px, {panY}px) rotate({rotation}deg) scaleX({flipped ? -1 : 1});"
     ></canvas>
+    {#if notice}
+      <div class="notice">{notice}</div>
+    {/if}
     {#if hover.on && !spaceDown && !panning && activeTool !== 'picker'}
       {@const d = Math.max(brush.size * zoom, 4)}
       <div
@@ -1267,7 +1380,7 @@
             title="Show / hide"
             onclick={(e) => {
               e.stopPropagation();
-              layer.visible = !layer.visible;
+              changeLayer(layer, () => (layer.visible = !layer.visible));
             }}>{layer.visible ? '👁' : '—'}</button
           >
           {#if layer.clip}<span class="clip-mark" title="Clipped to the layer below">↳</span>{/if}
@@ -1302,23 +1415,74 @@
           </div>
         </div>
       {/each}
-      <div class="layer paper-row" title="Paper is the background, not a drawing layer. Click the square to change its color, the eye to hide it (transparent).">
-        <button class="eye" title="Show / hide paper (hidden = transparent background)" onclick={() => (paper.visible = !paper.visible)}
-          >{paper.visible ? '👁' : '—'}</button
+      {#if paper.exists}
+      <div
+        class="layer paper-row"
+        class:active={activeId === PAPER_ID}
+        role="button"
+        tabindex="0"
+        title="Paper: the background under all layers"
+        onclick={() => (activeId = PAPER_ID)}
+        onkeydown={(e) => e.key === 'Enter' && (activeId = PAPER_ID)}
+        oncontextmenu={(e) => {
+          e.preventDefault();
+          activeId = PAPER_ID;
+        }}
+      >
+        <button
+          class="eye"
+          title="Show / hide paper (hidden = transparent background)"
+          onclick={(e) => {
+            e.stopPropagation();
+            changePaper(() => (paper.visible = !paper.visible));
+          }}>{paper.visible ? '👁' : '—'}</button
         >
-        <input class="paper-color" type="color" bind:value={paper.color} title="Paper color" />
+        <div class="paper-swatch" style="background: {paper.color}"></div>
         <div class="layer-text">
           <span class="name">Paper</span>
-          <span class="sub">{paper.visible ? 'Background' : 'Hidden · transparent'}</span>
+          <span class="sub">{paper.visible ? 'Background' : 'Transparent'}</span>
         </div>
       </div>
+      {:else}
+        <button class="add-paper" onclick={addPaper} title="Add a background paper under all layers">＋ Add paper</button>
+      {/if}
     </div>
 
-    {#if activeLayer}
+    {#if activeId === PAPER_ID}
+      <div class="layer-props">
+        <label class="row">
+          <span>Color</span>
+          <input
+            class="paper-color"
+            type="color"
+            value={paper.color}
+            oninput={(e) => {
+              beginPaperDrag();
+              paper.color = e.currentTarget.value;
+            }}
+            onchange={endPaperDrag}
+          />
+          <button class="small" onclick={() => changePaper(() => (paper.color = color))} title="Use the color from the color wheel">Use current color</button>
+        </label>
+        <div class="paper-actions">
+          <button class="small" onclick={() => changePaper(() => (paper.visible = !paper.visible))}>
+            {paper.visible ? 'Make transparent' : 'Show paper'}
+          </button>
+          <button class="small danger" onclick={deletePaper}>Delete paper</button>
+        </div>
+        <p class="blend-hint">Paper is the background. You can't draw on it. Transparent or deleted paper = transparent background.</p>
+      </div>
+    {:else if activeLayer}
       <div class="layer-props">
         <label class="row">
           <span>Blend</span>
-          <select bind:value={activeLayer.blend}>
+          <select
+            value={activeLayer.blend}
+            onchange={(e) => {
+              const v = e.currentTarget.value as BlendMode;
+              changeLayer(activeLayer, () => (activeLayer!.blend = v));
+            }}
+          >
             {#each BLEND_NAMES as b (b)}
               <option value={b}>{b}</option>
             {/each}
@@ -1333,16 +1497,34 @@
             max="1"
             step="0.01"
             value={activeLayer.opacity}
-            oninput={(e) => (activeLayer!.opacity = +e.currentTarget.value)}
+            oninput={(e) => {
+              beginLayerDrag(activeLayer!);
+              activeLayer!.opacity = +e.currentTarget.value;
+            }}
+            onchange={endLayerDrag}
           />
           <span class="val">{Math.round(activeLayer.opacity * 100)}%</span>
         </label>
         <div class="toggles">
           <label title="Show this layer only on top of the layer below (Alt + click in CSP/Photoshop)">
-            <input type="checkbox" bind:checked={activeLayer.clip} /> Clipping mask
+            <input
+              type="checkbox"
+              checked={activeLayer.clip}
+              onchange={(e) => {
+                const v = e.currentTarget.checked;
+                changeLayer(activeLayer, () => (activeLayer!.clip = v));
+              }}
+            /> Clipping mask
           </label>
           <label title="Paint only where this layer already has paint">
-            <input type="checkbox" bind:checked={activeLayer.lockAlpha} /> Lock alpha
+            <input
+              type="checkbox"
+              checked={activeLayer.lockAlpha}
+              onchange={(e) => {
+                const v = e.currentTarget.checked;
+                changeLayer(activeLayer, () => (activeLayer!.lockAlpha = v));
+              }}
+            /> Lock alpha
           </label>
         </div>
       </div>
@@ -1383,13 +1565,13 @@
     <button role="menuitem" onclick={() => menuDo(duplicateLayer)}>Duplicate</button>
     <button role="menuitem" onclick={() => menuDo(() => activeLayer && startRename(activeLayer))}>Rename</button>
     <hr />
-    <button role="menuitem" onclick={() => menuDo(() => (activeLayer!.clip = !activeLayer!.clip))}>
+    <button role="menuitem" onclick={() => menuDo(() => changeLayer(activeLayer, () => (activeLayer!.clip = !activeLayer!.clip)))}>
       {activeLayer.clip ? 'Release clipping mask' : 'Create clipping mask'}
     </button>
-    <button role="menuitem" onclick={() => menuDo(() => (activeLayer!.lockAlpha = !activeLayer!.lockAlpha))}>
+    <button role="menuitem" onclick={() => menuDo(() => changeLayer(activeLayer, () => (activeLayer!.lockAlpha = !activeLayer!.lockAlpha)))}>
       {activeLayer.lockAlpha ? '✓ Lock transparent pixels' : 'Lock transparent pixels'}
     </button>
-    <button role="menuitem" onclick={() => menuDo(() => (activeLayer!.visible = !activeLayer!.visible))}>
+    <button role="menuitem" onclick={() => menuDo(() => changeLayer(activeLayer, () => (activeLayer!.visible = !activeLayer!.visible)))}>
       {activeLayer.visible ? 'Hide layer' : 'Show layer'}
     </button>
     <hr />
@@ -1617,9 +1799,48 @@
     border-style: dashed;
     border-color: #3a3a44;
   }
-  .paper-color {
+  .paper-swatch {
     width: 40px;
     height: 40px;
+    flex-shrink: 0;
+    border-radius: 4px;
+    border: 1px solid #444;
+  }
+  .paper-actions {
+    display: flex;
+    gap: 6px;
+  }
+  .danger {
+    color: #ff7b7b;
+  }
+  .add-paper {
+    margin-top: 4px;
+    padding: 8px;
+    border-style: dashed;
+    color: #aaa;
+    background: transparent;
+  }
+  .small {
+    padding: 4px 8px;
+    font-size: 11px;
+  }
+  .notice {
+    position: absolute;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    padding: 8px 14px;
+    border-radius: 8px;
+    background: rgba(20, 20, 26, 0.92);
+    border: 1px solid #00b5c8;
+    color: #eee;
+    font-size: 13px;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  .paper-color {
+    width: 40px;
+    height: 28px;
     padding: 0;
     border: 1px solid #444;
     border-radius: 4px;
