@@ -14,7 +14,7 @@
   let projectName = $state('Untitled');
   const MAX_HISTORY = 50;
 
-  type Tool = 'brush' | 'eraser' | 'picker' | 'fill' | 'select' | 'lasso' | 'move';
+  type Tool = 'brush' | 'eraser' | 'picker' | 'fill' | 'lassoFill' | 'select' | 'move';
   type Layer = {
     id: number;
     name: string;
@@ -79,6 +79,7 @@
     | { type: 'move'; from: number; to: number }
     | { type: 'merge'; upper: Layer; upperIndex: number; lowerId: number; before: ImageData; after: ImageData }
     | { type: 'paper'; before: PaperState; after: PaperState }
+    | { type: 'selection'; before: SelShape[]; after: SelShape[] }
     | { type: 'layerProps'; layerId: number; before: LayerProps; after: LayerProps };
 
   type PaperState = { exists: boolean; visible: boolean; color: string };
@@ -101,13 +102,22 @@
   let fillGap = $state(3); // px: closes gaps in the lineart so the fill doesn't leak
 
   // Selection: a mask canvas (opaque = selected) plus the outlines drawn on screen
-  type SelShape = { pts: { x: number; y: number }[]; op: 'add' | 'sub' };
+  type SelShape = { pts: { x: number; y: number }[]; op: 'add' | 'sub' | 'invert'; feather?: number };
+  type ShapeMode = 'rect' | 'ellipse' | 'lasso';
+  let selMode = $state<ShapeMode>('rect'); // shape used by the Select tool
+  let lfMode = $state<ShapeMode>('lasso'); // shape used by Lasso fill
+  let selFeather = $state(0); // px of soft edge on new selections
+  let lfFeather = $state(0); // px of soft edge for Lasso fill
+  let selDraftOpen = $state(false); // a lasso that hasn't been closed yet
+  let shapeDragging = $state(false);
+  let draftMarks: number[] = []; // where each pen-down started, for Ctrl+Z inside a lasso
   let selCtx: CanvasRenderingContext2D;
   let hasSel = $state(false);
-  let selInverted = $state(false);
   let selShapes = $state<SelShape[]>([]);
+  let selInverted = $derived(selShapes.filter((s) => s.op === 'invert').length % 2 === 1);
   let selDraft = $state<{ x: number; y: number }[] | null>(null); // the shape being dragged right now
   let selOp: 'new' | 'add' | 'sub' = 'new';
+  let lassoErase = $state(false); // Lasso fill with Ctrl held: erases the shape instead
   let selStart = { x: 0, y: 0 };
 
   // Transform (Ctrl+T) and Move tool: the content floats above the layer until applied
@@ -264,6 +274,7 @@
   let clipCtx: CanvasRenderingContext2D; // one clipped layer, cut to the base's shape
   let texturedCtx: CanvasRenderingContext2D; // the stroke with paper grain applied
   let backupCtx: CanvasRenderingContext2D; // the layer before a color-mixing stroke (for undo)
+  let refCtx: CanvasRenderingContext2D; // everything else you see, for brushes that mix with all layers
   let tintCtx: CanvasRenderingContext2D; // small canvas used to color one brush tip
   let paperPattern: CanvasPattern | null = null;
   let nextId = 1;
@@ -323,6 +334,7 @@
     texturedCtx = makeCanvas().getContext('2d')!;
     backupCtx = makeCanvas().getContext('2d', { willReadFrequently: true })!;
     selCtx = makeCanvas().getContext('2d', { willReadFrequently: true })!;
+    refCtx = makeCanvas().getContext('2d', { willReadFrequently: true })!;
     paperPattern = texturedCtx.createPattern(getPaper(), 'repeat');
   }
 
@@ -374,7 +386,7 @@
   }
 
   // Draws all layers into ctx. `live` includes the unfinished stroke and transform previews.
-  function compositeTo(ctx: CanvasRenderingContext2D, withPaper: boolean, live: boolean) {
+  function compositeTo(ctx: CanvasRenderingContext2D, withPaper: boolean, live: boolean, excludeId = -999) {
     const strokeView = live && drawing && !directStroke ? previewStrokeLayer() : null;
     const xfView = live && xf ? previewTransform() : null;
     const surface = (l: Layer): CanvasImageSource => {
@@ -399,9 +411,9 @@
       const base = layers[i];
       let j = i + 1;
       while (j < layers.length && layers[j].clip) j++;
-      const clipped = layers.slice(i + 1, j).filter((c) => c.visible);
+      const clipped = layers.slice(i + 1, j).filter((c) => c.visible && c.id !== excludeId);
 
-      if (base.visible) {
+      if (base.visible && base.id !== excludeId) {
         let image: CanvasImageSource = surface(base);
         if (clipped.length) {
           const g = groupCtx;
@@ -603,8 +615,8 @@
       if (startTransform(true)) xfDown(e, pt, true);
       return;
     }
-    if (activeTool === 'select' || activeTool === 'lasso') {
-      selDown(e, pt);
+    if (activeTool === 'select' || activeTool === 'lassoFill') {
+      shapeDown(e, pt);
       return;
     }
     if (activeTool === 'fill') {
@@ -631,7 +643,7 @@
       return;
     }
     if (selDraft) {
-      selMove(toDoc(e.clientX, e.clientY));
+      shapeMove(toDoc(e.clientX, e.clientY), e.shiftKey);
       return;
     }
     move(e);
@@ -651,7 +663,7 @@
       return;
     }
     if (selDraft) {
-      selUp();
+      shapeUp();
       return;
     }
     up();
@@ -701,6 +713,10 @@
     if (directStroke) {
       backupCtx.clearRect(0, 0, docW, docH);
       backupCtx.drawImage(layer.canvas, 0, 0);
+      if (brush.mixRefer === 'all') {
+        // a picture of everything except this layer; the layer itself is read live on top of it
+        compositeTo(refCtx, true, false, layer.id);
+      }
       const [r0, g0, b0] = hexRGB(color);
       mixP = [r0, g0, b0, 1];
       lastSample = { x: -1e9, y: -1e9 };
@@ -922,15 +938,26 @@
     const x = Math.round(pt.x) - r;
     const y = Math.round(pt.y) - r;
     if (x + 2 * r < 0 || y + 2 * r < 0 || x >= docW || y >= docH) return;
-    const d = ctx.getImageData(x, y, r * 2 + 1, r * 2 + 1).data;
+    const size = r * 2 + 1;
+    const d = ctx.getImageData(x, y, size, size).data;
+    // "All layers": what you see = this layer on top of everything else
+    const ref = brush.mixRefer === 'all' ? refCtx.getImageData(x, y, size, size).data : null;
     let R = 0, G = 0, B = 0, A = 0;
     const n = d.length / 4;
     for (let i = 0; i < d.length; i += 4) {
       const a = d[i + 3] / 255;
-      R += d[i] * a;
-      G += d[i + 1] * a;
-      B += d[i + 2] * a;
-      A += a;
+      let pr = d[i] * a, pg = d[i + 1] * a, pb = d[i + 2] * a, pa = a;
+      if (ref) {
+        const ra = (ref[i + 3] / 255) * (1 - a);
+        pr += ref[i] * ra;
+        pg += ref[i + 1] * ra;
+        pb += ref[i + 2] * ra;
+        pa += ra;
+      }
+      R += pr;
+      G += pg;
+      B += pb;
+      A += pa;
     }
     // average in premultiplied form, so empty pixels count as "no paint", not as black paint
     const sample = [R / n, G / n, B / n, A / n];
@@ -1110,51 +1137,42 @@
   }
 
   // ---------- Selection ----------
+  // The selection is a list of shapes (added, removed, or "invert"). The mask canvas is
+  // rebuilt from that list, so undo only needs to remember the list.
 
-  function shapePath(ctx: CanvasRenderingContext2D, pts: { x: number; y: number }[]) {
+  type Pt = { x: number; y: number };
+
+  function shapePath(ctx: CanvasRenderingContext2D, pts: Pt[]) {
     ctx.beginPath();
     pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
     ctx.closePath();
   }
 
-  function rectPts(a: { x: number; y: number }, b: { x: number; y: number }) {
+  function rectPts(a: Pt, b: Pt) {
     const x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x);
     const y0 = Math.min(a.y, b.y), y1 = Math.max(a.y, b.y);
     return [{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }];
   }
 
-  function applySelShape(pts: { x: number; y: number }[], op: 'new' | 'add' | 'sub') {
-    const c = selCtx;
-    if (op === 'new') {
-      c.clearRect(0, 0, docW, docH);
-      selShapes = [];
-      selInverted = false;
+  // Rectangle or ellipse from the drag start to the pointer. Shift keeps it square / round.
+  function dragShape(mode: ShapeMode, a: Pt, b: Pt, keepRatio: boolean): Pt[] {
+    let x1 = b.x, y1 = b.y;
+    if (keepRatio) {
+      const side = Math.max(Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+      x1 = a.x + Math.sign(b.x - a.x || 1) * side;
+      y1 = a.y + Math.sign(b.y - a.y || 1) * side;
     }
-    c.globalCompositeOperation = op === 'sub' ? 'destination-out' : 'source-over';
-    c.fillStyle = '#000';
-    shapePath(c, pts);
-    c.fill();
-    c.globalCompositeOperation = 'source-over';
-    selShapes = [...selShapes, { pts, op: op === 'sub' ? 'sub' : 'add' }];
-    hasSel = true;
+    if (mode === 'rect') return rectPts(a, { x: x1, y: y1 });
+    const cx = (a.x + x1) / 2, cy = (a.y + y1) / 2;
+    const rx = Math.abs(x1 - a.x) / 2, ry = Math.abs(y1 - a.y) / 2;
+    const n = 96;
+    return Array.from({ length: n }, (_, i) => {
+      const t = (i / n) * Math.PI * 2;
+      return { x: cx + rx * Math.cos(t), y: cy + ry * Math.sin(t) };
+    });
   }
 
-  function selectAll() {
-    applySelShape(rectPts({ x: 0, y: 0 }, { x: docW, y: docH }), 'new');
-  }
-
-  function deselect() {
-    selCtx?.clearRect(0, 0, docW, docH);
-    selShapes = [];
-    selInverted = false;
-    hasSel = false;
-  }
-
-  function invertSelection() {
-    if (!hasSel) {
-      selectAll();
-      return;
-    }
+  function invertMask() {
     const t = clipCtx;
     t.globalCompositeOperation = 'source-over';
     t.clearRect(0, 0, docW, docH);
@@ -1165,7 +1183,73 @@
     t.globalCompositeOperation = 'source-over';
     selCtx.clearRect(0, 0, docW, docH);
     selCtx.drawImage(t.canvas, 0, 0);
-    selInverted = !selInverted;
+  }
+
+  function rebuildSelMask() {
+    const c = selCtx;
+    if (!c) return;
+    c.globalCompositeOperation = 'source-over';
+    c.clearRect(0, 0, docW, docH);
+    for (const sh of selShapes) {
+      if (sh.op === 'invert') {
+        invertMask();
+        continue;
+      }
+      c.globalCompositeOperation = sh.op === 'sub' ? 'destination-out' : 'source-over';
+      c.fillStyle = '#000';
+      // feather = a soft edge, made by blurring the shape
+      c.filter = sh.feather ? `blur(${sh.feather / 2}px)` : 'none';
+      shapePath(c, sh.pts);
+      c.fill();
+      c.filter = 'none';
+    }
+    c.globalCompositeOperation = 'source-over';
+    hasSel = selShapes.length > 0;
+  }
+
+  // Replaces the selection; `record` adds it to undo
+  function setSelection(next: SelShape[], record = true) {
+    const before = $state.snapshot(selShapes) as SelShape[];
+    selShapes = next;
+    rebuildSelMask();
+    if (record && !same(before, next)) push({ type: 'selection', before, after: $state.snapshot(selShapes) as SelShape[] });
+  }
+
+  function addSelShape(pts: Pt[], op: 'new' | 'add' | 'sub') {
+    const current = $state.snapshot(selShapes) as SelShape[];
+    const feather = selFeather || undefined;
+    setSelection(op === 'new' ? [{ pts, op: 'add', feather }] : [...current, { pts, op, feather }]);
+  }
+
+  // Feather slider: also softens the selection you already have (one undo step per drag)
+  let featherBefore: SelShape[] | null = null;
+  function featherInput(v: number) {
+    selFeather = v;
+    if (!selShapes.length) return;
+    const snap = $state.snapshot(selShapes) as SelShape[];
+    if (!featherBefore) featherBefore = snap;
+    selShapes = snap.map((sh) => (sh.op === 'invert' ? sh : { ...sh, feather: v || undefined }));
+    rebuildSelMask();
+  }
+  function featherDone() {
+    if (featherBefore) {
+      const after = $state.snapshot(selShapes) as SelShape[];
+      if (!same(featherBefore, after)) push({ type: 'selection', before: featherBefore, after });
+    }
+    featherBefore = null;
+  }
+
+  function selectAll() {
+    setSelection([{ pts: rectPts({ x: 0, y: 0 }, { x: docW, y: docH }), op: 'add' }]);
+  }
+
+  function deselect() {
+    if (selShapes.length) setSelection([]);
+  }
+
+  // Inverting nothing selects everything, like in Photoshop
+  function invertSelection() {
+    setSelection([...($state.snapshot(selShapes) as SelShape[]), { pts: [], op: 'invert' }]);
   }
 
   // Delete: erase what is inside the selection on the active layer
@@ -1175,6 +1259,69 @@
     editLayerPixels(layer, fullRect(), (ctx) => {
       ctx.globalCompositeOperation = 'destination-out';
       ctx.drawImage(selCtx.canvas, 0, 0);
+    });
+  }
+
+  // Keep only what is inside the selection (soft edges if the selection is feathered)
+  function deleteOutside() {
+    const layer = editableLayer();
+    if (!layer || !hasSel) return;
+    editLayerPixels(layer, fullRect(), (ctx) => {
+      ctx.globalCompositeOperation = 'destination-in';
+      ctx.drawImage(selCtx.canvas, 0, 0);
+    });
+  }
+
+  // Copies (or cuts) the selected part into a new layer right above
+  function selectionToNewLayer(cut: boolean) {
+    const layer = editableLayer();
+    if (!layer) return;
+    if (!hasSel) {
+      showNotice('Select an area first.');
+      return;
+    }
+    const l = makeLayer();
+    l.name = `${layer.name} ${cut ? 'cut' : 'copy'}`;
+    const c = l.canvas.getContext('2d')!;
+    c.drawImage(layer.canvas, 0, 0);
+    c.globalCompositeOperation = 'destination-in';
+    c.drawImage(selCtx.canvas, 0, 0);
+    c.globalCompositeOperation = 'source-over';
+    if (cut) {
+      editLayerPixels(layer, fullRect(), (ctx) => {
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.drawImage(selCtx.canvas, 0, 0);
+      });
+    }
+    const index = layers.findIndex((x) => x.id === layer.id) + 1;
+    insertAt(l, index);
+    push({ type: 'add', layer: l, index });
+    thumbTick++;
+    render();
+  }
+
+  // Softens the outer edge of everything on the layer: it fades out over `px` pixels
+  // towards the edge, while the colors and the inside stay as they are.
+  function featherLayerEdges(px: number) {
+    const layer = editableLayer();
+    if (!layer || px <= 0) return;
+    // blurred copy of the layer: its alpha tells how far inside the shape each pixel is
+    const m = makeCanvas();
+    const mctx = m.getContext('2d', { willReadFrequently: true })!;
+    mctx.filter = `blur(${px / 2}px)`;
+    mctx.drawImage(layer.canvas, 0, 0);
+    mctx.filter = 'none';
+    const mask = mctx.getImageData(0, 0, docW, docH).data;
+    editLayerPixels(layer, fullRect(), (ctx) => {
+      const img = ctx.getImageData(0, 0, docW, docH);
+      const d = img.data;
+      for (let i = 3; i < d.length; i += 4) {
+        if (!d[i]) continue;
+        // blurred alpha is ~50% on the edge and ~100% deep inside: map that to 0..1
+        const f = Math.min(1, Math.max(0, (mask[i] / 255 - 0.5) * 2));
+        d[i] = d[i] * f;
+      }
+      ctx.putImageData(img, 0, 0);
     });
   }
 
@@ -1194,36 +1341,122 @@
     editLayerPixels(layer, fullRect(), (ctx) => ctx.drawImage(t.canvas, 0, 0));
   }
 
-  function selDown(e: PointerEvent, pt: { x: number; y: number }) {
-    selOp = e.shiftKey ? 'add' : e.ctrlKey || e.metaKey ? 'sub' : 'new';
-    selStart = { x: pt.x, y: pt.y };
-    selDraft = [{ x: pt.x, y: pt.y }];
+  // ---------- Drawing a shape (Select and Lasso fill) ----------
+  // Rectangle / ellipse: drag. Lasso: draw a line (or click for straight segments; you can
+  // lift the pen and go on). It closes when the line comes back to its start point, or with
+  // a double-click or Enter. Esc cancels, Ctrl+Z removes the last part.
+
+  const shapeMode = (): ShapeMode => (activeTool === 'lassoFill' ? lfMode : selMode);
+
+  function shapeDown(e: PointerEvent, pt: Pt) {
+    if (activeTool === 'lassoFill' && !editableLayer()) return;
     capture(e);
-  }
-
-  function selMove(pt: { x: number; y: number }) {
-    if (!selDraft) return;
-    if (activeTool === 'select') {
-      selDraft = rectPts(selStart, pt);
-    } else {
-      const lastPt = selDraft[selDraft.length - 1];
-      if (Math.hypot(pt.x - lastPt.x, pt.y - lastPt.y) > 2 / zoom) selDraft = [...selDraft, { x: pt.x, y: pt.y }];
-    }
-  }
-
-  function selUp() {
-    const d = selDraft;
-    selDraft = null;
-    if (!d) return;
-    const xs = d.map((p) => p.x);
-    const ys = d.map((p) => p.y);
-    const tiny = Math.max(...xs) - Math.min(...xs) < 2 && Math.max(...ys) - Math.min(...ys) < 2;
-    if (tiny || d.length < 3) {
-      // a click without dragging clears the selection, like in Photoshop and CSP
-      if (selOp === 'new') deselect();
+    shapeDragging = true;
+    const p = { x: pt.x, y: pt.y };
+    if (shapeMode() === 'lasso' && selDraft && selDraftOpen) {
+      // continue the open lasso: a straight segment to here, then keep drawing
+      draftMarks.push(selDraft.length);
+      selDraft = [...selDraft, p];
       return;
     }
-    applySelShape(d, selOp);
+    selOp = e.shiftKey ? 'add' : e.ctrlKey || e.metaKey ? 'sub' : 'new';
+    lassoErase = e.ctrlKey || e.metaKey;
+    selStart = p;
+    selDraft = [p];
+    selDraftOpen = shapeMode() === 'lasso';
+    draftMarks = [0];
+  }
+
+  function shapeMove(pt: Pt, shift: boolean) {
+    if (!selDraft || !shapeDragging) return;
+    const mode = shapeMode();
+    if (mode === 'lasso') {
+      const lastPt = selDraft[selDraft.length - 1];
+      if (Math.hypot(pt.x - lastPt.x, pt.y - lastPt.y) > 2 / zoom) selDraft = [...selDraft, { x: pt.x, y: pt.y }];
+    } else {
+      selDraft = dragShape(mode, selStart, pt, shift);
+    }
+  }
+
+  function shapeUp() {
+    shapeDragging = false;
+    const d = selDraft;
+    if (!d) return;
+    if (shapeMode() === 'lasso') {
+      // closed when the line comes back near its start
+      const first = d[0], lastPt = d[d.length - 1];
+      if (d.length >= 3 && Math.hypot(lastPt.x - first.x, lastPt.y - first.y) < 14 / zoom) finishShape();
+      return;
+    }
+    const xs = d.map((p) => p.x), ys = d.map((p) => p.y);
+    const tiny = Math.max(...xs) - Math.min(...xs) < 2 && Math.max(...ys) - Math.min(...ys) < 2;
+    if (tiny || d.length < 3) {
+      cancelDraft();
+      // a click without dragging clears the selection, like in Photoshop and CSP
+      if (activeTool === 'select' && selOp === 'new') deselect();
+      return;
+    }
+    finishShape();
+  }
+
+  function finishShape() {
+    const d = selDraft;
+    cancelDraft();
+    if (!d || d.length < 3) return;
+    if (activeTool === 'lassoFill') lassoFill(d, lassoErase);
+    else addSelShape(d, selOp);
+  }
+
+  function cancelDraft() {
+    selDraft = null;
+    selDraftOpen = false;
+    draftMarks = [];
+    shapeDragging = false;
+  }
+
+  // Ctrl+Z while drawing a lasso: remove the last part instead of undoing other things
+  function undoDraftPart() {
+    if (!selDraft) return;
+    const m = draftMarks.pop();
+    if (!m) cancelDraft();
+    else selDraft = selDraft.slice(0, m);
+  }
+
+  // ---------- Lasso fill ----------
+
+  // Fills (or with Ctrl erases) the drawn shape on the active layer
+  function lassoFill(pts: { x: number; y: number }[], erase: boolean) {
+    const layer = editableLayer();
+    if (!layer) return;
+    const xs = pts.map((p) => p.x);
+    const ys = pts.map((p) => p.y);
+    const pad = 2 + lfFeather * 2; // room for the soft edge
+    const bx = Math.max(0, Math.floor(Math.min(...xs) - pad));
+    const by = Math.max(0, Math.floor(Math.min(...ys) - pad));
+    const bw = Math.min(docW, Math.ceil(Math.max(...xs) + pad)) - bx;
+    const bh = Math.min(docH, Math.ceil(Math.max(...ys) + pad)) - by;
+    if (bw <= 0 || bh <= 0) return;
+
+    const tmp = document.createElement('canvas');
+    tmp.width = bw;
+    tmp.height = bh;
+    const t = tmp.getContext('2d')!;
+    t.translate(-bx, -by);
+    t.fillStyle = color;
+    t.filter = lfFeather ? `blur(${lfFeather / 2}px)` : 'none';
+    shapePath(t, pts);
+    t.fill();
+    t.filter = 'none';
+    t.setTransform(1, 0, 0, 1, 0, 0);
+    t.globalCompositeOperation = 'destination-in';
+    if (hasSel) t.drawImage(selCtx.canvas, -bx, -by);
+    if (layer.lockAlpha && !erase) t.drawImage(layer.canvas, -bx, -by);
+    t.globalCompositeOperation = 'source-over';
+
+    editLayerPixels(layer, { x: bx, y: by, w: bw, h: bh }, (ctx) => {
+      ctx.globalCompositeOperation = erase ? 'destination-out' : 'source-over';
+      ctx.drawImage(tmp, bx, by);
+    });
   }
 
   // ---------- Fill (paint bucket) ----------
@@ -1485,25 +1718,17 @@
       drawTransformed(ctx, x);
       const after = ctx.getImageData(0, 0, docW, docH);
       push({ type: 'pixels', layerId: layer.id, rect: fullRect(), before: x.before, after });
-      // the selection moves along with what was selected
+      // the selection moves along with what was selected (one undo step with the pixels)
       if (hasSel) {
         const m = xfMatrix(x);
-        const t = clipCtx;
-        t.globalCompositeOperation = 'source-over';
-        t.clearRect(0, 0, docW, docH);
-        t.save();
-        t.setTransform(m);
-        t.drawImage(selCtx.canvas, 0, 0);
-        t.restore();
-        selCtx.clearRect(0, 0, docW, docH);
-        selCtx.drawImage(t.canvas, 0, 0);
-        selShapes = selShapes.map((sh) => ({
+        const moved = ($state.snapshot(selShapes) as SelShape[]).map((sh) => ({
           ...sh,
           pts: sh.pts.map((p) => {
             const q = m.transformPoint(new DOMPoint(p.x, p.y));
             return { x: q.x, y: q.y };
           }),
         }));
+        setSelection(moved, false);
       }
     }
     xf = null;
@@ -1587,7 +1812,7 @@
     xfDrag = null;
     hasSel = false;
     selShapes = [];
-    selInverted = false;
+    cancelDraft();
     docW = w;
     docH = h;
     makeWorkCanvases();
@@ -1843,6 +2068,10 @@
       case 'paper':
         Object.assign(paper, reverse ? e.before : e.after);
         break;
+      case 'selection':
+        selShapes = reverse ? e.before : e.after;
+        rebuildSelMask();
+        break;
       case 'layerProps': {
         const l = layers.find((x) => x.id === e.layerId);
         if (l) Object.assign(l, reverse ? e.before : e.after);
@@ -1906,6 +2135,24 @@
     const key = e.key.toLowerCase();
     if (adjusting || newDialog) return; // the dialog handles its own keys
 
+    // While a shape is being drawn: Enter closes it, Esc cancels, Ctrl+Z removes the last part
+    if (selDraft) {
+      if (key === 'enter') {
+        e.preventDefault();
+        finishShape();
+        return;
+      }
+      if (key === 'escape') {
+        cancelDraft();
+        return;
+      }
+      if (mod && key === 'z') {
+        e.preventDefault();
+        undoDraftPart();
+        return;
+      }
+    }
+
     // File shortcuts
     if (mod && key === 's') {
       e.preventDefault();
@@ -1947,6 +2194,11 @@
     if (mod && key === 'a') {
       e.preventDefault();
       selectAll();
+      return;
+    }
+    if (mod && key === 'j') {
+      e.preventDefault();
+      selectionToNewLayer(e.shiftKey);
       return;
     }
     if (mod && key === 'd') {
@@ -2017,8 +2269,12 @@
       tool = 'fill';
     } else if (!mod && key === 'm') {
       tool = 'select';
+      if (selMode === 'lasso') selMode = 'rect';
+    } else if (!mod && key === 'l' && e.shiftKey) {
+      tool = 'lassoFill';
     } else if (!mod && key === 'l') {
-      tool = 'lasso';
+      tool = 'select';
+      selMode = 'lasso';
     } else if (!mod && key === 'v') {
       tool = 'move';
     } else if (!mod && key === '[') {
@@ -2075,9 +2331,24 @@
       <button class:on={activeTool === 'brush'} onclick={() => (tool = 'brush')} title="Brush (B)">Brush</button>
       <button class:on={activeTool === 'eraser'} onclick={() => (tool = 'eraser')} title="Eraser (E)">Eraser</button>
       <button class:on={activeTool === 'fill'} onclick={() => (tool = 'fill')} title="Fill / paint bucket (G)">Fill</button>
+      <button class:on={activeTool === 'lassoFill'} onclick={() => (tool = 'lassoFill')} title="Lasso fill: draw a shape to fill it (Shift L). Hold Ctrl to erase the shape">⬠ Lasso fill</button>
       <button class:on={activeTool === 'picker'} onclick={() => (tool = 'picker')} title="Color picker (I, or hold Alt)">Picker</button>
-      <button class:on={activeTool === 'select'} onclick={() => (tool = 'select')} title="Rectangle select (M)">▭ Select</button>
-      <button class:on={activeTool === 'lasso'} onclick={() => (tool = 'lasso')} title="Lasso select (L)">✎ Lasso</button>
+      <button
+        class:on={activeTool === 'select' && selMode !== 'lasso'}
+        onclick={() => {
+          tool = 'select';
+          if (selMode === 'lasso') selMode = 'rect';
+        }}
+        title="Select: rectangle or ellipse (M)">▭ Select</button
+      >
+      <button
+        class:on={activeTool === 'select' && selMode === 'lasso'}
+        onclick={() => {
+          tool = 'select';
+          selMode = 'lasso';
+        }}
+        title="Lasso select (L)">✎ Lasso</button
+      >
       <button class:on={activeTool === 'move'} onclick={() => (tool = 'move')} title="Move (V)">✥ Move</button>
       <button class:on={!!xf} onclick={() => (xf ? applyTransform() : startTransform(false))} title="Transform: scale and rotate (Ctrl T)">⤡ Transform</button>
     </div>
@@ -2142,18 +2413,69 @@
         </label>
         <p class="hint">Click inside an area to fill it with the current color. "All layers" lets you color under lineart that is on a separate layer. Expand slides the color under the lines so no white gaps are left.</p>
       </div>
-    {:else if activeTool === 'select' || activeTool === 'lasso'}
-      <div class="panel-head">{activeTool === 'select' ? 'Rectangle select' : 'Lasso select'}</div>
+    {:else if activeTool === 'lassoFill'}
+      <div class="panel-head">Lasso fill</div>
       <div class="tool-options">
-        <p class="hint">Drag to select. <b>Shift</b> + drag adds, <b>Ctrl</b> + drag removes. Click once to deselect. Painting, fill and Move only affect the selected area.</p>
+        <div class="seg3">
+          <button class:on={lfMode === 'lasso'} onclick={() => (lfMode = 'lasso')}>✎ Lasso</button>
+          <button class:on={lfMode === 'rect'} onclick={() => (lfMode = 'rect')}>▭ Rectangle</button>
+          <button class:on={lfMode === 'ellipse'} onclick={() => (lfMode = 'ellipse')}>◯ Ellipse</button>
+        </div>
+        <label class="opt" title="Soft edge: 0 = sharp">
+          <span>Feather</span>
+          <input type="range" min="0" max="100" bind:value={lfFeather} />
+          <span class="val">{lfFeather}px</span>
+        </label>
+        <p class="hint">
+          {#if lfMode === 'lasso'}Draw a line around the area; when it reaches the start point, the shape is filled. You can lift the pen and continue, or click for straight lines. Double-click or Enter closes it, Esc cancels, Ctrl+Z removes the last part.{:else}Drag to draw the shape; it is filled when you let go. Hold Shift for a square / circle.{/if}
+          Hold <b>Ctrl</b> when you start to erase instead of fill.
+        </p>
+      </div>
+    {:else if activeTool === 'select'}
+      <div class="panel-head">Select</div>
+      <div class="tool-options">
+        <div class="seg3">
+          <button class:on={selMode === 'rect'} onclick={() => (selMode = 'rect')}>▭ Rectangle</button>
+          <button class:on={selMode === 'ellipse'} onclick={() => (selMode = 'ellipse')}>◯ Ellipse</button>
+          <button class:on={selMode === 'lasso'} onclick={() => (selMode = 'lasso')}>✎ Lasso</button>
+        </div>
+        <label class="opt" title="Soft edge: 0 = sharp. Painting, fill and delete fade out softly at the edge.">
+          <span>Feather</span>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={selFeather}
+            oninput={(e) => featherInput(+e.currentTarget.value)}
+            onchange={featherDone}
+          />
+          <span class="val">{selFeather}px</span>
+        </label>
+        <p class="hint small-note">{hasSel ? 'Changes the current selection right away.' : 'Used for the next selection you draw.'}</p>
+        <p class="hint">
+          {#if selMode === 'lasso'}Draw a line around the area; when it reaches the start point, it is selected. You can lift the pen and continue, or click for straight lines. Double-click or Enter closes it, Esc cancels, Ctrl+Z removes the last part.{:else}Drag to select. Shift while dragging keeps it square / round. Click once to deselect.{/if}
+          Start with <b>Shift</b> to add, <b>Ctrl</b> to remove. Painting, fill and Move then only affect the selected area.
+        </p>
         <div class="btn-grid">
           <button onclick={selectAll}>Select all <kbd>Ctrl A</kbd></button>
           <button onclick={deselect} disabled={!hasSel}>Deselect <kbd>Ctrl D</kbd></button>
           <button onclick={invertSelection}>Invert <kbd>Ctrl Shift I</kbd></button>
           <button onclick={clearSelected} disabled={!hasSel}>Delete inside <kbd>Del</kbd></button>
+          <button onclick={deleteOutside} disabled={!hasSel} title="Cut the picture out along the selection">Delete outside (cut out)</button>
+          <button onclick={() => selectionToNewLayer(false)} disabled={!hasSel}>Copy to new layer <kbd>Ctrl J</kbd></button>
+          <button onclick={() => selectionToNewLayer(true)} disabled={!hasSel}>Cut to new layer <kbd>Ctrl Shift J</kbd></button>
           <button onclick={fillSelected} disabled={!hasSel}>Fill with color</button>
           <button onclick={() => startTransform(false)} disabled={!hasSel}>Transform <kbd>Ctrl T</kbd></button>
         </div>
+        <div class="panel-head sub-head">Existing drawing</div>
+        <button
+          class="wide"
+          onclick={() => featherLayerEdges(selFeather)}
+          disabled={selFeather <= 0}
+          title="Make the outer edges of the active layer's drawing soft, using the Feather value"
+          >Feather layer edges ({selFeather}px)</button
+        >
+        <p class="hint small-note">Softens the outline of what is already drawn on the active layer. Set the amount with Feather above.</p>
       </div>
     {:else if activeTool === 'move'}
       <div class="panel-head">Move</div>
@@ -2179,6 +2501,7 @@
     onpointerup={onPointerUp}
     onpointercancel={onPointerUp}
     onpointerleave={() => (hover.on = false)}
+    ondblclick={() => selDraft && selDraftOpen && finishShape()}
   >
     <canvas
       class="doc-view"
@@ -2210,8 +2533,22 @@
         {/if}
         {#if selDraft}
           {@const pts = selDraft.map((p) => `${p.x},${p.y}`).join(' ')}
-          <polygon class="ants-bg" points={pts} stroke-width={sw} />
-          <polygon class="ants" points={pts} stroke-width={sw} stroke-dasharray="{dash} {dash}" />
+          {#if activeTool === 'lassoFill'}
+            <polygon points={pts} fill={lassoErase ? '#ffffff' : color} fill-opacity="0.5" stroke="none" />
+          {/if}
+          {#if selDraftOpen}
+            {@const lastPt = selDraft[selDraft.length - 1]}
+            {@const cur = docFromStage(hover.x, hover.y)}
+            <polyline class="ants-bg" points={pts} stroke-width={sw} />
+            <polyline class="ants" points={pts} stroke-width={sw} stroke-dasharray="{dash} {dash}" />
+            {#if !shapeDragging && hover.on}
+              <line class="rubber" x1={lastPt.x} y1={lastPt.y} x2={cur.x} y2={cur.y} stroke-width={sw} stroke-dasharray="{dash} {dash}" />
+            {/if}
+            <circle class="start-dot" cx={selDraft[0].x} cy={selDraft[0].y} r={7 / zoom} stroke-width={sw} />
+          {:else}
+            <polygon class="ants-bg" points={pts} stroke-width={sw} />
+            <polygon class="ants" points={pts} stroke-width={sw} stroke-dasharray="{dash} {dash}" />
+          {/if}
         {/if}
         {#if xf && !xf.quick}
           {@const corners = xfCorners(xf)}
@@ -2472,6 +2809,9 @@
     <hr />
     <button role="menuitem" disabled={activeIndex() <= 0} onclick={() => menuDo(mergeDown)}>Merge down</button>
     <button role="menuitem" onclick={() => menuDo(() => (adjusting = true))}>Adjust colors… (Ctrl+U)</button>
+    <button role="menuitem" onclick={() => menuDo(() => featherLayerEdges(selFeather || 20))}>
+      Feather edges ({selFeather || 20}px)
+    </button>
     <button role="menuitem" onclick={() => menuDo(clearLayer)}>Clear layer (make transparent)</button>
     <button role="menuitem" class="danger" disabled={layers.length <= 1} onclick={() => menuDo(deleteLayer)}>
       Delete layer
@@ -2808,6 +3148,23 @@
       stroke-dashoffset: calc(var(--dash) * -2);
     }
   }
+  .rubber {
+    stroke: #000;
+    opacity: 0.6;
+  }
+  .start-dot {
+    fill: #fff;
+    stroke: #00b5c8;
+  }
+  .seg3 {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+  }
+  .seg3 button {
+    padding: 6px 2px;
+    font-size: 11px;
+  }
   .xf-box {
     fill: none;
     stroke: #00b5c8;
@@ -2898,6 +3255,19 @@
     margin: 0;
     color: #888;
     line-height: 1.45;
+  }
+  .sub-head {
+    margin-top: 8px;
+    font-size: 12px;
+    color: #ccc;
+  }
+  .wide {
+    width: 100%;
+    font-size: 12px;
+  }
+  .small-note {
+    margin-top: -6px;
+    font-size: 11px;
   }
   .btn-grid {
     display: grid;
