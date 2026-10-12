@@ -1,0 +1,146 @@
+// Canvas display: composites dirty tiles, keeps one GPU texture per tile, draws them through the
+// view transform (so zoom/rotate/mirror are free), and keeps a small thumbnail for the navigator.
+
+use std::collections::HashMap;
+
+use eframe::egui::{
+    self, Color32, ColorImage, Mesh, Painter, Pos2, Rect, Shape, TextureHandle, TextureOptions, pos2,
+};
+
+use crate::doc::{Document, TILE, TileKey};
+use crate::view::View;
+
+const THUMB_MAX: usize = 320;
+
+pub struct CanvasRenderer {
+    textures: HashMap<TileKey, TextureHandle>,
+    composite: HashMap<TileKey, Vec<Color32>>, // CPU copy, used for the thumbnail and color picking
+    thumb: Option<TextureHandle>,
+    thumb_revision: u64,
+    thumb_time: f64,
+    buf: Vec<Color32>,
+}
+
+impl Default for CanvasRenderer {
+    fn default() -> Self {
+        Self {
+            textures: HashMap::new(),
+            composite: HashMap::new(),
+            thumb: None,
+            thumb_revision: u64::MAX,
+            thumb_time: 0.0,
+            buf: vec![Color32::TRANSPARENT; TILE * TILE],
+        }
+    }
+}
+
+fn tex_options() -> TextureOptions {
+    TextureOptions {
+        magnification: egui::TextureFilter::Nearest, // see real pixels when zoomed in
+        minification: egui::TextureFilter::Linear,
+        wrap_mode: egui::TextureWrapMode::ClampToEdge,
+        mipmap_mode: Some(egui::TextureFilter::Linear), // smooth when zoomed out
+    }
+}
+
+impl CanvasRenderer {
+    /// Drop everything (new document / different size).
+    #[allow(dead_code)] // used by the New project dialog (file step)
+    pub fn reset(&mut self) {
+        self.textures.clear();
+        self.composite.clear();
+        self.thumb = None;
+        self.thumb_revision = u64::MAX;
+    }
+
+    /// Re-composite dirty tiles and upload them.
+    pub fn sync(&mut self, ctx: &egui::Context, doc: &mut Document) {
+        for key in doc.take_dirty() {
+            doc.composite_tile(key, &mut self.buf);
+            let img = ColorImage::new([TILE, TILE], self.buf.clone());
+            match self.textures.get_mut(&key) {
+                Some(t) => t.set(img, tex_options()),
+                None => {
+                    let t = ctx.load_texture(format!("tile{}_{}", key.0, key.1), img, tex_options());
+                    self.textures.insert(key, t);
+                }
+            }
+            self.composite.insert(key, self.buf.clone());
+        }
+
+        // Navigator thumbnail: at most ~6 times a second while drawing.
+        let now = ctx.input(|i| i.time);
+        if doc.revision != self.thumb_revision && (now - self.thumb_time > 0.16 || self.thumb.is_none()) {
+            self.thumb_revision = doc.revision;
+            self.thumb_time = now;
+            let img = self.thumbnail(doc);
+            match &mut self.thumb {
+                Some(t) => t.set(img, TextureOptions::LINEAR),
+                None => self.thumb = Some(ctx.load_texture("navigator", img, TextureOptions::LINEAR)),
+            }
+            ctx.request_repaint_after_secs(0.2);
+        }
+    }
+
+    fn thumbnail(&self, doc: &Document) -> ColorImage {
+        let s = (THUMB_MAX as f32 / doc.w.max(doc.h) as f32).min(1.0);
+        let tw = ((doc.w as f32 * s).round() as usize).max(1);
+        let th = ((doc.h as f32 * s).round() as usize).max(1);
+        let mut px = vec![Color32::TRANSPARENT; tw * th];
+        for y in 0..th {
+            for x in 0..tw {
+                let dx = ((x as f32 + 0.5) / s) as usize;
+                let dy = ((y as f32 + 0.5) / s) as usize;
+                if let Some(c) = self.pixel(dx, dy) {
+                    px[y * tw + x] = c;
+                }
+            }
+        }
+        ColorImage::new([tw, th], px)
+    }
+
+    /// Displayed (composited) color at a document pixel.
+    pub fn pixel(&self, x: usize, y: usize) -> Option<Color32> {
+        let key = ((x / TILE) as i32, (y / TILE) as i32);
+        self.composite.get(&key).map(|t| t[(y % TILE) * TILE + x % TILE])
+    }
+
+    pub fn thumb(&self) -> Option<&TextureHandle> {
+        self.thumb.as_ref()
+    }
+
+    /// Draw every tile that's on screen.
+    pub fn paint(&self, p: &Painter, view: &View, doc: &Document) {
+        let clip = p.clip_rect();
+        let t = TILE as f32;
+        for ty in 0..doc.tiles_y() {
+            for tx in 0..doc.tiles_x() {
+                let Some(tex) = self.textures.get(&(tx, ty)) else { continue };
+                let x0 = tx as f32 * t;
+                let y0 = ty as f32 * t;
+                let x1 = (x0 + t).min(doc.w as f32);
+                let y1 = (y0 + t).min(doc.h as f32);
+                let corners = [pos2(x0, y0), pos2(x1, y0), pos2(x1, y1), pos2(x0, y1)].map(|c| view.doc_to_screen(c));
+                let bb = Rect::from_points(&corners);
+                if !bb.intersects(clip) {
+                    continue;
+                }
+                let (u1, v1) = ((x1 - x0) / t, (y1 - y0) / t);
+                let uvs = [pos2(0.0, 0.0), pos2(u1, 0.0), pos2(u1, v1), pos2(0.0, v1)];
+                let mut m = Mesh::with_texture(tex.id());
+                for (pos, uv) in corners.iter().zip(uvs) {
+                    m.vertices.push(egui::epaint::Vertex { pos: *pos, uv, color: Color32::WHITE });
+                }
+                m.add_triangle(0, 1, 2);
+                m.add_triangle(0, 2, 3);
+                p.add(Shape::mesh(m));
+            }
+        }
+    }
+}
+
+/// Document corners on screen (for the shadow and border around the page).
+pub fn page_quad(view: &View, doc: &Document) -> Vec<Pos2> {
+    let (w, h) = (doc.w as f32, doc.h as f32);
+    [pos2(0.0, 0.0), pos2(w, 0.0), pos2(w, h), pos2(0.0, h)].iter().map(|c| view.doc_to_screen(*c)).collect()
+}

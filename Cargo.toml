@@ -1,0 +1,10 @@
+[package]
+name = "seviathstudio"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.36"
+
+[dev-dependencies]
+egui_kittest = { version = "0.36", features = ["wgpu", "snapshot", "eframe"] }
