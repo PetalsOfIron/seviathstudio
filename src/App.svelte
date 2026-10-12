@@ -6,7 +6,7 @@
   import NewProjectDialog from './lib/NewProjectDialog.svelte';
   import { floodFill, expandMask } from './lib/fill';
   import { saveProject, openProject, exportPNG, exportPSD, importPSD, type ProjectData } from './lib/fileio';
-  import { PRESETS, settingsOf, getDab, getPaper, type BrushSettings } from './lib/brush';
+  import { PRESETS, ERASER_PRESETS, settingsOf, getDab, getPaper, type BrushSettings } from './lib/brush';
 
   // Document size (chosen in New project, or taken from an opened file)
   let docW = $state(2000);
@@ -91,6 +91,20 @@
   let color = $state('#222222');
   let brush = $state<BrushSettings>(settingsOf(PRESETS[0]));
   let preset = $state(PRESETS[0].name);
+  // The brush and the eraser remember their own settings: switching tools swaps them
+  let stash = {
+    brush: { settings: settingsOf(PRESETS[0]), preset: PRESETS[0].name },
+    eraser: { settings: settingsOf(ERASER_PRESETS[0]), preset: ERASER_PRESETS[0].name },
+  };
+  let settingsFor: 'brush' | 'eraser' = 'brush';
+  $effect(() => {
+    const want = tool === 'eraser' ? 'eraser' : 'brush';
+    if (want === settingsFor) return;
+    stash[settingsFor] = { settings: { ...$state.snapshot(brush) }, preset };
+    Object.assign(brush, stash[want].settings);
+    preset = stash[want].preset;
+    settingsFor = want;
+  });
   let altDown = $state(false);
   // Holding Alt temporarily switches to the color picker
   let activeTool = $derived<Tool>(altDown ? 'picker' : tool);
@@ -2353,7 +2367,7 @@
       <button class:on={!!xf} onclick={() => (xf ? applyTransform() : startTransform(false))} title="Transform: scale and rotate (Ctrl T)">⤡ Transform</button>
     </div>
     <div class="current-color" style="background: {color}" title={color}></div>
-    <span class="brush-name">Brush: {preset} · {brush.size}px</span>
+    <span class="brush-name">{tool === 'eraser' ? 'Eraser' : 'Brush'}: {preset} · {brush.size}px</span>
     <div class="group">
       <button onclick={undo} disabled={undoCount === 0}>↶ Undo</button>
       <button onclick={redo} disabled={redoCount === 0}>↷ Redo</button>
@@ -2484,7 +2498,7 @@
       </div>
     {:else}
       <div class="panel-head">Brush</div>
-      <BrushPanel bind:brush bind:preset />
+      <BrushPanel bind:brush bind:preset eraser={tool === 'eraser'} />
     {/if}
   </aside>
 

@@ -1,7 +1,13 @@
 <script lang="ts">
-  import { PRESETS, settingsOf, type BrushSettings, type BrushPreset } from './brush';
+  import { PRESETS, ERASER_PRESETS, settingsOf, type BrushSettings, type BrushPreset } from './brush';
 
-  let { brush = $bindable(), preset = $bindable() }: { brush: BrushSettings; preset: string } = $props();
+  let {
+    brush = $bindable(),
+    preset = $bindable(),
+    eraser = false,
+  }: { brush: BrushSettings; preset: string; eraser?: boolean } = $props();
+
+  let list = $derived(eraser ? ERASER_PRESETS : PRESETS);
 
   function choose(p: BrushPreset) {
     preset = p.name;
@@ -20,6 +26,9 @@
     Blender: 'Adds no color. Smears and blends the colors already on this layer.',
     'Paint mix': 'Wet paint: your color mixes with the colors already on this layer.',
     Airbrush: 'Very soft spray that builds up slowly.',
+    'Hard eraser': 'Removes everything it touches, completely.',
+    'Soft eraser': 'Fades paint out gently. Go over again to erase more.',
+    'Textured eraser': 'Grainy, like a rubber on pencil.',
   };
 
   // Brush size uses a logarithmic slider: 0.5 px … 500 px, so small sizes are easy to hit
@@ -44,7 +53,7 @@
 
 <div class="brush-panel">
   <div class="presets">
-    {#each PRESETS as p (p.name)}
+    {#each list as p (p.name)}
       <button class:on={preset === p.name} onclick={() => choose(p)}>{p.name}</button>
     {/each}
   </div>
@@ -54,7 +63,7 @@
   {/if}
 
   <label>
-    <span>Brush size</span>
+    <span>{eraser ? 'Eraser size' : 'Brush size'}</span>
     <input
       type="range"
       min="0"
@@ -99,11 +108,22 @@
     <input type="range" min="0.02" max="1" step="0.01" bind:value={brush.spacing} />
     <span class="val">{pct(brush.spacing)}</span>
   </label>
+  {#if !eraser}
   <label title="0% = clean paint, 100% = only blends the colors already on the layer">
     <span>Color mix</span>
     <input type="range" min="0" max="1" step="0.01" bind:value={brush.mix} />
     <span class="val">{pct(brush.mix)}</span>
   </label>
+  {#if brush.mix > 0}
+    <div class="ends">
+      <span>Mix with</span>
+      <div class="seg two">
+        <button class:on={brush.mixRefer === 'all'} onclick={() => (brush.mixRefer = 'all')} title="Mix with everything you see: all visible layers and the paper">All layers</button>
+        <button class:on={brush.mixRefer === 'layer'} onclick={() => (brush.mixRefer = 'layer')} title="Mix only with the colors on the active layer">This layer</button>
+      </div>
+    </div>
+  {/if}
+  {/if}
   <label>
     <span>Paper texture</span>
     <input type="range" min="0" max="1" step="0.01" bind:value={brush.texture} />
@@ -233,6 +253,9 @@
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     gap: 2px;
+  }
+  .seg.two {
+    grid-template-columns: 1fr 1fr;
   }
   .seg button {
     padding: 5px 2px;

@@ -14,23 +14,34 @@ export type BrushSettings = {
   ends: 'round' | 'taper' | 'flat'; // shape of both ends of a line
   taper: number; // 0..1, how long the tapered tips are
   mix: number; // 0..1, color mixing: 0 = clean paint, 1 = only blends the colors already there
+  mixRefer: 'all' | 'layer'; // mix with everything you see, or only with the active layer
 };
 
 export type BrushPreset = BrushSettings & { name: string };
 
 export const PRESETS: BrushPreset[] = [
   // Ballpoint-like: almost even width, a little grain
-  { name: 'Pen', size: 8, opacity: 0.95, flow: 0.9, hardness: 0.85, spacing: 0.06, sizePressure: true, minSize: 0.65, opacityPressure: true, texture: 0.18, stabilize: 0.3, ends: 'taper', taper: 0.25, mix: 0 },
+  { name: 'Pen', size: 8, opacity: 0.95, flow: 0.9, hardness: 0.85, spacing: 0.06, sizePressure: true, minSize: 0.65, opacityPressure: true, texture: 0.18, stabilize: 0.3, ends: 'taper', taper: 0.25, mix: 0, mixRefer: 'all' },
   // Brush ink: razor-sharp edge, thin-to-thick with pressure, no grain
-  { name: 'Ink', size: 4, opacity: 1, flow: 1, hardness: 1, spacing: 0.04, sizePressure: true, minSize: 0.25, opacityPressure: false, texture: 0, stabilize: 0.55, ends: 'taper', taper: 0.5, mix: 0 },
-  { name: 'Pencil', size: 6, opacity: 1, flow: 1, hardness: 0.7, spacing: 0.06, sizePressure: true, minSize: 0.5, opacityPressure: true, texture: 0.45, stabilize: 0.1, ends: 'round', taper: 0.3, mix: 0 },
-  { name: 'Marker', size: 30, opacity: 0.5, flow: 1, hardness: 0.85, spacing: 0.06, sizePressure: false, minSize: 1, opacityPressure: false, texture: 0, stabilize: 0.2, ends: 'flat', taper: 0.3, mix: 0 },
-  { name: 'Soft round', size: 60, opacity: 1, flow: 0.35, hardness: 0.2, spacing: 0.08, sizePressure: true, minSize: 0.2, opacityPressure: true, texture: 0, stabilize: 0, ends: 'round', taper: 0.3, mix: 0 },
+  { name: 'Ink', size: 4, opacity: 1, flow: 1, hardness: 1, spacing: 0.04, sizePressure: true, minSize: 0.25, opacityPressure: false, texture: 0, stabilize: 0.55, ends: 'taper', taper: 0.5, mix: 0, mixRefer: 'all' },
+  { name: 'Pencil', size: 6, opacity: 1, flow: 1, hardness: 0.7, spacing: 0.06, sizePressure: true, minSize: 0.5, opacityPressure: true, texture: 0.45, stabilize: 0.1, ends: 'round', taper: 0.3, mix: 0, mixRefer: 'all' },
+  { name: 'Marker', size: 30, opacity: 0.5, flow: 1, hardness: 0.85, spacing: 0.06, sizePressure: false, minSize: 1, opacityPressure: false, texture: 0, stabilize: 0.2, ends: 'flat', taper: 0.3, mix: 0, mixRefer: 'all' },
+  { name: 'Soft round', size: 60, opacity: 1, flow: 0.35, hardness: 0.2, spacing: 0.08, sizePressure: true, minSize: 0.2, opacityPressure: true, texture: 0, stabilize: 0, ends: 'round', taper: 0.3, mix: 0, mixRefer: 'all' },
   // Picks up the colors under it and smears them together for soft transitions
-  { name: 'Blender', size: 50, opacity: 1, flow: 0.6, hardness: 0.3, spacing: 0.08, sizePressure: true, minSize: 0.4, opacityPressure: true, texture: 0, stabilize: 0.1, ends: 'round', taper: 0.3, mix: 1 },
+  { name: 'Blender', size: 50, opacity: 1, flow: 0.6, hardness: 0.3, spacing: 0.08, sizePressure: true, minSize: 0.4, opacityPressure: true, texture: 0, stabilize: 0.1, ends: 'round', taper: 0.3, mix: 1, mixRefer: 'all' },
   // Your color mixes with the paint already on the canvas, like wet paint
-  { name: 'Paint mix', size: 40, opacity: 1, flow: 0.8, hardness: 0.5, spacing: 0.08, sizePressure: true, minSize: 0.4, opacityPressure: true, texture: 0, stabilize: 0.1, ends: 'round', taper: 0.3, mix: 0.5 },
-  { name: 'Airbrush', size: 150, opacity: 1, flow: 0.06, hardness: 0, spacing: 0.06, sizePressure: false, minSize: 1, opacityPressure: true, texture: 0, stabilize: 0, ends: 'round', taper: 0.3, mix: 0 },
+  { name: 'Paint mix', size: 40, opacity: 1, flow: 0.8, hardness: 0.5, spacing: 0.08, sizePressure: true, minSize: 0.4, opacityPressure: true, texture: 0, stabilize: 0.1, ends: 'round', taper: 0.3, mix: 0.5, mixRefer: 'all' },
+  { name: 'Airbrush', size: 150, opacity: 1, flow: 0.06, hardness: 0, spacing: 0.06, sizePressure: false, minSize: 1, opacityPressure: true, texture: 0, stabilize: 0, ends: 'round', taper: 0.3, mix: 0, mixRefer: 'all' },
+];
+
+// The eraser keeps its own settings, separate from the brush
+export const ERASER_PRESETS: BrushPreset[] = [
+  // Removes everything it touches, completely
+  { name: 'Hard eraser', size: 20, opacity: 1, flow: 1, hardness: 0.9, spacing: 0.05, sizePressure: true, minSize: 0.5, opacityPressure: false, texture: 0, stabilize: 0, ends: 'round', taper: 0.3, mix: 0, mixRefer: 'all' },
+  // Fades paint out gently; press harder or go over again to erase more
+  { name: 'Soft eraser', size: 80, opacity: 1, flow: 0.3, hardness: 0.1, spacing: 0.06, sizePressure: true, minSize: 0.4, opacityPressure: true, texture: 0, stabilize: 0, ends: 'round', taper: 0.3, mix: 0, mixRefer: 'all' },
+  // Grainy, like a real rubber on pencil
+  { name: 'Textured eraser', size: 30, opacity: 1, flow: 1, hardness: 0.7, spacing: 0.06, sizePressure: true, minSize: 0.5, opacityPressure: true, texture: 0.45, stabilize: 0, ends: 'round', taper: 0.3, mix: 0, mixRefer: 'all' },
 ];
 
 export function settingsOf(p: BrushPreset): BrushSettings {
