@@ -1811,7 +1811,7 @@
   const shapeMode = (): ShapeMode => (activeTool === 'lassoFill' ? lfMode : selMode);
 
   function shapeDown(e: PointerEvent, pt: Pt) {
-    if (activeTool === 'lassoFill' && !editableLayer()) return;
+    if (activeTool === 'lassoFill' && !isVector(activeLayer) && !editableLayer()) return;
     capture(e);
     shapeDragging = true;
     const p = { x: pt.x, y: pt.y };
@@ -1888,7 +1888,7 @@
 
   // Fills (or with Ctrl erases) the drawn shape on the active layer
   function lassoFill(pts: { x: number; y: number }[], erase: boolean) {
-    const layer = editableLayer();
+    const layer = fillTarget()?.target;
     if (!layer) return;
     // with mirror drawing on, the shape is filled on every mirrored side too
     const shapes = [pts, ...(sym.mode === 'off' ? [] : symCopies(sym)).map((f) => pts.map(f))];
@@ -1927,14 +1927,47 @@
 
   // ---------- Fill (paint bucket) ----------
 
-  function doFill(pt: { x: number; y: number }) {
-    const layer = editableLayer();
-    if (!layer) return;
+  // Vector layers keep only lines, so color goes into a pixel layer right under them
+  // ("<name> colors"), the same way lineart and flat colors are usually split.
+  const colorsLayerOf = new Map<number, number>(); // vector layer id → its colors layer id
 
-    // What the bucket "looks at": this layer only, or everything visible (without paper)
+  function fillTarget(): { target: Layer; ref: Layer } | null {
+    const l = activeLayer;
+    if (l && isVector(l)) {
+      if (!l.visible) {
+        showNotice('This layer is hidden. Show it (👁) first.');
+        return null;
+      }
+      const known = layers.find((x) => x.id === colorsLayerOf.get(l.id));
+      const idx = activeIndex();
+      const below = layers[idx - 1];
+      let target = known ?? (below && !isVector(below) && below.name === `${l.name} colors` ? below : undefined);
+      if (!target) {
+        target = makeLayer();
+        target.name = `${l.name} colors`;
+        insertAt(target, idx);
+        push({ type: 'add', layer: target, index: idx });
+        activeId = l.id; // keep drawing on the vector layer
+        showNotice(`Colors go into "${target.name}" under the lines, so the lines stay editable.`);
+      }
+      colorsLayerOf.set(l.id, target.id);
+      if (!target.visible) target.visible = true;
+      return { target, ref: l };
+    }
+    const e = editableLayer();
+    return e ? { target: e, ref: e } : null;
+  }
+
+  function doFill(pt: { x: number; y: number }) {
+    const ft = fillTarget();
+    if (!ft) return;
+    const layer = ft.target;
+
+    // What the bucket "looks at": this layer only (for a vector layer: its lines),
+    // or everything visible (without paper)
     let ref: ImageData;
     if (fillRefer === 'layer') {
-      ref = layer.canvas.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, docW, docH);
+      ref = ft.ref.canvas.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, docW, docH);
     } else {
       const c = makeCanvas();
       const cctx = c.getContext('2d', { willReadFrequently: true })!;
