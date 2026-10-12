@@ -27,7 +27,8 @@ fn main() -> eframe::Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("SeviathStudio")
             .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([960.0, 600.0]),
+            .with_min_inner_size([960.0, 600.0])
+            .with_icon(eframe::egui::IconData { rgba: snake::icon_rgba(256), width: 256, height: 256 }),
         ..Default::default()
     };
     eframe::run_native("SeviathStudio", options, Box::new(|cc| Ok(Box::new(app::SeviathApp::new(cc)))))
