@@ -2,9 +2,15 @@
 // The layer's pixels are drawn from the lines, so you can change the line width later,
 // cut lines cleanly with the vector eraser, and nothing gets blurry when scaled.
 
+import { strokeColorAt, type GradStop, type GradRepeat } from './gradient';
+
+// A line painted with a gradient: the color changes along its length
+export type StrokeGradient = { stops: GradStop[]; smooth: boolean; length: number; repeat: GradRepeat };
+
 export type VecStroke = {
   pts: number[]; // x, y, pressure, x, y, pressure, ...
   color: string;
+  grad?: StrokeGradient;
   size: number; // diameter at full pressure
   minSize: number; // 0..1, size at the lightest pressure
   sizePressure: boolean;
@@ -13,10 +19,71 @@ export type VecStroke = {
   opacity: number;
 };
 
+// A flat color shape (from Auto trace): one or more outlines filled with one color.
+// Outlines inside other outlines are holes.
+export type VecFill = { rings: number[][]; color: string };
+
 export type VecLayer = {
   strokes: VecStroke[];
   width: number; // line width multiplier for the whole layer (1 = as drawn)
+  fills?: VecFill[]; // color shapes, drawn under the lines
 };
+
+export function fillBounds(f: VecFill): Box {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const ring of f.rings)
+    for (let i = 0; i < ring.length; i += 2) {
+      minX = Math.min(minX, ring[i]);
+      maxX = Math.max(maxX, ring[i]);
+      minY = Math.min(minY, ring[i + 1]);
+      maxY = Math.max(maxY, ring[i + 1]);
+    }
+  return { x: minX - 2, y: minY - 2, w: maxX - minX + 4, h: maxY - minY + 4 };
+}
+
+export function drawFill(ctx: CanvasRenderingContext2D, f: VecFill) {
+  ctx.beginPath();
+  for (const ring of f.rings) {
+    if (ring.length < 6) continue;
+    ctx.moveTo(ring[0], ring[1]);
+    for (let i = 2; i < ring.length; i += 2) ctx.lineTo(ring[i], ring[i + 1]);
+    ctx.closePath();
+  }
+  ctx.fillStyle = f.color;
+  ctx.fill('evenodd');
+  // a hairline in the same color hides the thin seams between neighbouring shapes
+  ctx.strokeStyle = f.color;
+  ctx.lineWidth = 0.8;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+}
+
+// Is (x, y) inside the shape?
+export function insideFill(f: VecFill, x: number, y: number) {
+  let inside = false;
+  for (const ring of f.rings) {
+    for (let i = 0, j = ring.length - 2; i < ring.length; j = i, i += 2) {
+      const xi = ring[i], yi = ring[i + 1], xj = ring[j], yj = ring[j + 1];
+      if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+    }
+  }
+  return inside;
+}
+
+export function mapFill(f: VecFill, fn: (p: { x: number; y: number }) => { x: number; y: number }): VecFill {
+  return {
+    ...f,
+    rings: f.rings.map((ring) => {
+      const out = ring.slice();
+      for (let i = 0; i < out.length; i += 2) {
+        const q = fn({ x: out[i], y: out[i + 1] });
+        out[i] = Math.round(q.x * 100) / 100;
+        out[i + 1] = Math.round(q.y * 100) / 100;
+      }
+      return out;
+    }),
+  };
+}
 
 export type VPt = { x: number; y: number; p: number };
 
@@ -112,7 +179,7 @@ function taperFactor(d: number, total: number, s: VecStroke) {
 }
 
 // The stroke as points with their radius
-function outline(s: VecStroke, widthScale: number): { x: number; y: number; r: number }[] {
+function outline(s: VecStroke, widthScale: number): { x: number; y: number; r: number; d: number }[] {
   const base = toPts(s.pts);
   // a point every ~2 px is plenty for a smooth curve (joints are rounded); fewer points = faster
   const step = Math.max(0.75, Math.min(2.5, (s.size * widthScale) / 3));
@@ -125,7 +192,7 @@ function outline(s: VecStroke, widthScale: number): { x: number; y: number; r: n
   }
   return pts.map((q, i) => {
     const f = s.sizePressure ? s.minSize + (1 - s.minSize) * q.p : 1;
-    return { x: q.x, y: q.y, r: Math.max(0.25, ((s.size * f) / 2) * widthScale * taperFactor(dist[i], total, s)) };
+    return { x: q.x, y: q.y, r: Math.max(0.25, ((s.size * f) / 2) * widthScale * taperFactor(dist[i], total, s)), d: dist[i] };
   });
 }
 
@@ -183,8 +250,40 @@ export function strokeBounds(s: VecStroke, widthScale = 1) {
 
 let temp: CanvasRenderingContext2D | null = null;
 
+// Gradient lines: every little piece gets its own color
+function drawGradStroke(ctx: CanvasRenderingContext2D, s: VecStroke, widthScale: number) {
+  const g = s.grad!;
+  const o = outline(s, widthScale);
+  for (let i = 0; i < o.length; i++) {
+    const a = o[i];
+    ctx.fillStyle = strokeColorAt(g.stops, g.smooth, a.d, g.length, g.repeat).hex;
+    ctx.beginPath();
+    ctx.moveTo(a.x + a.r, a.y);
+    ctx.arc(a.x, a.y, a.r, 0, Math.PI * 2);
+    ctx.closePath();
+    if (i > 0) {
+      const b = o[i - 1];
+      const dx = a.x - b.x, dy = a.y - b.y;
+      const len = Math.hypot(dx, dy);
+      if (len > 1e-6) {
+        const nx = -dy / len, ny = dx / len;
+        addPoly(ctx, [
+          [b.x + nx * b.r, b.y + ny * b.r],
+          [a.x + nx * a.r, a.y + ny * a.r],
+          [a.x - nx * a.r, a.y - ny * a.r],
+          [b.x - nx * b.r, b.y - ny * b.r],
+        ]);
+      }
+    }
+    ctx.fill('nonzero');
+  }
+}
+
 export function drawStroke(ctx: CanvasRenderingContext2D, s: VecStroke, widthScale = 1) {
   if (s.pts.length < 3) return;
+  if (s.grad) {
+    if (s.opacity >= 0.999) return drawGradStroke(ctx, s, widthScale);
+  }
   if (s.opacity >= 0.999) {
     ctx.fillStyle = s.color;
     strokePath(ctx, s, widthScale);
@@ -205,9 +304,12 @@ export function drawStroke(ctx: CanvasRenderingContext2D, s: VecStroke, widthSca
   t.setTransform(1, 0, 0, 1, 0, 0);
   t.clearRect(0, 0, w, h);
   t.translate(-b.x, -b.y);
-  t.fillStyle = s.color;
-  strokePath(t, s, widthScale);
-  t.fill('nonzero');
+  if (s.grad) drawGradStroke(t, s, widthScale);
+  else {
+    t.fillStyle = s.color;
+    strokePath(t, s, widthScale);
+    t.fill('nonzero');
+  }
   t.setTransform(1, 0, 0, 1, 0, 0);
   ctx.save();
   ctx.globalAlpha *= s.opacity;
@@ -222,6 +324,7 @@ export function renderVectorLayer(canvas: HTMLCanvasElement, v: VecLayer) {
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = 'source-over';
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  for (const f of v.fills ?? []) drawFill(ctx, f);
   for (const s of v.strokes) drawStroke(ctx, s, v.width);
 }
 
@@ -312,6 +415,9 @@ export function changedArea(a: VecLayer, b: VecLayer): Box | null | 'all' {
   let box: Box | null = null;
   for (const s of a.strokes) if (!inB.has(s)) box = unionBox(box, strokeBounds(s, a.width));
   for (const s of b.strokes) if (!inA.has(s)) box = unionBox(box, strokeBounds(s, b.width));
+  const fa = new Set(a.fills ?? []), fb = new Set(b.fills ?? []);
+  for (const f of a.fills ?? []) if (!fb.has(f)) box = unionBox(box, fillBounds(f));
+  for (const f of b.fills ?? []) if (!fa.has(f)) box = unionBox(box, fillBounds(f));
   return box;
 }
 
@@ -330,6 +436,11 @@ export function renderVectorRegion(canvas: HTMLCanvasElement, v: VecLayer, r: Bo
   ctx.rect(x, y, w, h);
   ctx.clip();
   ctx.clearRect(x, y, w, h);
+  for (const f of v.fills ?? []) {
+    const b = fillBounds(f);
+    if (b.x > x + w || b.y > y + h || b.x + b.w < x || b.y + b.h < y) continue;
+    drawFill(ctx, f);
+  }
   for (const s of v.strokes) {
     const b = strokeBounds(s, v.width);
     if (b.x > x + w || b.y > y + h || b.x + b.w < x || b.y + b.h < y) continue;
@@ -380,9 +491,16 @@ export function drawLivePiece(
   ctx.fillStyle = st.color;
   ctx.beginPath();
   let prev: { x: number; y: number; r: number } | null = null;
+  const g = st.grad;
   const put = (x: number, y: number, p: number, d: number) => {
     const q = map({ x, y });
     const r = radiusOf(st, p, widthScale) * startTaper(st, d);
+    if (g) {
+      // gradient line: finish the last piece in its color, start a new one in this color
+      ctx.fill('nonzero');
+      ctx.fillStyle = strokeColorAt(g.stops, g.smooth, d, g.length, g.repeat).hex;
+      ctx.beginPath();
+    }
     ctx.moveTo(q.x + r, q.y);
     ctx.arc(q.x, q.y, r, 0, Math.PI * 2);
     ctx.closePath();
@@ -482,4 +600,99 @@ export function nodeCount(s: VecStroke) {
 // The same line with a point every `step` px (so its pressure can be edited finely)
 export function densifyStroke(s: VecStroke, step: number): VecStroke {
   return { ...s, pts: toFlat(densify(toPts(s.pts), step)) };
+}
+
+// ---------- Node editing (Vector select) ----------
+
+// The node of these lines nearest to (x, y), within `tol` px
+// `spacing` > 0: only the handles keyNodes() shows can be grabbed
+export function nearestNode(strokes: VecStroke[], x: number, y: number, tol: number, spacing = 0): { s: VecStroke; k: number } | null {
+  let best: { s: VecStroke; k: number } | null = null;
+  let bd = tol;
+  for (const s of strokes) {
+    for (const k of spacing > 0 ? keyNodes(s, spacing) : Array.from({ length: s.pts.length / 3 }, (_, i) => i)) {
+      const d = Math.hypot(s.pts[k * 3] - x, s.pts[k * 3 + 1] - y);
+      if (d <= bd) {
+        bd = d;
+        best = { s, k };
+      }
+    }
+  }
+  return best;
+}
+
+// Moves node k by (dx, dy). With `soft` > 0, the nodes next to it along the line (up to
+// `soft` px away, measured along the line) follow smoothly, so freehand lines bend instead of spiking.
+export function moveNode(s: VecStroke, k: number, dx: number, dy: number, soft = 0): VecStroke {
+  const pts = s.pts.slice();
+  const n = pts.length / 3;
+  const shift = (i: number, w: number) => {
+    pts[i * 3] = round2(s.pts[i * 3] + dx * w);
+    pts[i * 3 + 1] = round2(s.pts[i * 3 + 1] + dy * w);
+  };
+  shift(k, 1);
+  if (soft > 0) {
+    for (const step of [-1, 1]) {
+      let d = 0;
+      for (let i = k + step; i >= 0 && i < n; i += step) {
+        const j = i - step;
+        d += Math.hypot(s.pts[i * 3] - s.pts[j * 3], s.pts[i * 3 + 1] - s.pts[j * 3 + 1]);
+        if (d >= soft) break;
+        const t = 1 - (d / soft) * (d / soft);
+        shift(i, t * t);
+      }
+    }
+  }
+  return { ...s, pts };
+}
+
+// The line without node k (a line keeps at least 2 nodes)
+export function deleteNode(s: VecStroke, k: number): VecStroke {
+  if (s.pts.length <= 6) return s;
+  const pts = s.pts.slice();
+  pts.splice(k * 3, 3);
+  return { ...s, pts };
+}
+
+// Adds a node on the line where it passes nearest to (x, y). Returns the new line and the node index.
+export function insertNode(s: VecStroke, x: number, y: number): { s: VecStroke; k: number } {
+  let best = 0, bd = Infinity, bt = 0;
+  for (let i = 0; i + 1 < s.pts.length / 3; i++) {
+    const ax = s.pts[i * 3], ay = s.pts[i * 3 + 1], bx = s.pts[i * 3 + 3], by = s.pts[i * 3 + 4];
+    const vx = bx - ax, vy = by - ay;
+    const len2 = vx * vx + vy * vy || 1;
+    const t = Math.max(0, Math.min(1, ((x - ax) * vx + (y - ay) * vy) / len2));
+    const d = Math.hypot(ax + vx * t - x, ay + vy * t - y);
+    if (d < bd) {
+      bd = d;
+      best = i;
+      bt = t;
+    }
+  }
+  const i = best * 3;
+  const p = s.pts[i + 2] + ((s.pts[i + 5] ?? s.pts[i + 2]) - s.pts[i + 2]) * bt;
+  const nx = s.pts[i] + ((s.pts[i + 3] ?? s.pts[i]) - s.pts[i]) * bt;
+  const ny = s.pts[i + 1] + ((s.pts[i + 4] ?? s.pts[i + 1]) - s.pts[i + 1]) * bt;
+  const pts = s.pts.slice();
+  pts.splice(i + 3, 0, round2(nx), round2(ny), p);
+  return { s: { ...s, pts }, k: best + 1 };
+}
+
+// The nodes worth showing as handles: on dense freehand lines only every node that is at
+// least `minDist` px from the previous handle (plus both ends), so handles don't cover the line.
+export function keyNodes(s: VecStroke, minDist: number): number[] {
+  const n = s.pts.length / 3;
+  if (n <= 2) return Array.from({ length: n }, (_, i) => i);
+  const out = [0];
+  let lx = s.pts[0], ly = s.pts[1];
+  for (let i = 1; i < n - 1; i++) {
+    const x = s.pts[i * 3], y = s.pts[i * 3 + 1];
+    if (Math.hypot(x - lx, y - ly) >= minDist && Math.hypot(x - s.pts[(n - 1) * 3], y - s.pts[(n - 1) * 3 + 1]) >= minDist * 0.6) {
+      out.push(i);
+      lx = x;
+      ly = y;
+    }
+  }
+  out.push(n - 1);
+  return out;
 }

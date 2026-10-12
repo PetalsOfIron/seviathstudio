@@ -7,9 +7,12 @@
   import ProjectManager from './lib/ProjectManager.svelte';
   import ExportDialog from './lib/ExportDialog.svelte';
   import PressureEditor from './lib/PressureEditor.svelte';
+  import GradientPanel, { type GradApply } from './lib/GradientPanel.svelte';
+  import { renderGradient, strokeColorAt, cssGradient, type GradientSettings, type GradRepeat } from './lib/gradient';
   import { recognize } from './lib/shapes';
+  import TraceDialog from './lib/TraceDialog.svelte';
   import type { NewProjectResult } from './lib/NewProjectDialog.svelte';
-  import { cleanLine, renderVectorLayer, renderVectorRegion, changedArea, eraseStrokes, mapStroke, drawStroke, strokeBounds, drawLivePiece, exactLine, hitStroke, strokesInBox, smoothStroke, simplifyStroke, setPressures, densifyStroke, nodeCount, type VecLayer, type VecStroke, type VPt, type EraseMode } from './lib/vector';
+  import { cleanLine, renderVectorLayer, renderVectorRegion, changedArea, eraseStrokes, mapStroke, drawStroke, strokeBounds, drawLivePiece, exactLine, fillBounds, insideFill, mapFill, type VecFill, hitStroke, strokesInBox, smoothStroke, simplifyStroke, setPressures, densifyStroke, nodeCount, nearestNode, moveNode, deleteNode, insertNode, keyNodes, type VecLayer, type VecStroke, type VPt, type EraseMode } from './lib/vector';
   import { applyPrintPreview, type ColorMode } from './lib/color';
   import { exportAs, type ExportOptions } from './lib/export';
   import {
@@ -24,10 +27,12 @@
     type SymmetryMode,
     type PtMap,
   } from './lib/symmetry';
-  import { saveToLibrary, loadFromLibrary, newId, canvasToBlob } from './lib/library';
+  import { saveToLibrary, loadFromLibrary, newId, canvasToBlob, listBrushes, saveBrushes, deleteBrush } from './lib/library';
   import { floodFill, expandMask } from './lib/fill';
-  import { saveProject, exportPNG, exportPSD, openAnyFile, ACCEPT, type ProjectData } from './lib/fileio';
-  import { PRESETS, ERASER_PRESETS, settingsOf, getDab, getPaper, type BrushSettings } from './lib/brush';
+  import { saveProject, exportPNG, exportPSD, openAnyFile, ACCEPT, download, type ProjectData } from './lib/fileio';
+  import BrushLibrary from './lib/BrushLibrary.svelte';
+  import { brushFile, imageToTip, type ImportedBrush } from './lib/brushimport';
+  import { PRESETS, ERASER_PRESETS, settingsOf, getDab, getPaper, ensureTip, isShaped, dabShape, stampDab, jitterColor, pickVariant, hasStrokeEdges, applyStrokeEdges, type BrushSettings, type BrushPreset } from './lib/brush';
 
   // Document size (chosen in New project, or taken from an opened file)
   let docW = $state(2000);
@@ -35,7 +40,7 @@
   let projectName = $state('Untitled');
   const MAX_HISTORY = 50;
 
-  type Tool = 'brush' | 'eraser' | 'picker' | 'fill' | 'lassoFill' | 'select' | 'move' | 'vselect';
+  type Tool = 'brush' | 'eraser' | 'picker' | 'fill' | 'lassoFill' | 'select' | 'move' | 'vselect' | 'gradient';
   type Layer = {
     id: number;
     name: string;
@@ -204,6 +209,43 @@
   let strokeVector = false; // the current stroke is on a vector layer
   let vecPreviewDirty = false;
 
+  // Your own brushes (saved or imported) and the brush library window
+  type MyBrush = BrushPreset & { id: string; source?: string };
+  let myBrushes = $state.raw<MyBrush[]>([]);
+  let libOpen = $state(false);
+  let libTab = $state<'mine' | 'import' | 'community'>('mine');
+
+  // Auto trace window (raster layer → new vector layer)
+  let traceFor = $state<null | { layerId: number; bounds: Rect }>(null);
+  let vselF = $state.raw<VecFill[]>([]); // selected color shapes (vector select tool)
+
+  // Gradient tool and painting with a gradient
+  let grad = $state<GradientSettings>({
+    stops: [
+      { pos: 0, color: '#222222', alpha: 1 },
+      { pos: 1, color: '#222222', alpha: 0 },
+    ],
+    shape: 'linear',
+    repeat: 'none',
+    smooth: true,
+    dither: true,
+    opacity: 1,
+  });
+  let gradApply = $state<GradApply>({ target: 'new', where: 'drawing', blend: 'Normal' });
+  let color2 = $state('#ffffff');
+  let gradDrag = $state<null | { p0: { x: number; y: number }; p1: { x: number; y: number } }>(null);
+  let gradCanvas: HTMLCanvasElement | null = null; // the gradient being placed (doc size)
+  let gradAutoStops = JSON.stringify([
+    { pos: 0, color: '#222222', alpha: 1 },
+    { pos: 1, color: '#222222', alpha: 0 },
+  ]); // the starting "color → transparent" follows the current color until you change it
+  let gradBaseEmpty = false; // "only on the drawing" but there is no drawing: put it everywhere
+  let gradMixCtx: CanvasRenderingContext2D | null = null; // layer + gradient, for "into this layer"
+  let gradBrush = $state(false); // paint with the gradient
+  let gradBrushLen = $state(600); // px for one run of the gradient along a stroke
+  let gradBrushRepeat = $state<GradRepeat>('mirror');
+  let curDabD = 0; // distance along the stroke of the dab being drawn
+
   // Hold to straighten: keep the pen still at the end of a line and it becomes a clean shape
   let holdShapes = $state(true);
   let shapeLocked = false; // the line already became a shape; the pen no longer changes it
@@ -218,15 +260,34 @@
   // plain object on purpose: Svelte state would wrap the lines and break "same line" checks
   let vselBox = $state<null | { x0: number; y0: number; x1: number; y1: number }>(null); // box being dragged
   let vselDrag: null | {
-    mode: 'move' | 'box';
+    mode: 'move' | 'box' | 'node';
+    node?: { s: VecStroke; k: number }; // the grabbed node (node mode)
+    dbl?: boolean; // second press of a double-click: acts on release if the pen didn't move
     start: { x: number; y: number };
     cur: { x: number; y: number };
     before: VecLayer; // layer when the drag started
     shown: VecLayer; // what is on screen now
     picked: VecStroke[]; // the selected lines when the drag started
+    pickedF: VecFill[]; // and the selected color shapes
     moved: boolean;
     add: boolean;
   } = null;
+  const NODE_GAP = 28; // screen px between the node handles shown on dense lines
+  let nodeSoft = $state(0); // node dragging: nearby nodes within this many px follow
+  let vselLast = { t: 0, x: 0, y: 0 }; // for double-click on a line (adds a node)
+  let vselLayerId = 0;
+  // A selection belongs to one layer: switching or deleting the layer drops it
+  $effect(() => {
+    const id = activeId;
+    const visible = activeLayer?.visible;
+    if (id !== vselLayerId || visible === false) {
+      vselLayerId = id;
+      vsel = [];
+      vselF = [];
+      vselBox = null;
+      vselDrag = null;
+    }
+  });
   let prDense: VecStroke | null = null; // pressure editing works on a finely pointed copy
   let prBefore: VecLayer | null = null;
   let vecRaw: VPt[] = []; // the points of the current vector stroke
@@ -522,6 +583,7 @@
     window.addEventListener('keydown', onKey);
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', releaseKeys);
+    loadMyBrushes();
     window.addEventListener('dragover', onWindowDragOver);
     window.addEventListener('drop', onWindowDrop);
     window.addEventListener('paste', onPaste);
@@ -626,11 +688,20 @@
     const blit = (c: CanvasRenderingContext2D, img: CanvasImageSource) => c.drawImage(img, A.x, A.y, A.w, A.h, A.x, A.y, A.w, A.h);
     const strokeView = live && drawing && !directStroke ? previewStrokeLayer(A) : null;
     const xfView = live && xf ? previewTransform() : null;
+    // while placing a gradient: shown as an extra layer, or mixed into the active layer
+    const gv = live && gradDrag && gradCanvas ? gradientPlan() : null;
+    const gradInto = gv && gv.into ? gradientMixed(gv.into) : null;
     const surface = (l: Layer): CanvasImageSource => {
       if (strokeView && l.id === strokeLayerId) return strokeView;
       if (xfView && xf && l.id === xf.layerId) return xfView;
+      if (gradInto && gv?.into && l.id === gv.into.id) return gradInto;
       return l.canvas;
     };
+    let list = layers;
+    if (gv && gv.layer) {
+      list = [...layers];
+      list.splice(gv.index, 0, gv.layer);
+    }
 
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
@@ -644,11 +715,11 @@
 
     // Walk up the stack; each normal layer may have clipped layers right above it
     let i = 0;
-    while (i < layers.length) {
-      const base = layers[i];
+    while (i < list.length) {
+      const base = list[i];
       let j = i + 1;
-      while (j < layers.length && layers[j].clip) j++;
-      const clipped = layers.slice(i + 1, j).filter((c) => c.visible && c.id !== excludeId);
+      while (j < list.length && list[j].clip) j++;
+      const clipped = list.slice(i + 1, j).filter((c) => c.visible && c.id !== excludeId);
 
       if (base.visible && base.id !== excludeId) {
         let image: CanvasImageSource = surface(base);
@@ -877,6 +948,10 @@
       vselDown(e, pt);
       return;
     }
+    if (activeTool === 'gradient') {
+      gradDown(e, pt);
+      return;
+    }
     down(e);
   }
 
@@ -902,6 +977,10 @@
     }
     if (vselDrag) {
       vselMove(toDoc(e.clientX, e.clientY));
+      return;
+    }
+    if (gradDrag) {
+      gradMove(toDoc(e.clientX, e.clientY), e.shiftKey);
       return;
     }
     if (selDraft) {
@@ -930,6 +1009,10 @@
     }
     if (vselDrag) {
       vselUp();
+      return;
+    }
+    if (gradDrag) {
+      gradUp();
       return;
     }
     if (selDraft) {
@@ -1018,6 +1101,8 @@
     ropeEnd = { ...pt };
     vecDrawn = 0;
     vecDist = [];
+    dabLast = [];
+    ensureTip(brush, () => render());
     shapeLocked = false;
     shapeClosed = false;
     penPts = [{ x: pt.x, y: pt.y, p: pt.p }];
@@ -1134,6 +1219,8 @@
       }
     } else {
       before = ctx.getImageData(x, y, w, h);
+      // wet brushes: the stroke gets its ragged outline and darker rim as it "dries"
+      if (strokeTool !== 'eraser' && hasStrokeEdges(brush)) applyStrokeEdges(strokeCtx, x, y, w, h, brush);
       ctx.globalAlpha = brush.opacity;
       ctx.globalCompositeOperation = strokeTool === 'eraser' ? 'destination-out' : 'source-over';
       ctx.drawImage(strokeSource(layer, { x, y, w, h }), x, y, w, h, x, y, w, h);
@@ -1194,6 +1281,7 @@
       ends: shapeClosed ? 'round' : brush.ends,
       taper: brush.taper,
       opacity: brush.opacity,
+      ...(gradBrush ? { grad: { stops: $state.snapshot(grad.stops), smooth: grad.smooth, length: gradBrushLen, repeat: gradBrushRepeat } } : {}),
     };
   }
 
@@ -1247,6 +1335,7 @@
       // eraser size is the same on screen as the brush cursor
       const paths = maps.map((f) => vecRaw.map((q) => ({ ...f(q), r: radiusAt(q.p) })));
       let strokes = v.strokes;
+      let fills = v.fills;
       let changed = false;
       for (const path of paths) {
         const next = eraseStrokes(strokes, path, vecEraseMode, v.width);
@@ -1254,8 +1343,16 @@
           strokes = next;
           changed = true;
         }
+        // "Whole lines" also removes color shapes the eraser touches
+        if (vecEraseMode === 'whole' && fills?.length) {
+          const kept = fills.filter((f) => !path.some((q) => insideFill(f, q.x, q.y)));
+          if (kept.length !== fills.length) {
+            fills = kept;
+            changed = true;
+          }
+        }
       }
-      if (changed) setVector(layer, { ...v, strokes });
+      if (changed) setVector(layer, { ...v, strokes, fills });
       else requestFrame();
       return;
     }
@@ -1335,6 +1432,7 @@
     if (prev) strokeLen += Math.hypot(pt.x - prev.x, pt.y - prev.y);
     const dab = { ...pt, d: strokeLen };
     dabs.push(dab);
+    curDabD = dab.d;
     // While drawing only the start can be tapered; the end is tapered when the stroke ends
     drawDab(dab, taperAt(dab.d, Infinity));
   }
@@ -1359,7 +1457,7 @@
         mixP = st.p;
         lastSample = st.ls;
       }
-      drawMixDab(pt, factor);
+      drawMixDab(pt, factor, copy);
       if (st) {
         st.p = mixP;
         st.ls = lastSample;
@@ -1367,12 +1465,45 @@
       return;
     }
     const r = Math.max(radiusAt(pt.p) * factor, 0.3);
-    const tip = getDab(strokeTool === 'eraser' ? '#000000' : color, brush.hardness);
+    const dir = dabDirection(pt, copy);
+    let dabColor = color;
+    let dabAlpha = 1;
+    if (gradBrush && strokeTool !== 'eraser') {
+      // painting with the gradient: the color depends on how far along the stroke we are
+      const q = Math.round(curDabD / 6) * 6; // a few dozen colors are enough and keep it fast
+      const c = strokeColorAt(grad.stops, grad.smooth, q, gradBrushLen, gradBrushRepeat);
+      dabColor = c.hex;
+      dabAlpha = c.alpha;
+    }
+    if (brush.colorJitter > 0 && strokeTool !== 'eraser') dabColor = jitterColor(dabColor, brush.colorJitter);
+    const tip = getDab(strokeTool === 'eraser' ? '#000000' : dabColor, brush, pickVariant(brush));
     // Light pressure still leaves some paint (25%), like a real pencil or pen
-    strokeCtx.globalAlpha = brush.flow * (brush.opacityPressure ? 0.25 + 0.75 * pt.p : 1);
-    strokeCtx.drawImage(tip, pt.x - r, pt.y - r, r * 2, r * 2);
+    const alpha = dabAlpha * brush.flow * (brush.opacityPressure ? 0.25 + 0.75 * pt.p : 1);
+    if (!isShaped(brush)) {
+      strokeCtx.globalAlpha = alpha;
+      strokeCtx.drawImage(tip, pt.x - r, pt.y - r, r * 2, r * 2);
+      strokeCtx.globalAlpha = 1;
+      grow(pt.x - r - 2, pt.y - r - 2, pt.x + r + 2, pt.y + r + 2);
+      return;
+    }
+    // shaped tips: turned, squashed, scattered and jittered
+    const sh = dabShape(brush, r, dir);
+    const x = pt.x + sh.ox, y = pt.y + sh.oy;
+    strokeCtx.globalAlpha = alpha * sh.alpha;
+    stampDab(strokeCtx, tip, x, y, sh.r, sh.a, brush.roundness);
     strokeCtx.globalAlpha = 1;
-    grow(pt.x - r - 2, pt.y - r - 2, pt.x + r + 2, pt.y + r + 2);
+    const R = sh.r * 1.45 + 2;
+    grow(x - R, y - R, x + R, y + R);
+  }
+
+  // Direction the stroke is going at this dab (each mirrored copy keeps its own)
+  let dabLast: ({ x: number; y: number; a: number } | null)[] = [];
+  function dabDirection(pt: { x: number; y: number }, copy: number) {
+    const prev = dabLast[copy];
+    let a = prev ? prev.a : 0;
+    if (prev && Math.hypot(pt.x - prev.x, pt.y - prev.y) > 0.5) a = Math.atan2(pt.y - prev.y, pt.x - prev.x);
+    if (!prev || Math.hypot(pt.x - prev.x, pt.y - prev.y) > 0.5) dabLast[copy] = { x: pt.x, y: pt.y, a };
+    return a;
   }
 
   // ---------- Color mixing ----------
@@ -1416,7 +1547,7 @@
     for (let i = 0; i < 4; i++) mixP[i] += (sample[i] - mixP[i]) * amount;
   }
 
-  function drawMixDab(pt: Point, factor: number) {
+  function drawMixDab(pt: Point, factor: number, copy = 0) {
     const layer = layers.find((l) => l.id === strokeLayerId);
     if (!layer) return;
     const r = Math.max(radiusAt(pt.p) * factor, 0.5);
@@ -1447,10 +1578,15 @@
     t.globalCompositeOperation = 'source-over';
     t.globalAlpha = 1;
     t.clearRect(0, 0, t.canvas.width, t.canvas.height);
-    const tip = getDab('#ffffff', brush.hardness);
-    t.drawImage(tip, 0, 0, r * 2, r * 2); // left: mask
+    const tip = getDab('#ffffff', brush, pickVariant(brush));
+    // the tip turned with the stroke (bristles, flat brushes), squashed by roundness
+    const ang =
+      (brush.angle * Math.PI) / 180 +
+      (brush.followDirection ? dabDirection(pt, copy) : 0) +
+      (brush.angleJitter > 0 ? (Math.random() - 0.5) * 2 * Math.PI * brush.angleJitter : 0);
+    stampDab(t, tip, r, r, r, ang, brush.roundness); // left: mask
     t.globalAlpha = a;
-    t.drawImage(tip, size, 0, r * 2, r * 2); // right: paint with its transparency
+    stampDab(t, tip, size + r, r, r, ang, brush.roundness); // right: paint with its transparency
     t.globalAlpha = 1;
     t.globalCompositeOperation = 'source-atop';
     t.fillStyle = `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
@@ -1493,6 +1629,8 @@
       // Redraw the whole stroke with both ends tapered, filling gaps where dabs got small
       strokeCtx.clearRect(0, 0, docW, docH);
       const total = strokeLen;
+      curDabD = 0;
+      dabLast = [];
       drawDab(dabs[0], taperAt(0, total));
       for (let i = 1; i < dabs.length; i++) {
         const a = dabs[i - 1];
@@ -1504,6 +1642,7 @@
         for (let j = 1; j <= n; j++) {
           const t = j / n;
           const d = a.d + (b.d - a.d) * t;
+          curDabD = d;
           drawDab({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, p: a.p + (b.p - a.p) * t }, taperAt(d, total));
         }
       }
@@ -2324,10 +2463,9 @@
   function layerBounds(l: Layer) {
     if (isVector(l)) {
       const v = vecData.get(l.id);
-      if (!v || !v.strokes.length) return null;
+      if (!v || (!v.strokes.length && !v.fills?.length)) return null;
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-      for (const s of v.strokes) {
-        const b = strokeBounds(s, v.width);
+      for (const b of [...v.strokes.map((s) => strokeBounds(s, v.width)), ...(v.fills ?? []).map(fillBounds)]) {
         x0 = Math.min(x0, b.x);
         y0 = Math.min(y0, b.y);
         x1 = Math.max(x1, b.x + b.w);
@@ -2375,7 +2513,8 @@
       if (!v || !b) return showNotice('This layer is empty.');
       const dx = how === 'v' ? 0 : Math.round(toX - (b.x + b.w / 2));
       const dy = how === 'h' ? 0 : Math.round(toY - (b.y + b.h / 2));
-      if (dx || dy) setVector(layer, { ...v, strokes: v.strokes.map((s) => mapStroke(s, (p) => ({ x: p.x + dx, y: p.y + dy }))) });
+      const by = (p: { x: number; y: number }) => ({ x: p.x + dx, y: p.y + dy });
+      if (dx || dy) setVector(layer, { ...v, strokes: v.strokes.map((s) => mapStroke(s, by)), fills: v.fills?.map((f) => mapFill(f, by)) });
       return;
     }
     if (!startTransform(false) || !xf) return;
@@ -2482,6 +2621,304 @@
     vecWidthBefore = null;
   }
 
+  // ---------- Gradient tool ----------
+  // Drag from start to end. The gradient goes on a new layer (default, your drawing is not
+  // touched and the gradient stays easy to change) or into the active layer, everywhere or
+  // only on what is already drawn, with any mix mode.
+
+  function gradDown(e: PointerEvent, pt: { x: number; y: number }) {
+    if (activeId !== PAPER_ID) {
+      const l = activeLayer;
+      if (!l) return;
+      if (!l.visible) return showNotice('This layer is hidden. Show it (👁) first.');
+    }
+    capture(e);
+    // untouched starting gradient: use the color you have picked now
+    const now = JSON.stringify($state.snapshot(grad.stops));
+    if (now === gradAutoStops) {
+      grad.stops = [
+        { pos: 0, color, alpha: 1 },
+        { pos: 1, color, alpha: 0 },
+      ];
+      gradAutoStops = JSON.stringify($state.snapshot(grad.stops));
+    }
+    gradDrag = { p0: pt, p1: pt };
+    gradCanvas = null;
+    // "Only on the drawing" follows the layer the gradient sits on (the bottom of a
+    // clipping group). If that layer is empty there's nothing to follow.
+    let i = activeId === PAPER_ID ? -1 : activeIndex();
+    while (i > 0 && layers[i].clip) i--;
+    const base = i >= 0 ? layers[i] : null;
+    gradBaseEmpty = !base || !layerBounds(base);
+  }
+
+  function gradMove(pt: { x: number; y: number }, shift: boolean) {
+    const d = gradDrag;
+    if (!d) return;
+    let p1 = pt;
+    if (shift) {
+      // straight angles: every 15°
+      const a = Math.round(Math.atan2(pt.y - d.p0.y, pt.x - d.p0.x) / (Math.PI / 12)) * (Math.PI / 12);
+      const len = Math.hypot(pt.x - d.p0.x, pt.y - d.p0.y);
+      p1 = { x: d.p0.x + Math.cos(a) * len, y: d.p0.y + Math.sin(a) * len };
+    }
+    gradDrag = { p0: d.p0, p1 };
+    // quick small version while dragging
+    gradCanvas = gradientCanvas(Math.min(1, 640 / Math.max(docW, docH)));
+    render();
+  }
+
+  // The gradient as a doc-size picture (inside the selection only, if there is one)
+  function gradientCanvas(scale: number) {
+    const d = gradDrag!;
+    const g = renderGradient(docW, docH, d.p0, d.p1, $state.snapshot(grad) as GradientSettings, scale);
+    const c = makeCanvas();
+    const ctx = c.getContext('2d')!;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(g, 0, 0, docW, docH);
+    if (hasSel) {
+      ctx.globalCompositeOperation = 'destination-in';
+      ctx.drawImage(selCtx.canvas, 0, 0);
+      ctx.globalCompositeOperation = 'source-over';
+    }
+    return c;
+  }
+
+  // Where the gradient goes: a new layer (with its index) or into an existing layer
+  function gradientPlan(): { layer?: Layer; index: number; into?: Layer } {
+    const l = activeId === PAPER_ID ? null : activeLayer;
+    const asNew = !l || gradApply.target === 'new' || isVector(l);
+    if (!asNew && l) return { into: l, index: activeIndex() };
+    const index = l ? activeIndex() + 1 : 0;
+    const virtual: Layer = {
+      id: -50,
+      name: 'Gradient',
+      canvas: gradCanvas!,
+      visible: true,
+      opacity: grad.opacity,
+      blend: gradApply.blend as BlendMode,
+      // "only on the drawing": clipped to the layer under it, so the drawing keeps its shape
+      clip: !!l && gradApply.where === 'drawing' && !gradBaseEmpty,
+      lockAlpha: false,
+      kind: 'raster',
+    };
+    return { layer: virtual, index };
+  }
+
+  // The layer with the gradient mixed into it
+  function gradientMixed(l: Layer): HTMLCanvasElement {
+    if (!gradMixCtx || gradMixCtx.canvas.width !== docW || gradMixCtx.canvas.height !== docH) gradMixCtx = makeCanvas().getContext('2d')!;
+    const m = gradMixCtx;
+    m.globalCompositeOperation = 'source-over';
+    m.globalAlpha = 1;
+    m.clearRect(0, 0, docW, docH);
+    m.drawImage(l.canvas, 0, 0);
+    m.globalAlpha = grad.opacity;
+    m.globalCompositeOperation = opOf(gradApply.blend as BlendMode);
+    m.drawImage(gradCanvas!, 0, 0);
+    m.globalAlpha = 1;
+    if ((gradApply.where === 'drawing' && !gradBaseEmpty) || l.lockAlpha) {
+      // keep exactly the shape (transparency) the layer had
+      m.globalCompositeOperation = 'destination-in';
+      m.drawImage(l.canvas, 0, 0);
+    }
+    m.globalCompositeOperation = 'source-over';
+    return m.canvas;
+  }
+
+  function gradUp() {
+    const d = gradDrag;
+    if (!d) return;
+    if (Math.hypot(d.p1.x - d.p0.x, d.p1.y - d.p0.y) < 2) {
+      gradDrag = null;
+      gradCanvas = null;
+      render();
+      return showNotice('Drag from where the gradient starts to where it ends.');
+    }
+    gradCanvas = gradientCanvas(1); // full quality
+    const plan = gradientPlan();
+    if (plan.layer) {
+      const l = makeLayer();
+      l.name = 'Gradient';
+      l.canvas.getContext('2d')!.drawImage(gradCanvas, 0, 0);
+      l.opacity = plan.layer.opacity;
+      l.blend = plan.layer.blend;
+      l.clip = plan.layer.clip;
+      const keep = activeId;
+      insertAt(l, plan.index);
+      push({ type: 'add', layer: l, index: plan.index });
+      // stay on the drawing so the next gradient also goes on it
+      if (keep !== PAPER_ID) activeId = keep;
+    } else if (plan.into) {
+      const mixed = gradientMixed(plan.into);
+      editLayerPixels(plan.into, fullRect(), (ctx) => {
+        ctx.clearRect(0, 0, docW, docH);
+        ctx.drawImage(mixed, 0, 0);
+      });
+    }
+    gradDrag = null;
+    gradCanvas = null;
+    thumbTick++;
+    render();
+    if (gradApply.where === 'drawing' && gradBaseEmpty) {
+      showNotice('This layer has no drawing yet, so the gradient was put everywhere. Pick the layer with your drawing for "Only on the drawing".');
+    }
+  }
+
+  // ---------- My brushes ----------
+
+  async function loadMyBrushes() {
+    try {
+      const list = await listBrushes();
+      myBrushes = list.map((b) => ({
+        ...settingsOf(b.settings as Partial<BrushPreset>),
+        name: b.name,
+        category: 'My brushes',
+        about: b.about ?? (b.source ? `Imported from ${b.source}` : 'Your brush'),
+        id: b.id,
+        source: b.source,
+      }));
+    } catch {
+      // no browser storage (private window): the built-in brushes still work
+    }
+  }
+
+  // Brush names must be different from each other (they are how a brush is picked)
+  function uniqueNames(names: string[]) {
+    const taken = new Set([...PRESETS.map((p) => p.name), ...myBrushes.map((b) => b.name)]);
+    return names.map((n) => {
+      let name = n || 'Brush', k = 2;
+      while (taken.has(name)) name = `${n} (${k++})`;
+      taken.add(name);
+      return name;
+    });
+  }
+
+  async function saveCurrentBrush() {
+    const n = prompt('Name for your brush', `My ${preset}`)?.trim();
+    if (!n) return;
+    const [name] = uniqueNames([n]);
+    try {
+      await saveBrushes([{ id: newId(), name, category: 'My brushes', about: `Based on ${preset}`, created: Date.now(), settings: $state.snapshot(brush) as Record<string, unknown> }]);
+      await loadMyBrushes();
+      preset = name;
+      showNotice(`Saved "${name}" in My brushes.`);
+    } catch (e) {
+      alert(`Could not save the brush: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  // The selected part of the active layer (or the whole layer) becomes the brush tip
+  async function tipFromCanvas() {
+    const l = activeLayer;
+    if (!l || l.id === PAPER_ID) return showNotice('Pick a layer with a drawing on it first.');
+    const src = makeCanvas();
+    const c = src.getContext('2d')!;
+    c.drawImage(l.canvas, 0, 0);
+    if (hasSel) {
+      c.globalCompositeOperation = 'destination-in';
+      c.drawImage(selCtx.canvas, 0, 0);
+      c.globalCompositeOperation = 'source-over';
+    }
+    const box = contentBounds(src);
+    if (!box) return showNotice(hasSel ? 'Nothing is drawn inside the selection.' : 'This layer is empty. Draw the tip shape on it (or select part of a drawing).');
+    // a square around it, so the tip keeps its proportions
+    const side = Math.max(box.w, box.h);
+    const k = Math.min(1, 512 / side);
+    const crop = document.createElement('canvas');
+    crop.width = crop.height = Math.max(1, Math.round(side * k));
+    crop.getContext('2d')!.drawImage(src, box.x - (side - box.w) / 2, box.y - (side - box.h) / 2, side, side, 0, 0, crop.width, crop.height);
+    const blob = await new Promise<Blob | null>((r) => crop.toBlob(r, 'image/png'));
+    if (!blob) return;
+    const t = await imageToTip(blob);
+    Object.assign(brush, { tip: 'image', tipImage: t.tip, tipId: 'sel' + Date.now().toString(36), hardness: 1, size: Math.max(2, Math.min(500, Math.round(side))) });
+    ensureTip(brush, () => thumbTick++);
+    if (tool !== 'brush') tool = 'brush';
+    showNotice('Your drawing is now the brush tip. Save it with ★ Save as my brush.');
+  }
+
+  async function addImportedBrushes(list: ImportedBrush[]) {
+    const names = uniqueNames(list.map((b) => b.name));
+    const now = Date.now();
+    await saveBrushes(
+      list.map((b, i) => ({
+        id: newId(),
+        name: names[i],
+        category: 'My brushes',
+        about: b.about ?? `Imported from ${b.source}`,
+        source: b.source,
+        created: now + i,
+        settings: JSON.parse(JSON.stringify(b.settings)) as Record<string, unknown>,
+      })),
+    );
+    await loadMyBrushes();
+    showNotice(`Added ${list.length} brush${list.length === 1 ? '' : 'es'} to My brushes.`);
+  }
+
+  function useMyBrush(b: MyBrush) {
+    if (tool !== 'brush') tool = 'brush';
+    preset = b.name;
+    Object.assign(brush, { tipImage: undefined, tipId: undefined }, settingsOf(b));
+    ensureTip(brush, () => render());
+    libOpen = false;
+  }
+
+  async function renameMyBrush(id: string, name: string) {
+    const list = await listBrushes();
+    const b = list.find((x) => x.id === id);
+    if (!b) return;
+    const [n] = uniqueNames([name]);
+    if (preset === b.name) preset = n;
+    b.name = n;
+    await saveBrushes([b]);
+    await loadMyBrushes();
+  }
+
+  async function deleteMyBrush(id: string) {
+    await deleteBrush(id);
+    await loadMyBrushes();
+  }
+
+  async function exportMyBrushes(ids: string[]) {
+    const list = (await listBrushes()).filter((b) => ids.includes(b.id));
+    if (!list.length) return;
+    download(
+      brushFile(list.map((b) => ({ name: b.name, about: b.about, settings: b.settings as Partial<BrushSettings> }))),
+      list.length === 1 ? `${list[0].name}.seviathbrush` : 'my-brushes.seviathbrush',
+    );
+  }
+
+  // ---------- Auto trace ----------
+
+  function openTrace() {
+    funcMenu = false;
+    if (xf) applyTransform();
+    const l = activeId === PAPER_ID ? null : activeLayer;
+    if (!l) return showNotice('Select the layer to trace.');
+    if (isVector(l)) return showNotice('This is already a vector layer. Pick a pixel layer to trace.');
+    const b = contentBounds(l.canvas);
+    if (!b) return showNotice('This layer is empty.');
+    traceFor = { layerId: l.id, bounds: b };
+  }
+
+  function finishTrace(r: { layer: VecLayer; hideOriginal: boolean; name: string } | null) {
+    const t = traceFor;
+    traceFor = null;
+    if (!r || !t) return;
+    const orig = layers.find((x) => x.id === t.layerId);
+    const index = orig ? layers.indexOf(orig) + 1 : layers.length;
+    const l = makeLayer();
+    l.kind = 'vector';
+    l.name = r.name;
+    vecData.set(l.id, r.layer);
+    drawVector(l);
+    insertAt(l, index);
+    push({ type: 'add', layer: l, index });
+    if (r.hideOriginal && orig) changeLayer(orig, () => (orig.visible = false));
+    render();
+    showNotice(`Traced: ${r.layer.strokes.length} lines, ${r.layer.fills?.length ?? 0} color shapes. Edit them with Vector select (A).`);
+  }
+
   // ---------- Vector select tool ----------
   // Click a line to select it (Shift adds), drag a box around lines, drag selected lines to
   // move them. The panel then edits them: color, width, pressure, smoothing, nodes.
@@ -2504,14 +2941,49 @@
     const lv = vecLayerOrNotice();
     if (!lv) return;
     capture(e);
+    const now = performance.now();
+    const dbl = now - vselLast.t < 350 && Math.hypot(pt.x - vselLast.x, pt.y - vselLast.y) < 8 / zoom;
+    vselLast = { t: now, x: pt.x, y: pt.y };
+    // nodes of the selected lines come first: drag one to reshape the line,
+    // Alt+click (or double-click) removes it
+    if (vsel.length && vsel.length <= 20 && !e.shiftKey) {
+      const node = e.ctrlKey || e.metaKey ? null : nearestNode(vsel, pt.x, pt.y, 4.5 / zoom, NODE_GAP / zoom);
+      if (node) {
+        if (e.altKey) {
+          if (node.s.pts.length <= 6) return showNotice('A line needs at least 2 nodes. Use Delete to remove the whole line.');
+          const n = deleteNode(node.s, node.k);
+          setVector(lv.l, { ...lv.v, strokes: lv.v.strokes.map((s) => (s === node.s ? n : s)) });
+          vsel = vsel.map((s) => (s === node.s ? n : s));
+          vselLast.t = 0;
+          return;
+        }
+        vselDrag = { mode: 'node', node, start: pt, cur: pt, before: lv.v, shown: lv.v, picked: vsel, pickedF: vselF, moved: false, add: false, dbl };
+        return;
+      }
+    }
     const hit = hitStroke(lv.v.strokes, pt.x, pt.y, 6 / zoom, lv.v.width);
+    // no line there: maybe a color shape (the top-most one under the pen)
+    const fillHit = hit ? null : ([...(lv.v.fills ?? [])].reverse().find((f) => insideFill(f, pt.x, pt.y)) ?? null);
+    if (fillHit) {
+      if (e.shiftKey) vselF = vselF.includes(fillHit) ? vselF.filter((f) => f !== fillHit) : [...vselF, fillHit];
+      else if (!vselF.includes(fillHit)) {
+        vselF = [fillHit];
+        vsel = [];
+      }
+      vselDrag = { mode: 'move', start: pt, cur: pt, before: lv.v, shown: lv.v, picked: vsel, pickedF: vselF, moved: false, add: e.shiftKey };
+      return;
+    }
+    if (hit && !e.shiftKey && !vsel.includes(hit)) vselF = [];
     if (hit) {
       if (e.shiftKey) vsel = vsel.includes(hit) ? vsel.filter((s) => s !== hit) : [...vsel, hit];
       else if (!vsel.includes(hit)) vsel = [hit];
-      vselDrag = { mode: 'move', start: pt, cur: pt, before: lv.v, shown: lv.v, picked: vsel, moved: false, add: e.shiftKey };
+      vselDrag = { mode: 'move', start: pt, cur: pt, before: lv.v, shown: lv.v, picked: vsel, pickedF: vselF, moved: false, add: e.shiftKey, dbl: dbl && !e.shiftKey };
     } else {
-      if (!e.shiftKey) vsel = [];
-      vselDrag = { mode: 'box', start: pt, cur: pt, before: lv.v, shown: lv.v, picked: vsel, moved: false, add: e.shiftKey };
+      if (!e.shiftKey) {
+        vsel = [];
+        vselF = [];
+      }
+      vselDrag = { mode: 'box', start: pt, cur: pt, before: lv.v, shown: lv.v, picked: vsel, pickedF: vselF, moved: false, add: e.shiftKey };
     }
   }
 
@@ -2527,11 +2999,30 @@
     const dx = Math.round((pt.x - d.start.x) * 2) / 2, dy = Math.round((pt.y - d.start.y) * 2) / 2;
     if (!d.moved && Math.hypot(dx, dy) < 2 / zoom) return;
     d.moved = true;
-    const map = new Map(d.picked.map((s) => [s, mapStroke(s, (q) => ({ x: q.x + dx, y: q.y + dy }))]));
-    const next = { ...d.before, strokes: d.before.strokes.map((s) => map.get(s) ?? s) };
+    if (d.mode === 'node' && d.node) {
+      const src = d.node.s;
+      // on dense freehand lines the hidden nodes up to the next handles follow too
+      const dense = src.pts.length / 3 > keyNodes(src, NODE_GAP / zoom).length;
+      const moved = moveNode(src, d.node.k, pt.x - d.start.x, pt.y - d.start.y, Math.max(nodeSoft, dense ? (NODE_GAP * 1.6) / zoom : 0));
+      const next = { ...d.before, strokes: d.before.strokes.map((s) => (s === src ? moved : s)) };
+      const area = showVector(l, d.shown, next);
+      d.shown = next;
+      vsel = d.picked.map((s) => (s === src ? moved : s));
+      render(area);
+      return;
+    }
+    const shift = (q: { x: number; y: number }) => ({ x: q.x + dx, y: q.y + dy });
+    const map = new Map(d.picked.map((s) => [s, mapStroke(s, shift)]));
+    const fmap = new Map(d.pickedF.map((f) => [f, mapFill(f, shift)]));
+    const next = {
+      ...d.before,
+      strokes: d.before.strokes.map((s) => map.get(s) ?? s),
+      fills: d.before.fills?.map((f) => fmap.get(f) ?? f),
+    };
     const area = showVector(l, d.shown, next);
     d.shown = next;
     vsel = d.picked.map((s) => map.get(s)!);
+    vselF = d.pickedF.map((f) => fmap.get(f)!);
     render(area);
   }
 
@@ -2541,10 +3032,12 @@
     vselBox = null;
     const l = activeLayer;
     if (!d || !l) return;
-    if (d.mode === 'move') {
+    if (d.mode === 'move' || d.mode === 'node') {
       if (d.moved) {
         push({ type: 'vector', layerId: l.id, before: d.before, after: d.shown });
         render({ x: 0, y: 0, w: 0, h: 0 });
+      } else if (d.dbl) {
+        vselDouble(l, d.before, d.node ?? null, d.start);
       }
       return;
     }
@@ -2557,6 +3050,24 @@
     if (box.w < 2 / zoom && box.h < 2 / zoom) return;
     const inside = strokesInBox(d.before.strokes, box);
     vsel = d.add ? [...new Set([...vsel, ...inside])] : inside;
+  }
+
+  // Double-click: on a node removes it, on a selected line adds a node there
+  function vselDouble(l: Layer, v: VecLayer, node: { s: VecStroke; k: number } | null, pt: { x: number; y: number }) {
+    vselLast.t = 0;
+    let from: VecStroke, to: VecStroke;
+    if (node) {
+      if (node.s.pts.length <= 6) return showNotice('A line needs at least 2 nodes. Use Delete to remove the whole line.');
+      from = node.s;
+      to = deleteNode(node.s, node.k);
+    } else {
+      const hit = hitStroke(vsel, pt.x, pt.y, 6 / zoom, v.width);
+      if (!hit) return;
+      from = hit;
+      to = insertNode(hit, pt.x, pt.y).s;
+    }
+    setVector(l, { ...v, strokes: v.strokes.map((s) => (s === from ? to : s)) });
+    vsel = vsel.map((s) => (s === from ? to : s));
   }
 
   // Changes the selected lines (or every line when none is selected), one undo step
@@ -2578,10 +3089,36 @@
 
   function deleteLines() {
     const lv = vecLayerOrNotice();
-    if (!lv || !vsel.length) return;
+    if (!lv || (!vsel.length && !vselF.length)) return;
     const gone = new Set(vsel);
-    setVector(lv.l, { ...lv.v, strokes: lv.v.strokes.filter((s) => !gone.has(s)) });
+    const goneF = new Set(vselF);
+    setVector(lv.l, { ...lv.v, strokes: lv.v.strokes.filter((s) => !gone.has(s)), fills: lv.v.fills?.filter((f) => !goneF.has(f)) });
     vsel = [];
+    vselF = [];
+  }
+
+  // Recolors the selected lines and color shapes (everything when nothing is selected)
+  function recolorSelected() {
+    const lv = vecLayerOrNotice();
+    if (!lv) return;
+    const all = !vsel.length && !vselF.length;
+    const ls = new Set(vsel), fs = new Set(vselF);
+    const lmap = new Map<VecStroke, VecStroke>(), fmap = new Map<VecFill, VecFill>();
+    const strokes = lv.v.strokes.map((s) => {
+      if (!all && !ls.has(s)) return s;
+      const n = { ...s, color, grad: undefined };
+      lmap.set(s, n);
+      return n;
+    });
+    const fills = lv.v.fills?.map((f) => {
+      if (!all && !fs.has(f)) return f;
+      const n = { ...f, color };
+      fmap.set(f, n);
+      return n;
+    });
+    setVector(lv.l, { ...lv.v, strokes, fills });
+    vsel = vsel.map((s) => lmap.get(s) ?? s);
+    vselF = vselF.map((f) => fmap.get(f) ?? f);
   }
 
   function duplicateLines() {
@@ -3248,6 +3785,8 @@
         else vecData.set(e.layerId, to);
         const still = new Set(to.strokes);
         vsel = vsel.filter((s) => still.has(s));
+        const stillF = new Set(to.fills ?? []);
+        vselF = vselF.filter((f) => stillF.has(f));
         break;
       }
       case 'doc': {
@@ -3313,7 +3852,7 @@
     if (target.tagName === 'INPUT' && (target.type === 'text' || target.type === 'number')) return;
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
-    if (adjusting || newDialog || showProjects || exportDialog) return; // the dialog handles its own keys
+    if (adjusting || newDialog || showProjects || exportDialog || traceFor || libOpen) return; // the dialog handles its own keys
 
     // While a shape is being drawn: Enter closes it, Esc cancels, Ctrl+Z removes the last part
     if (selDraft) {
@@ -3378,7 +3917,7 @@
       else selectAll();
       return;
     }
-    if (activeTool === 'vselect' && vsel.length) {
+    if (activeTool === 'vselect' && (vsel.length || vselF.length)) {
       if (key === 'delete' || key === 'backspace') {
         e.preventDefault();
         deleteLines();
@@ -3386,6 +3925,7 @@
       }
       if (key === 'escape') {
         vsel = [];
+        vselF = [];
         return;
       }
       const step = e.shiftKey ? 10 : 1;
@@ -3431,7 +3971,8 @@
       deselect();
     } else if (key === 'alt') {
       e.preventDefault();
-      altDown = true;
+      // in Vector select, Alt+click removes nodes instead of picking a color
+      if (tool !== 'vselect') altDown = true;
     } else if (key === ' ') {
       e.preventDefault();
       spaceDown = true;
@@ -3467,6 +4008,8 @@
       resetRotation();
     } else if (!mod && key === 'h') {
       toggleFlip();
+    } else if (!mod && key === 'g' && e.shiftKey) {
+      tool = 'gradient';
     } else if (!mod && key === 'g') {
       tool = 'fill';
     } else if (!mod && key === 'm') {
@@ -3501,7 +4044,7 @@
 
   // ---------- Toolbar menus ----------
 
-  type ItemId = 'brush' | 'eraser' | 'fill' | 'lassoFill' | 'lassoSel' | 'picker' | 'select' | 'move' | 'vselect';
+  type ItemId = 'brush' | 'eraser' | 'fill' | 'lassoFill' | 'lassoSel' | 'picker' | 'select' | 'move' | 'vselect' | 'gradient';
   type Item = { id: ItemId; icon: string; label: string; key: string; title: string };
   const TOOL_ITEMS: Item[] = [
     { id: 'brush', icon: '🖌', label: 'Brush', key: 'B', title: 'Paint with the chosen brush' },
@@ -3510,6 +4053,7 @@
     { id: 'lassoFill', icon: '⬠', label: 'Lasso fill', key: 'Shift L', title: 'Draw a shape to fill it. Hold Ctrl to erase the shape' },
     { id: 'lassoSel', icon: '✎', label: 'Lasso', key: 'L', title: 'Lasso selection: draw around an area' },
     { id: 'picker', icon: '💧', label: 'Picker', key: 'I / Alt', title: 'Pick a color from the canvas' },
+    { id: 'gradient', icon: '🌈', label: 'Gradient', key: 'Shift G', title: 'Drag to put a gradient on the drawing or a new layer' },
     { id: 'vselect', icon: '◇', label: 'Vector select', key: 'A', title: 'Select, move and edit lines on a vector layer' },
   ];
   const FUNC_ITEMS: Item[] = [
@@ -3639,6 +4183,8 @@
               <span>{MODE_LABEL[m]}</span>{#if m === 'off'}<kbd>Y cycles</kbd>{/if}
             </button>
           {/each}
+          <hr />
+          <button role="menuitem" onclick={openTrace} title="Turns the active pixel layer into editable vector lines and color shapes"><span>✒ Auto trace → vector…</span></button>
           <hr />
           <div class="menu-title">Center the layer</div>
           <button role="menuitem" onclick={() => centerLayer('both')} title="Moves the drawing (or the selected part) to the middle of the canvas"><span>⊕ Center on canvas</span></button>
@@ -3826,6 +4372,11 @@
         >
         <p class="hint small-note">Softens the outline of what is already drawn on the active layer. Set the amount with Feather above.</p>
       </div>
+    {:else if activeTool === 'gradient'}
+      <div class="panel-head">🌈 Gradient</div>
+      <div class="tool-options">
+        <GradientPanel bind:grad bind:apply={gradApply} bind:color bind:color2 blends={BLEND_NAMES} vectorActive={isVector(activeLayer)} />
+      </div>
     {:else if activeTool === 'vselect'}
       <div class="panel-head">◇ Vector select</div>
       <div class="tool-options">
@@ -3833,14 +4384,16 @@
           <p class="hint">Pick a vector layer (VECTOR in the layer list) or make one with ✒. This tool selects and edits its lines.</p>
         {:else}
           <p class="hint small-note">
-            {vsel.length ? `${vsel.length} line${vsel.length === 1 ? '' : 's'} selected` : 'Nothing selected: the buttons change every line on the layer'}
+            {vsel.length || vselF.length
+              ? `${vsel.length} line${vsel.length === 1 ? '' : 's'}${vselF.length ? `, ${vselF.length} color shape${vselF.length === 1 ? '' : 's'}` : ''} selected`
+              : 'Nothing selected: the buttons change every line on the layer'}
           </p>
           <div class="btn-grid two">
             <button onclick={selectAllLines}>Select all <kbd>Ctrl A</kbd></button>
             <button onclick={() => (vsel = [])} disabled={!vsel.length}>Deselect <kbd>Esc</kbd></button>
-            <button onclick={deleteLines} disabled={!vsel.length}>Delete <kbd>Del</kbd></button>
+            <button onclick={deleteLines} disabled={!vsel.length && !vselF.length}>Delete <kbd>Del</kbd></button>
             <button onclick={duplicateLines} disabled={!vsel.length}>Duplicate</button>
-            <button onclick={() => editLines((s) => ({ ...s, color }))} title="Paint the lines with the current color">
+            <button onclick={recolorSelected} title="Paint the selected lines and color shapes with the current color">
               <span class="dot" style="background: {color}"></span> Recolor
             </button>
             <button onclick={() => flipLines('h')} disabled={!vsel.length}>⇋ Flip</button>
@@ -3857,6 +4410,13 @@
             <button onclick={() => editLines((s) => simplifyStroke(s, 1.2))} title="Fewer points, same look (reduce nodes)">Fewer nodes</button>
             <button onclick={() => editLines((s) => ({ ...s, ends: s.ends === 'taper' ? 'round' : 'taper' }))} title="Pointed or round ends">Ends ◁ ⇄ ◖</button>
           </div>
+          <div class="panel-sub">Nodes</div>
+          <label class="opt" title="0 = only the grabbed node moves. Higher = nearby nodes follow smoothly (good for freehand lines with many nodes)">
+            <span>Soft pull</span>
+            <input type="range" min="0" max="200" step="1" bind:value={nodeSoft} />
+            <span class="val">{nodeSoft ? nodeSoft + ' px' : 'off'}</span>
+          </label>
+          <p class="hint small-note">Drag a ▫ node to reshape a selected line, drag the line between nodes (or hold <b>Ctrl</b>) to move it. Double-click a line to add a node, double-click or <b>Alt</b>+click a node to remove it.</p>
           {#if prSource}
             <div class="panel-sub">Pressure of the first selected line (drag up = thicker)</div>
             <PressureEditor pts={prSource.pts} onchange={pressureChange} />
@@ -3910,10 +4470,44 @@
         </div>
       {/if}
       <div class="panel-head">{tool === 'eraser' ? 'Eraser' : 'Brush'}</div>
+      {#if tool === 'brush'}
+        <label class="hold-check" title="The color changes along each stroke, using the colors of the Gradient tool (Shift G)">
+          <input type="checkbox" bind:checked={gradBrush} /> Paint with the gradient
+        </label>
+        {#if gradBrush}
+          <div class="grad-brush">
+            <div class="mini-bar" style="background: {cssGradient(grad.stops, grad.smooth)}"></div>
+            <label class="opt">
+              <span>Length</span>
+              <input type="range" min="20" max="4000" step="10" bind:value={gradBrushLen} />
+              <span class="val">{gradBrushLen}px</span>
+            </label>
+            <div class="seg3">
+              <button class:on={gradBrushRepeat === 'none'} onclick={() => (gradBrushRepeat = 'none')}>Once</button>
+              <button class:on={gradBrushRepeat === 'repeat'} onclick={() => (gradBrushRepeat = 'repeat')}>Repeat</button>
+              <button class:on={gradBrushRepeat === 'mirror'} onclick={() => (gradBrushRepeat = 'mirror')}>Back & forth</button>
+            </div>
+            <button class="wide" onclick={() => (tool = 'gradient')}>Edit gradient colors…</button>
+          </div>
+        {/if}
+      {/if}
       <label class="hold-check" title="Draw a line, circle, rectangle, triangle or polygon by hand and keep the pen still for a moment at the end: it becomes clean and straight">
         <input type="checkbox" bind:checked={holdShapes} /> Hold still at the end to straighten (line, circle, box…)
       </label>
-      <BrushPanel bind:brush bind:preset eraser={tool === 'eraser'} />
+      <BrushPanel
+        bind:brush
+        bind:preset
+        eraser={tool === 'eraser'}
+        mine={myBrushes}
+        {color}
+        onsave={saveCurrentBrush}
+        ontipfromcanvas={tipFromCanvas}
+        hasSelection={hasSel}
+        onlibrary={(t) => {
+          libTab = t ?? 'mine';
+          libOpen = true;
+        }}
+      />
     {/if}
   </aside>
 
@@ -3940,7 +4534,7 @@
       class:pixelated={zoom >= 2}
       style="width: {docW * zoom}px; height: {docH * zoom}px; transform-origin: {(docW * zoom) / 2}px {(docH * zoom) / 2}px; transform: translate({panX}px, {panY}px) rotate({rotation}deg) scaleX({flipped ? -1 : 1});"
     ></canvas>
-    {#if hasSel || selDraft || xf || sym.mode !== 'off' || (activeTool === 'vselect' && (vsel.length || vselBox))}
+    {#if hasSel || selDraft || xf || sym.mode !== 'off' || (activeTool === 'vselect' && (vsel.length || vselF.length || vselBox)) || gradDrag}
       {@const sw = 1.5 / zoom}
       {@const dash = 6 / zoom}
       <svg
@@ -3949,15 +4543,26 @@
         preserveAspectRatio="none"
         style="width: {docW * zoom}px; height: {docH * zoom}px; transform-origin: {(docW * zoom) / 2}px {(docH * zoom) / 2}px; transform: translate({panX}px, {panY}px) rotate({rotation}deg) scaleX({flipped ? -1 : 1}); --dash: {dash}px;"
       >
+        {#if gradDrag}
+          <line class="sym-axis-bg" x1={gradDrag.p0.x} y1={gradDrag.p0.y} x2={gradDrag.p1.x} y2={gradDrag.p1.y} stroke-width={sw * 3} />
+          <line class="sym-axis" x1={gradDrag.p0.x} y1={gradDrag.p0.y} x2={gradDrag.p1.x} y2={gradDrag.p1.y} stroke-width={sw * 1.5} />
+          <circle class="sym-handle" cx={gradDrag.p0.x} cy={gradDrag.p0.y} r={6 / zoom} stroke-width={sw} />
+          <circle class="sym-handle" cx={gradDrag.p1.x} cy={gradDrag.p1.y} r={6 / zoom} stroke-width={sw} />
+        {/if}
         {#if activeTool === 'vselect'}
           {#each vsel as s, i (i)}
             {@const pts = Array.from({ length: s.pts.length / 3 }, (_, k) => `${s.pts[k * 3]},${s.pts[k * 3 + 1]}`).join(' ')}
             <polyline class="vsel-line" points={pts} stroke-width={sw * 1.5} />
             {#if vsel.length <= 20}
-              {#each Array.from({ length: Math.min(s.pts.length / 3, 400) }) as _, k (k)}
-                <rect class="vsel-node" x={s.pts[k * 3] - 2.5 / zoom} y={s.pts[k * 3 + 1] - 2.5 / zoom} width={5 / zoom} height={5 / zoom} stroke-width={sw} />
+              {#each keyNodes(s, NODE_GAP / zoom).slice(0, 600) as k (k)}
+                <rect class="vsel-node" x={s.pts[k * 3] - 3 / zoom} y={s.pts[k * 3 + 1] - 3 / zoom} width={6 / zoom} height={6 / zoom} stroke-width={sw} />
               {/each}
             {/if}
+          {/each}
+          {#each vselF as f, i (i)}
+            {#each f.rings as ring, k (k)}
+              <polygon class="vsel-line" points={Array.from({ length: ring.length / 2 }, (_, j) => `${ring[j * 2]},${ring[j * 2 + 1]}`).join(' ')} stroke-width={sw * 1.5} />
+            {/each}
           {/each}
           {#if vselBox}
             <rect
@@ -4233,6 +4838,27 @@
   <NewProjectDialog ondone={newProject} />
 {/if}
 
+{#if libOpen}
+  <BrushLibrary
+    bind:tab={libTab}
+    mine={myBrushes}
+    {color}
+    onuse={useMyBrush}
+    onrename={renameMyBrush}
+    ondelete={deleteMyBrush}
+    onexport={exportMyBrushes}
+    onadd={addImportedBrushes}
+    onclose={() => (libOpen = false)}
+  />
+{/if}
+
+{#if traceFor}
+  {@const src = layers.find((x) => x.id === traceFor!.layerId)}
+  {#if src}
+    <TraceDialog source={src.canvas} bounds={traceFor.bounds} layerName={src.name} ondone={finishTrace} />
+  {/if}
+{/if}
+
 {#if exportDialog}
   <ExportDialog width={docW} height={docH} dpi={docDpi} {colorMode} initial={exportOpts} ondone={finishExport} />
 {/if}
@@ -4278,6 +4904,8 @@
     <button role="menuitem" onclick={() => menuDo(addVectorLayer)}>New vector layer above</button>
     {#if activeLayer.kind === 'vector'}
       <button role="menuitem" onclick={() => menuDo(rasterizeLayer)}>Rasterize (turn into pixels)</button>
+    {:else}
+      <button role="menuitem" onclick={() => menuDo(openTrace)}>Auto trace → vector…</button>
     {/if}
     <button role="menuitem" onclick={() => menuDo(() => addShadingLayer('shadow'))}>New shadow layer (Multiply)</button>
     <button role="menuitem" onclick={() => menuDo(() => addShadingLayer('light'))}>New light layer (Add)</button>
@@ -4805,6 +5433,17 @@
     border-radius: 50%;
     border: 1px solid #666;
     vertical-align: -1px;
+  }
+  .grad-brush {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+  .mini-bar {
+    height: 12px;
+    border-radius: 3px;
+    border: 1px solid #555;
   }
   .hold-check {
     display: flex;
