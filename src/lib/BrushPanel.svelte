@@ -11,13 +11,19 @@
     settingsOf,
     remixBrushes,
     surpriseBrush,
+    RANDOM_KINDS,
+    type RandomKind,
     renderBrushPreview,
     ensureTip,
     getTipMask,
+    getTexture,
+    TEXTURES,
+    warmTip,
     type BrushSettings,
     type BrushPreset,
   } from './brush';
   import TipPad from './TipPad.svelte';
+  import { toABR, toKPP, tipPNG } from './brushexport';
 
   type MyBrush = BrushPreset & { id: string; source?: string };
 
@@ -70,16 +76,30 @@
   // 🎲 A random brush, ready to draw with. `part` randomizes only one group of settings.
   const PARTS = {
     tip: ['tip', 'shapeBase', 'sides', 'starInner', 'roundness', 'angle', 'followDirection', 'hardness'],
-    edges: ['edge', 'edgeAmount', 'edgeDetail', 'wetRim', 'grain', 'variants', 'seed'],
-    random: ['scatter', 'sizeJitter', 'angleJitter', 'opacityJitter', 'colorJitter', 'spacing'],
+    edges: ['edge', 'edgeAmount', 'edgeDetail', 'wetRim', 'grain', 'variants', 'seed', 'streaks', 'deform'],
+    random: ['scatter', 'sizeJitter', 'angleJitter', 'opacityJitter', 'colorJitter', 'spacing', 'particles', 'particleSize'],
   } as const;
+  let randomKind = $state<RandomKind>('paint');
+  const KIND_ICONS: Record<RandomKind, string> = {
+    paint: '🎨', watercolor: '💧', oil: '🖌', gouache: '🟫', dry: '🌾', ink: '🖋', pen: '✒', pencil: '✏', pastel: '🖍', marker: '🖊', airbrush: '💨', texture: '🧵', rough: '🪨', particles: '✴', fx: '✨',
+  };
+  const SHORT: Partial<Record<RandomKind, string>> = { paint: 'Any paint', oil: 'Oil', pencil: 'Pencil', pastel: 'Pastel', ink: 'Ink brush', rough: 'Rough' };
+  // build the tip versions in the background whenever the tip or its edges change
+  let warmTimer = 0;
+  $effect(() => {
+    const s = $state.snapshot(brush) as BrushSettings;
+    clearTimeout(warmTimer);
+    warmTimer = window.setTimeout(() => warmTip(s), 120);
+  });
+  const kindLabel = (k: RandomKind) => SHORT[k] ?? RANDOM_KINDS.find((x) => x.id === k)?.label ?? k;
   function surprise(part?: keyof typeof PARTS) {
     remixFrom = null;
-    const r = surpriseBrush() as Record<string, unknown>;
+    const r = surpriseBrush(randomKind) as Record<string, unknown>;
     if (eraser) r.colorJitter = 0;
     if (!part) {
-      Object.assign(brush, { tipImage: undefined, tipId: undefined }, r);
-      preset = 'Random brush'; // a new brush: save it with ★ Save as my brush to keep it
+      // your brush size stays: only the kind of brush changes
+      Object.assign(brush, { tipImage: undefined, tipId: undefined }, r, { size: brush.size });
+      preset = 'Random ' + (RANDOM_KINDS.find((k) => k.id === randomKind)?.label.toLowerCase() ?? 'brush'); // save it with ★ to keep it
       return;
     }
     // an image tip stays unless the tip itself is randomized
@@ -93,6 +113,41 @@
     remixFrom = null;
   }
 
+  // ---- texture from your own picture
+  let texInput = $state<HTMLInputElement>();
+  function pickTexture() {
+    texInput?.click();
+  }
+  function loadTexture(f: File | undefined) {
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      brush.texImage = r.result as string;
+      brush.texKind = 'custom';
+      if (brush.texture < 0.2) brush.texture = 0.6;
+      getTexture(brush, () => (brush.texScale = brush.texScale)); // redraw the previews once it has loaded
+    };
+    r.readAsDataURL(f);
+  }
+
+  // ---- saving the brush for other programs
+  let exporting = $state('');
+  async function exportAs(kind: 'abr' | 'kpp' | 'png') {
+    exporting = kind;
+    try {
+      const s = $state.snapshot(brush) as BrushSettings;
+      const name = preset || 'My brush';
+      const blob = kind === 'abr' ? await toABR([{ name, settings: s }]) : kind === 'kpp' ? await toKPP(name, s) : await tipPNG(s, 512);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = name.replace(/[\\/:*?"<>|]+/g, '_') + (kind === 'png' ? '_tip.png' : '.' + kind);
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    } finally {
+      exporting = '';
+    }
+  }
+
   // Opens the share window (brush card, shared library, send to apps)
   function share() {
     onshare?.(preset || 'My brush', current?.about, $state.snapshot(brush) as BrushSettings);
@@ -101,8 +156,9 @@
   function choose(p: BrushPreset) {
     preset = p.name;
     remixFrom = null;
-    // clear image tips from the previous brush, then take every setting of the new one
-    Object.assign(brush, { tipImage: undefined, tipId: undefined }, settingsOf(p));
+    // clear image tips from the previous brush, then take every setting of the new one,
+    // keeping the size you are drawing with
+    Object.assign(brush, { tipImage: undefined, tipId: undefined, texImage: undefined }, settingsOf(p), { size: brush.size });
     ensureTip(brush);
   }
 
@@ -197,6 +253,7 @@
       <button onclick={() => onlibrary?.('mine')} title="Your brushes, import, and brushes shared by others">📚 Library…</button>
       <button onclick={() => onlibrary?.('import')} title="Photoshop .abr, Krita .kpp / .bundle, Clip Studio .sut, PNG">⇪ Import</button>
     </div>
+
   {/if}
 
   <label>
@@ -253,11 +310,26 @@
       </div>
     {/if}
   {/if}
+  <div class="texrow">
+    <span>Texture</span>
+    <select bind:value={brush.texKind} title="The surface the paint takes: paper, hair, skin, cloth…" onchange={() => brush.texKind === 'custom' && !brush.texImage && pickTexture()}>
+      {#each TEXTURES as t (t.id)}<option value={t.id}>{t.icon} {t.label}</option>{/each}
+    </select>
+    <button class="mini" onclick={pickTexture} title="Use your own picture as the texture (light parts take paint away)">🖼</button>
+  </div>
+  <input bind:this={texInput} type="file" accept="image/*" hidden onchange={(e) => loadTexture(e.currentTarget.files?.[0])} />
   <label>
-    <span>Paper texture</span>
+    <span>Texture amount</span>
     <input type="range" min="0" max="1" step="0.01" bind:value={brush.texture} />
     <span class="val">{pct(brush.texture)}</span>
   </label>
+  {#if brush.texture > 0 && (brush.texKind ?? 'paper') !== 'paper'}
+    <label>
+      <span>Texture size</span>
+      <input type="range" min="0.25" max="4" step="0.05" bind:value={brush.texScale} />
+      <span class="val">{Math.round((brush.texScale ?? 1) * 100)}%</span>
+    </label>
+  {/if}
   <label>
     <span>Min size</span>
     <input type="range" min="0" max="1" step="0.01" bind:value={brush.minSize} disabled={!brush.sizePressure} />
@@ -288,14 +360,26 @@
   <div class="checks">
     <label class="check"><input type="checkbox" bind:checked={brush.sizePressure} /> Pressure → size</label>
     <label class="check"><input type="checkbox" bind:checked={brush.opacityPressure} /> Pressure → opacity</label>
+    <label class="check" title="Off: crisp edges with no soft pixels (pixel art, clean flat colors for filling)"><input type="checkbox" bind:checked={brush.antialias} /> Anti-aliasing (smooth edges)</label>
   </div>
 
-  <button class="fold" onclick={() => (showTip = !showTip)}>{showTip ? '▾' : '▸'} Brush designer: tip, edges, randomness</button>
+  <button class="fold" class:open={showTip} onclick={() => (showTip = !showTip)} title="Tip shape, edges, randomness, draw your own tip, remix, share">
+    <span class="fold-icon">🛠</span>
+    <span class="fold-text"><b>Brush designer</b><small>tip · edges · randomize · make your own</small></span>
+    <span class="chev">{showTip ? '▲' : '▼'}</span>
+  </button>
   {#if showTip}
     <div class="tabs">
       <button class:on={tab === 'tip'} onclick={() => (tab = 'tip')}>Tip</button>
       <button class:on={tab === 'edges'} onclick={() => (tab = 'edges')}>Edges</button>
-      <button class:on={tab === 'random'} onclick={() => (tab = 'random')}>Random</button>
+      <button
+        class:on={tab === 'random'}
+        onclick={() => {
+          tab = 'random';
+          surprise();
+        }}
+        title="Makes a new random brush every time you press it"
+      >🎲 Randomize</button>
       <button class:on={tab === 'make'} onclick={() => (tab = 'make')}>✨ Make</button>
     </div>
 
@@ -369,6 +453,16 @@
         <input type="range" min="0" max="1" step="0.01" bind:value={brush.grain} />
         <span class="val">{pct(brush.grain)}</span>
       </label>
+      <label title="Lines along the stroke left by the bristles, like oil paint">
+        <span>Bristle marks</span>
+        <input type="range" min="0" max="1" step="0.01" bind:value={brush.streaks} />
+        <span class="val">{pct(brush.streaks)}</span>
+      </label>
+      <label title="Bends and warps the tip shape, every version differently (rocks, splotches, broken shapes)">
+        <span>Deform</span>
+        <input type="range" min="0" max="1" step="0.01" bind:value={brush.deform} />
+        <span class="val">{pct(brush.deform)}</span>
+      </label>
       <label title="How many different versions of the tip the brush switches between">
         <span>Variations</span>
         <input type="range" min="1" max="8" step="1" bind:value={brush.variants} />
@@ -381,12 +475,26 @@
         <button onclick={() => (brush.seed = Math.floor(Math.random() * 9999) + 1)} title="A new random pattern for the edges and grain">🎲 New pattern</button>
       </div>
     {:else if tab === 'random'}
-      <button class="dice big" onclick={() => surprise()} title="A completely new random brush. Just draw with it; keep pressing until you like one, then ★ Save as my brush">🎲 Randomize everything</button>
+      <p class="about">Change only one part of the brush you have now (whole new brushes: <b>Generate a brush</b> below):</p>
       <div class="dice-row">
         <button class="dice" onclick={() => surprise('tip')} title="New random tip shape, angle and roundness">🎲 Tip</button>
         <button class="dice" onclick={() => surprise('edges')} title="New random edges, wet rim and grain">🎲 Edges</button>
         <button class="dice" onclick={() => surprise('random')} title="New random scatter, jitter and spacing">🎲 Scatter</button>
       </div>
+      <div class="panel-sub">Particles (separate dots)</div>
+      <label title="0 = off. Each dab becomes this many separate small dabs: spray, dust, sparkles">
+        <span>Particles</span>
+        <input type="range" min="0" max="40" step="1" bind:value={brush.particles} />
+        <span class="val">{brush.particles || 'off'}</span>
+      </label>
+      {#if brush.particles > 0}
+        <label>
+          <span>Particle size</span>
+          <input type="range" min="0.03" max="0.8" step="0.01" bind:value={brush.particleSize} />
+          <span class="val">{pct(brush.particleSize)}</span>
+        </label>
+      {/if}
+      <div class="panel-sub">Randomness</div>
       <label title="Dabs spread out to the sides">
         <span>Scatter</span>
         <input type="range" min="0" max="3" step="0.01" bind:value={brush.scatter} />
@@ -427,6 +535,15 @@
           <button onclick={share} title="Share with everyone: in the shared library, as a picture that carries the brush, or to other apps">⇪ Share brush</button>
         {/if}
       </div>
+      {#if !eraser}
+        <div class="panel-sub">Save for other programs</div>
+        <div class="seg three">
+          <button onclick={() => exportAs('abr')} disabled={!!exporting} title="Photoshop brush. Clip Studio Paint imports it too: drag the .abr onto the Sub Tool palette">PS / CSP .abr</button>
+          <button onclick={() => exportAs('kpp')} disabled={!!exporting} title="Krita brush preset (tip included)">Krita .kpp</button>
+          <button onclick={() => exportAs('png')} disabled={!!exporting} title="The tip as a picture: CSP “Register material → brush tip”, Procreate, GIMP…">Tip .png</button>
+        </div>
+        <p class="about">Tip, size, spacing, angle, opacity and pressure go across. Effects only SeviathStudio has (wet rim, particles, textures) stay here.</p>
+      {/if}
       <div class="panel-sub">Remix with another brush</div>
       <select class="pick" bind:value={remixWith} onchange={() => (remixFrom = null)}>
         {#each all.filter((p) => p.name !== preset) as p (p.name)}
@@ -442,8 +559,27 @@
     {/if}
   {/if}
 
+  {#if !eraser}
+  <div class="gen">
+    <div class="gen-head">🎲 Generate a brush <span>press a kind again for another</span></div>
+    <div class="gen-grid">
+      {#each RANDOM_KINDS as k (k.id)}
+        <button
+          class:on={randomKind === k.id}
+          onclick={() => {
+            randomKind = k.id;
+            surprise();
+          }}
+          title={`A new random ${k.label.toLowerCase()} brush, ready to draw`}
+        >
+          <span class="gi">{KIND_ICONS[k.id]}</span>{kindLabel(k.id)}
+        </button>
+      {/each}
+    </div>
+  </div>
+  {/if}
+
   <div class="bottom-row">
-    <button onclick={() => surprise()} title="A completely new random brush, ready to draw">🎲 Random brush</button>
     <button onclick={reset} disabled={!current} title="Back to how this brush was">↺ Reset brush</button>
   </div>
   <p class="hint">Shift + click: straight line from the last point · [ ] change size</p>
@@ -603,10 +739,41 @@
     gap: 6px;
   }
   .fold {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     text-align: left;
-    background: none;
-    border-color: #3a3a44;
     margin-top: 4px;
+    padding: 8px 10px;
+    background: #23303a;
+    border: 1px solid #00b5c8;
+    color: #eee;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .fold:hover {
+    background: #2b3d49;
+  }
+  .fold.open {
+    background: #00b5c8;
+    color: #111;
+  }
+  .fold-icon {
+    font-size: 16px;
+  }
+  .fold-text {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    line-height: 1.2;
+  }
+  .fold-text small {
+    font-size: 10px;
+    opacity: 0.75;
+  }
+  .chev {
+    font-size: 10px;
   }
   .tip-box {
     display: flex;
@@ -671,12 +838,65 @@
     padding: 4px 2px;
     font-size: 11px;
   }
-  .dice.big {
-    background: linear-gradient(90deg, #00b5c8, #8a5cf6);
-    border: none;
-    color: #fff;
+  .gen {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, rgba(0, 181, 200, 0.12), rgba(138, 92, 246, 0.12));
+    border: 1px solid #3a3a50;
+  }
+  .gen-head {
     font-weight: 600;
-    padding: 8px;
+    color: #eee;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .gen-head span {
+    font-weight: 400;
+    font-size: 10px;
+    color: #888;
+  }
+  .gen-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 3px;
+  }
+  .gen-grid button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1px;
+    padding: 4px 1px;
+    font-size: 10px;
+    line-height: 1.15;
+  }
+  .gi {
+    font-size: 15px;
+  }
+  .texrow {
+    display: grid;
+    grid-template-columns: 76px 1fr 30px;
+    align-items: center;
+    gap: 6px;
+    color: #bbb;
+  }
+  .texrow select {
+    background: #15151a;
+    color: #eee;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 3px;
+    font-size: 11px;
+    min-width: 0;
+  }
+  .mini {
+    padding: 3px 0;
+  }
+  .seg.three {
+    grid-template-columns: repeat(3, 1fr);
   }
   .dice-row {
     display: grid;

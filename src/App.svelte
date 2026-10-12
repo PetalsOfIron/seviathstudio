@@ -37,7 +37,7 @@
   import SettingsDialog, { loadPrefs, savePrefs, mapPressure, comboOf, type Prefs } from './lib/SettingsDialog.svelte';
   import { cloudReady, watchAccount, onPasswordRecovery, type Account } from './lib/cloud';
   import { brushFile, imageToTip, type ImportedBrush } from './lib/brushimport';
-  import { PRESETS, ERASER_PRESETS, surpriseBrush, settingsOf, getDab, getPaper, ensureTip, isShaped, dabShape, stampDab, jitterColor, pickVariant, particleSpread, getTexture, setBrushPerf, brushPerf, previewIsLighter, hasEdgeEffects, hasStrokeEdges, applyStrokeEdges, type BrushSettings, type BrushPreset } from './lib/brush';
+  import { PRESETS, ERASER_PRESETS, surpriseBrush, settingsOf, getDab, getPaper, ensureTip, isShaped, dabShape, stampDab, jitterColor, pickVariant, particleSpread, getTexture, dirTexture, setBrushPerf, brushPerf, previewIsLighter, hasEdgeEffects, hasStrokeEdges, applyStrokeEdges, type BrushSettings, type BrushPreset } from './lib/brush';
 
   // Document size (chosen in New project, or taken from an opened file)
   let docW = $state(2000);
@@ -255,8 +255,8 @@
   // Gradient tool and painting with a gradient
   let grad = $state<GradientSettings>({
     stops: [
-      { pos: 0, color: '#222222', alpha: 1 },
-      { pos: 1, color: '#222222', alpha: 0 },
+      { pos: 0, color: '#3fb8e6', alpha: 1 },
+      { pos: 1, color: '#ffd93d', alpha: 1 },
     ],
     shape: 'linear',
     repeat: 'none',
@@ -275,7 +275,8 @@
   let gradBaseEmpty = false; // "only on the drawing" but there is no drawing: put it everywhere
   let gradMixCtx: CanvasRenderingContext2D | null = null; // layer + gradient, for "into this layer"
   let gradBrush = $state(false); // paint with the gradient
-  let gradBrushLen = $state(600); // px for one run of the gradient along a stroke
+  let gradBrushLen = $state(300); // screen px for one run of the gradient along a stroke (same feel at any zoom)
+  let strokeZoom = 1; // the zoom when the stroke started
   let gradBrushRepeat = $state<GradRepeat>('mirror');
   let gradBrushEdit = $state(false); // the gradient colors editor open in the brush panel
   let curDabD = 0; // distance along the stroke of the dab being drawn
@@ -1132,6 +1133,7 @@
     // the brush texture (paper grain, hair, cloth…). Paper grain shifts a little every stroke so
     // going over an area fills it in; other textures stay put so their pattern lines up.
     paperPattern = texturedCtx.createPattern(getTexture(brush, () => render()), 'repeat');
+    strokeZoom = zoom;
     grainOffset = (brush.texKind || 'paper') === 'paper' ? { x: Math.random() * 256, y: Math.random() * 256 } : { x: 0, y: 0 };
 
     strokeMaps = sym.mode === 'off' ? [] : symCopies(sym);
@@ -1146,7 +1148,7 @@
         // a picture of everything except this layer; the layer itself is read live on top of it
         compositeTo(refCtx, true, false, layer.id);
       }
-      const [r0, g0, b0] = hexRGB(gradBrush ? strokeColorAt(grad.stops, grad.smooth, 0, gradBrushLen, gradBrushRepeat).hex : color);
+      const [r0, g0, b0] = hexRGB(gradBrush ? strokeColorAt(grad.stops, grad.smooth, 0, gradBrushLen / strokeZoom, gradBrushRepeat).hex : color);
       mixP = [r0, g0, b0, 1];
       lastSample = { x: -1e9, y: -1e9 };
       // start with the color that's already under the brush (for every mirrored copy too)
@@ -1418,7 +1420,7 @@
       ends: shapeClosed ? 'round' : brush.ends,
       taper: brush.taper,
       opacity: brush.opacity,
-      ...(gradBrush ? { grad: { stops: $state.snapshot(grad.stops), smooth: grad.smooth, length: gradBrushLen, repeat: gradBrushRepeat } } : {}),
+      ...(gradBrush ? { grad: { stops: $state.snapshot(grad.stops), smooth: grad.smooth, length: gradBrushLen / zoom, repeat: gradBrushRepeat } } : {}),
     };
   }
 
@@ -1519,7 +1521,8 @@
   // The stroke as it should be added to the layer: with paper grain worn into it if the
   // brush has texture. The grain pattern is fixed to the canvas, so it never slides.
   function strokeSource(layer: Layer, A: Rect = { x: 0, y: 0, w: docW, h: docH }): HTMLCanvasElement {
-    const useTexture = brush.texture > 0 && paperPattern && !strokeVector;
+    // hair / fur textures are inside the tip (they follow the stroke), not on the canvas
+    const useTexture = brush.texture > 0 && paperPattern && !strokeVector && !dirTexture(brush);
     const useLock = layer.lockAlpha && strokeTool !== 'eraser' && !strokeVector;
     const useSel = hasSel && !strokeVector;
     if (!useTexture && !useLock && !useSel) return strokeCtx.canvas;
@@ -1562,6 +1565,7 @@
   function resetDabs() {
     dabs = [];
     strokeLen = 0;
+    sinceDab = 0;
   }
 
   function stamp(pt: Point) {
@@ -1608,7 +1612,7 @@
     if (gradBrush && strokeTool !== 'eraser') {
       // painting with the gradient: the color depends on how far along the stroke we are
       const q = Math.round(curDabD / 6) * 6; // a few dozen colors are enough and keep it fast
-      const c = strokeColorAt(grad.stops, grad.smooth, q, gradBrushLen, gradBrushRepeat);
+      const c = strokeColorAt(grad.stops, grad.smooth, q, gradBrushLen / strokeZoom, gradBrushRepeat);
       dabColor = c.hex;
       dabAlpha = c.alpha;
     }
@@ -1722,13 +1726,17 @@
     if (Math.hypot(pt.x - lastSample.x, pt.y - lastSample.y) >= Math.max(1, r * 0.4)) {
       // fresh paint from the brush slowly comes back, unless mix is 100%
       // (painting with the gradient: the paint color follows the gradient along the stroke)
-      const [br, bg, bb] = hexRGB(gradBrush && strokeTool !== 'eraser' ? strokeColorAt(grad.stops, grad.smooth, Math.round(curDabD / 6) * 6, gradBrushLen, gradBrushRepeat).hex : color);
+      const [br, bg, bb] = hexRGB(gradBrush && strokeTool !== 'eraser' ? strokeColorAt(grad.stops, grad.smooth, Math.round(curDabD / 6) * 6, gradBrushLen / strokeZoom, gradBrushRepeat).hex : color);
       const fresh = [br, bg, bb, 1];
       // Color mix % = how much of the paint comes from the canvas, the rest is your color.
       // A pure blender (≈100%) smears what it just picked up; paint mixing reads the layer
       // from before the stroke so it doesn't keep picking up its own fresh paint.
-      for (let i = 0; i < 4; i++) mixP[i] += (fresh[i] - mixP[i]) * (1 - brush.mix) * 0.3;
-      sampleCanvas(layer, pt, brush.mix * 0.3, brush.mix < 0.9);
+      // with the gradient the brush keeps reloading its new color strongly, so the gradient
+      // shows clearly even with mixing paints (oil, acrylic, gouache)
+      const g = gradBrush && strokeTool !== 'eraser' && brush.mix < 0.9;
+      const reload = g ? Math.max(0.5, 1 - brush.mix) * 0.6 : (1 - brush.mix) * 0.3;
+      for (let i = 0; i < 4; i++) mixP[i] += (fresh[i] - mixP[i]) * reload;
+      sampleCanvas(layer, pt, brush.mix * (g ? 0.12 : 0.3), brush.mix < 0.9);
       lastSample = { x: pt.x, y: pt.y };
     }
 
@@ -1749,7 +1757,7 @@
     // the tip turned with the stroke (bristles, flat brushes), squashed by roundness
     const ang =
       (brush.angle * Math.PI) / 180 +
-      (brush.followDirection ? dabDirection(pt, copy) : 0) +
+      (brush.followDirection || dirTexture(brush) ? dabDirection(pt, copy) : 0) +
       (brush.angleJitter > 0 ? (Math.random() - 0.5) * 2 * Math.PI * brush.angleJitter : 0);
     stampDab(t, tip, r, r, r, ang, brush.roundness); // left: mask
     t.globalAlpha = a;
@@ -1841,20 +1849,26 @@
   }
 
   // Places dabs evenly between two points, blending size and pressure along the way
+  // Dabs are placed every `spacing` along the line, carried over from one piece to the next,
+  // so short pieces (smooth curves, slow pens) never squeeze extra dabs in
+  let sinceDab = 0;
   function segment(a: Point, b: Point) {
     if (drawing && !replaying) vecRaw.push({ x: b.x, y: b.y, p: b.p });
     const dist = Math.hypot(b.x - a.x, b.y - a.y);
+    if (dist <= 1e-6) return;
     const r = radiusAt(Math.min(a.p, b.p)) * taperAt(strokeLen, Infinity);
     const step = Math.max(0.3, r * 2 * brush.spacing);
-    const n = Math.ceil(dist / step);
-    for (let i = 1; i <= n; i++) {
-      const t = i / n;
+    let d = Math.max(0, step - sinceDab);
+    while (d <= dist) {
+      const t = d / dist;
       stamp({
         x: a.x + (b.x - a.x) * t,
         y: a.y + (b.y - a.y) * t,
         p: a.p + (b.p - a.p) * t,
       });
+      d += step;
     }
+    sinceDab = dist - (d - step);
   }
 
   function grow(x0: number, y0: number, x1: number, y1: number) {
@@ -3043,9 +3057,15 @@
   }
 
   function useMyBrush(b: MyBrush) {
-    if (tool !== 'brush') tool = 'brush';
+    if (tool !== 'brush') {
+      tool = 'brush';
+      flushSync(); // switch the brush/eraser settings first, so they don't overwrite this brush
+    }
     preset = b.name;
-    Object.assign(brush, { tipImage: undefined, tipId: undefined }, settingsOf(b));
+    const { id, source, ...rest } = b;
+    void id;
+    void source;
+    Object.assign(brush, { tipImage: undefined, tipId: undefined, texImage: undefined }, settingsOf(rest), { size: brush.size });
     ensureTip(brush, () => render());
     libOpen = false;
   }
@@ -4194,7 +4214,7 @@
     randomBrush: () => {
       if (tool !== 'brush') tool = 'brush';
       flushSync();
-      Object.assign(brush, { tipImage: undefined, tipId: undefined }, surpriseBrush('paint'));
+      Object.assign(brush, { tipImage: undefined, tipId: undefined }, surpriseBrush('paint'), { size: brush.size });
       preset = 'Random brush';
     },
     mirror: () => setSymMode(nextMode(sym.mode)),
@@ -4676,9 +4696,9 @@
         {#if gradBrush}
           <div class="grad-brush">
             <div class="mini-bar" style="background: {cssGradient(grad.stops, grad.smooth)}"></div>
-            <label class="opt">
+            <label class="opt" title="How long a stroke takes to go through all the colors, measured on screen (feels the same at any zoom)">
               <span>Length</span>
-              <input type="range" min="20" max="4000" step="10" bind:value={gradBrushLen} />
+              <input type="range" min="40" max="1500" step="10" bind:value={gradBrushLen} />
               <span class="val">{gradBrushLen}px</span>
             </label>
             <div class="seg3">
