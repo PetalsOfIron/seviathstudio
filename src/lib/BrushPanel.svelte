@@ -10,6 +10,18 @@
 
   const pct = (x: number) => Math.round(x * 100) + '%';
 
+  // One line about what each brush is for
+  const ABOUT: Record<string, string> = {
+    Pen: 'Even line with a light grain, like a ballpoint pen.',
+    Ink: 'Sharp, clean lineart. Thin to thick with pen pressure.',
+    Pencil: 'Grainy pencil for sketching. Press harder for darker lines.',
+    Marker: 'Flat, see-through color that does not get darker where it overlaps itself.',
+    'Soft round': 'Soft edges for shading and smooth color.',
+    Blender: 'Adds no color. Smears and blends the colors already on this layer.',
+    'Paint mix': 'Wet paint: your color mixes with the colors already on this layer.',
+    Airbrush: 'Very soft spray that builds up slowly.',
+  };
+
   // Brush size uses a logarithmic slider: 0.5 px … 500 px, so small sizes are easy to hit
   const MIN = 0.5;
   const MAX = 500;
@@ -36,6 +48,10 @@
       <button class:on={preset === p.name} onclick={() => choose(p)}>{p.name}</button>
     {/each}
   </div>
+
+  {#if ABOUT[preset]}
+    <p class="about"><b>{preset}:</b> {ABOUT[preset]}</p>
+  {/if}
 
   <label>
     <span>Brush size</span>
@@ -134,6 +150,32 @@
     flex-direction: column;
     gap: 8px;
     font-size: 12px;
+  }
+  button {
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid #444;
+    background: #2b2b33;
+    color: #eee;
+    cursor: pointer;
+    font: inherit;
+  }
+  button:hover {
+    border-color: #666;
+  }
+  button.on {
+    background: #00b5c8;
+    border-color: #00b5c8;
+    color: #111;
+    font-weight: 600;
+  }
+  .about {
+    margin: 0 0 2px;
+    color: #999;
+    line-height: 1.4;
+  }
+  .about b {
+    color: #ddd;
   }
   .presets {
     display: grid;

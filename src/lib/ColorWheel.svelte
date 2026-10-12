@@ -93,7 +93,7 @@
   }
 
   function setRgb(i: number, value: number) {
-    const c: [number, number, number] = [...rgb];
+    const c: [number, number, number] = [rgb[0], rgb[1], rgb[2]];
     c[i] = clamp(Math.round(value || 0), 0, 255);
     color = rgbToHex(...c);
   }
