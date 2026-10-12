@@ -3,7 +3,7 @@
 
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, CursorIcon, Event, FontId, Key, Layout, Margin, Modifiers,
-    MouseWheelUnit, Panel, PointerButton, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, Ui, UiBuilder, Vec2,
+    MouseWheelUnit, Panel, PointerButton, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, TouchPhase, Ui, UiBuilder, Vec2,
     ecolor::Hsva, pos2, vec2,
 };
 
@@ -11,13 +11,16 @@ use crate::canvas::{self as cv, CanvasRenderer};
 use crate::colorpick;
 use crate::doc::{Document, LayerId, LayerKind};
 use crate::icons::Icon;
-use crate::paint::{self, DabParams, StrokeState};
+use crate::brush::engine::{Sample, Stroke as BrushStroke, StrokeResult};
 use crate::snake;
 use crate::theme::*;
 use crate::view::View;
-use crate::widgets::{self, icon_button, section_title, segmented, slider_row};
+use crate::widgets::{self, icon_button, section_title, segmented};
 
+mod brushes;
 mod layers;
+
+use brushes::BrushLib;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tool {
@@ -105,21 +108,6 @@ impl Tool {
     }
 }
 
-/// Brush categories and preset names, same as the web version's brush.ts.
-pub const CATEGORIES: &[(&str, &[&str])] = &[
-    ("Pens", &["Pen", "Ink", "G-pen", "Maru pen", "Gel pen", "Fineliner", "Brush pen", "Dip pen", "Double line pen", "Sumi ink brush", "Calligraphy", "Anime lineart", "Hair strands"]),
-    ("Pencils", &["Pencil", "Soft pencil 2B", "Dark pencil 6B", "Mechanical", "Colored pencil", "Charcoal", "Pastel", "Wax crayon", "Rough pencil"]),
-    ("Markers", &["Marker", "Highlighter", "Alcohol marker", "Outline marker"]),
-    ("Paint", &["Oil paint", "Acrylic", "Gouache", "Oil flat", "Oil filbert", "Oil fan", "Palette knife", "Impasto", "Gouache flat", "Dry gouache", "Outlined gouache", "Fuzzy bristle", "Dry brush", "Paint mix", "Cel shade", "Flat chisel", "Gloss highlight"]),
-    ("Watercolor", &["Watercolor", "Watercolor wash", "Watercolor bloom", "Transparent watercolor", "Dark rim watercolor", "Wet blending watercolor", "Dry watercolor", "Granulating watercolor", "Flat wash brush", "Watercolor liner", "Bleeding watercolor", "Mottled wash", "Dried ring watercolor", "Salt watercolor", "Watercolor splatter", "Watercolor dots"]),
-    ("Airbrush", &["Soft round", "Airbrush", "Hard airbrush", "Grainy airbrush", "Spray paint", "Splatter", "Soft blush"]),
-    ("Blend", &["Blender", "Smudge", "Bristle blender", "Hair blend", "Fur blend", "Finger tip", "Textured blend", "Soft blur", "Water blend"]),
-    ("Textures", &["Hair texture", "Fur texture", "Skin texture", "Cloth / linen", "Denim", "Knit wool", "Leather", "Scales", "Wood grain", "Stone / concrete", "Canvas oil", "Watercolor paper", "Grunge texture", "Crosshatch shading", "Halftone shading"]),
-    ("Rough & particles", &["Grunge stamp", "Dust particles", "Speckle spray", "Rough rock", "Splotch", "Crosshatch", "Dry scratch", "Particle sparkle"]),
-    ("Nature & FX", &["Leaves", "Grass", "Clouds", "Sparkles", "Hearts", "Confetti", "Scale stamps", "Glass sparkle", "Fur", "Hair strands brush"]),
-    ("My brushes", &[]),
-];
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SubTab {
     Navigator,
@@ -128,14 +116,7 @@ enum SubTab {
 
 pub struct DrawState {
     pub tool: Tool,
-    category: usize,
-    brush: usize,
-    pub size: f32,
-    opacity: f32,
-    flow: f32,
-    hardness: f32,
-    spacing: f32,
-    stabilizer: f32,
+    lib: BrushLib,
     pub primary: Color32,
     secondary: Color32,
     hsv: Hsva,
@@ -158,7 +139,10 @@ pub struct DrawState {
     view: View,
     view_ready: bool,
     renderer: CanvasRenderer,
-    stroke: StrokeState,
+    stroke: Option<BrushStroke>,
+    pen_stroke: bool, // the stroke in progress comes from a pen (has pressure)
+    /// What the last finished stroke changed (for undo).
+    pub last_stroke: Option<StrokeResult>,
     rotate_raw: f32,
     canvas_rect: Rect,
     cursor_doc: Option<Pos2>,
@@ -170,14 +154,7 @@ impl Default for DrawState {
         let doc = Document::new(3000, 4000);
         Self {
             tool: Tool::Brush,
-            category: 0,
-            brush: 0,
-            size: 8.0,
-            opacity: 95.0,
-            flow: 90.0,
-            hardness: 85.0,
-            spacing: 6.0,
-            stabilizer: 20.0,
+            lib: BrushLib::default(),
             primary: Color32::from_rgb(34, 34, 34),
             secondary: Color32::WHITE,
             hsv: Hsva::from(Color32::from_rgb(34, 34, 34)),
@@ -211,7 +188,9 @@ impl Default for DrawState {
             view: View::default(),
             view_ready: false,
             renderer: CanvasRenderer::default(),
-            stroke: StrokeState::default(),
+            stroke: None,
+            pen_stroke: false,
+            last_stroke: None,
             rotate_raw: 0.0,
             canvas_rect: Rect::NOTHING,
             cursor_doc: None,
@@ -225,7 +204,7 @@ impl DrawState {
         let mut s = format!(
             "{} · {} · {}×{} px · {:.0}%",
             self.tool.name(),
-            CATEGORIES[self.category].1.get(self.brush).copied().unwrap_or("—"),
+            self.brush_name(),
             self.doc.w,
             self.doc.h,
             self.view.zoom * 100.0
@@ -322,10 +301,12 @@ impl DrawState {
                 self.hex = hex_of(self.primary);
             }
             if i.consume_key(Modifiers::NONE, Key::OpenBracket) {
-                self.size = (self.size / 1.15).max(1.0);
+                let s = self.brush_mut();
+                s.size = (s.size / 1.15).max(0.5);
             }
             if i.consume_key(Modifiers::NONE, Key::CloseBracket) {
-                self.size = (self.size * 1.15).min(1000.0);
+                let s = self.brush_mut();
+                s.size = (s.size * 1.15).min(1000.0);
             }
             // View: Ctrl+0 fit, Ctrl+Alt+0 100%, Ctrl+= / Ctrl+- zoom, F mirror.
             let c = self.view.screen_center;
@@ -378,70 +359,6 @@ impl DrawState {
                 self.hex = hex_of(self.primary);
             }
         });
-    }
-
-    fn brush_panel(&mut self, ui: &mut Ui) {
-        section_title(ui, "Brush");
-        ui.add_space(2.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-            for (i, (name, _)) in CATEGORIES.iter().enumerate() {
-                if widgets::chip(ui, name, self.category == i).clicked() {
-                    self.category = i;
-                    self.brush = 0;
-                }
-            }
-        });
-        ui.add_space(6.0);
-
-        let brushes = CATEGORIES[self.category].1;
-        egui::ScrollArea::vertical()
-            .id_salt("brush_list")
-            .max_height(ui.available_height() * 0.5)
-            .show(ui, |ui| {
-                if brushes.is_empty() {
-                    ui.add_space(12.0);
-                    ui.label(
-                        RichText::new("Your saved and imported brushes will appear here.")
-                            .color(TEXT_DIM)
-                            .italics(),
-                    );
-                    return;
-                }
-                let w = ((ui.available_width() - 6.0) / 2.0).floor();
-                egui::Grid::new("brush_grid").spacing(vec2(6.0, 6.0)).show(ui, |ui| {
-                    for (i, name) in brushes.iter().enumerate() {
-                        if brush_card(ui, name, self.category, w, self.brush == i, self.primary).clicked() {
-                            self.brush = i;
-                        }
-                        if i % 2 == 1 {
-                            ui.end_row();
-                        }
-                    }
-                });
-            });
-
-        ui.add_space(8.0);
-        ui.separator();
-        ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(vec2(72.0, 18.0), Sense::hover());
-            ui.painter().text(r.left_center(), Align2::LEFT_CENTER, "Size", FontId::proportional(12.5), TEXT_DIM);
-            ui.add(egui::Slider::new(&mut self.size, 1.0..=1000.0).logarithmic(true).suffix(" px").max_decimals(1));
-        });
-        ui.horizontal(|ui| {
-            ui.add_space(80.0);
-            ui.spacing_mut().item_spacing.x = 3.0;
-            for v in [1.0f32, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0] {
-                if widgets::chip(ui, &format!("{v}"), (self.size - v).abs() < 0.01).clicked() {
-                    self.size = v;
-                }
-            }
-        });
-        slider_row(ui, "Opacity", &mut self.opacity, 0.0..=100.0, "%");
-        slider_row(ui, "Flow", &mut self.flow, 0.0..=100.0, "%");
-        slider_row(ui, "Hardness", &mut self.hardness, 0.0..=100.0, "%");
-        slider_row(ui, "Spacing", &mut self.spacing, 1.0..=200.0, "%");
-        slider_row(ui, "Stabilizer", &mut self.stabilizer, 0.0..=100.0, "");
     }
 
     fn right_panel(&mut self, ui: &mut Ui) {
@@ -695,55 +612,73 @@ impl DrawState {
         }
 
         // ---- Painting and color picking.
-        let painting_tool = matches!(self.tool, Tool::Brush | Tool::Eraser);
+        let painting_tool = matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Smudge);
         let pressed_here = resp.is_pointer_button_down_on() && primary_down;
-        let picking = self.tool == Tool::Picker || (painting_tool && alt);
+        let picking = self.tool == Tool::Picker || (painting_tool && alt && self.stroke.is_none());
+        let renderer = &self.renderer;
+        let sample_all = move |x: i32, y: i32| if x < 0 || y < 0 { None } else { renderer.pixel(x as usize, y as usize) };
         if picking && pressed_here && !nav_key {
             if let Some(p) = resp.interact_pointer_pos() {
                 let d = self.view.screen_to_doc(p);
-                if d.x >= 0.0 && d.y >= 0.0 && d.x < self.doc.w as f32 && d.y < self.doc.h as f32 {
-                    if let Some(c) = self.renderer.pixel(d.x as usize, d.y as usize) {
-                        let [r, g, b, _] = c.to_srgba_unmultiplied();
-                        self.primary = Color32::from_rgb(r, g, b);
-                        self.hex = hex_of(self.primary);
+                if let Some(c) = sample_all(d.x as i32, d.y as i32) {
+                    let [r, g, b, _] = c.to_srgba_unmultiplied();
+                    self.primary = Color32::from_rgb(r, g, b);
+                    self.hex = hex_of(self.primary);
+                }
+            }
+        } else if painting_tool && !nav_key && (pressed_here || self.stroke.is_some()) && primary_down {
+            // Pen samples carry pressure (Windows Ink arrives as touch events with force);
+            // otherwise it's a mouse: every pointer sample of this frame at full pressure.
+            let view = self.view;
+            let to_doc = |p: Pos2, pressure: f32| {
+                let d = view.screen_to_doc(p);
+                Sample { x: d.x, y: d.y, p: pressure.clamp(0.0, 1.0) }
+            };
+            let pen: Vec<Sample> = events
+                .iter()
+                .filter_map(|e| match e {
+                    Event::Touch { pos, force: Some(f), phase, .. } if *phase != TouchPhase::Cancel => Some(to_doc(*pos, *f)),
+                    _ => None,
+                })
+                .collect();
+            let is_pen = !pen.is_empty() || self.pen_stroke;
+            let mut samples = if is_pen {
+                pen
+            } else {
+                events.iter().filter_map(|e| if let Event::PointerMoved(p) = e { Some(to_doc(*p, 1.0)) } else { None }).collect()
+            };
+            if self.stroke.is_none() {
+                let ai = self.active_idx();
+                if !self.doc.layers[ai].paintable() {
+                    self.notice = Some(match self.doc.layers[ai].kind {
+                        _ if self.doc.layers[ai].locked => "This layer is locked.",
+                        LayerKind::Vector => "Vector layers are drawn with the vector pen (coming soon). Pick a pixel layer to paint.",
+                        _ => "Pick a pixel layer to paint on.",
+                    });
+                } else {
+                    self.notice = None;
+                    let start = if is_pen && !samples.is_empty() {
+                        Some(samples.remove(0))
+                    } else {
+                        ctx.input(|i| i.pointer.press_origin()).map(|o| to_doc(o, 1.0))
+                    };
+                    if let Some(start) = start {
+                        let settings = self.lib.mem[brushes::slot(self.tool)].s.clone();
+                        let erase = self.tool == Tool::Eraser;
+                        self.pen_stroke = is_pen;
+                        self.stroke = Some(BrushStroke::begin(&mut self.doc, ai, &settings, self.primary, erase, view.zoom, is_pen, start, &sample_all));
                     }
                 }
             }
-        } else if painting_tool && !nav_key && pressed_here {
-            let ai = self.active_idx();
-            if !self.doc.layers[ai].paintable() {
-                self.notice = Some(match self.doc.layers[ai].kind {
-                    _ if self.doc.layers[ai].locked => "This layer is locked.",
-                    LayerKind::Raster => "This layer can't be painted.",
-                    LayerKind::Vector => "Vector layers are drawn with the vector pen (coming soon). Pick a pixel layer to paint.",
-                    _ => "Pick a pixel layer to paint on.",
-                });
-            } else {
-                self.notice = None;
-                let prm = DabParams {
-                    radius: self.size / 2.0,
-                    hardness: self.hardness / 100.0,
-                    alpha: (self.opacity / 100.0) * (self.flow / 100.0),
-                    color: self.primary,
-                    erase: self.tool == Tool::Eraser,
-                    spacing: (self.spacing / 100.0).max(0.02),
-                };
-                let mut pts: Vec<Pos2> = Vec::new();
-                if !self.stroke.active() {
-                    if let Some(o) = ctx.input(|i| i.pointer.press_origin()) {
-                        pts.push(o);
-                    }
-                }
-                // Every pointer sample of this frame, so fast strokes stay smooth.
-                pts.extend(events.iter().filter_map(|e| if let Event::PointerMoved(p) = e { Some(*p) } else { None }));
-                for sp in pts {
-                    let d = self.view.screen_to_doc(sp);
-                    paint::stroke_to(&mut self.doc, ai, &mut self.stroke, d, &prm);
-                }
+            if let Some(st) = self.stroke.as_mut() {
+                st.add(&mut self.doc, &samples, &sample_all);
             }
         }
-        if !primary_down && self.stroke.active() {
-            self.stroke.end();
+        if !primary_down {
+            if let Some(st) = self.stroke.take() {
+                self.last_stroke = Some(st.finish(&mut self.doc, &sample_all));
+            }
+            self.pen_stroke = false;
         }
 
         // ---- Draw.
@@ -768,7 +703,7 @@ impl DrawState {
                 match self.tool {
                     Tool::Zoom if alt => CursorIcon::ZoomOut,
                     Tool::Zoom => CursorIcon::ZoomIn,
-                    Tool::Brush | Tool::Eraser if !alt => CursorIcon::None,
+                    Tool::Brush | Tool::Eraser | Tool::Smudge if !alt => CursorIcon::None,
                     Tool::Move => CursorIcon::Move,
                     Tool::Text => CursorIcon::Text,
                     _ => CursorIcon::Crosshair,
@@ -776,7 +711,7 @@ impl DrawState {
             };
             ctx.set_cursor_icon(icon);
             if icon == CursorIcon::None {
-                let r = (self.size / 2.0 * self.view.zoom).max(1.5);
+                let r = (self.brush().size / 2.0 * self.view.zoom).max(1.5);
                 p.circle_stroke(hp, r, Stroke::new(2.2, Color32::from_black_alpha(150)));
                 p.circle_stroke(hp, r, Stroke::new(1.0, Color32::from_white_alpha(230)));
                 if r > 6.0 {
@@ -842,64 +777,6 @@ impl DrawState {
                 });
         });
     }
-}
-
-/// A brush card: preview stroke on a dark tile, name underneath. The preview shape follows the category.
-fn brush_card(ui: &mut Ui, name: &str, category: usize, w: f32, selected: bool, color: Color32) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 62.0), Sense::click());
-    if !ui.is_rect_visible(rect) {
-        return resp;
-    }
-    let p = ui.painter();
-    let bg = if resp.hovered() { HOVER } else { RAISED };
-    p.rect_filled(rect, CornerRadius::same(8), bg);
-    p.rect_stroke(
-        rect,
-        CornerRadius::same(8),
-        Stroke::new(if selected { 1.5 } else { 1.0 }, if selected { EMERALD } else { LINE }),
-        StrokeKind::Inside,
-    );
-
-    // Preview on a light strip so dark colors stay visible.
-    let strip = Rect::from_min_max(rect.min + vec2(5.0, 5.0), pos2(rect.right() - 5.0, rect.top() + 38.0));
-    p.rect_filled(strip, CornerRadius::same(5), Color32::from_rgb(236, 240, 236));
-    let col = if color.r() as u32 + color.g() as u32 + color.b() as u32 > 680 { Color32::from_rgb(40, 40, 40) } else { color };
-    let (max_w, alpha, grain) = match category {
-        0 => (3.2, 1.0, false),     // pens
-        1 => (2.4, 0.75, true),     // pencils
-        2 => (5.0, 0.55, false),    // markers
-        3 => (6.5, 0.95, false),    // paint
-        4 => (7.0, 0.35, false),    // watercolor
-        5 => (9.0, 0.12, false),    // airbrush
-        6 => (6.0, 0.25, false),    // blend
-        7 | 8 => (5.0, 0.8, true),  // textures, rough
-        _ => (4.0, 0.9, true),      // nature & fx
-    };
-    let seed = name.bytes().fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
-    let n = 40;
-    for i in 0..=n {
-        let t = i as f32 / n as f32;
-        let x = strip.left() + 10.0 + t * (strip.width() - 20.0);
-        let y = strip.center().y + (t * std::f32::consts::TAU).sin() * 6.0;
-        let taper = (t * std::f32::consts::PI).sin().powf(0.6);
-        let r = (max_w * taper).max(0.6);
-        if grain {
-            let h = seed.wrapping_add(i * 2654435761) >> 16;
-            let jitter = vec2(((h % 7) as f32 - 3.0) * 0.4, ((h / 7 % 7) as f32 - 3.0) * 0.4);
-            p.circle_filled(pos2(x, y) + jitter, r * 0.8, col.gamma_multiply(alpha * 0.8));
-        } else {
-            p.circle_filled(pos2(x, y), r, col.gamma_multiply(alpha));
-        }
-    }
-    let name_col = if selected { VENOM } else { TEXT };
-    p.text(
-        pos2(rect.center().x, rect.bottom() - 11.0),
-        Align2::CENTER_CENTER,
-        name,
-        FontId::proportional(11.5),
-        name_col,
-    );
-    resp.on_hover_text(name)
 }
 
 fn checker(p: &egui::Painter, r: Rect) {

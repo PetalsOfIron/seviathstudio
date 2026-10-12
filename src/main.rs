@@ -4,12 +4,13 @@
 
 mod app;
 mod blend;
+mod brush;
 mod canvas;
 mod colorpick;
 mod doc;
 mod icons;
-mod paint;
 mod snake;
+mod stroke;
 mod tabs;
 mod theme;
 mod view;

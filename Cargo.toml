@@ -9,3 +9,4 @@ rayon = "1"
 
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["wgpu", "snapshot", "eframe"] }
+image = { version = "0.25", default-features = false, features = ["png"] }

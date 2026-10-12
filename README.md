@@ -26,6 +26,10 @@ cargo test screens -- --nocapture
 - `src/doc.rs` — document, layers (folders, clipping, labels), tiles and compositing
 - `src/blend.rs` — the 17 blend modes (W3C compositing math)
 - `src/view.rs`, `src/canvas.rs` — zoom/pan/rotate/mirror and GPU tile display
-- `src/paint.rs` — painting dabs into tiles
+- `src/brush/` — brush engine: settings + 103 presets, tips, textures, stroke engine (stabilizer, pressure, taper, mixing, whole-stroke edges)
+- `src/stroke.rs` — the live stroke buffer shown on top of its layer until the pen lifts
+
+Brush sheet (every brush painted on one image): `cargo test --release brush_sheet` → `target/screens/brush_sheet.png`
+Texture sheet: `cargo test --release texture_sheet` → `target/screens/texture_sheet.png`
 
 Performance check: `cargo test --release bench_full_redraw -- --ignored --nocapture`
