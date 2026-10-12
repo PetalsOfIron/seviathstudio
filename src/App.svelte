@@ -4,8 +4,29 @@
   import BrushPanel from './lib/BrushPanel.svelte';
   import AdjustColors from './lib/AdjustColors.svelte';
   import NewProjectDialog from './lib/NewProjectDialog.svelte';
+  import ProjectManager from './lib/ProjectManager.svelte';
+  import ExportDialog from './lib/ExportDialog.svelte';
+  import PressureEditor from './lib/PressureEditor.svelte';
+  import { recognize } from './lib/shapes';
+  import type { NewProjectResult } from './lib/NewProjectDialog.svelte';
+  import { cleanLine, renderVectorLayer, renderVectorRegion, changedArea, eraseStrokes, mapStroke, drawStroke, strokeBounds, drawLivePiece, exactLine, hitStroke, strokesInBox, smoothStroke, simplifyStroke, setPressures, densifyStroke, nodeCount, type VecLayer, type VecStroke, type VPt, type EraseMode } from './lib/vector';
+  import { applyPrintPreview, type ColorMode } from './lib/color';
+  import { exportAs, type ExportOptions } from './lib/export';
+  import {
+    symCopies,
+    axisLines,
+    sameSpot,
+    nextMode,
+    MODES,
+    MODE_LABEL,
+    MODE_HINT,
+    type SymmetryState,
+    type SymmetryMode,
+    type PtMap,
+  } from './lib/symmetry';
+  import { saveToLibrary, loadFromLibrary, newId, canvasToBlob } from './lib/library';
   import { floodFill, expandMask } from './lib/fill';
-  import { saveProject, openProject, exportPNG, exportPSD, importPSD, type ProjectData } from './lib/fileio';
+  import { saveProject, exportPNG, exportPSD, openAnyFile, ACCEPT, type ProjectData } from './lib/fileio';
   import { PRESETS, ERASER_PRESETS, settingsOf, getDab, getPaper, type BrushSettings } from './lib/brush';
 
   // Document size (chosen in New project, or taken from an opened file)
@@ -14,7 +35,7 @@
   let projectName = $state('Untitled');
   const MAX_HISTORY = 50;
 
-  type Tool = 'brush' | 'eraser' | 'picker' | 'fill' | 'lassoFill' | 'select' | 'move';
+  type Tool = 'brush' | 'eraser' | 'picker' | 'fill' | 'lassoFill' | 'select' | 'move' | 'vselect';
   type Layer = {
     id: number;
     name: string;
@@ -24,6 +45,7 @@
     blend: BlendMode;
     clip: boolean; // clipping mask: only shows on top of the layer below
     lockAlpha: boolean; // paint only where the layer already has paint
+    kind?: 'raster' | 'vector'; // vector layers keep their lines (see vecData)
   };
   type Rect = { x: number; y: number; w: number; h: number };
 
@@ -80,7 +102,11 @@
     | { type: 'merge'; upper: Layer; upperIndex: number; lowerId: number; before: ImageData; after: ImageData }
     | { type: 'paper'; before: PaperState; after: PaperState }
     | { type: 'selection'; before: SelShape[]; after: SelShape[] }
-    | { type: 'layerProps'; layerId: number; before: LayerProps; after: LayerProps };
+    | { type: 'layerProps'; layerId: number; before: LayerProps; after: LayerProps }
+    | { type: 'vector'; layerId: number; before: VecLayer; after: VecLayer }
+    | { type: 'doc'; before: DocSettings; after: DocSettings };
+
+  type DocSettings = { dpi: number; colorMode: ColorMode };
 
   type PaperState = { exists: boolean; visible: boolean; color: string };
   // The settings of a layer that can be undone (everything except its pixels)
@@ -161,6 +187,81 @@
   let newDialog = $state(false);
   let fileMenu = $state(false);
   let fileInput = $state<HTMLInputElement>();
+  let fileMode: 'open' | 'layer' = 'open';
+  // Document: print resolution and color mode
+  let docDpi = $state(72);
+  let colorMode = $state<ColorMode>('rgb');
+  let printPreview = $state(true); // CMYK projects: show colors as they will print
+  let proofTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // Vector layers: their lines live here (outside Svelte's state, so big lists stay fast).
+  // A VecLayer is never changed in place; every edit makes a new one, so undo can keep the old.
+  const vecData = new Map<number, VecLayer>();
+  let vecTick = $state(0); // changes whenever vector lines change, so the panel updates
+  let vecSmooth = $state(0.15); // how much new vector lines are smoothed
+  let vecEraseMode = $state<EraseMode>('cut');
+  let vecWidthBefore: VecLayer | null = null; // while dragging the line width slider
+  let strokeVector = false; // the current stroke is on a vector layer
+  let vecPreviewDirty = false;
+
+  // Hold to straighten: keep the pen still at the end of a line and it becomes a clean shape
+  let holdShapes = $state(true);
+  let shapeLocked = false; // the line already became a shape; the pen no longer changes it
+  let holdTimer: ReturnType<typeof setTimeout> | undefined;
+  let holdAnchor = { x: 0, y: 0 };
+  let replaying = false; // redrawing a recognized shape: don't record its points again
+  let penPts: VPt[] = []; // where the pen really went (before the stabilizer), for shapes
+  let shapeClosed = false; // the recognized shape is closed (circle, box…): no pointed ends
+
+  // Vector select tool: the chosen lines (plain references, not Svelte proxies)
+  let vsel = $state.raw<VecStroke[]>([]);
+  // plain object on purpose: Svelte state would wrap the lines and break "same line" checks
+  let vselBox = $state<null | { x0: number; y0: number; x1: number; y1: number }>(null); // box being dragged
+  let vselDrag: null | {
+    mode: 'move' | 'box';
+    start: { x: number; y: number };
+    cur: { x: number; y: number };
+    before: VecLayer; // layer when the drag started
+    shown: VecLayer; // what is on screen now
+    picked: VecStroke[]; // the selected lines when the drag started
+    moved: boolean;
+    add: boolean;
+  } = null;
+  let prDense: VecStroke | null = null; // pressure editing works on a finely pointed copy
+  let prBefore: VecLayer | null = null;
+  let vecRaw: VPt[] = []; // the points of the current vector stroke
+
+  let toolsMenu = $state(false);
+  // Toolbar menus are placed under their button on the page itself, so the toolbar
+  // (which scrolls sideways on narrow windows) can't cut them off
+  let dropPos = $state({ x: 0, y: 0 });
+  function dropAt(e: MouseEvent, open: boolean) {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    dropPos = { x: Math.max(4, Math.min(r.left, window.innerWidth - 300)), y: r.bottom + 4 };
+    return open;
+  }
+  let funcMenu = $state(false);
+  let exportDialog = $state(false);
+  let exportOpts = $state<ExportOptions>({ format: 'psd', scale: 1, quality: 0.92, transparent: false, cmyk: true, printColors: true });
+
+  // Mirror drawing (symmetry). The center can be dragged on the canvas.
+  let sym = $state<SymmetryState>({ mode: 'off', cx: 1000, cy: 700, count: 6, angle: 0 });
+  let symDrag = $state(false);
+  let symLocked = $state(false); // stops the center from being dragged by accident
+  let symLastMode: SymmetryMode = 'vertical'; // what the toolbar mirror button turns on
+  let strokeMaps: PtMap[] = []; // mirror copies for the stroke being drawn
+  // color-mixing brushes keep separate paint for every mirrored copy
+  let mixStates: { p: number[]; ls: { x: number; y: number } }[] = []; // Open as a new project, or add to this one as layers
+
+  // Project library (autosave)
+  let showProjects = $state(true); // the project manager is the start page
+  let currentId = $state<string | null>(null);
+  let saveState = $state<'saved' | 'saving' | 'unsaved'>('saved');
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  let saving: Promise<void> | null = null;
+  let saveAgain = false;
+  const blobCache = new Map<number, Blob>(); // layer id → its last saved PNG
+  const dirtyLayers = new Set<number>(); // layers whose pixels changed since the last save
 
   // Paper: the background under all layers. Hide it to see (and later export) transparency.
   let paper = $state({ exists: true, visible: true, color: '#ffffff' });
@@ -320,18 +421,68 @@
     return c;
   }
 
+  // A layer canvas: its drawing context is made right away so it stays on the graphics card
+  // (a canvas keeps the kind of context it got first)
+  function makeLayerCanvas() {
+    const c = makeCanvas();
+    c.getContext('2d');
+    return c;
+  }
+
   function makeLayer(): Layer {
     const id = nextId++;
     return {
       id,
       name: `Layer ${id}`,
-      canvas: makeCanvas(),
+      canvas: makeLayerCanvas(),
       visible: true,
       opacity: 1,
       blend: 'Normal',
       clip: false,
       lockAlpha: false,
+      kind: 'raster',
     };
+  }
+
+  function makeVectorLayer(): Layer {
+    const l = makeLayer();
+    l.kind = 'vector';
+    l.name = `Vector ${l.id}`;
+    vecData.set(l.id, { strokes: [], width: 1 });
+    return l;
+  }
+
+  const isVector = (l: Layer | null | undefined) => !!l && l.kind === 'vector';
+
+  // Redraws a vector layer's pixels from its lines
+  function drawVector(l: Layer) {
+    const v = vecData.get(l.id);
+    if (v) renderVectorLayer(l.canvas, v);
+    thumbTick++;
+    vecTick++;
+  }
+
+  // Replaces a vector layer's lines (with undo)
+  function setVector(l: Layer, after: VecLayer, before = vecData.get(l.id)!) {
+    const area = showVector(l, before, after);
+    push({ type: 'vector', layerId: l.id, before, after });
+    render(area);
+  }
+
+  // Switches a vector layer to another version, redrawing only the part that changed.
+  // Returns the changed area (undefined = everything).
+  function showVector(l: Layer, from: VecLayer, to: VecLayer): Rect | undefined {
+    vecData.set(l.id, to);
+    const area = changedArea(from, to);
+    if (area === null) return { x: 0, y: 0, w: 0, h: 0 };
+    if (area === 'all') {
+      drawVector(l);
+      return undefined;
+    }
+    renderVectorRegion(l.canvas, to, area);
+    thumbTick++;
+    vecTick++;
+    return area;
   }
 
   // A plain copy of a layer's settings (history keeps these, not the live proxies)
@@ -347,14 +498,17 @@
     clipCtx = makeCanvas().getContext('2d')!;
     texturedCtx = makeCanvas().getContext('2d')!;
     backupCtx = makeCanvas().getContext('2d', { willReadFrequently: true })!;
-    selCtx = makeCanvas().getContext('2d', { willReadFrequently: true })!;
+    selCtx = makeCanvas().getContext('2d')!;
     refCtx = makeCanvas().getContext('2d', { willReadFrequently: true })!;
     paperPattern = texturedCtx.createPattern(getPaper(), 'repeat');
   }
 
   onMount(() => {
-    viewCtx = view!.getContext('2d', { willReadFrequently: true })!;
+    // The screen canvas and the layers stay on the graphics card (fast to draw and show).
+    // Only helper canvases that are read pixel by pixel all the time live in normal memory.
+    viewCtx = view!.getContext('2d')!;
     makeWorkCanvases();
+    centerSym();
     tintCtx = document.createElement('canvas').getContext('2d')!;
 
     const first = makeLayer();
@@ -368,7 +522,17 @@
     window.addEventListener('keydown', onKey);
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', releaseKeys);
+    window.addEventListener('dragover', onWindowDragOver);
+    window.addEventListener('drop', onWindowDrop);
+    window.addEventListener('paste', onPaste);
+    window.addEventListener('beforeunload', onBeforeUnload);
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
+      window.removeEventListener('dragover', onWindowDragOver);
+      window.removeEventListener('drop', onWindowDrop);
+      window.removeEventListener('paste', onPaste);
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      document.removeEventListener('visibilitychange', onVisibility);
       stage?.removeEventListener('wheel', onWheel);
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('keyup', onKeyUp);
@@ -391,17 +555,76 @@
   });
 
   let frame = 0;
-  function render() {
+  // Redraws the screen on the next frame. With `area`, only that part is redrawn: while
+  // drawing that is just around the stroke, which keeps big canvases fast on any computer.
+  let pendingArea: Rect | 'all' | null = null;
+
+  function unionRect(a: Rect | null, b: Rect): Rect {
+    if (!a) return { ...b };
+    const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+    return { x, y, w: Math.max(a.x + a.w, b.x + b.w) - x, h: Math.max(a.y + a.h, b.y + b.h) - y };
+  }
+
+  // Whole pixels inside the canvas, with a small margin for soft edges
+  function clampRect(r: Rect): Rect | null {
+    const x = Math.max(0, Math.floor(r.x) - 2), y = Math.max(0, Math.floor(r.y) - 2);
+    const w = Math.min(docW, Math.ceil(r.x + r.w) + 2) - x;
+    const h = Math.min(docH, Math.ceil(r.y + r.h) + 2) - y;
+    return w > 0 && h > 0 ? { x, y, w, h } : null;
+  }
+
+  function render(area?: Rect | null) {
+    if (!viewCtx) return;
+    if (!area) pendingArea = 'all';
+    else if (pendingArea !== 'all') pendingArea = unionRect(pendingArea, area);
+    requestFrame();
+  }
+
+  // Adds an area to the next redraw without asking for a frame yet
+  function markArea(area: Rect) {
+    if (pendingArea !== 'all') pendingArea = unionRect(pendingArea, area);
+  }
+
+  function requestFrame() {
     if (!viewCtx || frame) return;
     frame = requestAnimationFrame(() => {
       frame = 0;
-      compositeTo(viewCtx!, true, true);
+      // the vector line is rebuilt once per screen frame, not on every pen event
+      if (vecPreviewDirty && drawing && strokeVector) {
+        const a = vectorPreview();
+        if (a && pendingArea !== 'all') pendingArea = unionRect(pendingArea, a);
+      }
+      vecPreviewDirty = false;
+      const R = pendingArea === 'all' || !pendingArea ? undefined : (clampRect(pendingArea) ?? undefined);
+      const all = pendingArea === 'all';
+      pendingArea = null;
+      if (!all && !R) return;
+      compositeTo(viewCtx!, true, true, -999, R);
+      if (colorMode === 'cmyk' && printPreview) {
+        // a small area is quick; the whole canvas waits until you stop drawing or dragging
+        clearTimeout(proofTimer);
+        if (R) proofView(R);
+        else if (drawing || xfDrag || selDraft || symDrag) proofTimer = setTimeout(() => render(), 200);
+        else proofView();
+      }
     });
   }
 
+  function proofView(R?: Rect) {
+    if (!viewCtx) return;
+    const r = R ?? { x: 0, y: 0, w: docW, h: docH };
+    const img = viewCtx.getImageData(r.x, r.y, r.w, r.h);
+    applyPrintPreview(img.data);
+    viewCtx.putImageData(img, r.x, r.y);
+  }
+
   // Draws all layers into ctx. `live` includes the unfinished stroke and transform previews.
-  function compositeTo(ctx: CanvasRenderingContext2D, withPaper: boolean, live: boolean, excludeId = -999) {
-    const strokeView = live && drawing && !directStroke ? previewStrokeLayer() : null;
+  // `R` limits the work to one area (the rest of ctx is left as it is).
+  function compositeTo(ctx: CanvasRenderingContext2D, withPaper: boolean, live: boolean, excludeId = -999, R?: Rect) {
+    const A = R ?? { x: 0, y: 0, w: docW, h: docH };
+    // copies the area A from one canvas to the same place in another
+    const blit = (c: CanvasRenderingContext2D, img: CanvasImageSource) => c.drawImage(img, A.x, A.y, A.w, A.h, A.x, A.y, A.w, A.h);
+    const strokeView = live && drawing && !directStroke ? previewStrokeLayer(A) : null;
     const xfView = live && xf ? previewTransform() : null;
     const surface = (l: Layer): CanvasImageSource => {
       if (strokeView && l.id === strokeLayerId) return strokeView;
@@ -413,10 +636,10 @@
     ctx.globalCompositeOperation = 'source-over';
     if (withPaper && paper.exists && paper.visible) {
       ctx.fillStyle = paper.color;
-      ctx.fillRect(0, 0, docW, docH);
+      ctx.fillRect(A.x, A.y, A.w, A.h);
     } else {
       // transparent: the checkerboard behind the canvas shows through
-      ctx.clearRect(0, 0, docW, docH);
+      ctx.clearRect(A.x, A.y, A.w, A.h);
     }
 
     // Walk up the stack; each normal layer may have clipped layers right above it
@@ -433,20 +656,20 @@
           const g = groupCtx;
           g.globalAlpha = 1;
           g.globalCompositeOperation = 'source-over';
-          g.clearRect(0, 0, docW, docH);
-          g.drawImage(image, 0, 0);
+          g.clearRect(A.x, A.y, A.w, A.h);
+          blit(g, image);
           for (const c of clipped) {
             // cut the clipped layer to the base layer's shape, then blend it on
             const t = clipCtx;
             t.globalCompositeOperation = 'source-over';
-            t.clearRect(0, 0, docW, docH);
-            t.drawImage(surface(c), 0, 0);
+            t.clearRect(A.x, A.y, A.w, A.h);
+            blit(t, surface(c));
             t.globalCompositeOperation = 'destination-in';
-            t.drawImage(image, 0, 0);
+            blit(t, image);
             t.globalCompositeOperation = 'source-over';
             g.globalAlpha = c.opacity;
             g.globalCompositeOperation = opOf(c.blend);
-            g.drawImage(t.canvas, 0, 0);
+            blit(g, t.canvas);
           }
           g.globalAlpha = 1;
           g.globalCompositeOperation = 'source-over';
@@ -454,7 +677,7 @@
         }
         ctx.globalAlpha = base.opacity;
         ctx.globalCompositeOperation = opOf(base.blend);
-        ctx.drawImage(image, 0, 0);
+        blit(ctx, image);
       }
       i = j;
     }
@@ -462,18 +685,19 @@
     ctx.globalCompositeOperation = 'source-over';
   }
 
-  // The layer being painted on, with the unfinished stroke shown on top of it
-  function previewStrokeLayer(): HTMLCanvasElement | null {
+  // The layer being painted on, with the unfinished stroke shown on top of it (area A only)
+  function previewStrokeLayer(A: Rect): HTMLCanvasElement | null {
     const l = layers.find((x) => x.id === strokeLayerId);
     if (!l) return null;
     const s = scratchCtx;
+    const blit = (img: CanvasImageSource) => s.drawImage(img, A.x, A.y, A.w, A.h, A.x, A.y, A.w, A.h);
     s.globalCompositeOperation = 'source-over';
     s.globalAlpha = 1;
-    s.clearRect(0, 0, docW, docH);
-    s.drawImage(l.canvas, 0, 0);
+    s.clearRect(A.x, A.y, A.w, A.h);
+    blit(l.canvas);
     s.globalAlpha = brush.opacity;
     s.globalCompositeOperation = strokeTool === 'eraser' ? 'destination-out' : 'source-over';
-    s.drawImage(strokeSource(l), 0, 0);
+    blit(strokeSource(l, A));
     s.globalCompositeOperation = 'source-over';
     s.globalAlpha = 1;
     return s.canvas;
@@ -604,6 +828,9 @@
   }
 
   function onPointerDown(e: PointerEvent) {
+    // leave any text box or slider, so keyboard shortcuts work again on the canvas
+    const focused = document.activeElement as HTMLElement | null;
+    if (focused && focused !== document.body) focused.blur();
     // Middle mouse button or Space + drag moves the canvas
     if (e.button === 1 || spaceDown) {
       e.preventDefault();
@@ -613,6 +840,15 @@
       return;
     }
     if (e.button !== 0) return;
+    // Mirror drawing: the ◎ handle moves the center of the axes
+    if (sym.mode !== 'off' && !xf && !symLocked) {
+      const d = toDoc(e.clientX, e.clientY);
+      if (Math.hypot(d.x - sym.cx, d.y - sym.cy) <= 12 / zoom) {
+        capture(e);
+        symDrag = true;
+        return;
+      }
+    }
     if (activeTool === 'picker') {
       capture(e);
       picking = true;
@@ -637,6 +873,10 @@
       doFill(pt);
       return;
     }
+    if (activeTool === 'vselect') {
+      vselDown(e, pt);
+      return;
+    }
     down(e);
   }
 
@@ -652,8 +892,16 @@
       pickColor(e);
       return;
     }
+    if (symDrag) {
+      moveSymCenter(toDoc(e.clientX, e.clientY));
+      return;
+    }
     if (xfDrag) {
       xfMove(toDoc(e.clientX, e.clientY), e.shiftKey);
+      return;
+    }
+    if (vselDrag) {
+      vselMove(toDoc(e.clientX, e.clientY));
       return;
     }
     if (selDraft) {
@@ -672,8 +920,16 @@
       picking = false;
       return;
     }
+    if (symDrag) {
+      symDrag = false;
+      return;
+    }
     if (xfDrag) {
       xfUp();
+      return;
+    }
+    if (vselDrag) {
+      vselUp();
       return;
     }
     if (selDraft) {
@@ -723,7 +979,11 @@
     resetDabs();
     grainOffset = { x: Math.random() * 256, y: Math.random() * 256 };
 
-    directStroke = strokeTool === 'brush' && brush.mix > 0;
+    strokeMaps = sym.mode === 'off' ? [] : symCopies(sym);
+    strokeVector = isVector(layer);
+    vecRaw = [{ ...(e.shiftKey && lastEnd && lastEnd.layerId === layer.id ? lastEnd.pt : pt) }];
+    // vector lines are clean lines: no color mixing
+    directStroke = strokeTool === 'brush' && brush.mix > 0 && !strokeVector;
     if (directStroke) {
       backupCtx.clearRect(0, 0, docW, docH);
       backupCtx.drawImage(layer.canvas, 0, 0);
@@ -734,8 +994,14 @@
       const [r0, g0, b0] = hexRGB(color);
       mixP = [r0, g0, b0, 1];
       lastSample = { x: -1e9, y: -1e9 };
-      // start with the color that's already under the brush
-      sampleCanvas(layer, pt, brush.mix);
+      // start with the color that's already under the brush (for every mirrored copy too)
+      mixStates = [];
+      for (const f of [(q: { x: number; y: number }) => q, ...strokeMaps]) {
+        mixP = [r0, g0, b0, 1];
+        lastSample = { x: -1e9, y: -1e9 };
+        sampleCanvas(layer, { ...pt, ...f(pt) }, brush.mix);
+        mixStates.push({ p: mixP, ls: lastSample });
+      }
     }
 
     // Shift + click: straight line from where the last stroke ended
@@ -750,12 +1016,21 @@
     last = pt;
     lastRaw = pt;
     ropeEnd = { ...pt };
+    vecDrawn = 0;
+    vecDist = [];
+    shapeLocked = false;
+    shapeClosed = false;
+    penPts = [{ x: pt.x, y: pt.y, p: pt.p }];
+    holdAnchor = { x: pt.x, y: pt.y };
+    clearTimeout(holdTimer);
+    if (holdShapes && !directStroke) holdTimer = setTimeout(tryShape, 600);
     stamp(pt);
-    render();
+    if (strokeVector) vecPreviewDirty = true;
+    requestFrame();
   }
 
   function move(e: PointerEvent) {
-    if (!drawing) return;
+    if (!drawing || shapeLocked) return;
     let events = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
     if (events.length === 0) events = [e];
     // Stabilizer ("lazy rope", like Krita and CSP): the brush hangs behind the pen on an
@@ -768,6 +1043,13 @@
     for (const ev of events) {
       const raw = point(ev);
       lastRaw = raw;
+      penPts.push({ x: raw.x, y: raw.y, p: raw.p });
+      // the pen moved: start waiting again for it to stand still
+      if (holdShapes && !directStroke && Math.hypot(raw.x - holdAnchor.x, raw.y - holdAnchor.y) > 4 / zoom) {
+        holdAnchor = { x: raw.x, y: raw.y };
+        clearTimeout(holdTimer);
+        holdTimer = setTimeout(tryShape, 600);
+      }
       const dx = raw.x - ropeEnd.x;
       const dy = raw.y - ropeEnd.y;
       const d = Math.hypot(dx, dy);
@@ -788,20 +1070,26 @@
       segment(last, next);
       last = next;
     }
-    render();
+    if (strokeVector) vecPreviewDirty = true;
+    requestFrame();
   }
 
   function up() {
+    clearTimeout(holdTimer);
     if (!drawing) return;
     // Let the stabilized line catch up with where the pen actually stopped
-    if (brush.stabilize > 0) segment(last, lastRaw);
+    if (brush.stabilize > 0 && !shapeLocked) segment(last, lastRaw);
     finishStroke(lastRaw);
   }
 
   // Adds the finished stroke to the layer and records it for undo
   function finishStroke(endPt: Point) {
+    if (strokeVector) {
+      finishVectorStroke(endPt);
+      return;
+    }
     drawing = false;
-    if (!directStroke) shapeEnds();
+    if (!directStroke && !shapeClosed) shapeEnds();
     const layer = layers.find((l) => l.id === strokeLayerId);
     if (!layer || !hasRect) {
       render();
@@ -848,7 +1136,7 @@
       before = ctx.getImageData(x, y, w, h);
       ctx.globalAlpha = brush.opacity;
       ctx.globalCompositeOperation = strokeTool === 'eraser' ? 'destination-out' : 'source-over';
-      ctx.drawImage(strokeSource(layer), 0, 0);
+      ctx.drawImage(strokeSource(layer, { x, y, w, h }), x, y, w, h, x, y, w, h);
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';
     }
@@ -858,8 +1146,135 @@
     push({ type: 'pixels', layerId: layer.id, rect: { x, y, w, h }, before, after });
     thumbTick++;
     lastEnd = { layerId: layer.id, pt: endPt };
-    strokeCtx.clearRect(0, 0, docW, docH);
-    render();
+    strokeCtx.clearRect(x, y, w, h);
+    render({ x, y, w, h });
+  }
+
+  // The pen stood still: if the line looks like a shape, replace it with the clean shape
+  function tryShape() {
+    if (!drawing || shapeLocked || directStroke) return;
+    // shapes follow where the pen really went, not the slower stabilized line
+    const found = recognize(penPts.length > 2 ? penPts : vecRaw);
+    if (!found) return;
+    shapeLocked = true;
+    shapeClosed = found.kind !== 'line';
+    // remove what was drawn so far
+    if (hasRect) {
+      const old = { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+      strokeCtx.clearRect(old.x - 2, old.y - 2, old.w + 4, old.h + 4);
+      markArea(old);
+    }
+    vecRaw = found.pts;
+    resetDabs();
+    if (strokeVector && strokeTool === 'brush') {
+      vecDrawn = 0;
+      vecDist = [];
+      vecPreviewDirty = true;
+    } else {
+      replaying = true;
+      stamp(found.pts[0]);
+      for (let i = 1; i < found.pts.length; i++) segment(found.pts[i - 1], found.pts[i]);
+      replaying = false;
+    }
+    last = lastRaw = found.pts[found.pts.length - 1];
+    showNotice(`${found.kind[0].toUpperCase()}${found.kind.slice(1)} — lift the pen to keep it.`);
+    requestFrame();
+  }
+
+  // The vector line being drawn, built the same way while drawing and when it's saved,
+  // so nothing changes when you lift the pen
+  function currentVectorLine(v: VecLayer): VecStroke {
+    return {
+      pts: shapeLocked ? exactLine(vecRaw) : cleanLine(vecRaw, vecSmooth),
+      color,
+      // sizes are stored without the layer's width multiplier
+      size: brush.size / v.width,
+      minSize: brush.minSize,
+      sizePressure: brush.sizePressure,
+      ends: shapeClosed ? 'round' : brush.ends,
+      taper: brush.taper,
+      opacity: brush.opacity,
+    };
+  }
+
+  // Live picture of the vector line (and its mirror copies) in the stroke canvas
+  let vecDrawn = 0; // how many points of the line are already on screen
+  let vecDist: number[] = []; // distance of each point from the start of the line
+
+  // Draws only the new part of the vector line (and its mirror copies). Returns that area.
+  function vectorPreview(): Rect | null {
+    if (strokeTool !== 'brush') return null;
+    const v = vecData.get(strokeLayerId);
+    if (!v) return null;
+    for (let i = vecDist.length; i < vecRaw.length; i++) {
+      vecDist.push(i === 0 ? 0 : vecDist[i - 1] + Math.hypot(vecRaw[i].x - vecRaw[i - 1].x, vecRaw[i].y - vecRaw[i - 1].y));
+    }
+    // the last point is held back one frame so the curve through it can bend smoothly
+    const to = shapeLocked ? vecRaw.length - 1 : Math.max(vecDrawn, vecRaw.length - 2);
+    if (to === vecDrawn && vecDrawn > 0) return null;
+    const style = { ...currentVectorLine(v), pts: undefined };
+    let area: Rect | null = null;
+    for (const f of [(q: { x: number; y: number }) => q, ...strokeMaps]) {
+      const b = drawLivePiece(strokeCtx, vecRaw, vecDist, vecDrawn, to, style, v.width, f);
+      if (b) {
+        grow(b.x, b.y, b.x + b.w, b.y + b.h);
+        area = unionRect(area, b);
+      }
+    }
+    vecDrawn = to;
+    return area;
+  }
+
+  // Vector layer: the drawn line becomes a clean vector line (or the eraser cuts lines)
+  function finishVectorStroke(endPt: Point) {
+    drawing = false;
+    strokeVector = false;
+    // the preview disappears: that area is redrawn too
+    const strokeArea = hasRect ? { x: minX, y: minY, w: maxX - minX, h: maxY - minY } : null;
+    if (strokeArea) {
+      strokeCtx.clearRect(strokeArea.x - 2, strokeArea.y - 2, strokeArea.w + 4, strokeArea.h + 4);
+      markArea(strokeArea);
+    }
+    const layer = layers.find((l) => l.id === strokeLayerId);
+    const v = layer && vecData.get(layer.id);
+    if (!layer || !v) {
+      render();
+      return;
+    }
+    lastEnd = { layerId: layer.id, pt: endPt };
+    const maps = [(q: { x: number; y: number }) => q, ...strokeMaps];
+    if (strokeTool === 'eraser') {
+      // eraser size is the same on screen as the brush cursor
+      const paths = maps.map((f) => vecRaw.map((q) => ({ ...f(q), r: radiusAt(q.p) })));
+      let strokes = v.strokes;
+      let changed = false;
+      for (const path of paths) {
+        const next = eraseStrokes(strokes, path, vecEraseMode, v.width);
+        if (next) {
+          strokes = next;
+          changed = true;
+        }
+      }
+      if (changed) setVector(layer, { ...v, strokes });
+      else requestFrame();
+      return;
+    }
+    const line = currentVectorLine(v);
+    const added = maps.map((f, i) => (i === 0 ? line : mapStroke(line, f)));
+    // new lines go on top, so only they need drawing (redrawing every line would lag)
+    const after = { ...v, strokes: [...v.strokes, ...added] };
+    vecData.set(layer.id, after);
+    const ctx = layer.canvas.getContext('2d')!;
+    let area: Rect | null = null;
+    for (const s of added) {
+      drawStroke(ctx, s, v.width);
+      area = unionRect(area, strokeBounds(s, v.width));
+    }
+    thumbTick++;
+    vecTick++;
+    push({ type: 'vector', layerId: layer.id, before: v, after });
+    if (area) render(area);
+    else requestFrame();
   }
 
   function radiusAt(p: number) {
@@ -869,33 +1284,34 @@
 
   // The stroke as it should be added to the layer: with paper grain worn into it if the
   // brush has texture. The grain pattern is fixed to the canvas, so it never slides.
-  function strokeSource(layer: Layer): HTMLCanvasElement {
-    const useTexture = brush.texture > 0 && paperPattern;
-    const useLock = layer.lockAlpha && strokeTool !== 'eraser';
-    const useSel = hasSel;
+  function strokeSource(layer: Layer, A: Rect = { x: 0, y: 0, w: docW, h: docH }): HTMLCanvasElement {
+    const useTexture = brush.texture > 0 && paperPattern && !strokeVector;
+    const useLock = layer.lockAlpha && strokeTool !== 'eraser' && !strokeVector;
+    const useSel = hasSel && !strokeVector;
     if (!useTexture && !useLock && !useSel) return strokeCtx.canvas;
     const t = texturedCtx;
     t.globalCompositeOperation = 'source-over';
     t.globalAlpha = 1;
-    t.clearRect(0, 0, docW, docH);
-    t.drawImage(strokeCtx.canvas, 0, 0);
+    const blit = (img: CanvasImageSource) => t.drawImage(img, A.x, A.y, A.w, A.h, A.x, A.y, A.w, A.h);
+    t.clearRect(A.x, A.y, A.w, A.h);
+    blit(strokeCtx.canvas);
     if (useTexture) {
       t.globalCompositeOperation = 'destination-out';
       t.globalAlpha = brush.texture;
       paperPattern!.setTransform(new DOMMatrix().translate(grainOffset.x, grainOffset.y));
       t.fillStyle = paperPattern!;
-      t.fillRect(0, 0, docW, docH);
+      t.fillRect(A.x, A.y, A.w, A.h);
       t.globalAlpha = 1;
     }
     if (useLock) {
       // Lock alpha: keep the stroke only where the layer already has paint
       t.globalCompositeOperation = 'destination-in';
-      t.drawImage(layer.canvas, 0, 0);
+      blit(layer.canvas);
     }
     if (useSel) {
       // Selection: keep the stroke only inside the selected area
       t.globalCompositeOperation = 'destination-in';
-      t.drawImage(selCtx.canvas, 0, 0);
+      blit(selCtx.canvas);
     }
     t.globalCompositeOperation = 'source-over';
     return t.canvas;
@@ -923,9 +1339,31 @@
     drawDab(dab, taperAt(dab.d, Infinity));
   }
 
+  // Draws one dab plus its mirror copies (when mirror drawing is on)
   function drawDab(pt: Point, factor: number) {
+    // vector pen: the line is drawn by vectorPreview() exactly as it will be saved
+    if (strokeVector && strokeTool === 'brush') return;
+    drawDabOne(pt, factor, 0);
+    if (!strokeMaps.length) return;
+    const r = radiusAt(pt.p) * factor;
+    strokeMaps.forEach((f, k) => {
+      const q = f(pt);
+      if (!sameSpot(pt, q, r)) drawDabOne({ x: q.x, y: q.y, p: pt.p }, factor, k + 1);
+    });
+  }
+
+  function drawDabOne(pt: Point, factor: number, copy: number) {
     if (directStroke) {
+      const st = mixStates[copy];
+      if (st) {
+        mixP = st.p;
+        lastSample = st.ls;
+      }
       drawMixDab(pt, factor);
+      if (st) {
+        st.p = mixP;
+        st.ls = lastSample;
+      }
       return;
     }
     const r = Math.max(radiusAt(pt.p) * factor, 0.3);
@@ -1080,6 +1518,10 @@
     const r = radiusAt(end.p);
     // look a little way into the stroke to find its direction at this end
     const inner = fromEnd.find((q) => Math.hypot(q.x - end.x, q.y - end.y) >= Math.max(r, 2)) ?? fromEnd[fromEnd.length - 1];
+    for (const f of [(q: { x: number; y: number }) => q, ...strokeMaps]) cutAt(f(end), f(inner), r);
+  }
+
+  function cutAt(end: { x: number; y: number }, inner: { x: number; y: number }, r: number) {
     const dx = end.x - inner.x;
     const dy = end.y - inner.y;
     if (dx === 0 && dy === 0) return;
@@ -1094,6 +1536,7 @@
 
   // Places dabs evenly between two points, blending size and pressure along the way
   function segment(a: Point, b: Point) {
+    if (drawing && !replaying) vecRaw.push({ x: b.x, y: b.y, p: b.p });
     const dist = Math.hypot(b.x - a.x, b.y - a.y);
     const r = radiusAt(Math.min(a.p, b.p)) * taperAt(strokeLen, Infinity);
     const step = Math.max(0.3, r * 2 * brush.spacing);
@@ -1109,6 +1552,7 @@
   }
 
   function grow(x0: number, y0: number, x1: number, y1: number) {
+    if (drawing) markArea({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
     if (!hasRect) {
       minX = x0; minY = y0; maxX = x1; maxY = y1;
       hasRect = true;
@@ -1143,6 +1587,10 @@
     }
     const layer = activeLayer;
     if (!layer) return null;
+    if (isVector(layer)) {
+      showNotice('This is a vector layer: use Brush and Eraser on it. For pixel tools, right-click the layer → Rasterize.');
+      return null;
+    }
     if (!layer.visible) {
       showNotice('This layer is hidden. Show it (👁) first.');
       return null;
@@ -1442,8 +1890,10 @@
   function lassoFill(pts: { x: number; y: number }[], erase: boolean) {
     const layer = editableLayer();
     if (!layer) return;
-    const xs = pts.map((p) => p.x);
-    const ys = pts.map((p) => p.y);
+    // with mirror drawing on, the shape is filled on every mirrored side too
+    const shapes = [pts, ...(sym.mode === 'off' ? [] : symCopies(sym)).map((f) => pts.map(f))];
+    const xs = shapes.flat().map((p) => p.x);
+    const ys = shapes.flat().map((p) => p.y);
     const pad = 2 + lfFeather * 2; // room for the soft edge
     const bx = Math.max(0, Math.floor(Math.min(...xs) - pad));
     const by = Math.max(0, Math.floor(Math.min(...ys) - pad));
@@ -1458,8 +1908,10 @@
     t.translate(-bx, -by);
     t.fillStyle = color;
     t.filter = lfFeather ? `blur(${lfFeather / 2}px)` : 'none';
-    shapePath(t, pts);
-    t.fill();
+    for (const sh of shapes) {
+      shapePath(t, sh);
+      t.fill();
+    }
     t.filter = 'none';
     t.setTransform(1, 0, 0, 1, 0, 0);
     t.globalCompositeOperation = 'destination-in';
@@ -1549,7 +2001,7 @@
     if (!layer) return false;
     const src = makeCanvas();
     const base = makeCanvas();
-    const sctx = src.getContext('2d', { willReadFrequently: true })!;
+    const sctx = src.getContext('2d')!;
     const bctx = base.getContext('2d')!;
     sctx.drawImage(layer.canvas, 0, 0);
     if (hasSel) {
@@ -1779,7 +2231,10 @@
         clip: l.clip,
         lockAlpha: l.lockAlpha,
         canvas: l.canvas,
+        ...(isVector(l) && vecData.get(l.id) ? { vector: vecData.get(l.id) } : {}),
       })),
+      dpi: docDpi,
+      colorMode,
     };
   }
 
@@ -1799,25 +2254,638 @@
     }
   }
 
-  const doSave = () => runFileAction('Saving', () => saveProject(projectData(), `${projectName}.seviath`));
-  const doExportPNG = () => runFileAction('PNG export', () => exportPNG(exportComposite(), `${projectName}.png`));
+  const doDownload = () => runFileAction('Saving', () => saveProject(projectData(), `${projectName}.seviath`));
+  const doExportPNG = () => runFileAction('PNG export', () => exportPNG(exportComposite(), `${projectName}.png`, docDpi));
   const doExportPSD = () => runFileAction('PSD export', () => exportPSD(projectData(), exportComposite(), `${projectName}.psd`));
 
-  function openFilePicker() {
+  // ---------- Mirror drawing and mirror functions ----------
+
+  function moveSymCenter(p: { x: number; y: number }) {
+    let x = Math.min(docW, Math.max(0, p.x));
+    let y = Math.min(docH, Math.max(0, p.y));
+    // snaps to the middle of the canvas
+    const snap = 10 / zoom;
+    if (Math.abs(x - docW / 2) < snap) x = docW / 2;
+    if (Math.abs(y - docH / 2) < snap) y = docH / 2;
+    sym.cx = Math.round(x * 2) / 2;
+    sym.cy = Math.round(y * 2) / 2;
+  }
+
+  function setSymMode(m: SymmetryMode) {
+    funcMenu = false;
+    sym.mode = m;
+    if (m !== 'off') symLastMode = m;
+    if (m !== 'off') showNotice(`Mirror drawing: ${MODE_LABEL[m]}. Drag ◎ to move the center.`);
+  }
+
+  function centerSym() {
+    sym.cx = docW / 2;
+    sym.cy = docH / 2;
+  }
+
+  function toggleMirror() {
+    setSymMode(sym.mode === 'off' ? symLastMode : 'off');
+  }
+
+  // Bounds of what is drawn on a layer (vector layers: their lines)
+  function layerBounds(l: Layer) {
+    if (isVector(l)) {
+      const v = vecData.get(l.id);
+      if (!v || !v.strokes.length) return null;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const s of v.strokes) {
+        const b = strokeBounds(s, v.width);
+        x0 = Math.min(x0, b.x);
+        y0 = Math.min(y0, b.y);
+        x1 = Math.max(x1, b.x + b.w);
+        y1 = Math.max(y1, b.y + b.h);
+      }
+      return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+    }
+    return contentBounds(l.canvas);
+  }
+
+  // Puts the mirror center in the middle of the layer's drawing or of the selection
+  function symToLayer() {
+    const l = activeLayer;
+    const b = l && layerBounds(l);
+    if (!b) {
+      showNotice('This layer is empty.');
+      return;
+    }
+    sym.cx = Math.round((b.x + b.w / 2) * 2) / 2;
+    sym.cy = Math.round((b.y + b.h / 2) * 2) / 2;
+  }
+
+  function symToSelection() {
+    const b = hasSel ? contentBounds(selCtx.canvas) : null;
+    if (!b) {
+      showNotice('Select an area first.');
+      return;
+    }
+    sym.cx = Math.round((b.x + b.w / 2) * 2) / 2;
+    sym.cy = Math.round((b.y + b.h / 2) * 2) / 2;
+  }
+
+  // Moves the active layer's drawing (or the selected part) to the middle of the canvas,
+  // or onto the mirror center. One undo step.
+  function centerLayer(how: 'both' | 'h' | 'v' | 'axis') {
+    funcMenu = false;
+    if (xf) applyTransform();
+    const layer = activeLayer;
+    if (!layer || activeId === PAPER_ID) return;
+    const toX = how === 'axis' && sym.mode !== 'off' ? sym.cx : docW / 2;
+    const toY = how === 'axis' && sym.mode !== 'off' ? sym.cy : docH / 2;
+    if (isVector(layer)) {
+      const v = vecData.get(layer.id);
+      const b = layerBounds(layer);
+      if (!v || !b) return showNotice('This layer is empty.');
+      const dx = how === 'v' ? 0 : Math.round(toX - (b.x + b.w / 2));
+      const dy = how === 'h' ? 0 : Math.round(toY - (b.y + b.h / 2));
+      if (dx || dy) setVector(layer, { ...v, strokes: v.strokes.map((s) => mapStroke(s, (p) => ({ x: p.x + dx, y: p.y + dy }))) });
+      return;
+    }
+    if (!startTransform(false) || !xf) return;
+    const b = xf.box;
+    if (how !== 'v') xf.tx = Math.round(toX - (b.x + b.w / 2));
+    if (how !== 'h') xf.ty = Math.round(toY - (b.y + b.h / 2));
+    applyTransform();
+  }
+
+  // Flips the active layer (or the selected part) using the transform, so it can be undone
+  function flipLayer(dir: 'h' | 'v') {
+    funcMenu = false;
+    if (xf) applyTransform();
+    if (!startTransform(false)) return;
+    flipTransform(dir);
+    applyTransform();
+  }
+
+  // Copies one half of the layer onto the other half, mirrored. The mirror line is the
+  // mirror-drawing center when that is on, otherwise the middle of the canvas.
+  function mirrorHalf(from: 'left' | 'right' | 'top' | 'bottom') {
+    funcMenu = false;
+    if (xf) applyTransform();
+    const layer = editableLayer();
+    if (!layer) return;
+    const ax = sym.mode !== 'off' ? sym.cx : docW / 2;
+    const ay = sym.mode !== 'off' ? sym.cy : docH / 2;
+    const src = makeCanvas();
+    src.getContext('2d')!.drawImage(layer.canvas, 0, 0);
+    editLayerPixels(layer, fullRect(), (ctx) => {
+      ctx.save();
+      ctx.beginPath();
+      if (from === 'left') ctx.rect(ax, 0, docW - ax, docH);
+      if (from === 'right') ctx.rect(0, 0, ax, docH);
+      if (from === 'top') ctx.rect(0, ay, docW, docH - ay);
+      if (from === 'bottom') ctx.rect(0, 0, docW, ay);
+      ctx.clip();
+      ctx.clearRect(0, 0, docW, docH);
+      if (from === 'left' || from === 'right') {
+        ctx.translate(2 * ax, 0);
+        ctx.scale(-1, 1);
+      } else {
+        ctx.translate(0, 2 * ay);
+        ctx.scale(1, -1);
+      }
+      ctx.drawImage(src, 0, 0);
+      ctx.restore();
+    });
+  }
+
+  function openAdjust() {
+    if (!activeLayer) return;
+    if (isVector(activeLayer)) {
+      showNotice('Adjust colors works on pixel layers. Right-click the layer → Rasterize first.');
+      return;
+    }
+    adjusting = true;
+  }
+
+  // ---------- Vector layers ----------
+
+  function addVectorLayer() {
+    const l = makeVectorLayer();
+    const index = activeIndex() + 1;
+    insertAt(l, index);
+    push({ type: 'add', layer: l, index });
+    if (tool !== 'brush' && tool !== 'eraser') tool = 'brush';
+  }
+
+  // Turns a vector layer into a normal pixel layer (the lines stay as they look now).
+  // Undo brings the vector layer back.
+  function rasterizeLayer() {
+    const l = activeLayer;
+    if (!l || !isVector(l)) return;
+    const index = activeIndex();
+    const copy = copyLayer(l);
+    const r = makeLayer();
+    Object.assign(r, { name: l.name, visible: l.visible, opacity: l.opacity, blend: l.blend, clip: l.clip, lockAlpha: l.lockAlpha });
+    r.canvas.getContext('2d')!.drawImage(l.canvas, 0, 0);
+    removeAt(index);
+    push({ type: 'delete', layer: copy, index });
+    insertAt(r, index);
+    push({ type: 'add', layer: r, index });
+    thumbTick++;
+    render();
+    showNotice('Rasterized: the layer is pixels now. Ctrl+Z turns it back into vector lines.');
+  }
+
+  // Line width slider: changes every line on the layer, live
+  function vecWidthInput(w: number) {
+    const l = activeLayer;
+    const v = l && vecData.get(l.id);
+    if (!l || !v) return;
+    if (!vecWidthBefore) vecWidthBefore = v;
+    vecData.set(l.id, { ...v, width: w });
+    drawVector(l);
+    render();
+  }
+
+  function vecWidthDone() {
+    const l = activeLayer;
+    const v = l && vecData.get(l.id);
+    if (l && v && vecWidthBefore && vecWidthBefore.width !== v.width) setVector(l, v, vecWidthBefore);
+    vecWidthBefore = null;
+  }
+
+  // ---------- Vector select tool ----------
+  // Click a line to select it (Shift adds), drag a box around lines, drag selected lines to
+  // move them. The panel then edits them: color, width, pressure, smoothing, nodes.
+
+  function vecLayerOrNotice(): { l: Layer; v: VecLayer } | null {
+    const l = activeLayer;
+    const v = l && isVector(l) ? vecData.get(l.id) : undefined;
+    if (!l || !v) {
+      showNotice('Vector select works on vector layers. Pick one in the layer list, or add one with ✒.');
+      return null;
+    }
+    if (!l.visible) {
+      showNotice('This layer is hidden. Show it (👁) first.');
+      return null;
+    }
+    return { l, v };
+  }
+
+  function vselDown(e: PointerEvent, pt: { x: number; y: number }) {
+    const lv = vecLayerOrNotice();
+    if (!lv) return;
+    capture(e);
+    const hit = hitStroke(lv.v.strokes, pt.x, pt.y, 6 / zoom, lv.v.width);
+    if (hit) {
+      if (e.shiftKey) vsel = vsel.includes(hit) ? vsel.filter((s) => s !== hit) : [...vsel, hit];
+      else if (!vsel.includes(hit)) vsel = [hit];
+      vselDrag = { mode: 'move', start: pt, cur: pt, before: lv.v, shown: lv.v, picked: vsel, moved: false, add: e.shiftKey };
+    } else {
+      if (!e.shiftKey) vsel = [];
+      vselDrag = { mode: 'box', start: pt, cur: pt, before: lv.v, shown: lv.v, picked: vsel, moved: false, add: e.shiftKey };
+    }
+  }
+
+  function vselMove(pt: { x: number; y: number }) {
+    const d = vselDrag;
+    const l = activeLayer;
+    if (!d || !l) return;
+    d.cur = pt;
+    if (d.mode === 'box') {
+      vselBox = { x0: d.start.x, y0: d.start.y, x1: pt.x, y1: pt.y };
+      return;
+    }
+    const dx = Math.round((pt.x - d.start.x) * 2) / 2, dy = Math.round((pt.y - d.start.y) * 2) / 2;
+    if (!d.moved && Math.hypot(dx, dy) < 2 / zoom) return;
+    d.moved = true;
+    const map = new Map(d.picked.map((s) => [s, mapStroke(s, (q) => ({ x: q.x + dx, y: q.y + dy }))]));
+    const next = { ...d.before, strokes: d.before.strokes.map((s) => map.get(s) ?? s) };
+    const area = showVector(l, d.shown, next);
+    d.shown = next;
+    vsel = d.picked.map((s) => map.get(s)!);
+    render(area);
+  }
+
+  function vselUp() {
+    const d = vselDrag;
+    vselDrag = null;
+    vselBox = null;
+    const l = activeLayer;
+    if (!d || !l) return;
+    if (d.mode === 'move') {
+      if (d.moved) {
+        push({ type: 'vector', layerId: l.id, before: d.before, after: d.shown });
+        render({ x: 0, y: 0, w: 0, h: 0 });
+      }
+      return;
+    }
+    const box = {
+      x: Math.min(d.start.x, d.cur.x),
+      y: Math.min(d.start.y, d.cur.y),
+      w: Math.abs(d.cur.x - d.start.x),
+      h: Math.abs(d.cur.y - d.start.y),
+    };
+    if (box.w < 2 / zoom && box.h < 2 / zoom) return;
+    const inside = strokesInBox(d.before.strokes, box);
+    vsel = d.add ? [...new Set([...vsel, ...inside])] : inside;
+  }
+
+  // Changes the selected lines (or every line when none is selected), one undo step
+  function editLines(fn: (s: VecStroke) => VecStroke) {
+    const lv = vecLayerOrNotice();
+    if (!lv) return;
+    const targets = new Set(vsel.length ? vsel : lv.v.strokes);
+    if (!targets.size) return showNotice('This layer has no lines yet.');
+    const map = new Map<VecStroke, VecStroke>();
+    const strokes = lv.v.strokes.map((s) => {
+      if (!targets.has(s)) return s;
+      const n = fn(s);
+      map.set(s, n);
+      return n;
+    });
+    setVector(lv.l, { ...lv.v, strokes });
+    if (vsel.length) vsel = vsel.map((s) => map.get(s) ?? s);
+  }
+
+  function deleteLines() {
+    const lv = vecLayerOrNotice();
+    if (!lv || !vsel.length) return;
+    const gone = new Set(vsel);
+    setVector(lv.l, { ...lv.v, strokes: lv.v.strokes.filter((s) => !gone.has(s)) });
+    vsel = [];
+  }
+
+  function duplicateLines() {
+    const lv = vecLayerOrNotice();
+    if (!lv || !vsel.length) return;
+    const copies = vsel.map((s) => mapStroke(s, (q) => ({ x: q.x + 20, y: q.y + 20 })));
+    setVector(lv.l, { ...lv.v, strokes: [...lv.v.strokes, ...copies] });
+    vsel = copies;
+  }
+
+  function selectAllLines() {
+    const lv = vecLayerOrNotice();
+    if (lv) vsel = lv.v.strokes;
+  }
+
+  // Bounds of the selected lines
+  function vselBounds() {
+    let box: Rect | null = null;
+    const w = activeLayer ? (vecData.get(activeLayer.id)?.width ?? 1) : 1;
+    for (const s of vsel) box = unionRect(box, strokeBounds(s, w));
+    return box;
+  }
+
+  function flipLines(dir: 'h' | 'v') {
+    const b = vselBounds();
+    if (!b) return;
+    const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+    editLines((s) => mapStroke(s, (q) => (dir === 'h' ? { x: 2 * cx - q.x, y: q.y } : { x: q.x, y: 2 * cy - q.y })));
+  }
+
+  function nudgeLines(dx: number, dy: number) {
+    if (!vsel.length) return;
+    editLines((s) => mapStroke(s, (q) => ({ x: q.x + dx, y: q.y + dy })));
+  }
+
+  // Pressure graph of the first selected line
+  function pressureChange(pressures: number[], done: boolean) {
+    const lv = vecLayerOrNotice();
+    if (!lv || !vsel.length || !prDense) return;
+    const target = vsel[0];
+    if (!prBefore) prBefore = lv.v;
+    const edited = setPressures(prDense, pressures);
+    const next = { ...lv.v, strokes: lv.v.strokes.map((s) => (s === target ? edited : s)) };
+    const area = showVector(lv.l, lv.v, next);
+    vsel = [edited, ...vsel.slice(1)];
+    prDense = edited;
+    render(area);
+    if (done) {
+      push({ type: 'vector', layerId: lv.l.id, before: prBefore, after: next });
+      prBefore = null;
+    }
+  }
+
+  // A finely pointed copy of the first selected line for the pressure graph
+  let prSource = $derived.by(() => {
+    const s = vsel[0];
+    if (!s) return null;
+    if (prDense && (prDense === s || prDense.pts === s.pts)) return prDense;
+    prDense = nodeCount(s) < 40 ? densifyStroke(s, 4) : s;
+    return prDense;
+  });
+
+  // ---------- Document settings ----------
+
+  function setDoc(next: DocSettings) {
+    fileMenu = false;
+    const before = { dpi: docDpi, colorMode };
+    if (before.dpi === next.dpi && before.colorMode === next.colorMode) return;
+    docDpi = next.dpi;
+    colorMode = next.colorMode;
+    push({ type: 'doc', before, after: next });
+    render();
+  }
+
+  function askDpi() {
+    const cm = (px: number) => ((px / docDpi) * 2.54).toFixed(1);
+    const v = prompt(`Print resolution in DPI (pixels per inch). 300 = print, 72 = screen.\nThe picture keeps its pixels; only the print size changes (now ${cm(docW)} × ${cm(docH)} cm).`, String(docDpi));
+    const dpi = Math.round(Number(v));
+    if (!v || !isFinite(dpi) || dpi < 1 || dpi > 2400) return;
+    setDoc({ dpi, colorMode });
+  }
+
+  // ---------- Export ----------
+
+  function openExport() {
+    fileMenu = false;
+    if (xf) applyTransform();
+    exportDialog = true;
+  }
+
+  function finishExport(r: ExportOptions | null) {
+    exportDialog = false;
+    if (!r) return;
+    exportOpts = r;
+    runFileAction('Export', () =>
+      exportAs(
+        r,
+        projectData(),
+        (withPaper) => {
+          const c = makeCanvas();
+          compositeTo(c.getContext('2d')!, withPaper, false);
+          return c;
+        },
+        projectName,
+      ),
+    );
+  }
+
+  // ---------- Autosave to the project library ----------
+
+  // Something changed: remember which layer's pixels changed and save a little later
+  function touch(e?: HistoryEntry) {
+    if (e?.type === 'pixels') dirtyLayers.add(e.layerId);
+    if (e?.type === 'merge') dirtyLayers.add(e.lowerId);
+    if (e?.type === 'vector') dirtyLayers.add(e.layerId);
+    if (!currentId) return;
+    saveState = 'unsaved';
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => saveNow(), 2500);
+  }
+
+  async function saveNow(): Promise<void> {
+    clearTimeout(saveTimer);
+    if (saving) {
+      saveAgain = true;
+      return saving;
+    }
+    if (!currentId || saveState === 'saved') return;
+    // don't save half a stroke or an unfinished transform; try again soon
+    if (drawing || xf) {
+      saveTimer = setTimeout(() => saveNow(), 1500);
+      return;
+    }
+    const id = currentId;
+    const ids = layers.map((l) => l.id);
+    const changed = new Set(dirtyLayers);
+    dirtyLayers.clear();
+    saveState = 'saving';
+    saving = (async () => {
+      try {
+        await saveToLibrary(id, projectName, projectData(), exportComposite(), async (l, i) => {
+          let blob = blobCache.get(ids[i]);
+          if (!blob || changed.has(ids[i])) {
+            blob = await canvasToBlob(l.canvas);
+            blobCache.set(ids[i], blob);
+          }
+          return blob;
+        });
+        if (id === currentId && saveState === 'saving') saveState = 'saved';
+      } catch (err) {
+        for (const c of changed) dirtyLayers.add(c);
+        if (id === currentId) saveState = 'unsaved';
+        showNotice(`Autosave failed: ${err instanceof Error ? err.message : err}`);
+      } finally {
+        saving = null;
+      }
+    })();
+    await saving;
+    if (saveAgain) {
+      saveAgain = false;
+      await saveNow();
+    }
+  }
+
+  // Ctrl+S: save right now
+  async function doSave() {
+    fileMenu = false;
+    if (xf) applyTransform();
+    if (!currentId) {
+      currentId = newId();
+      saveState = 'unsaved';
+    }
+    if (saveState === 'saved') {
+      showNotice('Saved.');
+      return;
+    }
+    await saveNow();
+    if ((saveState as string) === 'saved') showNotice('Saved.');
+  }
+
+  function renameCurrent() {
+    fileMenu = false;
+    const name = prompt('Project name', projectName)?.trim();
+    if (!name || name === projectName) return;
+    projectName = name;
+    touch();
+  }
+
+  // A fresh document becomes a new project in the library
+  async function startLibraryProject() {
+    blobCache.clear();
+    dirtyLayers.clear();
+    currentId = newId();
+    saveState = 'unsaved';
+    await saveNow();
+  }
+
+  async function openManager() {
+    fileMenu = false;
+    if (xf) applyTransform();
+    await saveNow();
+    showProjects = true;
+  }
+
+  async function openFromLibrary(id: string) {
+    if (id === currentId) {
+      showProjects = false;
+      return;
+    }
+    await saveNow();
+    try {
+      const { meta, data } = await loadFromLibrary(id);
+      await loadProject(data, meta.name);
+      blobCache.clear();
+      dirtyLayers.clear();
+      currentId = id;
+      saveState = 'saved';
+      showProjects = false;
+    } catch (err) {
+      alert(`Opening failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  function openFilePicker(mode: 'open' | 'layer' = 'open') {
     fileMenu = false;
     if (!fileInput) return;
+    fileMode = mode;
     fileInput.value = '';
     fileInput.click();
   }
 
-  async function onFileChosen() {
-    const file = fileInput?.files?.[0];
-    if (!file) return;
-    if (undoCount > 0 && !confirm('Open this file? The current drawing will be replaced (save it first if you need it).')) return;
-    await runFileAction('Opening', async () => {
-      const data = file.name.toLowerCase().endsWith('.psd') ? await importPSD(file) : await openProject(file);
-      await loadProject(data, file.name.replace(/\.[^.]+$/, ''));
-    });
+  function onFileChosen() {
+    const files = Array.from(fileInput?.files ?? []);
+    if (!files.length) return;
+    if (fileMode === 'layer') importAsLayers(files);
+    else openFiles(files);
+  }
+
+  // Every file opens as its own new project (the last one stays open)
+  async function openFiles(files: File[]) {
+    if (xf) applyTransform();
+    await saveNow();
+    let opened = false;
+    for (const file of files) {
+      try {
+        const o = await openAnyFile(file);
+        await loadProject(o.data, o.name);
+        await startLibraryProject();
+        if (o.note) showNotice(o.note);
+        opened = true;
+      } catch (err) {
+        alert(`Could not open "${file.name}": ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    if (opened) showProjects = false;
+  }
+
+  // Adds pictures (or every layer of a PSD / ORA / project) on top of the active layer.
+  // Bigger pictures are shrunk to fit the canvas; everything is centered.
+  async function importAsLayers(files: File[]) {
+    if (xf) applyTransform();
+    let added = 0;
+    for (const file of files) {
+      try {
+        const o = await openAnyFile(file);
+        const d = o.data;
+        const s = Math.min(1, docW / d.width, docH / d.height);
+        const ox = (docW - d.width * s) / 2;
+        const oy = (docH - d.height * s) / 2;
+        let index = activeIndex() + 1;
+        for (const src of d.layers) {
+          const l = makeLayer();
+          l.name = d.layers.length === 1 ? o.name : src.name;
+          l.visible = src.visible;
+          l.opacity = src.opacity;
+          l.blend = (BLEND_NAMES as string[]).includes(src.blend) ? (src.blend as BlendMode) : 'Normal';
+          l.clip = src.clip && index > 0;
+          const ctx = l.canvas.getContext('2d')!;
+          ctx.imageSmoothingQuality = 'high';
+          ctx.drawImage(src.canvas, ox, oy, d.width * s, d.height * s);
+          insertAt(l, index);
+          push({ type: 'add', layer: l, index });
+          dirtyLayers.add(l.id);
+          index++;
+          added++;
+        }
+        if (o.note) showNotice(o.note);
+      } catch (err) {
+        alert(`Could not import "${file.name}": ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    if (!added) return;
+    thumbTick++;
+    render();
+    // One picture: show the transform box right away so it can be placed
+    if (added === 1) {
+      await tick();
+      if (startTransform(false)) showNotice('Move or resize the picture, then press Enter.');
+    }
+  }
+
+  function isFileDrag(e: DragEvent) {
+    return Array.from(e.dataTransfer?.types ?? []).includes('Files');
+  }
+
+  // Dropping files on the drawing adds them as layers (in the project manager: opens them)
+  function onWindowDragOver(e: DragEvent) {
+    if (isFileDrag(e)) e.preventDefault();
+  }
+  function onWindowDrop(e: DragEvent) {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    if (showProjects) return; // the project manager handles its own drops
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    if (files.length) importAsLayers(files);
+  }
+
+  // Ctrl+V with a picture on the clipboard (e.g. a screenshot) pastes it as a new layer
+  function onPaste(e: ClipboardEvent) {
+    if (showProjects || newDialog || adjusting) return;
+    const t = e.target as HTMLElement;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+    const files = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith('image/'));
+    if (!files.length) return;
+    e.preventDefault();
+    importAsLayers(files.map((f, i) => new File([f], f.name && f.name !== 'image.png' ? f.name : `Pasted image${i ? ' ' + (i + 1) : ''}.png`, { type: f.type })));
+  }
+
+  function onBeforeUnload(e: BeforeUnloadEvent) {
+    if (currentId && saveState !== 'saved') {
+      saveNow();
+      e.preventDefault();
+    }
+  }
+
+  function onVisibility() {
+    if (document.visibilityState === 'hidden') saveNow();
   }
 
   // Clears everything and sets a new document size
@@ -1829,25 +2897,35 @@
     cancelDraft();
     docW = w;
     docH = h;
+    sym.cx = w / 2;
+    sym.cy = h / 2;
     makeWorkCanvases();
     undoStack.length = 0;
     redoStack.length = 0;
+    vecData.clear();
     sync();
     lastEnd = null;
   }
 
   async function loadProject(data: ProjectData, name: string) {
     resetDocument(data.width, data.height);
-    const list: Layer[] = data.layers.map((l) => ({
-      id: nextId++,
-      name: l.name,
-      canvas: l.canvas,
-      visible: l.visible,
-      opacity: l.opacity,
-      blend: (BLEND_NAMES as string[]).includes(l.blend) ? (l.blend as BlendMode) : 'Normal',
-      clip: l.clip,
-      lockAlpha: l.lockAlpha,
-    }));
+    docDpi = data.dpi ?? 72;
+    colorMode = data.colorMode ?? 'rgb';
+    const list: Layer[] = data.layers.map((l) => {
+      const id = nextId++;
+      if (l.vector) vecData.set(id, { strokes: l.vector.strokes ?? [], width: l.vector.width ?? 1 });
+      return {
+        id,
+        name: l.name,
+        canvas: l.canvas,
+        visible: l.visible,
+        opacity: l.opacity,
+        blend: (BLEND_NAMES as string[]).includes(l.blend) ? (l.blend as BlendMode) : 'Normal',
+        clip: l.clip,
+        lockAlpha: l.lockAlpha,
+        kind: l.vector ? 'vector' : 'raster',
+      };
+    });
     if (!list.length) list.push(makeLayer());
     layers = list;
     activeId = list[list.length - 1].id;
@@ -1859,24 +2937,28 @@
     render();
   }
 
-  async function newProject(r: { width: number; height: number; paper: 'white' | 'transparent' } | null) {
+  async function newProject(r: NewProjectResult) {
     newDialog = false;
     if (!r) return;
+    await saveNow();
     resetDocument(r.width, r.height);
-    const first = makeLayer();
+    docDpi = r.dpi;
+    colorMode = r.colorMode;
+    const first = r.layerKind === 'vector' ? makeVectorLayer() : makeLayer();
     layers = [first];
     activeId = first.id;
     Object.assign(paper, { exists: true, visible: r.paper === 'white', color: '#ffffff' });
     projectName = 'Untitled';
+    showProjects = false;
     await tick();
     fitToScreen();
     thumbTick++;
     render();
+    await startLibraryProject();
   }
 
   function askNewProject() {
     fileMenu = false;
-    if (undoCount > 0 && !confirm('Start a new project? The current drawing will be lost (save it first if you need it).')) return;
     newDialog = true;
   }
 
@@ -1907,13 +2989,20 @@
   }
 
   function deleteLayer() {
-    if (layers.length <= 1) return;
     const index = activeIndex();
     if (index < 0) return;
     const l = layers[index];
     const copy = copyLayer(l);
     removeAt(index);
     push({ type: 'delete', layer: copy, index });
+    // the last layer can be deleted too: a new empty layer takes its place
+    if (layers.length === 0) {
+      const fresh = makeLayer();
+      insertAt(fresh, 0);
+      push({ type: 'add', layer: fresh, index: 0 });
+    }
+    thumbTick++;
+    render();
   }
 
   // A new layer above, already set up for shading: clipped to the layer below with a blend mode
@@ -1930,8 +3019,10 @@
   function duplicateLayer() {
     const src = activeLayer;
     if (!src) return;
-    const l = { ...makeLayer(), name: src.name + ' copy', visible: src.visible, opacity: src.opacity, blend: src.blend, clip: src.clip, lockAlpha: src.lockAlpha };
+    const l = { ...makeLayer(), name: src.name + ' copy', visible: src.visible, opacity: src.opacity, blend: src.blend, clip: src.clip, lockAlpha: src.lockAlpha, kind: src.kind };
     l.canvas.getContext('2d')!.drawImage(src.canvas, 0, 0);
+    const v = vecData.get(src.id);
+    if (isVector(src) && v) vecData.set(l.id, v);
     const index = activeIndex() + 1;
     insertAt(l, index);
     push({ type: 'add', layer: l, index });
@@ -1943,6 +3034,10 @@
     if (index <= 0) return;
     const upper = layers[index];
     const lower = layers[index - 1];
+    if (isVector(lower)) {
+      showNotice("Can't merge into a vector layer. Rasterize the layer below first (right-click → Rasterize).");
+      return;
+    }
     const ctx = lower.canvas.getContext('2d', { willReadFrequently: true })!;
     const before = ctx.getImageData(0, 0, docW, docH);
 
@@ -1979,6 +3074,11 @@
   function clearLayer() {
     const layer = activeLayer;
     if (!layer) return;
+    if (isVector(layer)) {
+      const v = vecData.get(layer.id);
+      if (v && v.strokes.length) setVector(layer, { ...v, strokes: [] });
+      return;
+    }
     const ctx = layer.canvas.getContext('2d', { willReadFrequently: true })!;
     const before = ctx.getImageData(0, 0, docW, docH);
     ctx.clearRect(0, 0, docW, docH);
@@ -2024,6 +3124,17 @@
     }
   }
 
+  // Svelte action: moves a popup menu up/left so all of it is inside the window
+  function fitOnScreen(node: HTMLElement) {
+    const fit = () => {
+      const r = node.getBoundingClientRect();
+      if (r.bottom > window.innerHeight - 8) node.style.top = `${Math.max(8, window.innerHeight - 8 - r.height)}px`;
+      if (r.right > window.innerWidth - 8) node.style.left = `${Math.max(8, window.innerWidth - 8 - r.width)}px`;
+    };
+    requestAnimationFrame(fit);
+    fit();
+  }
+
   function openLayerMenu(e: MouseEvent, id: number) {
     e.preventDefault();
     activeId = id;
@@ -2052,6 +3163,7 @@
   // ---------- Undo / redo ----------
 
   function push(entry: HistoryEntry) {
+    touch(entry);
     undoStack.push(entry);
     if (undoStack.length > MAX_HISTORY) undoStack.shift();
     redoStack.length = 0;
@@ -2063,11 +3175,15 @@
     redoCount = redoStack.length;
   }
 
-  function apply(e: HistoryEntry, reverse: boolean) {
+  // Undoes (reverse) or redoes an entry. Returns the area that changed (undefined = all).
+  function apply(e: HistoryEntry, reverse: boolean): Rect | undefined {
+    touch(e);
+    let changed: Rect | undefined;
     switch (e.type) {
       case 'pixels': {
         const l = layers.find((l) => l.id === e.layerId);
         l?.canvas.getContext('2d')!.putImageData(reverse ? e.before : e.after, e.rect.x, e.rect.y);
+        changed = e.rect;
         break;
       }
       case 'add':
@@ -2091,6 +3207,22 @@
         if (l) Object.assign(l, reverse ? e.before : e.after);
         break;
       }
+      case 'vector': {
+        const l = layers.find((x) => x.id === e.layerId);
+        const from = reverse ? e.after : e.before;
+        const to = reverse ? e.before : e.after;
+        if (l) changed = showVector(l, from, to);
+        else vecData.set(e.layerId, to);
+        const still = new Set(to.strokes);
+        vsel = vsel.filter((s) => still.has(s));
+        break;
+      }
+      case 'doc': {
+        const d = reverse ? e.before : e.after;
+        docDpi = d.dpi;
+        colorMode = d.colorMode;
+        break;
+      }
       case 'merge': {
         const lower = layers.find((l) => l.id === e.lowerId);
         lower?.canvas.getContext('2d')!.putImageData(reverse ? e.before : e.after, 0, 0);
@@ -2103,24 +3235,25 @@
       }
     }
     thumbTick++;
+    return changed;
   }
 
   function undo() {
     const e = undoStack.pop();
     if (!e) return;
-    apply(e, true);
+    const area = apply(e, true);
     redoStack.push(e);
     sync();
-    render();
+    render(area);
   }
 
   function redo() {
     const e = redoStack.pop();
     if (!e) return;
-    apply(e, false);
+    const area = apply(e, false);
     undoStack.push(e);
     sync();
-    render();
+    render(area);
   }
 
   // ---------- Thumbnails ----------
@@ -2147,7 +3280,7 @@
     if (target.tagName === 'INPUT' && (target.type === 'text' || target.type === 'number')) return;
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
-    if (adjusting || newDialog) return; // the dialog handles its own keys
+    if (adjusting || newDialog || showProjects || exportDialog) return; // the dialog handles its own keys
 
     // While a shape is being drawn: Enter closes it, Esc cancels, Ctrl+Z removes the last part
     if (selDraft) {
@@ -2175,13 +3308,14 @@
     }
     if (mod && key === 'o') {
       e.preventDefault();
-      openFilePicker();
+      if (e.shiftKey) openManager();
+      else openFilePicker('open');
       return;
     }
     if (mod && key === 'e') {
       e.preventDefault();
       if (e.shiftKey) doExportPNG();
-      else doExportPSD();
+      else openExport();
       return;
     }
 
@@ -2207,8 +3341,27 @@
     // Selection
     if (mod && key === 'a') {
       e.preventDefault();
-      selectAll();
+      if (activeTool === 'vselect') selectAllLines();
+      else selectAll();
       return;
+    }
+    if (activeTool === 'vselect' && vsel.length) {
+      if (key === 'delete' || key === 'backspace') {
+        e.preventDefault();
+        deleteLines();
+        return;
+      }
+      if (key === 'escape') {
+        vsel = [];
+        return;
+      }
+      const step = e.shiftKey ? 10 : 1;
+      const arrows: Record<string, [number, number]> = { arrowleft: [-step, 0], arrowright: [step, 0], arrowup: [0, -step], arrowdown: [0, step] };
+      if (arrows[key]) {
+        e.preventDefault();
+        nudgeLines(...arrows[key]);
+        return;
+      }
     }
     if (mod && key === 'j') {
       e.preventDefault();
@@ -2232,13 +3385,15 @@
     }
     if (mod && key === 'u') {
       e.preventDefault();
-      if (activeLayer) adjusting = true;
+      openAdjust();
       return;
     }
 
-    if (key === 'escape' && (layerMenu || fileMenu)) {
+    if (key === 'escape' && (layerMenu || fileMenu || toolsMenu || funcMenu)) {
       layerMenu = null;
       fileMenu = false;
+      toolsMenu = false;
+      funcMenu = false;
     } else if (key === 'escape' && hasSel) {
       deselect();
     } else if (key === 'alt') {
@@ -2291,6 +3446,10 @@
       selMode = 'lasso';
     } else if (!mod && key === 'v') {
       tool = 'move';
+    } else if (!mod && key === 'a') {
+      tool = 'vselect';
+    } else if (!mod && key === 'y') {
+      setSymMode(nextMode(sym.mode));
     } else if (!mod && key === '[') {
       brush.size = stepSize(brush.size, -1);
     } else if (!mod && key === ']') {
@@ -2305,6 +3464,44 @@
     if (next < 10) return Math.round(next * 10) / 10;
     if (next < 50) return Math.round(next * 2) / 2;
     return Math.round(next);
+  }
+
+  // ---------- Toolbar menus ----------
+
+  type ItemId = 'brush' | 'eraser' | 'fill' | 'lassoFill' | 'lassoSel' | 'picker' | 'select' | 'move' | 'vselect';
+  type Item = { id: ItemId; icon: string; label: string; key: string; title: string };
+  const TOOL_ITEMS: Item[] = [
+    { id: 'brush', icon: '🖌', label: 'Brush', key: 'B', title: 'Paint with the chosen brush' },
+    { id: 'eraser', icon: '⌫', label: 'Eraser', key: 'E', title: 'Hard, soft and textured erasers' },
+    { id: 'fill', icon: '🪣', label: 'Fill', key: 'G', title: 'Paint bucket' },
+    { id: 'lassoFill', icon: '⬠', label: 'Lasso fill', key: 'Shift L', title: 'Draw a shape to fill it. Hold Ctrl to erase the shape' },
+    { id: 'lassoSel', icon: '✎', label: 'Lasso', key: 'L', title: 'Lasso selection: draw around an area' },
+    { id: 'picker', icon: '💧', label: 'Picker', key: 'I / Alt', title: 'Pick a color from the canvas' },
+    { id: 'vselect', icon: '◇', label: 'Vector select', key: 'A', title: 'Select, move and edit lines on a vector layer' },
+  ];
+  const FUNC_ITEMS: Item[] = [
+    { id: 'select', icon: '▭', label: 'Select', key: 'M', title: 'Rectangle or ellipse selection' },
+    { id: 'move', icon: '✥', label: 'Move', key: 'V', title: 'Move the layer or the selected part' },
+  ];
+
+  let currentItem = $derived<ItemId>(
+    activeTool === 'select' ? (selMode === 'lasso' ? 'lassoSel' : 'select') : (activeTool as ItemId),
+  );
+  let toolItem = $derived(TOOL_ITEMS.find((i) => i.id === currentItem) ?? null);
+  let funcItem = $derived(FUNC_ITEMS.find((i) => i.id === currentItem) ?? null);
+
+  function pickItem(id: ItemId) {
+    toolsMenu = false;
+    funcMenu = false;
+    if (id === 'lassoSel') {
+      tool = 'select';
+      selMode = 'lasso';
+    } else if (id === 'select') {
+      tool = 'select';
+      if (selMode === 'lasso') selMode = 'rect';
+    } else {
+      tool = id;
+    }
   }
 
   function onKeyUp(e: KeyboardEvent) {
@@ -2326,46 +3523,112 @@
   <header class="toolbar">
     <strong>SeviathStudio</strong>
     <div class="file-wrap">
-      <button class:on={fileMenu} onclick={() => (fileMenu = !fileMenu)}>File ▾</button>
+      <button class:on={fileMenu} onclick={(e) => (fileMenu = dropAt(e, !fileMenu))}>File ▾</button>
       {#if fileMenu}
         <div class="menu-backdrop" role="presentation" onpointerdown={() => (fileMenu = false)}></div>
-        <div class="context-menu file-menu" role="menu">
-          <div class="menu-title">{projectName} · {docW} × {docH}</div>
+        <div class="context-menu drop file-menu" role="menu" style="left: {dropPos.x}px; top: {dropPos.y}px;">
+          <div class="menu-title">{projectName} · {docW} × {docH} px · {docDpi} dpi · {colorMode.toUpperCase()}</div>
+          <button role="menuitem" onclick={openManager}>🗂 Projects… <kbd>Ctrl Shift O</kbd></button>
           <button role="menuitem" onclick={askNewProject}>New project…</button>
-          <button role="menuitem" onclick={openFilePicker}>Open… (.seviath or .psd) <kbd>Ctrl O</kbd></button>
+          <button role="menuitem" onclick={() => openFilePicker('open')} title="PSD, OpenRaster, Krita, PNG, JPG, WebP, GIF, SVG, .seviath">Open file as new project… <kbd>Ctrl O</kbd></button>
+          <button role="menuitem" onclick={() => openFilePicker('layer')} title="Adds pictures as new layers. You can also drop files on the canvas or paste with Ctrl V">Import as layer…</button>
           <hr />
-          <button role="menuitem" onclick={doSave}>Save project (.seviath) <kbd>Ctrl S</kbd></button>
+          <button role="menuitem" onclick={doSave}>Save now <kbd>Ctrl S</kbd></button>
+          <button role="menuitem" onclick={renameCurrent}>Rename project…</button>
+          <button role="menuitem" onclick={doDownload}>Download project (.seviath)</button>
+          <button role="menuitem" onclick={askDpi} title="Print size of the picture; pixels stay the same">Resolution: {docDpi} DPI…</button>
+          <button role="menuitem" onclick={() => setDoc({ dpi: docDpi, colorMode: colorMode === 'rgb' ? 'cmyk' : 'rgb' })} title="RGB for screens, CMYK for print">
+            {colorMode === 'rgb' ? 'Switch to CMYK (print)' : 'Switch to RGB (screen)'}
+          </button>
           <hr />
-          <button role="menuitem" onclick={doExportPSD}>Export PSD <kbd>Ctrl E</kbd></button>
-          <button role="menuitem" onclick={doExportPNG}>Export PNG <kbd>Ctrl Shift E</kbd></button>
+          <button role="menuitem" onclick={openExport} title="PSD, ORA, .seviath, PNG, JPG, WebP, GIF, BMP, TIFF, ICO, SVG">Export… (all file types) <kbd>Ctrl E</kbd></button>
+          <button role="menuitem" onclick={doExportPSD}>Quick export PSD</button>
+          <button role="menuitem" onclick={doExportPNG}>Quick export PNG <kbd>Ctrl Shift E</kbd></button>
         </div>
       {/if}
     </div>
-    <div class="group">
-      <button class:on={activeTool === 'brush'} onclick={() => (tool = 'brush')} title="Brush (B)">Brush</button>
-      <button class:on={activeTool === 'eraser'} onclick={() => (tool = 'eraser')} title="Eraser (E)">Eraser</button>
-      <button class:on={activeTool === 'fill'} onclick={() => (tool = 'fill')} title="Fill / paint bucket (G)">Fill</button>
-      <button class:on={activeTool === 'lassoFill'} onclick={() => (tool = 'lassoFill')} title="Lasso fill: draw a shape to fill it (Shift L). Hold Ctrl to erase the shape">⬠ Lasso fill</button>
-      <button class:on={activeTool === 'picker'} onclick={() => (tool = 'picker')} title="Color picker (I, or hold Alt)">Picker</button>
+    <button class="project-name" onclick={renameCurrent} title="Rename project">{projectName}</button>
+    <span class="save-state {saveState}" title="Your work is saved automatically in this browser">
+      {saveState === 'saved' ? '✓ Saved' : saveState === 'saving' ? 'Saving…' : '● Not saved yet'}
+    </span>
+    <span class="doc-badge" title="Color mode and print resolution (File menu to change)">{colorMode.toUpperCase()} · {docDpi} dpi</span>
+    {#if colorMode === 'cmyk'}
       <button
-        class:on={activeTool === 'select' && selMode !== 'lasso'}
+        class:on={printPreview}
         onclick={() => {
-          tool = 'select';
-          if (selMode === 'lasso') selMode = 'rect';
+          printPreview = !printPreview;
+          render();
         }}
-        title="Select: rectangle or ellipse (M)">▭ Select</button
+        title="Show colors as they will look printed (approximate)">🖨 Print preview</button
       >
-      <button
-        class:on={activeTool === 'select' && selMode === 'lasso'}
-        onclick={() => {
-          tool = 'select';
-          selMode = 'lasso';
-        }}
-        title="Lasso select (L)">✎ Lasso</button
-      >
-      <button class:on={activeTool === 'move'} onclick={() => (tool = 'move')} title="Move (V)">✥ Move</button>
-      <button class:on={!!xf} onclick={() => (xf ? applyTransform() : startTransform(false))} title="Transform: scale and rotate (Ctrl T)">⤡ Transform</button>
+    {/if}
+    <div class="file-wrap">
+      <button class:on={toolsMenu} class:active-group={toolItem !== null} onclick={(e) => (toolsMenu = dropAt(e, !toolsMenu))} title="Drawing tools">
+        {toolItem ? (isVector(activeLayer) && (toolItem.id === 'brush' || toolItem.id === 'eraser') ? (toolItem.id === 'brush' ? '✒ Vector pen' : '⌫ Vector eraser') : `${toolItem.icon} ${toolItem.label}`) : 'Tools'} ▾
+      </button>
+      {#if toolsMenu}
+        <div class="menu-backdrop" role="presentation" onpointerdown={() => (toolsMenu = false)}></div>
+        <div class="context-menu drop file-menu" role="menu" style="left: {dropPos.x}px; top: {dropPos.y}px;">
+          {#each TOOL_ITEMS as it (it.id)}
+            <button role="menuitem" class:checked={toolItem?.id === it.id} onclick={() => pickItem(it.id)} title={it.title}>
+              <span>{it.icon} {it.label}</span><kbd>{it.key}</kbd>
+            </button>
+          {/each}
+        </div>
+      {/if}
     </div>
+    <div class="file-wrap">
+      <button class:on={funcMenu} class:active-group={funcItem !== null || !!xf} onclick={(e) => (funcMenu = dropAt(e, !funcMenu))} title="Select, move, transform, mirror">
+        {xf ? '⤡ Transform' : funcItem ? `${funcItem.icon} ${funcItem.label}` : 'Functions'} ▾
+      </button>
+      {#if funcMenu}
+        <div class="menu-backdrop" role="presentation" onpointerdown={() => (funcMenu = false)}></div>
+        <div class="context-menu drop file-menu" role="menu" style="left: {dropPos.x}px; top: {dropPos.y}px;">
+          {#each FUNC_ITEMS as it (it.id)}
+            <button role="menuitem" class:checked={funcItem?.id === it.id} onclick={() => pickItem(it.id)} title={it.title}>
+              <span>{it.icon} {it.label}</span><kbd>{it.key}</kbd>
+            </button>
+          {/each}
+          <button
+            role="menuitem"
+            class:checked={!!xf}
+            onclick={() => {
+              funcMenu = false;
+              if (xf) applyTransform();
+              else startTransform(false);
+            }}
+            title="Scale, rotate and flip the layer or the selection"><span>⤡ Transform</span><kbd>Ctrl T</kbd></button
+          >
+          <hr />
+          <div class="menu-title">🪞 Mirror drawing</div>
+          {#each MODES as m (m)}
+            <button role="menuitem" class:checked={sym.mode === m} onclick={() => setSymMode(m)} title={MODE_HINT[m]}>
+              <span>{MODE_LABEL[m]}</span>{#if m === 'off'}<kbd>Y cycles</kbd>{/if}
+            </button>
+          {/each}
+          <hr />
+          <div class="menu-title">Center the layer</div>
+          <button role="menuitem" onclick={() => centerLayer('both')} title="Moves the drawing (or the selected part) to the middle of the canvas"><span>⊕ Center on canvas</span></button>
+          <button role="menuitem" onclick={() => centerLayer('h')}><span>↔ Center horizontally</span></button>
+          <button role="menuitem" onclick={() => centerLayer('v')}><span>↕ Center vertically</span></button>
+          <button role="menuitem" onclick={() => centerLayer('axis')} disabled={sym.mode === 'off'}><span>◎ Center on mirror center</span></button>
+          <hr />
+          <div class="menu-title">Mirror the layer</div>
+          <button role="menuitem" onclick={() => flipLayer('h')} title="Also works on a selection"><span>⇋ Flip horizontally</span></button>
+          <button role="menuitem" onclick={() => flipLayer('v')} title="Also works on a selection"><span>⇵ Flip vertically</span></button>
+          <button role="menuitem" onclick={() => mirrorHalf('left')} title="Makes the right side a mirror copy of the left side"><span>◧ Copy left half → right</span></button>
+          <button role="menuitem" onclick={() => mirrorHalf('right')} title="Makes the left side a mirror copy of the right side"><span>◨ Copy right half → left</span></button>
+          <button role="menuitem" onclick={() => mirrorHalf('top')}><span>⬒ Copy top half → bottom</span></button>
+          <button role="menuitem" onclick={() => mirrorHalf('bottom')}><span>⬓ Copy bottom half → top</span></button>
+        </div>
+      {/if}
+    </div>
+    <button
+      class="mirror-btn"
+      class:on={sym.mode !== 'off'}
+      onclick={toggleMirror}
+      title="Mirror drawing: draw on one side, it appears on the other (Y cycles the modes)">🪞 {sym.mode === 'off' ? 'Mirror' : MODE_LABEL[sym.mode]}</button
+    >
     <div class="current-color" style="background: {color}" title={color}></div>
     <span class="brush-name">{tool === 'eraser' ? 'Eraser' : 'Brush'}: {preset} · {brush.size}px</span>
     <div class="group">
@@ -2403,6 +3666,45 @@
   </header>
 
   <aside class="panel left">
+    {#if sym.mode !== 'off'}
+      <div class="panel-head">🪞 Mirror drawing</div>
+      <div class="tool-options sym-options">
+        <div class="seg3">
+          {#each MODES.filter((m) => m !== 'off') as m (m)}
+            <button class:on={sym.mode === m} onclick={() => (sym.mode = m)} title={MODE_HINT[m]}>{MODE_LABEL[m]}</button>
+          {/each}
+        </div>
+        {#if sym.mode === 'radial' || sym.mode === 'kaleido'}
+          <label class="opt">
+            <span>Copies</span>
+            <input type="range" min="2" max="32" step="1" bind:value={sym.count} />
+            <span class="val">{sym.count}</span>
+          </label>
+        {/if}
+        <label class="opt" title="Turn the axes">
+          <span>Angle</span>
+          <input type="range" min="-180" max="180" step="1" bind:value={sym.angle} ondblclick={() => (sym.angle = 0)} />
+          <span class="val">{sym.angle}°</span>
+        </label>
+        <div class="xy">
+          <label>X <input type="number" step="0.5" bind:value={sym.cx} /></label>
+          <label>Y <input type="number" step="0.5" bind:value={sym.cy} /></label>
+          <button class:on={symLocked} onclick={() => (symLocked = !symLocked)} title="Lock the center so it can't be dragged by accident">{symLocked ? '🔒' : '🔓'}</button>
+        </div>
+        <div class="panel-sub">Put the center on…</div>
+        <div class="btn-grid three">
+          <button onclick={centerSym} title="The middle of the canvas">Canvas</button>
+          <button onclick={symToLayer} title="The middle of what is drawn on the active layer">Layer</button>
+          <button onclick={symToSelection} disabled={!hasSel} title="The middle of the selection">Selection</button>
+        </div>
+        <div class="panel-sub">Move the drawing…</div>
+        <div class="btn-grid">
+          <button onclick={() => centerLayer('axis')} title="Moves the active layer's drawing (or the selection) so its middle is on the mirror center">Layer → mirror center</button>
+          <button onclick={() => setSymMode('off')}>Turn mirror off</button>
+        </div>
+        <p class="hint">{MODE_HINT[sym.mode]} Drag the ◎ on the canvas to move the center (it snaps to the middle of the canvas). Whatever you draw on one side appears on the other at the same time: brush, eraser, vector pen and lasso fill. <b>Y</b> switches the mode.</p>
+      </div>
+    {/if}
     {#if activeTool === 'fill'}
       <div class="panel-head">Fill</div>
       <div class="tool-options">
@@ -2491,13 +3793,93 @@
         >
         <p class="hint small-note">Softens the outline of what is already drawn on the active layer. Set the amount with Feather above.</p>
       </div>
+    {:else if activeTool === 'vselect'}
+      <div class="panel-head">◇ Vector select</div>
+      <div class="tool-options">
+        {#if !isVector(activeLayer)}
+          <p class="hint">Pick a vector layer (VECTOR in the layer list) or make one with ✒. This tool selects and edits its lines.</p>
+        {:else}
+          <p class="hint small-note">
+            {vsel.length ? `${vsel.length} line${vsel.length === 1 ? '' : 's'} selected` : 'Nothing selected: the buttons change every line on the layer'}
+          </p>
+          <div class="btn-grid two">
+            <button onclick={selectAllLines}>Select all <kbd>Ctrl A</kbd></button>
+            <button onclick={() => (vsel = [])} disabled={!vsel.length}>Deselect <kbd>Esc</kbd></button>
+            <button onclick={deleteLines} disabled={!vsel.length}>Delete <kbd>Del</kbd></button>
+            <button onclick={duplicateLines} disabled={!vsel.length}>Duplicate</button>
+            <button onclick={() => editLines((s) => ({ ...s, color }))} title="Paint the lines with the current color">
+              <span class="dot" style="background: {color}"></span> Recolor
+            </button>
+            <button onclick={() => flipLines('h')} disabled={!vsel.length}>⇋ Flip</button>
+          </div>
+          <div class="panel-sub">Width</div>
+          <div class="btn-grid three">
+            <button onclick={() => editLines((s) => ({ ...s, size: s.size * 0.8 }))}>Thinner</button>
+            <button onclick={() => editLines((s) => ({ ...s, size: s.size * 1.25 }))}>Thicker</button>
+            <button onclick={() => editLines((s) => ({ ...s, sizePressure: !s.sizePressure }))} title="Turns pen pressure on/off for the line width: off = the same width everywhere">Even ⇄ pressure</button>
+          </div>
+          <div class="panel-sub">Shape</div>
+          <div class="btn-grid three">
+            <button onclick={() => editLines((s) => smoothStroke(s, 0.5))} title="Smoother curves">Smooth</button>
+            <button onclick={() => editLines((s) => simplifyStroke(s, 1.2))} title="Fewer points, same look (reduce nodes)">Fewer nodes</button>
+            <button onclick={() => editLines((s) => ({ ...s, ends: s.ends === 'taper' ? 'round' : 'taper' }))} title="Pointed or round ends">Ends ◁ ⇄ ◖</button>
+          </div>
+          {#if prSource}
+            <div class="panel-sub">Pressure of the first selected line (drag up = thicker)</div>
+            <PressureEditor pts={prSource.pts} onchange={pressureChange} />
+          {/if}
+          <p class="hint">
+            Click a line to select it, <b>Shift</b>+click to add more, or drag a box around lines. Drag selected lines to move them, arrow keys nudge (Shift = 10 px).
+            {#if vsel.length}{vsel.reduce((a, s) => a + nodeCount(s), 0)} nodes.{/if}
+          </p>
+        {/if}
+      </div>
     {:else if activeTool === 'move'}
       <div class="panel-head">Move</div>
       <div class="tool-options">
         <p class="hint">Drag to move the active layer, or only the selected part if there is a selection. For scaling and rotating use <b>Transform</b> (Ctrl T).</p>
       </div>
     {:else}
-      <div class="panel-head">Brush</div>
+      {#if isVector(activeLayer)}
+        {@const v = vecTick >= 0 ? vecData.get(activeLayer!.id) : undefined}
+        <div class="panel-head">✒ Vector layer</div>
+        <div class="tool-options vec-options">
+          {#if tool === 'eraser'}
+            <div class="seg2">
+              <button class:on={vecEraseMode === 'cut'} onclick={() => (vecEraseMode = 'cut')} title="Removes only the part you rub; the rest stays as clean lines">✂ Cut lines</button>
+              <button class:on={vecEraseMode === 'whole'} onclick={() => (vecEraseMode = 'whole')} title="Removes every line you touch">Whole lines</button>
+            </div>
+          {:else}
+            <label class="opt" title="0 = keeps your hand exactly, 100 = very smooth curves">
+              <span>Smooth</span>
+              <input type="range" min="0" max="1" step="0.01" bind:value={vecSmooth} />
+              <span class="val">{Math.round(vecSmooth * 100)}%</span>
+            </label>
+          {/if}
+          <label class="opt" title="Makes every line on this layer thinner or thicker, any time">
+            <span>Line width</span>
+            <input
+              type="range"
+              min="0.2"
+              max="4"
+              step="0.05"
+              value={v?.width ?? 1}
+              oninput={(e) => vecWidthInput(+e.currentTarget.value)}
+              onchange={vecWidthDone}
+            />
+            <span class="val">{Math.round((v?.width ?? 1) * 100)}%</span>
+          </label>
+          <p class="hint">
+            Lines on this layer stay editable: change their width later, cut them cleanly with the eraser, and they never get blurry. {v?.strokes.length ?? 0} lines.
+            Paper texture and color mixing are for pixel layers.
+          </p>
+          <button class="wide" onclick={rasterizeLayer}>Rasterize layer (turn into pixels)</button>
+        </div>
+      {/if}
+      <div class="panel-head">{tool === 'eraser' ? 'Eraser' : 'Brush'}</div>
+      <label class="hold-check" title="Draw a line, circle, rectangle, triangle or polygon by hand and keep the pen still for a moment at the end: it becomes clean and straight">
+        <input type="checkbox" bind:checked={holdShapes} /> Hold still at the end to straighten (line, circle, box…)
+      </label>
       <BrushPanel bind:brush bind:preset eraser={tool === 'eraser'} />
     {/if}
   </aside>
@@ -2525,7 +3907,7 @@
       class:pixelated={zoom >= 2}
       style="width: {docW * zoom}px; height: {docH * zoom}px; transform-origin: {(docW * zoom) / 2}px {(docH * zoom) / 2}px; transform: translate({panX}px, {panY}px) rotate({rotation}deg) scaleX({flipped ? -1 : 1});"
     ></canvas>
-    {#if hasSel || selDraft || xf}
+    {#if hasSel || selDraft || xf || sym.mode !== 'off' || (activeTool === 'vselect' && (vsel.length || vselBox))}
       {@const sw = 1.5 / zoom}
       {@const dash = 6 / zoom}
       <svg
@@ -2534,6 +3916,36 @@
         preserveAspectRatio="none"
         style="width: {docW * zoom}px; height: {docH * zoom}px; transform-origin: {(docW * zoom) / 2}px {(docH * zoom) / 2}px; transform: translate({panX}px, {panY}px) rotate({rotation}deg) scaleX({flipped ? -1 : 1}); --dash: {dash}px;"
       >
+        {#if activeTool === 'vselect'}
+          {#each vsel as s, i (i)}
+            {@const pts = Array.from({ length: s.pts.length / 3 }, (_, k) => `${s.pts[k * 3]},${s.pts[k * 3 + 1]}`).join(' ')}
+            <polyline class="vsel-line" points={pts} stroke-width={sw * 1.5} />
+            {#if vsel.length <= 20}
+              {#each Array.from({ length: Math.min(s.pts.length / 3, 400) }) as _, k (k)}
+                <rect class="vsel-node" x={s.pts[k * 3] - 2.5 / zoom} y={s.pts[k * 3 + 1] - 2.5 / zoom} width={5 / zoom} height={5 / zoom} stroke-width={sw} />
+              {/each}
+            {/if}
+          {/each}
+          {#if vselBox}
+            <rect
+              class="ants"
+              x={Math.min(vselBox.x0, vselBox.x1)}
+              y={Math.min(vselBox.y0, vselBox.y1)}
+              width={Math.abs(vselBox.x1 - vselBox.x0)}
+              height={Math.abs(vselBox.y1 - vselBox.y0)}
+              stroke-width={sw}
+              stroke-dasharray="{dash} {dash}"
+            />
+          {/if}
+        {/if}
+        {#if sym.mode !== 'off'}
+          {#each axisLines(sym, docW + docH) as [a, b], i (i)}
+            <line class="sym-axis-bg" x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke-width={sw * 2.5} />
+            <line class="sym-axis" x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke-width={sw} stroke-dasharray="{dash * 1.5} {dash}" />
+          {/each}
+          <circle class="sym-handle" class:dragging={symDrag} cx={sym.cx} cy={sym.cy} r={9 / zoom} stroke-width={sw * 1.5} />
+          <circle class="sym-dot" cx={sym.cx} cy={sym.cy} r={2.5 / zoom} />
+        {/if}
         {#if hasSel && !xf}
           {#if selInverted}
             <rect class="ants-bg" x="0" y="0" width={docW} height={docH} stroke-width={sw} />
@@ -2577,7 +3989,7 @@
       </svg>
     {/if}
     {#if xf && !xf.quick}
-      <div class="xf-bar">
+      <div class="xf-bar" role="toolbar" tabindex="-1" onpointerdown={(e) => e.stopPropagation()}>
         <span>Transform: drag inside to move, corners to scale (Shift = free), outside or ◯ to rotate</span>
         <button onclick={() => flipTransform('h')} title="Flip horizontally">⇋</button>
         <button onclick={() => flipTransform('v')} title="Flip vertically">⇵</button>
@@ -2599,7 +4011,7 @@
 
   <aside class="panel">
     <div class="panel-head">Color</div>
-    <ColorWheel bind:color />
+    <ColorWheel bind:color cmyk={colorMode === 'cmyk'} />
 
     <div class="panel-head">Layers</div>
 
@@ -2650,6 +4062,7 @@
               >
             {/if}
             <span class="sub">
+              {#if layer.kind === 'vector'}<span class="vec-badge" title="Vector layer">VECTOR</span>{/if}
               {layer.blend}{layer.opacity < 1 ? ` · ${Math.round(layer.opacity * 100)}%` : ''}{layer.lockAlpha ? ' · 🔒' : ''}
             </span>
           </div>
@@ -2772,12 +4185,13 @@
 
     <div class="layer-buttons">
       <button onclick={addLayer} title="New layer">＋</button>
+      <button onclick={addVectorLayer} title="New vector layer: lines you can re-shape later">✒</button>
       <button onclick={duplicateLayer} title="Duplicate layer">⧉</button>
-      <button onclick={() => (adjusting = true)} title="Adjust colors (Ctrl+U)">🎨</button>
+      <button onclick={openAdjust} title="Adjust colors (Ctrl+U)">🎨</button>
       <button onclick={mergeDown} disabled={activeIndex() <= 0} title="Merge down">⤓</button>
       <button onclick={() => moveLayer(1)} title="Move up">↑</button>
       <button onclick={() => moveLayer(-1)} title="Move down">↓</button>
-      <button onclick={deleteLayer} disabled={layers.length <= 1} title="Delete layer">🗑</button>
+      <button onclick={deleteLayer} disabled={activeId === PAPER_ID} title="Delete layer">🗑</button>
     </div>
   </aside>
 </div>
@@ -2786,7 +4200,29 @@
   <NewProjectDialog ondone={newProject} />
 {/if}
 
-<input bind:this={fileInput} type="file" accept=".seviath,.psd,application/json" hidden onchange={onFileChosen} />
+{#if exportDialog}
+  <ExportDialog width={docW} height={docH} dpi={docDpi} {colorMode} initial={exportOpts} ondone={finishExport} />
+{/if}
+
+<input bind:this={fileInput} type="file" multiple accept={ACCEPT} hidden onchange={onFileChosen} />
+
+{#if showProjects}
+  <ProjectManager
+    {currentId}
+    canClose={currentId !== null && !newDialog}
+    onopen={openFromLibrary}
+    onnew={askNewProject}
+    onfiles={openFiles}
+    onclose={() => (showProjects = false)}
+    onrenamed={(id, name) => id === currentId && (projectName = name)}
+    ondeleted={(id) => {
+      if (id === currentId) {
+        currentId = null;
+        saveState = 'saved';
+      }
+    }}
+  />
+{/if}
 
 {#if adjusting && activeLayer}
   <AdjustColors canvas={activeLayer.canvas} layerName={activeLayer.name} onchange={render} ondone={finishAdjust} />
@@ -2803,9 +4239,13 @@
       layerMenu = null;
     }}
   ></div>
-  <div class="context-menu" role="menu" style="left: {layerMenu.x}px; top: {layerMenu.y}px;">
+  <div class="context-menu" role="menu" use:fitOnScreen style="left: {layerMenu.x}px; top: {layerMenu.y}px;">
     <div class="menu-title">{activeLayer.name}</div>
     <button role="menuitem" onclick={() => menuDo(addLayer)}>New layer above</button>
+    <button role="menuitem" onclick={() => menuDo(addVectorLayer)}>New vector layer above</button>
+    {#if activeLayer.kind === 'vector'}
+      <button role="menuitem" onclick={() => menuDo(rasterizeLayer)}>Rasterize (turn into pixels)</button>
+    {/if}
     <button role="menuitem" onclick={() => menuDo(() => addShadingLayer('shadow'))}>New shadow layer (Multiply)</button>
     <button role="menuitem" onclick={() => menuDo(() => addShadingLayer('light'))}>New light layer (Add)</button>
     <button role="menuitem" onclick={() => menuDo(duplicateLayer)}>Duplicate</button>
@@ -2822,12 +4262,12 @@
     </button>
     <hr />
     <button role="menuitem" disabled={activeIndex() <= 0} onclick={() => menuDo(mergeDown)}>Merge down</button>
-    <button role="menuitem" onclick={() => menuDo(() => (adjusting = true))}>Adjust colors… (Ctrl+U)</button>
+    <button role="menuitem" onclick={() => menuDo(openAdjust)}>Adjust colors… (Ctrl+U)</button>
     <button role="menuitem" onclick={() => menuDo(() => featherLayerEdges(selFeather || 20))}>
       Feather edges ({selFeather || 20}px)
     </button>
     <button role="menuitem" onclick={() => menuDo(clearLayer)}>Clear layer (make transparent)</button>
-    <button role="menuitem" class="danger" disabled={layers.length <= 1} onclick={() => menuDo(deleteLayer)}>
+    <button role="menuitem" class="danger" onclick={() => menuDo(deleteLayer)}>
       Delete layer
     </button>
   </div>
@@ -2853,6 +4293,9 @@
     border-bottom: 1px solid #333;
     overflow-x: auto;
     white-space: nowrap;
+  }
+  .toolbar > * {
+    flex-shrink: 0;
   }
   .group {
     display: flex;
@@ -2960,6 +4403,53 @@
   }
   .panel-head {
     font-weight: 600;
+  }
+  .doc-badge {
+    font-size: 11px;
+    color: #9ab;
+    border: 1px solid #3a3a44;
+    border-radius: 4px;
+    padding: 2px 6px;
+    white-space: nowrap;
+  }
+  .vec-badge {
+    font-size: 9px;
+    font-weight: 700;
+    color: #111;
+    background: #7fe6f0;
+    border-radius: 3px;
+    padding: 0 3px;
+    margin-right: 4px;
+  }
+  .seg2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2px;
+  }
+  .seg2 button {
+    padding: 6px 2px;
+    font-size: 11px;
+  }
+  .project-name {
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    background: none;
+    border-color: transparent;
+    font-weight: 600;
+  }
+  .save-state {
+    font-size: 11px;
+    color: #7c7;
+    white-space: nowrap;
+    margin-right: 6px;
+  }
+  .save-state.saving {
+    color: #aaa;
+  }
+  .save-state.unsaved {
+    color: #d9a441;
   }
   .brush-name {
     color: #aaa;
@@ -3229,10 +4719,106 @@
   .file-wrap {
     position: relative;
   }
+  .context-menu.drop {
+    position: fixed;
+    max-height: calc(100vh - 60px);
+    overflow-y: auto;
+  }
+  .context-menu > * {
+    flex-shrink: 0;
+  }
+  .context-menu .checked {
+    background: #00b5c833;
+    color: #7fe6f0;
+  }
+  .active-group {
+    border-color: #00b5c8 !important;
+    color: #7fe6f0;
+  }
+  :global(.sym-axis) {
+    stroke: #00d8ee;
+    fill: none;
+  }
+  :global(.sym-axis-bg) {
+    stroke: rgba(0, 0, 0, 0.35);
+    fill: none;
+  }
+  :global(.sym-handle) {
+    fill: rgba(0, 181, 200, 0.25);
+    stroke: #00d8ee;
+    pointer-events: none;
+  }
+  :global(.sym-handle.dragging) {
+    fill: rgba(0, 181, 200, 0.6);
+  }
+  :global(.sym-dot) {
+    fill: #00d8ee;
+  }
+  :global(.vsel-line) {
+    fill: none;
+    stroke: #ff4fd8;
+  }
+  :global(.vsel-node) {
+    fill: #fff;
+    stroke: #ff4fd8;
+  }
+  .btn-grid.two {
+    grid-template-columns: 1fr 1fr;
+  }
+  .dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 1px solid #666;
+    vertical-align: -1px;
+  }
+  .hold-check {
+    display: flex;
+    gap: 6px;
+    align-items: flex-start;
+    font-size: 11px;
+    color: #aaa;
+    margin-bottom: 8px;
+    line-height: 1.3;
+  }
+  .xy {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .xy label {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: #aaa;
+  }
+  .xy input {
+    width: 100%;
+    min-width: 0;
+    background: #15151a;
+    border: 1px solid #444;
+    border-radius: 4px;
+    color: #eee;
+    padding: 4px 6px;
+    font-size: 12px;
+  }
+  .xy button {
+    padding: 4px 8px;
+  }
+  .panel-sub {
+    color: #888;
+    font-size: 11px;
+    margin-bottom: -4px;
+  }
+  .btn-grid.three {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .sym-options .seg3 {
+    grid-template-columns: repeat(3, 1fr);
+  }
   .file-menu {
-    position: absolute;
-    top: 36px;
-    left: 0;
     min-width: 280px;
   }
   .file-menu button {
@@ -3302,6 +4888,8 @@
     position: fixed;
     z-index: 51;
     min-width: 220px;
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
     display: flex;
     flex-direction: column;
     padding: 4px;

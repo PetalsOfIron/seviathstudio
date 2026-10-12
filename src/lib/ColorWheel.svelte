@@ -1,6 +1,10 @@
 <script lang="ts">
-  // Color wheel: hue ring + saturation/value square, with HEX, RGB, HSV fields and gray swatches
-  let { color = $bindable('#222222') }: { color: string } = $props();
+  // Color wheel: hue ring + saturation/value square, with HEX, RGB, HSV fields and gray swatches.
+  // In a CMYK (print) project it also shows the ink amounts and warns about colors
+  // that can't be printed.
+  import { rgbToCmyk, cmykToRgb, isPrintable, toPrintable } from './color';
+
+  let { color = $bindable('#222222'), cmyk = false }: { color: string; cmyk?: boolean } = $props();
 
   const SIZE = 200;
   const C = SIZE / 2;
@@ -22,6 +26,19 @@
   });
 
   let rgb = $derived(hexToRgb(color) ?? [0, 0, 0]);
+  let inks = $derived(rgbToCmyk(rgb[0], rgb[1], rgb[2]));
+  let printable = $derived(!cmyk || isPrintable(color));
+
+  function setCmyk(i: number, value: number) {
+    const c: [number, number, number, number] = [inks[0], inks[1], inks[2], inks[3]];
+    c[i] = clamp(Math.round(value || 0), 0, 100);
+    color = rgbToHex(...cmykToRgb(...c));
+  }
+
+  // Replaces the color with the closest one that prints
+  function makePrintable() {
+    color = rgbToHex(...toPrintable(rgb[0], rgb[1], rgb[2]));
+  }
 
   // ---------- Color math ----------
 
@@ -218,6 +235,20 @@
     <input type="number" min="0" max="100" value={Math.round(v * 100)} onchange={(e) => setHsv(h, s, (+e.currentTarget.value || 0) / 100)} />
   </div>
 
+  {#if cmyk}
+    <div class="fields four" title="Ink amounts in percent (approximate)">
+      {#each ['C', 'M', 'Y', 'K'] as ch, i (ch)}
+        <span>{ch}</span>
+        <input type="number" min="0" max="100" value={inks[i]} onchange={(e) => setCmyk(i, +e.currentTarget.value)} />
+      {/each}
+    </div>
+    {#if !printable}
+      <button class="gamut" onclick={makePrintable} title="This color is brighter than ink can print. Click to use the closest printable color.">
+        ⚠ Too bright to print · use printable color
+      </button>
+    {/if}
+  {/if}
+
   <div class="grays" title="Grayscale">
     {#each grays as g (g)}
       <button class="gray" class:on={color === g} style="background: {g}" title={g} aria-label={g} onclick={() => (color = g)}></button>
@@ -285,6 +316,19 @@
   .fields input {
     width: 100%;
     box-sizing: border-box;
+  }
+  .fields.four {
+    grid-template-columns: auto 1fr auto 1fr auto 1fr auto 1fr;
+  }
+  .gamut {
+    width: 100%;
+    padding: 5px 8px;
+    border-radius: 6px;
+    border: 1px solid #a07a2a;
+    background: #3a301a;
+    color: #f3c66b;
+    font-size: 11px;
+    cursor: pointer;
   }
   .grays {
     display: flex;
