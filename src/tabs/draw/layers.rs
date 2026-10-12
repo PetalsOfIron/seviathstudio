@@ -1,0 +1,551 @@
+// Layer panel: tree with folders, drag & drop, rename, thumbnails, and the active layer's settings.
+
+use eframe::egui::{
+    self, Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Id, Key, Layout, Modifiers, Order, Rect,
+    RichText, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
+};
+
+use super::{DrawState, checker};
+use crate::doc::{Blend, Drop, LayerId, LayerKind, TAG_COLORS};
+use crate::icons::{self, Icon};
+use crate::theme::*;
+use crate::widgets::{self, icon_button, section_title, slider_row};
+
+const ROW_H: f32 = 46.0;
+const INDENT: f32 = 16.0;
+
+impl DrawState {
+    pub(super) fn active_idx(&self) -> usize {
+        self.doc.index_of(self.active).unwrap_or(0)
+    }
+
+    /// Keep the selection on an existing layer (after deletes, merges…).
+    fn fix_active(&mut self) {
+        if self.doc.index_of(self.active).is_none() {
+            self.active = self.doc.layers.first().map(|l| l.id).unwrap_or(0);
+        }
+    }
+
+    fn next_name(&mut self, base: &str) -> String {
+        self.layer_counter += 1;
+        format!("{base} {}", self.layer_counter)
+    }
+
+    pub(super) fn add_layer(&mut self, kind: LayerKind) {
+        let name = match kind {
+            LayerKind::Group => self.next_name("Folder"),
+            LayerKind::Vector => self.next_name("Vector"),
+            _ => self.next_name("Layer"),
+        };
+        let l = self.doc.new_layer(&name, kind);
+        self.active = self.doc.insert_layer(l, self.active);
+    }
+
+    pub(super) fn duplicate_active(&mut self) {
+        if let Some(id) = self.doc.duplicate(self.active) {
+            self.active = id;
+        }
+    }
+
+    pub(super) fn merge_down_active(&mut self) {
+        match self.doc.merge_down(self.active) {
+            Ok(id) => self.active = id,
+            Err(e) => self.notice = Some(e),
+        }
+    }
+
+    pub(super) fn group_active(&mut self) {
+        let name = self.next_name("Folder");
+        if let Some(f) = self.doc.group(self.active, &name) {
+            self.active = f;
+        }
+    }
+
+    pub(super) fn toggle_clip_active(&mut self) {
+        let i = self.active_idx();
+        if self.doc.layers[i].kind != LayerKind::Paper {
+            self.doc.layers[i].clip = !self.doc.layers[i].clip;
+            self.doc.mark_all_dirty();
+        }
+    }
+
+    /// Layer shortcuts: Ctrl+Shift+N new, Ctrl+J duplicate, Ctrl+E merge down, Ctrl+G folder, Ctrl+Alt+G clip.
+    pub(super) fn layer_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let (new, dup, merge, clip, group) = ctx.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::N),
+                i.consume_key(Modifiers::COMMAND, Key::J),
+                i.consume_key(Modifiers::COMMAND, Key::E),
+                i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::G),
+                i.consume_key(Modifiers::COMMAND, Key::G),
+            )
+        });
+        if new {
+            self.add_layer(LayerKind::Raster);
+        }
+        if dup {
+            self.duplicate_active();
+        }
+        if merge {
+            self.merge_down_active();
+        }
+        if clip {
+            self.toggle_clip_active();
+        }
+        if group {
+            self.group_active();
+        }
+    }
+
+    /// What affects the composited picture; when it changes the canvas is redrawn.
+    fn layer_sig(&self) -> (Vec<(LayerId, bool, u32, Blend, bool)>, Color32) {
+        let v = self.doc.layers.iter().map(|l| (l.id, l.visible, l.opacity.to_bits(), l.blend, l.clip)).collect();
+        (v, self.doc.paper)
+    }
+
+    pub(super) fn layers_section(&mut self, ui: &mut Ui) {
+        let before = self.layer_sig();
+        self.layers_section_inner(ui);
+        self.fix_active();
+        if self.layer_sig() != before {
+            self.doc.mark_all_dirty();
+        }
+    }
+
+    fn layers_section_inner(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            section_title(ui, "Layers");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let is_paper = self.doc.layers[self.active_idx()].kind == LayerKind::Paper;
+                if icon_button(ui, Icon::Trash, false, 26.0, "Delete layer (a folder goes with its contents)").clicked() {
+                    if is_paper {
+                        self.notice = Some("The paper can't be deleted — hide it with the eye instead.");
+                    } else {
+                        self.doc.delete(self.active);
+                    }
+                }
+                if icon_button(ui, Icon::Folder, false, 26.0, "New folder").clicked() {
+                    self.add_layer(LayerKind::Group);
+                }
+                if icon_button(ui, Icon::Pen, false, 26.0, "New vector layer").clicked() {
+                    self.add_layer(LayerKind::Vector);
+                }
+                if icon_button(ui, Icon::Plus, false, 26.0, "New layer (Ctrl+Shift+N)").clicked() {
+                    self.add_layer(LayerKind::Raster);
+                }
+            });
+        });
+
+        // Search and color-label filter, for big files with many layers.
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            ui.add(
+                egui::TextEdit::singleline(&mut self.layer_query)
+                    .hint_text("Search layers…")
+                    .desired_width(ui.available_width() - 8.0 * 15.0),
+            );
+            for (t, (c, name)) in TAG_COLORS.iter().enumerate() {
+                let (r, resp) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::click());
+                let on = self.tag_filter as usize == t;
+                if t == 0 {
+                    ui.painter().circle_stroke(r.center(), 4.5, Stroke::new(1.2, if on { VENOM } else { TEXT_DIM }));
+                } else {
+                    ui.painter().circle_filled(r.center(), if on { 6.0 } else { 4.5 }, *c);
+                    if on {
+                        ui.painter().circle_stroke(r.center(), 6.0, Stroke::new(1.5, TEXT));
+                    }
+                }
+                let tip = if t == 0 { "Show all labels".to_owned() } else { format!("Show only {name} layers") };
+                if resp.on_hover_text(tip).clicked() {
+                    self.tag_filter = t as u8;
+                }
+            }
+        });
+        let query = self.layer_query.trim().to_lowercase();
+        let filtering = !query.is_empty() || self.tag_filter != 0;
+        if filtering && self.drag_layer.is_some() {
+            self.drag_layer = None;
+        }
+
+        let w = ui.available_width();
+        let mut rows: Vec<(LayerId, Rect, LayerKind)> = Vec::new();
+        let mut drag_released = false;
+        let ctx = ui.ctx().clone();
+
+        for i in 0..self.doc.layers.len() {
+            if filtering {
+                let l = &self.doc.layers[i];
+                let name_ok = query.is_empty() || l.name.to_lowercase().contains(&query);
+                let tag_ok = self.tag_filter == 0 || l.tag == self.tag_filter;
+                if !(name_ok && tag_ok) {
+                    continue;
+                }
+            } else if self.doc.collapsed_away(i) {
+                continue;
+            }
+            let depth = self.doc.depth(i) as f32;
+            let (row, resp) = ui.allocate_exact_size(vec2(w, ROW_H), Sense::click_and_drag());
+            let id = self.doc.layers[i].id;
+            let kind = self.doc.layers[i].kind;
+            rows.push((id, row, kind));
+            let selected = id == self.active;
+            let dragging_this = self.drag_layer == Some(id);
+
+            // Background and selection.
+            {
+                let p = ui.painter();
+                let bg = if selected {
+                    EMERALD_DEEP.gamma_multiply(0.55)
+                } else if resp.hovered() {
+                    HOVER
+                } else {
+                    RAISED
+                };
+                p.rect_filled(row, CornerRadius::same(8), if dragging_this { bg.gamma_multiply(0.4) } else { bg });
+                if selected {
+                    p.rect_stroke(row, CornerRadius::same(8), Stroke::new(1.0, EMERALD), StrokeKind::Inside);
+                }
+                let tag = self.doc.layers[i].tag as usize;
+                if tag > 0 {
+                    let stripe = Rect::from_min_max(row.left_top() + vec2(1.0, 6.0), row.left_bottom() + vec2(5.0, -6.0));
+                    p.rect_filled(stripe, CornerRadius::same(2), TAG_COLORS[tag].0);
+                }
+            }
+
+            let x0 = row.left() + 30.0 + depth * INDENT;
+            // Folder open/close arrow.
+            if kind == LayerKind::Group {
+                let ar = Rect::from_center_size(pos2(x0 + 6.0, row.center().y), Vec2::splat(16.0));
+                let aresp = ui.interact(ar, ui.id().with(("fold", id)), Sense::click());
+                let open = self.doc.layers[i].expanded;
+                let c = ar.center();
+                let col = if aresp.hovered() { VENOM } else { TEXT_DIM };
+                let tri = if open {
+                    vec![c + vec2(-4.0, -2.0), c + vec2(4.0, -2.0), c + vec2(0.0, 3.0)]
+                } else {
+                    vec![c + vec2(-2.0, -4.0), c + vec2(3.0, 0.0), c + vec2(-2.0, 4.0)]
+                };
+                ui.painter().add(Shape::convex_polygon(tri, col, Stroke::NONE));
+                if aresp.on_hover_text("Open / close folder").clicked() {
+                    self.doc.layers[i].expanded = !open;
+                }
+            }
+            let clip_x = if self.doc.layers[i].clip { 12.0 } else { 0.0 };
+            let thumb = Rect::from_min_size(pos2(x0 + 14.0 + clip_x, row.top() + 6.0), Vec2::splat(34.0));
+            if self.doc.layers[i].clip {
+                // Hooked arrow pointing down to the layer it is clipped to.
+                let p = ui.painter();
+                let hx = thumb.left() - 7.0;
+                p.line_segment([pos2(hx, row.top() + 12.0), pos2(hx, row.bottom() - 4.0)], Stroke::new(2.0, VENOM));
+                p.add(Shape::convex_polygon(
+                    vec![pos2(hx - 3.5, row.bottom() - 8.0), pos2(hx + 3.5, row.bottom() - 8.0), pos2(hx, row.bottom() - 3.0)],
+                    VENOM,
+                    Stroke::NONE,
+                ));
+            }
+
+            // Thumbnail.
+            let tex = {
+                let (dw, dh) = (self.doc.w, self.doc.h);
+                let layer = &self.doc.layers[i];
+                self.renderer.layer_thumb(&ctx, layer, dw, dh)
+            };
+            {
+                let layer = &self.doc.layers[i];
+                let p = ui.painter();
+                match layer.kind {
+                    LayerKind::Paper => {
+                        p.rect_filled(thumb, CornerRadius::same(4), self.doc.paper);
+                    }
+                    LayerKind::Group => {
+                        p.rect_filled(thumb, CornerRadius::same(4), CARD);
+                        icons::paint(p, thumb.shrink(7.0), Icon::Folder, GOLD);
+                    }
+                    LayerKind::Vector => {
+                        checker(p, thumb);
+                        icons::paint(p, thumb.shrink(9.0), Icon::Pen, EMERALD);
+                    }
+                    LayerKind::Raster => {
+                        checker(p, thumb);
+                        if let Some(t) = tex {
+                            let a = self.doc.w as f32 / self.doc.h as f32;
+                            let r = if a >= 1.0 {
+                                Rect::from_center_size(thumb.center(), vec2(thumb.width(), thumb.width() / a))
+                            } else {
+                                Rect::from_center_size(thumb.center(), vec2(thumb.height() * a, thumb.height()))
+                            };
+                            p.image(t, r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                        }
+                    }
+                }
+                p.rect_stroke(thumb, CornerRadius::same(4), Stroke::new(1.0, LINE), StrokeKind::Outside);
+            }
+
+            // Name (or rename box) and details.
+            let tx = thumb.right() + 10.0;
+            let name_rect = Rect::from_min_max(pos2(tx, row.top() + 5.0), pos2(row.right() - 28.0, row.top() + 25.0));
+            let renaming = matches!(&self.renaming, Some((rid, _)) if *rid == id);
+            if renaming {
+                let mut done = false;
+                if let Some((_, text)) = &mut self.renaming {
+                    let r = ui.put(name_rect, egui::TextEdit::singleline(text).font(FontId::proportional(13.0)));
+                    if !r.has_focus() && !r.lost_focus() {
+                        r.request_focus();
+                    }
+                    if r.lost_focus() {
+                        done = true;
+                    }
+                }
+                if done {
+                    let (rid, text) = self.renaming.take().unwrap();
+                    let t = text.trim();
+                    if !t.is_empty() {
+                        if let Some(k) = self.doc.index_of(rid) {
+                            self.doc.layers[k].name = t.chars().take(80).collect();
+                        }
+                    }
+                }
+            } else {
+                let layer = &self.doc.layers[i];
+                let name_col = if layer.visible { TEXT } else { TEXT_DIM };
+                ui.painter().with_clip_rect(name_rect.expand(2.0)).text(
+                    pos2(tx, row.top() + 15.0),
+                    Align2::LEFT_CENTER,
+                    &layer.name,
+                    FontId::proportional(13.0),
+                    name_col,
+                );
+            }
+            {
+                let layer = &self.doc.layers[i];
+                let mut sub = match layer.kind {
+                    LayerKind::Paper => "Background".to_owned(),
+                    LayerKind::Group => {
+                        let n = self.doc.block_len(i) - 1;
+                        format!("Folder · {} · {n} inside", layer.blend.name())
+                    }
+                    LayerKind::Vector => format!("Vector · {}", layer.blend.name()),
+                    LayerKind::Raster => layer.blend.name().to_owned(),
+                };
+                if layer.opacity < 100.0 {
+                    sub += &format!(" · {:.0}%", layer.opacity);
+                }
+                let p = ui.painter().with_clip_rect(Rect::from_min_max(pos2(tx, row.top()), pos2(row.right() - 24.0, row.bottom())));
+                p.text(pos2(tx, row.top() + 32.0), Align2::LEFT_CENTER, sub, FontId::proportional(11.0), TEXT_DIM);
+                if layer.locked {
+                    let lr = Rect::from_center_size(pos2(row.right() - 14.0, row.center().y), Vec2::splat(14.0));
+                    icons::paint(ui.painter(), lr, Icon::Lock, GOLD);
+                }
+            }
+
+            // Eye toggle, always in the first column.
+            let eye = Rect::from_center_size(pos2(row.left() + 15.0, row.center().y), Vec2::splat(24.0));
+            let eresp = ui.interact(eye, ui.id().with(("eye", id)), Sense::click());
+            let visible = self.doc.layers[i].visible;
+            let ecol = if eresp.hovered() { VENOM } else if visible { TEXT } else { TEXT_DIM };
+            icons::paint(ui.painter(), eye.shrink(4.0), if visible { Icon::Eye } else { Icon::EyeOff }, ecol);
+            if eresp.on_hover_text("Show / hide").clicked() {
+                self.doc.layers[i].visible = !visible;
+            } else if resp.double_clicked() && kind != LayerKind::Paper {
+                self.renaming = Some((id, self.doc.layers[i].name.clone()));
+            } else if resp.clicked() {
+                self.active = id;
+            }
+
+            // Right-click menu.
+            resp.context_menu(|ui| {
+                self.active = id;
+                if kind != LayerKind::Paper {
+                    if ui.button("Rename").clicked() {
+                        self.renaming = Some((id, self.doc.layers[i].name.clone()));
+                        ui.close();
+                    }
+                    if ui.button("Duplicate  (Ctrl+J)").clicked() {
+                        self.duplicate_active();
+                        ui.close();
+                    }
+                    if ui.button("Merge down  (Ctrl+E)").clicked() {
+                        self.merge_down_active();
+                        ui.close();
+                    }
+                    if ui.button("Into new folder  (Ctrl+G)").clicked() {
+                        self.group_active();
+                        ui.close();
+                    }
+                    let clip_label = if self.doc.layers[i].clip { "Release clipping mask" } else { "Clip to layer below" };
+                    if ui.button(clip_label).clicked() {
+                        self.toggle_clip_active();
+                        ui.close();
+                    }
+                    ui.separator();
+                }
+                ui.label(RichText::new("Color label").size(12.0).color(TEXT_DIM));
+                ui.horizontal(|ui| {
+                    for (t, (c, name)) in TAG_COLORS.iter().enumerate() {
+                        let (r, cresp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
+                        if t == 0 {
+                            ui.painter().circle_stroke(r.center(), 6.0, Stroke::new(1.2, TEXT_DIM));
+                            ui.painter().line_segment(
+                                [r.center() + vec2(-4.0, 4.0), r.center() + vec2(4.0, -4.0)],
+                                Stroke::new(1.2, TEXT_DIM),
+                            );
+                        } else {
+                            ui.painter().circle_filled(r.center(), 7.0, *c);
+                        }
+                        let current = self.doc.index_of(id).map(|k| self.doc.layers[k].tag as usize);
+                        if current == Some(t) {
+                            ui.painter().circle_stroke(r.center(), 8.5, Stroke::new(1.5, TEXT));
+                        }
+                        if cresp.on_hover_text(*name).clicked() {
+                            if let Some(k) = self.doc.index_of(id) {
+                                self.doc.layers[k].tag = t as u8;
+                            }
+                            ui.close();
+                        }
+                    }
+                });
+                if kind != LayerKind::Paper {
+                    ui.separator();
+                    if ui.button(RichText::new("Delete").color(Color32::from_rgb(232, 110, 110))).clicked() {
+                        self.doc.delete(id);
+                        ui.close();
+                    }
+                }
+            });
+            // The menu may have changed the list: stop drawing rows for this frame.
+            if self.doc.layers.get(i).map(|l| l.id) != Some(id) {
+                break;
+            }
+
+            // Drag & drop (not while the list is filtered).
+            if resp.drag_started() && kind != LayerKind::Paper && !filtering {
+                self.drag_layer = Some(id);
+                self.active = id;
+            }
+            if resp.drag_stopped() && self.drag_layer == Some(id) {
+                drag_released = true;
+            }
+            ui.add_space(2.0);
+        }
+
+        self.layer_rows = rows.iter().map(|(id, r, _)| (*id, *r)).collect();
+        if let Some(dragged) = self.drag_layer {
+            ctx.set_cursor_icon(CursorIcon::Grabbing);
+            let target = ctx.pointer_latest_pos().and_then(|p| drop_target(&rows, p));
+            if let Some((drop, rect)) = target {
+                let p = ui.painter();
+                match drop {
+                    Drop::Above(_) => {
+                        p.line_segment([rect.left_top() + vec2(4.0, -1.0), rect.right_top() + vec2(-4.0, -1.0)], Stroke::new(2.5, VENOM));
+                    }
+                    Drop::Below(_) => {
+                        p.line_segment(
+                            [rect.left_bottom() + vec2(4.0, 1.0), rect.right_bottom() + vec2(-4.0, 1.0)],
+                            Stroke::new(2.5, VENOM),
+                        );
+                    }
+                    Drop::Into(_) => {
+                        p.rect_stroke(rect, CornerRadius::same(8), Stroke::new(2.0, VENOM), StrokeKind::Inside);
+                    }
+                }
+            }
+            // A little name tag follows the pointer.
+            if let (Some(pos), Some(k)) = (ctx.pointer_latest_pos(), self.doc.index_of(dragged)) {
+                let lp = ctx.layer_painter(egui::LayerId::new(Order::Tooltip, Id::new("layer_drag")));
+                let galley = lp.layout_no_wrap(self.doc.layers[k].name.clone(), FontId::proportional(12.5), TEXT);
+                let r = Rect::from_min_size(pos + vec2(14.0, 6.0), galley.size() + vec2(16.0, 8.0));
+                lp.rect_filled(r, CornerRadius::same(6), EMERALD_DEEP);
+                lp.galley(r.min + vec2(8.0, 4.0), galley, TEXT);
+            }
+            if drag_released || !ctx.input(|i| i.pointer.any_down()) {
+                if let Some((drop, _)) = target {
+                    if !self.doc.move_layer(dragged, drop) {
+                        self.notice = Some("Can't put a layer there.");
+                    }
+                }
+                self.drag_layer = None;
+            }
+        }
+
+        // Quick actions for the selected layer.
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            if widgets::chip(ui, "Duplicate", false).on_hover_text("Copy this layer (Ctrl+J)").clicked() {
+                self.duplicate_active();
+            }
+            if widgets::chip(ui, "Merge down", false).on_hover_text("Bake into the layer below (Ctrl+E)").clicked() {
+                self.merge_down_active();
+            }
+            if widgets::chip(ui, "Into folder", false).on_hover_text("Put this layer in a new folder (Ctrl+G)").clicked() {
+                self.group_active();
+            }
+            let clipped = self.doc.layers[self.active_idx()].clip;
+            if widgets::chip(ui, "Clip", clipped)
+                .on_hover_text("Clipping mask: show only where the layer below has paint (Ctrl+Alt+G)")
+                .clicked()
+            {
+                self.toggle_clip_active();
+            }
+        });
+
+        // Settings of the selected layer.
+        ui.add_space(6.0);
+        let ai = self.active_idx();
+        if self.doc.layers[ai].kind == LayerKind::Paper {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Paper color").color(TEXT_DIM).size(12.5));
+                egui::color_picker::color_edit_button_srgba(ui, &mut self.doc.paper, egui::color_picker::Alpha::Opaque);
+            });
+            ui.label(RichText::new("Hide the paper (eye) to work on transparency.").color(TEXT_DIM).size(11.5));
+            return;
+        }
+        let layer = &mut self.doc.layers[ai];
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Blend").color(TEXT_DIM).size(12.5));
+            egui::ComboBox::from_id_salt("blend")
+                .selected_text(layer.blend.name())
+                .width(150.0)
+                .height(420.0)
+                .show_ui(ui, |ui| {
+                    if layer.kind == LayerKind::Group {
+                        ui.selectable_value(&mut layer.blend, Blend::PassThrough, Blend::PassThrough.name())
+                            .on_hover_text(Blend::PassThrough.about());
+                    }
+                    for b in Blend::ALL {
+                        ui.selectable_value(&mut layer.blend, b, b.name()).on_hover_text(b.about());
+                    }
+                });
+        });
+        ui.label(RichText::new(layer.blend.about()).color(TEXT_DIM).size(11.5));
+        slider_row(ui, "Opacity", &mut layer.opacity, 0.0..=100.0, "%");
+        ui.horizontal_wrapped(|ui| {
+            if layer.kind == LayerKind::Raster {
+                ui.checkbox(&mut layer.lock_alpha, "Lock alpha").on_hover_text("Paint only where there is already paint");
+            }
+            ui.checkbox(&mut layer.locked, "Lock").on_hover_text("No painting or moving");
+        });
+        ui.label(RichText::new("Double-click a layer to rename. Drag to reorder or drop onto a folder.").color(TEXT_DIM).size(11.0));
+    }
+}
+
+/// Which drop position the pointer is over: folders take the middle half as "into".
+fn drop_target(rows: &[(LayerId, Rect, LayerKind)], p: egui::Pos2) -> Option<(Drop, Rect)> {
+    let (id, rect, kind) = rows.iter().find(|(_, r, _)| p.y >= r.top() - 1.0 && p.y <= r.bottom() + 1.0).copied().or_else(|| {
+        // Below the last row: drop above the paper (the bottom-most place allowed).
+        let last = rows.last()?;
+        (p.y > last.1.bottom()).then_some(*last)
+    })?;
+    let t = ((p.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
+    let drop = match kind {
+        LayerKind::Paper => Drop::Above(id),
+        LayerKind::Group if (0.25..0.75).contains(&t) => Drop::Into(id),
+        _ if t < 0.5 => Drop::Above(id),
+        _ => Drop::Below(id),
+    };
+    Some((drop, rect))
+}

@@ -23,3 +23,9 @@ cargo test screens -- --nocapture
 - `src/theme.rs` — colors and widget styling
 - `src/snake.rs`, `src/icons.rs` — logo, snake divider, scale pattern and icons, all drawn in code
 - `src/widgets.rs`, `src/colorpick.rs` — shared widgets
+- `src/doc.rs` — document, layers (folders, clipping, labels), tiles and compositing
+- `src/blend.rs` — the 17 blend modes (W3C compositing math)
+- `src/view.rs`, `src/canvas.rs` — zoom/pan/rotate/mirror and GPU tile display
+- `src/paint.rs` — painting dabs into tiles
+
+Performance check: `cargo test --release bench_full_redraw -- --ignored --nocapture`

@@ -5,6 +5,7 @@ use eframe::egui::{Color32, Event, Key, Modifiers, MouseWheelUnit, PointerButton
 use egui_kittest::Harness;
 
 use crate::app::SeviathApp;
+use crate::doc::Blend;
 
 fn save(h: &mut Harness<'_, SeviathApp>, name: &str) {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("screens");
@@ -89,6 +90,44 @@ fn screens() {
     h.key_press(Key::F);
     h.run_steps(3);
     save(&mut h, "03_fit");
+
+    // Layers: a purple Multiply layer clipped to the strokes below it.
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::N);
+    h.step();
+    {
+        let d = h.state_mut().draw_mut();
+        d.size = 170.0;
+        d.primary = Color32::from_rgb(150, 110, 230);
+    }
+    stroke(&mut h, &wave(pos2(470.0, 360.0), pos2(990.0, 600.0), 20.0, 30));
+    {
+        let d = h.state_mut().draw_mut();
+        d.doc.layers[0].blend = Blend::Multiply;
+        d.doc.layers[0].clip = true;
+        d.doc.mark_all_dirty();
+    }
+    h.run_steps(3);
+    save(&mut h, "05_clip_multiply");
+
+    // Put the strokes layer into a folder: the clip now uses the folder and the picture stays the same.
+    h.state_mut().draw_mut().select(1);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::G);
+    h.run_steps(4);
+    save(&mut h, "06_folder");
+
+    // Organize: hide the color card, right-click a layer for its menu.
+    h.state_mut().draw_mut().set_color_open(false);
+    h.run_steps(3);
+    let row = h.state().draw_mut_ref().layer_row(0).expect("row of the top layer");
+    h.hover_at(row.center());
+    h.step();
+    h.event(Event::PointerButton { pos: row.center(), button: PointerButton::Secondary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    h.event(Event::PointerButton { pos: row.center(), button: PointerButton::Secondary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+    save(&mut h, "07_layer_menu");
+    h.key_press(Key::Escape);
+    h.run_steps(2);
 
     h.key_press_modifiers(Modifiers::COMMAND, Key::Num3);
     h.run_steps(3);

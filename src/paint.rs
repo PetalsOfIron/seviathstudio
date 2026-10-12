@@ -129,6 +129,7 @@ pub fn dab(doc: &mut Document, li: usize, c: Pos2, prm: &DabParams) {
             }
         }
     }
+    doc.layers[li].rev += 1;
     doc.mark_dirty_rect(x0, y0, x1, y1);
 }
 
