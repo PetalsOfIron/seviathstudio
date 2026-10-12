@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, flushSync, untrack } from 'svelte';
+  import { previewFilter, cmykById } from './lib/colorprofiles';
   import ColorWheel from './lib/ColorWheel.svelte';
   import BrushPanel from './lib/BrushPanel.svelte';
   import AdjustColors from './lib/AdjustColors.svelte';
@@ -13,7 +14,7 @@
   import TraceDialog from './lib/TraceDialog.svelte';
   import type { NewProjectResult } from './lib/NewProjectDialog.svelte';
   import { cleanLine, renderVectorLayer, renderVectorRegion, changedArea, eraseStrokes, mapStroke, drawStroke, strokeBounds, drawLivePiece, exactLine, fillBounds, insideFill, mapFill, type VecFill, hitStroke, strokesInBox, smoothStroke, simplifyStroke, setPressures, densifyStroke, nodeCount, nearestNode, moveNode, deleteNode, insertNode, keyNodes, type VecLayer, type VecStroke, type VPt, type EraseMode } from './lib/vector';
-  import { applyPrintPreview, type ColorMode } from './lib/color';
+  import { applyPrintPreview, setPrintProfile, type ColorMode } from './lib/color';
   import { exportAs, type ExportOptions } from './lib/export';
   import {
     symCopies,
@@ -27,18 +28,36 @@
     type SymmetryMode,
     type PtMap,
   } from './lib/symmetry';
-  import { saveToLibrary, loadFromLibrary, newId, canvasToBlob, listBrushes, saveBrushes, deleteBrush } from './lib/library';
+  import { saveToLibrary, saveRecovery, loadFromLibrary, newId, canvasToBlob, listBrushes, saveBrushes, deleteBrush } from './lib/library';
   import { floodFill, expandMask } from './lib/fill';
   import { saveProject, exportPNG, exportPSD, openAnyFile, ACCEPT, download, type ProjectData } from './lib/fileio';
-  import BrushLibrary from './lib/BrushLibrary.svelte';
+  import BrushLibrary, { type ShareRequest } from './lib/BrushLibrary.svelte';
+  import AccountPanel from './lib/AccountPanel.svelte';
+  import FilterDialog from './lib/FilterDialog.svelte';
+  import SettingsDialog, { loadPrefs, savePrefs, mapPressure, comboOf, type Prefs } from './lib/SettingsDialog.svelte';
+  import { cloudReady, watchAccount, onPasswordRecovery, type Account } from './lib/cloud';
   import { brushFile, imageToTip, type ImportedBrush } from './lib/brushimport';
-  import { PRESETS, ERASER_PRESETS, settingsOf, getDab, getPaper, ensureTip, isShaped, dabShape, stampDab, jitterColor, pickVariant, hasStrokeEdges, applyStrokeEdges, type BrushSettings, type BrushPreset } from './lib/brush';
+  import { PRESETS, ERASER_PRESETS, surpriseBrush, settingsOf, getDab, getPaper, ensureTip, isShaped, dabShape, stampDab, jitterColor, pickVariant, particleSpread, getTexture, setBrushPerf, brushPerf, previewIsLighter, hasEdgeEffects, hasStrokeEdges, applyStrokeEdges, type BrushSettings, type BrushPreset } from './lib/brush';
 
   // Document size (chosen in New project, or taken from an opened file)
   let docW = $state(2000);
   let docH = $state(1400);
   let projectName = $state('Untitled');
-  const MAX_HISTORY = 50;
+  // Settings (⚙): brush speed/quality, GPU or CPU, undo steps
+  let prefs = $state(loadPrefs());
+  let settingsOpen = $state(false);
+  let filterOpen = $state(false);
+  let penEraserFrom: Tool | null = null; // tool to go back to after the pen's eraser end
+  $effect(() => {
+    savePrefs($state.snapshot(prefs) as Prefs);
+    setBrushPerf(prefs.quality, prefs.wetEdges);
+    // a different press or rendering intent: redraw the print preview
+    if (setPrintProfile(cmykById(prefs.cmykProfile), prefs.intent) && colorMode === 'cmyk') untrack(() => render());
+  });
+
+  // GPU or CPU is decided when the page starts (canvases keep their kind)
+  // svelte-ignore state_referenced_locally
+  const cpuCanvases = prefs.graphics === 'cpu';
 
   type Tool = 'brush' | 'eraser' | 'picker' | 'fill' | 'lassoFill' | 'select' | 'move' | 'vselect' | 'gradient';
   type Layer = {
@@ -196,6 +215,8 @@
   // Document: print resolution and color mode
   let docDpi = $state(72);
   let colorMode = $state<ColorMode>('rgb');
+  // the canvas is shown through the RGB profile (an SVG filter on the graphics card)
+  let profileView = $derived(colorMode === 'rgb' ? previewFilter(prefs.rgbProfile) : null);
   let printPreview = $state(true); // CMYK projects: show colors as they will print
   let proofTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -213,6 +234,18 @@
   type MyBrush = BrushPreset & { id: string; source?: string };
   let myBrushes = $state.raw<MyBrush[]>([]);
   let libOpen = $state(false);
+  // Seviath account (Google or email), used for sharing brushes
+  let account = $state.raw<Account | null>(null);
+  let accountOpen = $state(false);
+  let recovery = $state(false); // opened from a "set a new password" email
+  $effect(() => watchAccount((a) => (account = a)));
+  $effect(() =>
+    onPasswordRecovery(() => {
+      recovery = true;
+      accountOpen = true;
+    }),
+  );
+  let shareReq = $state<ShareRequest | null>(null); // brush waiting in the share window
   let libTab = $state<'mine' | 'import' | 'community'>('mine');
 
   // Auto trace window (raster layer → new vector layer)
@@ -244,6 +277,7 @@
   let gradBrush = $state(false); // paint with the gradient
   let gradBrushLen = $state(600); // px for one run of the gradient along a stroke
   let gradBrushRepeat = $state<GradRepeat>('mirror');
+  let gradBrushEdit = $state(false); // the gradient colors editor open in the brush panel
   let curDabD = 0; // distance along the stroke of the dab being drawn
 
   // Hold to straighten: keep the pen still at the end of a line and it becomes a clean shape
@@ -486,7 +520,7 @@
   // (a canvas keeps the kind of context it got first)
   function makeLayerCanvas() {
     const c = makeCanvas();
-    c.getContext('2d');
+    c.getContext('2d', cpuCanvases ? { willReadFrequently: true } : undefined);
     return c;
   }
 
@@ -553,13 +587,13 @@
 
   // The helper canvases are as big as the document, so they are rebuilt when its size changes
   function makeWorkCanvases() {
-    strokeCtx = makeCanvas().getContext('2d')!;
-    scratchCtx = makeCanvas().getContext('2d')!;
-    groupCtx = makeCanvas().getContext('2d')!;
-    clipCtx = makeCanvas().getContext('2d')!;
-    texturedCtx = makeCanvas().getContext('2d')!;
+    strokeCtx = makeCanvas().getContext('2d', cpuCanvases ? { willReadFrequently: true } : undefined)!;
+    scratchCtx = makeCanvas().getContext('2d', cpuCanvases ? { willReadFrequently: true } : undefined)!;
+    groupCtx = makeCanvas().getContext('2d', cpuCanvases ? { willReadFrequently: true } : undefined)!;
+    clipCtx = makeCanvas().getContext('2d', cpuCanvases ? { willReadFrequently: true } : undefined)!;
+    texturedCtx = makeCanvas().getContext('2d', cpuCanvases ? { willReadFrequently: true } : undefined)!;
     backupCtx = makeCanvas().getContext('2d', { willReadFrequently: true })!;
-    selCtx = makeCanvas().getContext('2d')!;
+    selCtx = makeCanvas().getContext('2d', cpuCanvases ? { willReadFrequently: true } : undefined)!;
     refCtx = makeCanvas().getContext('2d', { willReadFrequently: true })!;
     paperPattern = texturedCtx.createPattern(getPaper(), 'repeat');
   }
@@ -647,9 +681,16 @@
     if (pendingArea !== 'all') pendingArea = unionRect(pendingArea, area);
   }
 
+  let lastFrameAt = 0;
   function requestFrame() {
     if (!viewCtx || frame) return;
-    frame = requestAnimationFrame(() => {
+    frame = requestAnimationFrame(function draw(now) {
+      // "Lighter" redraw (Preferences → Canvas): at most 30 times a second while drawing
+      if (prefs.fps === 30 && drawing && now - lastFrameAt < 30) {
+        frame = requestAnimationFrame(draw);
+        return;
+      }
+      lastFrameAt = now;
       frame = 0;
       // the vector line is rebuilt once per screen frame, not on every pen event
       if (vecPreviewDirty && drawing && strokeVector) {
@@ -902,8 +943,17 @@
     // leave any text box or slider, so keyboard shortcuts work again on the canvas
     const focused = document.activeElement as HTMLElement | null;
     if (focused && focused !== document.body) focused.blur();
+    // Fingers on a touch screen: draw, move the canvas, or nothing (Preferences → Tablet)
+    if (e.pointerType === 'touch' && prefs.touch === 'ignore') return;
+    const touchPan = e.pointerType === 'touch' && prefs.touch === 'pan';
+    // The eraser end of the pen erases, then the pen goes back to the tool it had
+    if (prefs.penEraser && e.pointerType === 'pen' && (e.buttons & 32) && tool !== 'eraser' && !penEraserFrom) {
+      penEraserFrom = tool;
+      tool = 'eraser';
+      flushSync();
+    }
     // Middle mouse button or Space + drag moves the canvas
-    if (e.button === 1 || spaceDown) {
+    if (e.button === 1 || spaceDown || touchPan) {
       e.preventDefault();
       capture(e);
       panning = true;
@@ -911,6 +961,11 @@
       return;
     }
     if (e.button !== 0) return;
+    // No layers left (all deleted): painting makes a new layer to paint on
+    if (!layers.length && (activeTool === 'brush' || activeTool === 'fill' || activeTool === 'lassoFill' || activeTool === 'gradient')) {
+      addLayer();
+      thumbTick++;
+    }
     // Mirror drawing: the ◎ handle moves the center of the axes
     if (sym.mode !== 'off' && !xf && !symLocked) {
       const d = toDoc(e.clientX, e.clientY);
@@ -991,6 +1046,12 @@
   }
 
   function onPointerUp() {
+    // pen turned back around: back to the tool before the eraser end
+    if (penEraserFrom) {
+      const back = penEraserFrom;
+      penEraserFrom = null;
+      queueMicrotask(() => (tool = back));
+    }
     if (panning) {
       panning = false;
       return;
@@ -1037,8 +1098,9 @@
 
   function point(e: PointerEvent): Point {
     const d = toDoc(e.clientX, e.clientY);
-    // A mouse has no pressure, so it always paints at full size
-    return { x: d.x, y: d.y, p: e.pointerType === 'mouse' ? 1 : e.pressure || 0.01 };
+    // A mouse has no pressure: it paints at the pressure set in Preferences → Tablet.
+    // Pen pressure goes through your pressure curve.
+    return { x: d.x, y: d.y, p: e.pointerType === 'mouse' ? prefs.mousePressure : mapPressure(e.pressure || 0.01, prefs) };
   }
 
   function down(e: PointerEvent) {
@@ -1059,8 +1121,18 @@
     strokeLayerId = layer.id;
     strokeTool = activeTool;
     strokeCtx.clearRect(0, 0, docW, docH);
+    // Anti-aliasing off: dabs are stamped pixel-sharp (no smoothing when scaled)
+    smoothing(layer, brush.antialias !== false || isVector(layer));
+    strokeDabs = [];
+    // colour-mixing strokes paint straight onto the layer, so they always use full-quality tips
+    const mixing = activeTool === 'brush' && brush.mix > 0 && !isVector(layer);
+    recordDabs = !mixing && previewIsLighter() && hasEdgeEffects(brush) && !isVector(layer);
+    brushPerf.final = mixing;
     resetDabs();
-    grainOffset = { x: Math.random() * 256, y: Math.random() * 256 };
+    // the brush texture (paper grain, hair, cloth…). Paper grain shifts a little every stroke so
+    // going over an area fills it in; other textures stay put so their pattern lines up.
+    paperPattern = texturedCtx.createPattern(getTexture(brush, () => render()), 'repeat');
+    grainOffset = (brush.texKind || 'paper') === 'paper' ? { x: Math.random() * 256, y: Math.random() * 256 } : { x: 0, y: 0 };
 
     strokeMaps = sym.mode === 'off' ? [] : symCopies(sym);
     strokeVector = isVector(layer);
@@ -1074,7 +1146,7 @@
         // a picture of everything except this layer; the layer itself is read live on top of it
         compositeTo(refCtx, true, false, layer.id);
       }
-      const [r0, g0, b0] = hexRGB(color);
+      const [r0, g0, b0] = hexRGB(gradBrush ? strokeColorAt(grad.stops, grad.smooth, 0, gradBrushLen, gradBrushRepeat).hex : color);
       mixP = [r0, g0, b0, 1];
       lastSample = { x: -1e9, y: -1e9 };
       // start with the color that's already under the brush (for every mirrored copy too)
@@ -1098,6 +1170,8 @@
     capture(e);
     last = pt;
     lastRaw = pt;
+    drawnTo = pt;
+    curveCtrl = null;
     ropeEnd = { ...pt };
     vecDrawn = 0;
     vecDist = [];
@@ -1116,8 +1190,21 @@
 
   function move(e: PointerEvent) {
     if (!drawing || shapeLocked) return;
+    // every pen sample counts (fast strokes would turn into straight pieces otherwise);
+    // "Prefer speed" only skips samples that are very close together
     let events = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
     if (events.length === 0) events = [e];
+    if (prefs.input === 'speed' && events.length > 2) {
+      const minGap = 2.5 / zoom;
+      let lx = lastRaw.x, ly = lastRaw.y;
+      events = events.filter((ev, i) => {
+        const q = toDoc(ev.clientX, ev.clientY);
+        if (i < events.length - 1 && Math.hypot(q.x - lx, q.y - ly) < minGap) return false;
+        lx = q.x;
+        ly = q.y;
+        return true;
+      });
+    }
     // Stabilizer ("lazy rope", like Krita and CSP): the brush hangs behind the pen on an
     // invisible rope and only moves when the pen pulls the rope tight. Shaky movements
     // smaller than the rope are ignored, so curves come out smooth.
@@ -1152,30 +1239,79 @@
         y: last.y + (ropeEnd.y - last.y) * k,
         p: ropeEnd.p,
       };
-      segment(last, next);
+      curveTo(next);
       last = next;
     }
     if (strokeVector) vecPreviewDirty = true;
     requestFrame();
   }
 
+  // Smooth strokes at any speed: the line runs through the middles between pen samples as
+  // gentle curves (the samples are the bends), so fast strokes don't become straight pieces.
+  let curveCtrl: Point | null = null; // the last pen sample: the next bend
+  let drawnTo: Point = { x: 0, y: 0, p: 0.5 }; // where the drawn line ends now
+  function curveTo(pt: Point) {
+    if (!curveCtrl) {
+      const mid = { x: (drawnTo.x + pt.x) / 2, y: (drawnTo.y + pt.y) / 2, p: (drawnTo.p + pt.p) / 2 };
+      segment(drawnTo, mid);
+      drawnTo = mid;
+      curveCtrl = pt;
+      return;
+    }
+    const c = curveCtrl;
+    const end = { x: (c.x + pt.x) / 2, y: (c.y + pt.y) / 2, p: (c.p + pt.p) / 2 };
+    quad(drawnTo, c, end);
+    drawnTo = end;
+    curveCtrl = pt;
+  }
+  function quad(a: Point, c: Point, b: Point) {
+    const len = Math.hypot(c.x - a.x, c.y - a.y) + Math.hypot(b.x - c.x, b.y - c.y);
+    // short pieces need no curve; long ones are split so the bend is smooth
+    const n = len < 6 ? 1 : Math.min(64, Math.ceil(len / 4));
+    let prev = a;
+    for (let i = 1; i <= n; i++) {
+      const t = i / n, u = 1 - t;
+      const q = { x: u * u * a.x + 2 * u * t * c.x + t * t * b.x, y: u * u * a.y + 2 * u * t * c.y + t * t * b.y, p: a.p + (b.p - a.p) * t };
+      segment(prev, q);
+      prev = q;
+    }
+  }
+  // the pen lifted: finish the curve up to the last sample
+  function flushCurve() {
+    if (curveCtrl) {
+      segment(drawnTo, curveCtrl);
+      drawnTo = curveCtrl;
+      curveCtrl = null;
+    }
+  }
+
   function up() {
     clearTimeout(holdTimer);
     if (!drawing) return;
+    if (!shapeLocked) flushCurve();
     // Let the stabilized line catch up with where the pen actually stopped
-    if (brush.stabilize > 0 && !shapeLocked) segment(last, lastRaw);
+    if (brush.stabilize > 0 && !shapeLocked) segment(drawnTo, lastRaw);
     finishStroke(lastRaw);
   }
 
   // Adds the finished stroke to the layer and records it for undo
+  function smoothing(layer: Layer, on: boolean) {
+    for (const c of [strokeCtx, tintCtx, layer.canvas.getContext('2d')!]) c.imageSmoothingEnabled = on;
+  }
+
   function finishStroke(endPt: Point) {
     if (strokeVector) {
       finishVectorStroke(endPt);
       return;
     }
     drawing = false;
+    brushPerf.final = false;
+    if (!directStroke) redrawStrokeFull();
+    recordDabs = false;
+    strokeDabs = [];
     if (!directStroke && !shapeClosed) shapeEnds();
     const layer = layers.find((l) => l.id === strokeLayerId);
+    if (layer) smoothing(layer, true); // copying the stroke is 1:1, so smoothing is back on already
     if (!layer || !hasRect) {
       render();
       return;
@@ -1252,6 +1388,7 @@
       markArea(old);
     }
     vecRaw = found.pts;
+    strokeDabs = [];
     resetDabs();
     if (strokeVector && strokeTool === 'brush') {
       vecDrawn = 0;
@@ -1395,7 +1532,7 @@
     if (useTexture) {
       t.globalCompositeOperation = 'destination-out';
       t.globalAlpha = brush.texture;
-      paperPattern!.setTransform(new DOMMatrix().translate(grainOffset.x, grainOffset.y));
+      paperPattern!.setTransform(new DOMMatrix().translate(grainOffset.x, grainOffset.y).scale(Math.max(0.25, brush.texScale ?? 1)));
       t.fillStyle = paperPattern!;
       t.fillRect(A.x, A.y, A.w, A.h);
       t.globalAlpha = 1;
@@ -1476,7 +1613,9 @@
       dabAlpha = c.alpha;
     }
     if (brush.colorJitter > 0 && strokeTool !== 'eraser') dabColor = jitterColor(dabColor, brush.colorJitter);
-    const tip = getDab(strokeTool === 'eraser' ? '#000000' : dabColor, brush, pickVariant(brush));
+    const tipColor = strokeTool === 'eraser' ? '#000000' : dabColor;
+    const variant = pickVariant(brush);
+    const tip = getDab(tipColor, brush, variant);
     // Light pressure still leaves some paint (25%), like a real pencil or pen
     const alpha = dabAlpha * brush.flow * (brush.opacityPressure ? 0.25 + 0.75 * pt.p : 1);
     if (!isShaped(brush)) {
@@ -1490,10 +1629,37 @@
     const sh = dabShape(brush, r, dir);
     const x = pt.x + sh.ox, y = pt.y + sh.oy;
     strokeCtx.globalAlpha = alpha * sh.alpha;
-    stampDab(strokeCtx, tip, x, y, sh.r, sh.a, brush.roundness);
+    // particles: the dab is made of several small separate dabs inside the brush circle
+    const parts = brush.particles > 0 ? particleSpread(brush).map((q) => ({ x: x + q.ox * sh.r, y: y + q.oy * sh.r, r: Math.max(0.3, sh.r * q.r), a: q.a + sh.a, v: pickVariant(brush) })) : [{ x, y, r: sh.r, a: sh.a, v: variant }];
+    for (const q of parts) {
+      stampDab(strokeCtx, q.v === variant ? tip : getDab(tipColor, brush, q.v), q.x, q.y, q.r, q.a, brush.roundness);
+      // lighter tips while drawing: remember the dab, the finished stroke is drawn again in full quality
+      if (recordDabs) strokeDabs.push({ c: tipColor, v: q.v, x: q.x, y: q.y, r: q.r, a: q.a, al: alpha * sh.alpha });
+    }
     strokeCtx.globalAlpha = 1;
     const R = sh.r * 1.45 + 2;
     grow(x - R, y - R, x + R, y + R);
+  }
+
+  // Speed setting "Fast"/"Balanced": the pen shows lighter tips while it moves, and when it lifts
+  // the stroke is drawn again with full-quality tips, so the finished drawing is always the same.
+  let recordDabs = false;
+  let strokeDabs: { c: string; v: number; x: number; y: number; r: number; a: number; al: number }[] = [];
+
+  function redrawStrokeFull() {
+    if (!recordDabs || !strokeDabs.length || !hasRect) return;
+    const x = Math.max(0, Math.floor(minX)), y = Math.max(0, Math.floor(minY));
+    strokeCtx.clearRect(x, y, Math.ceil(maxX) - x + 1, Math.ceil(maxY) - y + 1);
+    brushPerf.final = true;
+    try {
+      for (const d of strokeDabs) {
+        strokeCtx.globalAlpha = d.al;
+        stampDab(strokeCtx, getDab(d.c, brush, d.v), d.x, d.y, d.r, d.a, brush.roundness);
+      }
+    } finally {
+      strokeCtx.globalAlpha = 1;
+      brushPerf.final = false;
+    }
   }
 
   // Direction the stroke is going at this dab (each mirrored copy keeps its own)
@@ -1555,7 +1721,8 @@
     // Pick up color every so often (reading pixels is slow, so not on every dab)
     if (Math.hypot(pt.x - lastSample.x, pt.y - lastSample.y) >= Math.max(1, r * 0.4)) {
       // fresh paint from the brush slowly comes back, unless mix is 100%
-      const [br, bg, bb] = hexRGB(color);
+      // (painting with the gradient: the paint color follows the gradient along the stroke)
+      const [br, bg, bb] = hexRGB(gradBrush && strokeTool !== 'eraser' ? strokeColorAt(grad.stops, grad.smooth, Math.round(curDabD / 6) * 6, gradBrushLen, gradBrushRepeat).hex : color);
       const fresh = [br, bg, bb, 1];
       // Color mix % = how much of the paint comes from the canvas, the rest is your color.
       // A pure blender (≈100%) smears what it just picked up; paint mixing reads the layer
@@ -2565,6 +2732,26 @@
     });
   }
 
+  // ---------- Filters ----------
+  function openFilters() {
+    if (xf) applyTransform();
+    const l = activeLayer;
+    if (!l || activeId === PAPER_ID) return showNotice('Select a layer to use a filter on.');
+    if (isVector(l)) return showNotice('Filters work on pixel layers. Right-click the layer → Rasterize first.');
+    if (!l.visible) return showNotice('This layer is hidden. Show it (👁) first.');
+    filterOpen = true;
+  }
+
+  const selectionCanvas = () => selCtx.canvas;
+
+  function finishFilter(result: { before: ImageData; after: ImageData } | null) {
+    const layer = activeLayer;
+    filterOpen = false;
+    if (result && layer) push({ type: 'pixels', layerId: layer.id, rect: { x: 0, y: 0, w: docW, h: docH }, before: result.before, after: result.after });
+    thumbTick++;
+    render();
+  }
+
   function openAdjust() {
     if (!activeLayer) return;
     if (isVector(activeLayer)) {
@@ -3223,6 +3410,7 @@
           return c;
         },
         projectName,
+        { profile: prefs.rgbProfile, embed: prefs.embedProfile, bake: prefs.bakeProfile },
       ),
     );
   }
@@ -3236,9 +3424,30 @@
     if (e?.type === 'vector') dirtyLayers.add(e.layerId);
     if (!currentId) return;
     saveState = 'unsaved';
+    recoveryDirty = true;
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => saveNow(), 2500);
+    saveTimer = setTimeout(() => saveNow(), prefs.autosaveDelay * 1000);
   }
+
+  // ---------- Canvas recovery ----------
+  // Every few minutes (Preferences → File & recovery) a separate copy of the project is kept.
+  let recoveryDirty = false;
+  let lastRecovery = Date.now();
+  async function recoveryTick() {
+    if (!prefs.recoveryEvery || !currentId || !recoveryDirty || drawing || xf) return;
+    if (Date.now() - lastRecovery < prefs.recoveryEvery * 60_000) return;
+    lastRecovery = Date.now();
+    recoveryDirty = false;
+    try {
+      await saveRecovery(currentId, prefs.recoveryKeep, projectName, projectData(), exportComposite());
+    } catch {
+      recoveryDirty = true; // try again next time
+    }
+  }
+  $effect(() => {
+    const t = setInterval(recoveryTick, 30_000);
+    return () => clearInterval(t);
+  });
 
   async function saveNow(): Promise<void> {
     clearTimeout(saveTimer);
@@ -3565,12 +3774,7 @@
     const copy = copyLayer(l);
     removeAt(index);
     push({ type: 'delete', layer: copy, index });
-    // the last layer can be deleted too: a new empty layer takes its place
-    if (layers.length === 0) {
-      const fresh = makeLayer();
-      insertAt(fresh, 0);
-      push({ type: 'add', layer: fresh, index: 0 });
-    }
+    // the last layer can be deleted too; drawing again makes a new one (see onPointerDown)
     thumbTick++;
     render();
   }
@@ -3735,7 +3939,7 @@
   function push(entry: HistoryEntry) {
     touch(entry);
     undoStack.push(entry);
-    if (undoStack.length > MAX_HISTORY) undoStack.shift();
+    while (undoStack.length > prefs.undoSteps) undoStack.shift();
     redoStack.length = 0;
     sync();
   }
@@ -3832,6 +4036,13 @@
 
   // Svelte action: draws a small preview of a layer, again whenever `tick` changes
   function thumb(node: HTMLCanvasElement, args: { layer: Layer; tick: number }) {
+    let wait = 0;
+    const later = (a: { layer: Layer; tick: number }) => {
+      // Preferences → Canvas: layer pictures can wait until you pause drawing
+      clearTimeout(wait);
+      if (prefs.lazyThumbs) wait = window.setTimeout(() => draw(a), 900);
+      else draw(a);
+    };
     const draw = ({ layer }: { layer: Layer; tick: number }) => {
       const ctx = node.getContext('2d')!;
       ctx.clearRect(0, 0, node.width, node.height);
@@ -3841,7 +4052,7 @@
       ctx.drawImage(layer.canvas, (node.width - w) / 2, (node.height - h) / 2, w, h);
     };
     draw(args);
-    return { update: draw };
+    return { update: later, destroy: () => clearTimeout(wait) };
   }
 
   // ---------- Shortcuts ----------
@@ -3852,7 +4063,7 @@
     if (target.tagName === 'INPUT' && (target.type === 'text' || target.type === 'number')) return;
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
-    if (adjusting || newDialog || showProjects || exportDialog || traceFor || libOpen) return; // the dialog handles its own keys
+    if (adjusting || newDialog || showProjects || exportDialog || traceFor || libOpen || settingsOpen || filterOpen) return; // the dialog handles its own keys
 
     // While a shape is being drawn: Enter closes it, Esc cancels, Ctrl+Z removes the last part
     if (selDraft) {
@@ -3904,19 +4115,15 @@
       }
       return;
     }
-    if (mod && key === 't') {
+    // Your keyboard shortcuts (Preferences → Shortcuts)
+    const act = keyAction.get(comboOf(e));
+    if (act && ACTION_RUN[act]) {
       e.preventDefault();
-      startTransform(false);
+      ACTION_RUN[act]();
       return;
     }
 
     // Selection
-    if (mod && key === 'a') {
-      e.preventDefault();
-      if (activeTool === 'vselect') selectAllLines();
-      else selectAll();
-      return;
-    }
     if (activeTool === 'vselect' && (vsel.length || vselF.length)) {
       if (key === 'delete' || key === 'backspace') {
         e.preventDefault();
@@ -3936,29 +4143,14 @@
         return;
       }
     }
-    if (mod && key === 'j') {
+    if (mod && e.shiftKey && key === 'j') {
       e.preventDefault();
-      selectionToNewLayer(e.shiftKey);
-      return;
-    }
-    if (mod && key === 'd') {
-      e.preventDefault();
-      deselect();
-      return;
-    }
-    if (mod && e.shiftKey && key === 'i') {
-      e.preventDefault();
-      invertSelection();
+      selectionToNewLayer(true);
       return;
     }
     if ((key === 'delete' || key === 'backspace') && hasSel) {
       e.preventDefault();
       clearSelected();
-      return;
-    }
-    if (mod && key === 'u') {
-      e.preventDefault();
-      openAdjust();
       return;
     }
 
@@ -3976,62 +4168,60 @@
     } else if (key === ' ') {
       e.preventDefault();
       spaceDown = true;
-    } else if (mod && key === '0') {
-      e.preventDefault();
-      fitToScreen();
-    } else if (mod && key === '1') {
-      e.preventDefault();
-      zoomCenter(1 / zoom);
-    } else if (mod && (key === '=' || key === '+')) {
-      e.preventDefault();
-      zoomCenter(1.25);
-    } else if (mod && key === '-') {
-      e.preventDefault();
-      zoomCenter(1 / 1.25);
-    } else if (mod && key === 'z' && !e.shiftKey) {
-      e.preventDefault();
-      undo();
-    } else if (mod && (key === 'y' || (key === 'z' && e.shiftKey))) {
-      e.preventDefault();
-      redo();
-    } else if (!mod && key === 'b') {
-      tool = 'brush';
-    } else if (!mod && key === 'e') {
-      tool = 'eraser';
-    } else if (!mod && key === 'i') {
-      tool = 'picker';
-    } else if (!mod && key === '4') {
-      rotateBy(-15);
-    } else if (!mod && key === '6') {
-      rotateBy(15);
-    } else if (!mod && key === '5') {
-      resetRotation();
-    } else if (!mod && key === 'h') {
-      toggleFlip();
-    } else if (!mod && key === 'g' && e.shiftKey) {
-      tool = 'gradient';
-    } else if (!mod && key === 'g') {
-      tool = 'fill';
-    } else if (!mod && key === 'm') {
-      tool = 'select';
-      if (selMode === 'lasso') selMode = 'rect';
-    } else if (!mod && key === 'l' && e.shiftKey) {
-      tool = 'lassoFill';
-    } else if (!mod && key === 'l') {
-      tool = 'select';
-      selMode = 'lasso';
-    } else if (!mod && key === 'v') {
-      tool = 'move';
-    } else if (!mod && key === 'a') {
-      tool = 'vselect';
-    } else if (!mod && key === 'y') {
-      setSymMode(nextMode(sym.mode));
-    } else if (!mod && key === '[') {
-      brush.size = stepSize(brush.size, -1);
-    } else if (!mod && key === ']') {
-      brush.size = stepSize(brush.size, 1);
     }
   }
+
+  // What each shortcut does (the keys themselves are in Preferences → Shortcuts)
+  const ACTION_RUN: Record<string, () => void> = {
+    brush: () => (tool = 'brush'),
+    eraser: () => (tool = 'eraser'),
+    picker: () => (tool = 'picker'),
+    fill: () => (tool = 'fill'),
+    gradient: () => (tool = 'gradient'),
+    lassoFill: () => (tool = 'lassoFill'),
+    select: () => {
+      tool = 'select';
+      if (selMode === 'lasso') selMode = 'rect';
+    },
+    lassoSel: () => {
+      tool = 'select';
+      selMode = 'lasso';
+    },
+    move: () => (tool = 'move'),
+    vselect: () => (tool = 'vselect'),
+    sizeDown: () => (brush.size = stepSize(brush.size, -1)),
+    sizeUp: () => (brush.size = stepSize(brush.size, 1)),
+    randomBrush: () => {
+      if (tool !== 'brush') tool = 'brush';
+      flushSync();
+      Object.assign(brush, { tipImage: undefined, tipId: undefined }, surpriseBrush('paint'));
+      preset = 'Random brush';
+    },
+    mirror: () => setSymMode(nextMode(sym.mode)),
+    undo: () => undo(),
+    redo: () => redo(),
+    redo2: () => redo(),
+    transform: () => startTransform(false),
+    adjust: () => openAdjust(),
+    selectAll: () => (activeTool === 'vselect' ? selectAllLines() : selectAll()),
+    deselect: () => deselect(),
+    invertSel: () => invertSelection(),
+    selToLayer: () => selectionToNewLayer(false),
+    newLayer: () => addLayer(),
+    deleteLayer: () => deleteLayer(),
+    zoomIn: () => zoomCenter(1.25),
+    zoomOut: () => zoomCenter(1 / 1.25),
+    fit: () => fitToScreen(),
+    zoom100: () => zoomCenter(1 / zoom),
+    rotateLeft: () => rotateBy(-15),
+    rotateRight: () => rotateBy(15),
+    rotateReset: () => resetRotation(),
+    flip: () => toggleFlip(),
+    settings: () => (settingsOpen = true),
+    filters: () => openFilters(),
+  };
+  let keyAction = $derived(new Map(Object.entries(prefs.keys).filter(([, k]) => k).map(([a, k]) => [k, a])));
+  const keyFor = (id: string) => prefs.keys[id] || '';
 
   // [ and ] change the size by ~10%, but always by at least 0.1 px
   function stepSize(size: number, dir: 1 | -1) {
@@ -4099,6 +4289,13 @@
 <div class="app">
   <header class="toolbar">
     <strong>SeviathStudio</strong>
+    <button class="settings-btn" onclick={() => (settingsOpen = true)} title="Settings: performance (GPU/CPU, brush quality), undo steps">⚙</button>
+    {#if cloudReady}
+      <button class="account-btn" class:on={accountOpen} onclick={() => (accountOpen = !accountOpen)} title={account ? `Signed in as ${account.name}` : 'Sign in or create a Seviath account'}>
+        {#if account?.avatar}<img src={account.avatar} alt="" referrerpolicy="no-referrer" />{:else}👤{/if}
+        {account ? account.name : 'Sign in'}
+      </button>
+    {/if}
     <div class="file-wrap">
       <button class:on={fileMenu} onclick={(e) => (fileMenu = dropAt(e, !fileMenu))}>File ▾</button>
       {#if fileMenu}
@@ -4106,6 +4303,7 @@
         <div class="context-menu drop file-menu" role="menu" style="left: {dropPos.x}px; top: {dropPos.y}px;">
           <div class="menu-title">{projectName} · {docW} × {docH} px · {docDpi} dpi · {colorMode.toUpperCase()}</div>
           <button role="menuitem" onclick={openManager}>🗂 Projects… <kbd>Ctrl Shift O</kbd></button>
+          <button role="menuitem" onclick={() => { fileMenu = false; settingsOpen = true; }}>⚙ Settings…</button>
           <button role="menuitem" onclick={askNewProject}>New project…</button>
           <button role="menuitem" onclick={() => openFilePicker('open')} title="PSD, OpenRaster, Krita, PNG, JPG, WebP, GIF, SVG, .seviath">Open file as new project… <kbd>Ctrl O</kbd></button>
           <button role="menuitem" onclick={() => openFilePicker('layer')} title="Adds pictures as new layers. You can also drop files on the canvas or paste with Ctrl V">Import as layer…</button>
@@ -4148,12 +4346,13 @@
         <div class="context-menu drop file-menu" role="menu" style="left: {dropPos.x}px; top: {dropPos.y}px;">
           {#each TOOL_ITEMS as it (it.id)}
             <button role="menuitem" class:checked={toolItem?.id === it.id} onclick={() => pickItem(it.id)} title={it.title}>
-              <span>{it.icon} {it.label}</span><kbd>{it.key}</kbd>
+              <span>{it.icon} {it.label}</span><kbd>{it.id === 'picker' ? [keyFor('picker'), 'Alt'].filter(Boolean).join(' / ') : keyFor(it.id)}</kbd>
             </button>
           {/each}
         </div>
       {/if}
     </div>
+    <button class:on={filterOpen} onclick={openFilters} title="Filters: city blocks, cubes, triangles, spheres, blur, sharpen, halftone, glow, oil paint, make it an illustration…">✨ Filter</button>
     <div class="file-wrap">
       <button class:on={funcMenu} class:active-group={funcItem !== null || !!xf} onclick={(e) => (funcMenu = dropAt(e, !funcMenu))} title="Select, move, transform, mirror">
         {xf ? '⤡ Transform' : funcItem ? `${funcItem.icon} ${funcItem.label}` : 'Functions'} ▾
@@ -4163,7 +4362,7 @@
         <div class="context-menu drop file-menu" role="menu" style="left: {dropPos.x}px; top: {dropPos.y}px;">
           {#each FUNC_ITEMS as it (it.id)}
             <button role="menuitem" class:checked={funcItem?.id === it.id} onclick={() => pickItem(it.id)} title={it.title}>
-              <span>{it.icon} {it.label}</span><kbd>{it.key}</kbd>
+              <span>{it.icon} {it.label}</span><kbd>{it.id === 'picker' ? [keyFor('picker'), 'Alt'].filter(Boolean).join(' / ') : keyFor(it.id)}</kbd>
             </button>
           {/each}
           <button
@@ -4174,13 +4373,13 @@
               if (xf) applyTransform();
               else startTransform(false);
             }}
-            title="Scale, rotate and flip the layer or the selection"><span>⤡ Transform</span><kbd>Ctrl T</kbd></button
+            title="Scale, rotate and flip the layer or the selection"><span>⤡ Transform</span><kbd>{keyFor('transform')}</kbd></button
           >
           <hr />
           <div class="menu-title">🪞 Mirror drawing</div>
           {#each MODES as m (m)}
             <button role="menuitem" class:checked={sym.mode === m} onclick={() => setSymMode(m)} title={MODE_HINT[m]}>
-              <span>{MODE_LABEL[m]}</span>{#if m === 'off'}<kbd>Y cycles</kbd>{/if}
+              <span>{MODE_LABEL[m]}</span>{#if m === 'off'}<kbd>{keyFor('mirror')} cycles</kbd>{/if}
             </button>
           {/each}
           <hr />
@@ -4352,15 +4551,15 @@
           Start with <b>Shift</b> to add, <b>Ctrl</b> to remove. Painting, fill and Move then only affect the selected area.
         </p>
         <div class="btn-grid">
-          <button onclick={selectAll}>Select all <kbd>Ctrl A</kbd></button>
-          <button onclick={deselect} disabled={!hasSel}>Deselect <kbd>Ctrl D</kbd></button>
-          <button onclick={invertSelection}>Invert <kbd>Ctrl Shift I</kbd></button>
+          <button onclick={selectAll}>Select all <kbd>{keyFor('selectAll')}</kbd></button>
+          <button onclick={deselect} disabled={!hasSel}>Deselect <kbd>{keyFor('deselect')}</kbd></button>
+          <button onclick={invertSelection}>Invert <kbd>{keyFor('invertSel')}</kbd></button>
           <button onclick={clearSelected} disabled={!hasSel}>Delete inside <kbd>Del</kbd></button>
           <button onclick={deleteOutside} disabled={!hasSel} title="Cut the picture out along the selection">Delete outside (cut out)</button>
-          <button onclick={() => selectionToNewLayer(false)} disabled={!hasSel}>Copy to new layer <kbd>Ctrl J</kbd></button>
+          <button onclick={() => selectionToNewLayer(false)} disabled={!hasSel}>Copy to new layer <kbd>{keyFor('selToLayer')}</kbd></button>
           <button onclick={() => selectionToNewLayer(true)} disabled={!hasSel}>Cut to new layer <kbd>Ctrl Shift J</kbd></button>
           <button onclick={fillSelected} disabled={!hasSel}>Fill with color</button>
-          <button onclick={() => startTransform(false)} disabled={!hasSel}>Transform <kbd>Ctrl T</kbd></button>
+          <button onclick={() => startTransform(false)} disabled={!hasSel}>Transform <kbd>{keyFor('transform')}</kbd></button>
         </div>
         <div class="panel-head sub-head">Existing drawing</div>
         <button
@@ -4487,7 +4686,10 @@
               <button class:on={gradBrushRepeat === 'repeat'} onclick={() => (gradBrushRepeat = 'repeat')}>Repeat</button>
               <button class:on={gradBrushRepeat === 'mirror'} onclick={() => (gradBrushRepeat = 'mirror')}>Back & forth</button>
             </div>
-            <button class="wide" onclick={() => (tool = 'gradient')}>Edit gradient colors…</button>
+            <button class="wide" class:on={gradBrushEdit} onclick={() => (gradBrushEdit = !gradBrushEdit)}>{gradBrushEdit ? '▴ Done editing colors' : '✎ Edit the colors…'}</button>
+            {#if gradBrushEdit}
+              <GradientPanel bind:grad bind:apply={gradApply} bind:color bind:color2 blends={BLEND_NAMES} colorsOnly />
+            {/if}
           </div>
         {/if}
       {/if}
@@ -4502,6 +4704,10 @@
         {color}
         onsave={saveCurrentBrush}
         ontipfromcanvas={tipFromCanvas}
+        onshare={(name, about, settings) => {
+          shareReq = { name, about, settings };
+          libOpen = true;
+        }}
         hasSelection={hasSel}
         onlibrary={(t) => {
           libTab = t ?? 'mine';
@@ -4532,6 +4738,7 @@
       width={docW}
       height={docH}
       class:pixelated={zoom >= 2}
+      style:filter={profileView ? 'url(#rgb-profile)' : null}
       style="width: {docW * zoom}px; height: {docH * zoom}px; transform-origin: {(docW * zoom) / 2}px {(docH * zoom) / 2}px; transform: translate({panX}px, {panY}px) rotate({rotation}deg) scaleX({flipped ? -1 : 1});"
     ></canvas>
     {#if hasSel || selDraft || xf || sym.mode !== 'off' || (activeTool === 'vselect' && (vsel.length || vselF.length || vselBox)) || gradDrag}
@@ -4848,8 +5055,42 @@
     ondelete={deleteMyBrush}
     onexport={exportMyBrushes}
     onadd={addImportedBrushes}
-    onclose={() => (libOpen = false)}
+    onclose={() => {
+      libOpen = false;
+      shareReq = null;
+    }}
+    bind:share={shareReq}
+    {account}
   />
+{/if}
+
+<!-- the RGB profile preview (Preferences → Color profiles) -->
+{#if profileView}
+  <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+    <filter id="rgb-profile" color-interpolation-filters="linearRGB">
+      <feComponentTransfer>
+        <feFuncR type="table" tableValues={profileView.tables[0]} />
+        <feFuncG type="table" tableValues={profileView.tables[1]} />
+        <feFuncB type="table" tableValues={profileView.tables[2]} />
+      </feComponentTransfer>
+      <feColorMatrix type="matrix" values={profileView.matrix} />
+    </filter>
+  </svg>
+{/if}
+
+{#if settingsOpen}
+  <SettingsDialog bind:prefs onclose={() => (settingsOpen = false)} />
+{/if}
+
+{#if accountOpen}
+  <div class="menu-backdrop" role="presentation" onpointerdown={() => (accountOpen = false)}></div>
+  <div class="account-pop" role="dialog" aria-label="Seviath account">
+    <div class="account-head">
+      <strong>Seviath account</strong>
+      <button onclick={() => (accountOpen = false)}>✕</button>
+    </div>
+    <AccountPanel {account} bind:recovery why="One account for sharing brushes (and more later). Free." />
+  </div>
 {/if}
 
 {#if traceFor}
@@ -4881,6 +5122,10 @@
       }
     }}
   />
+{/if}
+
+{#if filterOpen && activeLayer}
+  <FilterDialog canvas={activeLayer.canvas} mask={hasSel ? selectionCanvas() : null} layerName={activeLayer.name} onchange={render} ondone={finishFilter} />
 {/if}
 
 {#if adjusting && activeLayer}
@@ -4943,6 +5188,42 @@
     font-family: system-ui, sans-serif;
     font-size: 14px;
     color: #eee;
+  }
+  .account-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 160px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .account-btn img {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+  }
+  .account-pop {
+    position: fixed;
+    z-index: 70;
+    top: 52px;
+    left: 12px;
+    width: min(340px, calc(100vw - 24px));
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px;
+    background: #24242b;
+    border: 1px solid #444;
+    border-radius: 12px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
+    color: #ddd;
+    font-size: 12px;
+  }
+  .account-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
   }
   .toolbar {
     grid-column: 1 / -1;
