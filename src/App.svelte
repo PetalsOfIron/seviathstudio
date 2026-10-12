@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import ColorWheel from './lib/ColorWheel.svelte';
+  import BrushPanel from './lib/BrushPanel.svelte';
+  import { PRESETS, settingsOf, getDab, getPaper, type BrushSettings } from './lib/brush';
 
   // Document size (will be selectable when creating a new project later)
   const DOC_W = 2000;
@@ -26,7 +28,8 @@
   // Tool settings
   let tool = $state<Tool>('brush');
   let color = $state('#222222');
-  let size = $state(16);
+  let brush = $state<BrushSettings>(settingsOf(PRESETS[0]));
+  let preset = $state(PRESETS[0].name);
   let altDown = $state(false);
   // Holding Alt temporarily switches to the color picker
   let activeTool = $derived<Tool>(altDown ? 'picker' : tool);
@@ -53,36 +56,52 @@
   let flipped = $state(false);
   let spaceDown = $state(false);
   let panning = $state(false);
+  // Brush outline that follows the pointer
+  let hover = $state({ x: 0, y: 0, on: false });
   let panStart = { x: 0, y: 0, px: 0, py: 0 };
 
   let view = $state<HTMLCanvasElement>();
   let viewCtx: CanvasRenderingContext2D | undefined;
-  let backupCtx: CanvasRenderingContext2D;
+  // A stroke is painted into strokeCtx first and only added to the layer when it ends.
+  // That way stroke opacity works like in Photoshop/CSP (overlapping dabs don't get darker).
+  let strokeCtx: CanvasRenderingContext2D;
+  let scratchCtx: CanvasRenderingContext2D;
+  let texturedCtx: CanvasRenderingContext2D; // the stroke with paper grain applied
+  let paperPattern: CanvasPattern | null = null;
   let nextId = 1;
 
   // Stroke state
   let drawing = false;
   let picking = false;
+  let strokeLayerId = 0;
+  let strokeTool: Tool = 'brush';
   let last: Point = { x: 0, y: 0, p: 0.5 };
+  let lastRaw: Point = { x: 0, y: 0, p: 0.5 };
+  let ropeEnd: Point = { x: 0, y: 0, p: 0.5 }; // stabilizer: where the rope pulls the brush
+  let lastEnd: { layerId: number; pt: Point } | null = null; // for Shift + click lines
   let hasRect = false;
   let minX = 0, minY = 0, maxX = 0, maxY = 0;
 
-  function makeLayer(): Layer {
+  function makeCanvas() {
     const c = document.createElement('canvas');
     c.width = DOC_W;
     c.height = DOC_H;
+    return c;
+  }
+
+  function makeLayer(): Layer {
     const id = nextId++;
-    return { id, name: `Layer ${id}`, canvas: c, visible: true, opacity: 1 };
+    return { id, name: `Layer ${id}`, canvas: makeCanvas(), visible: true, opacity: 1 };
   }
 
   const activeIndex = () => layers.findIndex((l) => l.id === activeId);
 
   onMount(() => {
     viewCtx = view!.getContext('2d', { willReadFrequently: true })!;
-    const backup = document.createElement('canvas');
-    backup.width = DOC_W;
-    backup.height = DOC_H;
-    backupCtx = backup.getContext('2d', { willReadFrequently: true })!;
+    strokeCtx = makeCanvas().getContext('2d')!;
+    scratchCtx = makeCanvas().getContext('2d')!;
+    texturedCtx = makeCanvas().getContext('2d')!;
+    paperPattern = texturedCtx.createPattern(getPaper(), 'repeat');
 
     const first = makeLayer();
     layers.push(first);
@@ -123,8 +142,24 @@
       ctx.fillRect(0, 0, DOC_W, DOC_H);
       for (const l of layers) {
         if (!l.visible) continue;
-        ctx.globalAlpha = l.opacity;
-        ctx.drawImage(l.canvas, 0, 0);
+        if (drawing && l.id === strokeLayerId) {
+          // Show the layer with the unfinished stroke on top of it
+          const s = scratchCtx;
+          s.globalCompositeOperation = 'source-over';
+          s.globalAlpha = 1;
+          s.clearRect(0, 0, DOC_W, DOC_H);
+          s.drawImage(l.canvas, 0, 0);
+          s.globalAlpha = brush.opacity;
+          s.globalCompositeOperation = strokeTool === 'eraser' ? 'destination-out' : 'source-over';
+          s.drawImage(strokeSource(), 0, 0);
+          s.globalCompositeOperation = 'source-over';
+          s.globalAlpha = 1;
+          ctx.globalAlpha = l.opacity;
+          ctx.drawImage(s.canvas, 0, 0);
+        } else {
+          ctx.globalAlpha = l.opacity;
+          ctx.drawImage(l.canvas, 0, 0);
+        }
       }
       ctx.globalAlpha = 1;
     });
@@ -245,18 +280,27 @@
 
   // ---------- Pointer input ----------
 
+  // Keep receiving pointer events even if the pen leaves the canvas mid-stroke
+  function capture(e: PointerEvent) {
+    try {
+      stage!.setPointerCapture(e.pointerId);
+    } catch {
+      // ignore: some synthetic or already-released pointers can't be captured
+    }
+  }
+
   function onPointerDown(e: PointerEvent) {
     // Middle mouse button or Space + drag moves the canvas
     if (e.button === 1 || spaceDown) {
       e.preventDefault();
-      stage!.setPointerCapture(e.pointerId);
+      capture(e);
       panning = true;
       panStart = { x: e.clientX, y: e.clientY, px: panX, py: panY };
       return;
     }
     if (e.button !== 0) return;
     if (activeTool === 'picker') {
-      stage!.setPointerCapture(e.pointerId);
+      capture(e);
       picking = true;
       pickColor(e);
       return;
@@ -265,6 +309,8 @@
   }
 
   function onPointerMove(e: PointerEvent) {
+    const r = stage!.getBoundingClientRect();
+    hover = { x: e.clientX - r.left, y: e.clientY - r.top, on: true };
     if (panning) {
       panX = panStart.px + (e.clientX - panStart.x);
       panY = panStart.py + (e.clientY - panStart.y);
@@ -303,31 +349,70 @@
 
   function point(e: PointerEvent): Point {
     const d = toDoc(e.clientX, e.clientY);
-    return { x: d.x, y: d.y, p: e.pointerType === 'mouse' ? 0.5 : e.pressure || 0.01 };
+    // A mouse has no pressure, so it always paints at full size
+    return { x: d.x, y: d.y, p: e.pointerType === 'mouse' ? 1 : e.pressure || 0.01 };
   }
 
   function down(e: PointerEvent) {
     const layer = activeLayer;
     if (!layer || !layer.visible) return;
-    stage!.setPointerCapture(e.pointerId);
+    const pt = point(e);
+
     drawing = true;
     hasRect = false;
+    strokeLayerId = layer.id;
+    strokeTool = activeTool;
+    strokeCtx.clearRect(0, 0, DOC_W, DOC_H);
+    resetDabs();
 
-    // Copy before the stroke so undo can restore it
-    backupCtx.clearRect(0, 0, DOC_W, DOC_H);
-    backupCtx.drawImage(layer.canvas, 0, 0);
+    // Shift + click: straight line from where the last stroke ended
+    if (e.shiftKey && lastEnd && lastEnd.layerId === layer.id) {
+      stamp(lastEnd.pt);
+      segment(lastEnd.pt, pt);
+      finishStroke(pt);
+      return;
+    }
 
-    last = point(e);
-    stamp(layer.canvas, last);
+    capture(e);
+    last = pt;
+    lastRaw = pt;
+    ropeEnd = { ...pt };
+    stamp(pt);
     render();
   }
 
   function move(e: PointerEvent) {
-    if (!drawing || !activeLayer) return;
-    const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    if (!drawing) return;
+    let events = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+    if (events.length === 0) events = [e];
+    // Stabilizer ("lazy rope", like Krita and CSP): the brush hangs behind the pen on an
+    // invisible rope and only moves when the pen pulls the rope tight. Shaky movements
+    // smaller than the rope are ignored, so curves come out smooth.
+    // The rope length is measured on screen, so it feels the same at any zoom.
+    const s = brush.stabilize;
+    const rope = (Math.pow(s, 1.5) * 90) / zoom;
+    const k = 1 - s * 0.6; // extra light smoothing that rounds off corners
     for (const ev of events) {
-      const next = point(ev);
-      segment(activeLayer.canvas, last, next);
+      const raw = point(ev);
+      lastRaw = raw;
+      const dx = raw.x - ropeEnd.x;
+      const dy = raw.y - ropeEnd.y;
+      const d = Math.hypot(dx, dy);
+      // pressure is smoothed but never waits for the rope
+      ropeEnd.p += (raw.p - ropeEnd.p) * Math.max(k, 0.3);
+      if (d > rope) {
+        const t = (d - rope) / d;
+        ropeEnd.x += dx * t;
+        ropeEnd.y += dy * t;
+      } else if (rope > 0) {
+        continue;
+      }
+      const next = {
+        x: last.x + (ropeEnd.x - last.x) * k,
+        y: last.y + (ropeEnd.y - last.y) * k,
+        p: ropeEnd.p,
+      };
+      segment(last, next);
       last = next;
     }
     render();
@@ -335,41 +420,169 @@
 
   function up() {
     if (!drawing) return;
-    drawing = false;
-    const layer = activeLayer;
-    if (!layer || !hasRect) return;
+    // Let the stabilized line catch up with where the pen actually stopped
+    if (brush.stabilize > 0) segment(last, lastRaw);
+    finishStroke(lastRaw);
+  }
 
-    // Undo stores only the area you drew on, not the whole layer
+  // Adds the finished stroke to the layer and records it for undo
+  function finishStroke(endPt: Point) {
+    drawing = false;
+    shapeEnds();
+    const layer = layers.find((l) => l.id === strokeLayerId);
+    if (!layer || !hasRect) {
+      render();
+      return;
+    }
+
     const x = Math.max(0, Math.floor(minX));
     const y = Math.max(0, Math.floor(minY));
     const w = Math.min(DOC_W, Math.ceil(maxX)) - x;
     const h = Math.min(DOC_H, Math.ceil(maxY)) - y;
-    if (w <= 0 || h <= 0) return;
+    if (w <= 0 || h <= 0) {
+      render();
+      return;
+    }
 
-    const before = backupCtx.getImageData(x, y, w, h);
-    const after = layer.canvas.getContext('2d')!.getImageData(x, y, w, h);
+    // Undo stores only the area you drew on, not the whole layer
+    const ctx = layer.canvas.getContext('2d', { willReadFrequently: true })!;
+    const before = ctx.getImageData(x, y, w, h);
+    ctx.globalAlpha = brush.opacity;
+    ctx.globalCompositeOperation = strokeTool === 'eraser' ? 'destination-out' : 'source-over';
+    ctx.drawImage(strokeSource(), 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    const after = ctx.getImageData(x, y, w, h);
+
     push({ type: 'pixels', layerId: layer.id, rect: { x, y, w, h }, before, after });
+    lastEnd = { layerId: layer.id, pt: endPt };
+    strokeCtx.clearRect(0, 0, DOC_W, DOC_H);
+    render();
   }
 
-  function stamp(target: HTMLCanvasElement, pt: Point) {
-    const ctx = target.getContext('2d')!;
-    const r = Math.max((size * pt.p) / 2, 0.5);
-    ctx.globalCompositeOperation = tool === 'eraser' ? 'destination-out' : 'source-over';
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalCompositeOperation = 'source-over';
+  function radiusAt(p: number) {
+    const factor = brush.sizePressure ? brush.minSize + (1 - brush.minSize) * p : 1;
+    return Math.max((brush.size * factor) / 2, 0.5);
+  }
+
+  // The stroke as it should be added to the layer: with paper grain worn into it if the
+  // brush has texture. The grain pattern is fixed to the canvas, so it never slides.
+  function strokeSource(): HTMLCanvasElement {
+    if (brush.texture <= 0 || !paperPattern) return strokeCtx.canvas;
+    const t = texturedCtx;
+    t.globalCompositeOperation = 'source-over';
+    t.globalAlpha = 1;
+    t.clearRect(0, 0, DOC_W, DOC_H);
+    t.drawImage(strokeCtx.canvas, 0, 0);
+    t.globalCompositeOperation = 'destination-out';
+    t.globalAlpha = brush.texture;
+    t.fillStyle = paperPattern;
+    t.fillRect(0, 0, DOC_W, DOC_H);
+    t.globalCompositeOperation = 'source-over';
+    t.globalAlpha = 1;
+    return t.canvas;
+  }
+
+  // ---------- Dabs and stroke ends ----------
+  // Every dab of the current stroke is remembered with its distance from the start.
+  // That lets us taper the end of the line once we know how long the whole stroke is.
+
+  type Dab = { x: number; y: number; p: number; d: number };
+  let dabs: Dab[] = [];
+  let strokeLen = 0;
+
+  function resetDabs() {
+    dabs = [];
+    strokeLen = 0;
+  }
+
+  function stamp(pt: Point) {
+    const prev = dabs[dabs.length - 1];
+    if (prev) strokeLen += Math.hypot(pt.x - prev.x, pt.y - prev.y);
+    const dab = { ...pt, d: strokeLen };
+    dabs.push(dab);
+    // While drawing only the start can be tapered; the end is tapered when the stroke ends
+    drawDab(dab, taperAt(dab.d, Infinity));
+  }
+
+  function drawDab(pt: Point, factor: number) {
+    const r = Math.max(radiusAt(pt.p) * factor, 0.3);
+    const tip = getDab(strokeTool === 'eraser' ? '#000000' : color, brush.hardness);
+    // Light pressure still leaves some paint (25%), like a real pencil or pen
+    strokeCtx.globalAlpha = brush.flow * (brush.opacityPressure ? 0.25 + 0.75 * pt.p : 1);
+    strokeCtx.drawImage(tip, pt.x - r, pt.y - r, r * 2, r * 2);
+    strokeCtx.globalAlpha = 1;
     grow(pt.x - r - 2, pt.y - r - 2, pt.x + r + 2, pt.y + r + 2);
   }
 
-  function segment(target: HTMLCanvasElement, a: Point, b: Point) {
+  function taperLength() {
+    return Math.max(4, brush.taper * brush.size * 15);
+  }
+
+  // 1 = full size, smaller towards the tapered tips
+  function taperAt(d: number, total: number) {
+    if (brush.ends !== 'taper') return 1;
+    const L = taperLength();
+    const ease = (t: number) => 1 - Math.pow(1 - Math.min(Math.max(t, 0), 1), 2);
+    const tipSize = 0.06;
+    let f = tipSize + (1 - tipSize) * ease(d / L);
+    if (isFinite(total)) f = Math.min(f, tipSize + (1 - tipSize) * ease((total - d) / L));
+    return f;
+  }
+
+  // Called when the stroke ends: applies the end shape to the whole stroke
+  function shapeEnds() {
+    if (dabs.length < 2) return;
+    if (brush.ends === 'taper') {
+      // Redraw the whole stroke with both ends tapered, filling gaps where dabs got small
+      strokeCtx.clearRect(0, 0, DOC_W, DOC_H);
+      const total = strokeLen;
+      drawDab(dabs[0], taperAt(0, total));
+      for (let i = 1; i < dabs.length; i++) {
+        const a = dabs[i - 1];
+        const b = dabs[i];
+        const ra = radiusAt(a.p) * taperAt(a.d, total);
+        const rb = radiusAt(b.p) * taperAt(b.d, total);
+        const step = Math.max(0.3, Math.min(ra, rb) * 2 * brush.spacing);
+        const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / step));
+        for (let j = 1; j <= n; j++) {
+          const t = j / n;
+          const d = a.d + (b.d - a.d) * t;
+          drawDab({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, p: a.p + (b.p - a.p) * t }, taperAt(d, total));
+        }
+      }
+    } else if (brush.ends === 'flat') {
+      cutFlat(dabs[0], dabs);
+      cutFlat(dabs[dabs.length - 1], [...dabs].reverse());
+    }
+  }
+
+  // Cuts off the round cap beyond an end point, along the stroke direction
+  function cutFlat(end: Dab, fromEnd: Dab[]) {
+    const r = radiusAt(end.p);
+    // look a little way into the stroke to find its direction at this end
+    const inner = fromEnd.find((q) => Math.hypot(q.x - end.x, q.y - end.y) >= Math.max(r, 2)) ?? fromEnd[fromEnd.length - 1];
+    const dx = end.x - inner.x;
+    const dy = end.y - inner.y;
+    if (dx === 0 && dy === 0) return;
+    const R = r + 3;
+    strokeCtx.save();
+    strokeCtx.globalCompositeOperation = 'destination-out';
+    strokeCtx.translate(end.x, end.y);
+    strokeCtx.rotate(Math.atan2(dy, dx));
+    strokeCtx.fillRect(0, -R, R, R * 2);
+    strokeCtx.restore();
+  }
+
+  // Places dabs evenly between two points, blending size and pressure along the way
+  function segment(a: Point, b: Point) {
     const dist = Math.hypot(b.x - a.x, b.y - a.y);
-    const step = Math.max(1, (size * Math.min(a.p, b.p)) / 6);
+    const r = radiusAt(Math.min(a.p, b.p)) * taperAt(strokeLen, Infinity);
+    const step = Math.max(0.3, r * 2 * brush.spacing);
     const n = Math.ceil(dist / step);
     for (let i = 1; i <= n; i++) {
       const t = i / n;
-      stamp(target, {
+      stamp({
         x: a.x + (b.x - a.x) * t,
         y: a.y + (b.y - a.y) * t,
         p: a.p + (b.p - a.p) * t,
@@ -529,7 +742,20 @@
       resetRotation();
     } else if (!mod && key === 'm') {
       toggleFlip();
+    } else if (!mod && key === '[') {
+      brush.size = stepSize(brush.size, -1);
+    } else if (!mod && key === ']') {
+      brush.size = stepSize(brush.size, 1);
     }
+  }
+
+  // [ and ] change the size by ~10%, but always by at least 0.1 px
+  function stepSize(size: number, dir: 1 | -1) {
+    let next = dir > 0 ? Math.max(size + 0.1, size * 1.1) : Math.min(size - 0.1, size / 1.1);
+    next = Math.min(500, Math.max(0.5, next));
+    if (next < 10) return Math.round(next * 10) / 10;
+    if (next < 50) return Math.round(next * 2) / 2;
+    return Math.round(next);
   }
 
   function onKeyUp(e: KeyboardEvent) {
@@ -556,7 +782,7 @@
       <button class:on={activeTool === 'picker'} onclick={() => (tool = 'picker')} title="Color picker (I, or hold Alt)">Picker (I)</button>
     </div>
     <div class="current-color" style="background: {color}" title={color}></div>
-    <label>Size <input type="range" min="1" max="200" bind:value={size} /> {size}px</label>
+    <span class="brush-name">Brush: {preset} · {brush.size}px</span>
     <div class="group">
       <button onclick={undo} disabled={undoCount === 0}>↶ Undo</button>
       <button onclick={redo} disabled={redoCount === 0}>↷ Redo</button>
@@ -569,13 +795,32 @@
       <button class:on={flipped} onclick={toggleFlip} title="Flip horizontally (M)">⇋ Flip</button>
     </div>
     <div class="group">
+      <span class="zoom-label">Zoom</span>
       <button onclick={() => zoomCenter(1 / 1.25)} title="Zoom out (Ctrl -)">−</button>
+      <input
+        class="zoom-slider"
+        type="range"
+        title="Canvas zoom (mouse wheel)"
+        min="-4.32"
+        max="5"
+        step="0.01"
+        value={Math.log2(zoom)}
+        oninput={(e) => {
+          const c = stageCenter();
+          zoomAt(2 ** +e.currentTarget.value, c.x, c.y);
+        }}
+      />
       <span class="zoom-value">{Math.round(zoom * 100)}%</span>
       <button onclick={() => zoomCenter(1.25)} title="Zoom in (Ctrl +)">+</button>
       <button onclick={fitToScreen} title="Fit to screen (Ctrl 0)">Fit</button>
       <button onclick={() => zoomCenter(1 / zoom)} title="Actual size (Ctrl 1)">100%</button>
     </div>
   </header>
+
+  <aside class="panel left">
+    <div class="panel-head">Brush</div>
+    <BrushPanel bind:brush bind:preset />
+  </aside>
 
   <main
     class="stage"
@@ -587,6 +832,7 @@
     onpointermove={onPointerMove}
     onpointerup={onPointerUp}
     onpointercancel={onPointerUp}
+    onpointerleave={() => (hover.on = false)}
   >
     <canvas
       bind:this={view}
@@ -595,6 +841,13 @@
       class:pixelated={zoom >= 2}
       style="width: {DOC_W * zoom}px; height: {DOC_H * zoom}px; transform-origin: {(DOC_W * zoom) / 2}px {(DOC_H * zoom) / 2}px; transform: translate({panX}px, {panY}px) rotate({rotation}deg) scaleX({flipped ? -1 : 1});"
     ></canvas>
+    {#if hover.on && !spaceDown && !panning && activeTool !== 'picker'}
+      {@const d = Math.max(brush.size * zoom, 4)}
+      <div
+        class="brush-cursor"
+        style="left: {hover.x - d / 2}px; top: {hover.y - d / 2}px; width: {d}px; height: {d}px;"
+      ></div>
+    {/if}
   </main>
 
   <aside class="panel">
@@ -653,7 +906,7 @@
 <style>
   .app {
     display: grid;
-    grid-template-columns: 1fr 248px;
+    grid-template-columns: 220px 1fr 248px;
     grid-template-rows: 56px 1fr;
     height: 100vh;
     font-family: system-ui, sans-serif;
@@ -711,6 +964,19 @@
     border: 1px solid #555;
     flex-shrink: 0;
   }
+  .zoom-label {
+    color: #aaa;
+  }
+  .zoom-slider {
+    width: 110px;
+  }
+  .brush-cursor {
+    position: absolute;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.9);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+    pointer-events: none;
+  }
   .zoom-value {
     min-width: 48px;
     text-align: center;
@@ -753,8 +1019,16 @@
     min-height: 0;
     overflow-y: auto;
   }
+  .panel.left {
+    border-left: none;
+    border-right: 1px solid #333;
+  }
   .panel-head {
     font-weight: 600;
+  }
+  .brush-name {
+    color: #aaa;
+    min-width: 120px;
   }
   .layer-list {
     flex: 1;

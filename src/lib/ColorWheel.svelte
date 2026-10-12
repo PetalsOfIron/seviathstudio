@@ -259,7 +259,9 @@
   }
   .hex input {
     flex: 1;
+    width: 100%;
     min-width: 0;
+    box-sizing: border-box;
     font-family: ui-monospace, monospace;
   }
   .fields {
