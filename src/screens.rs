@@ -57,17 +57,17 @@ fn screens() {
     h.run_steps(4);
 
     // Paint a few strokes with different sizes and colors.
-    h.state_mut().draw_mut().size = 24.0;
+    h.state_mut().draw_mut().brush_mut().size = 24.0;
     stroke(&mut h, &wave(pos2(520.0, 300.0), pos2(940.0, 300.0), 40.0, 40));
-    h.state_mut().draw_mut().size = 60.0;
+    h.state_mut().draw_mut().brush_mut().size = 60.0;
     h.state_mut().draw_mut().primary = Color32::from_rgb(46, 191, 113);
     stroke(&mut h, &wave(pos2(520.0, 480.0), pos2(940.0, 520.0), 60.0, 50));
-    h.state_mut().draw_mut().size = 8.0;
+    h.state_mut().draw_mut().brush_mut().size = 8.0;
     h.state_mut().draw_mut().primary = Color32::from_rgb(214, 168, 76);
     stroke(&mut h, &wave(pos2(560.0, 650.0), pos2(900.0, 640.0), 25.0, 60));
     // Eraser through the green stroke.
     h.key_press(Key::E);
-    h.state_mut().draw_mut().size = 30.0;
+    h.state_mut().draw_mut().brush_mut().size = 30.0;
     stroke(&mut h, &[pos2(730.0, 380.0), pos2(730.0, 490.0), pos2(730.0, 600.0)]);
     h.key_press(Key::B);
     h.run_steps(2);
@@ -96,7 +96,7 @@ fn screens() {
     h.step();
     {
         let d = h.state_mut().draw_mut();
-        d.size = 170.0;
+        d.brush_mut().size = 170.0;
         d.primary = Color32::from_rgb(150, 110, 230);
     }
     stroke(&mut h, &wave(pos2(470.0, 360.0), pos2(990.0, 600.0), 20.0, 30));

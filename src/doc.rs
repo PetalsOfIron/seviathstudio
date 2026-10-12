@@ -6,11 +6,13 @@
 // contents (children carry the folder's id as `parent`), so a folder and everything in it is always
 // one contiguous block that can be moved or deleted together.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use eframe::egui::Color32;
 
 use crate::blend::{self, CLEAR, Px};
+use crate::stroke::{self, LiveStroke};
 
 pub const TILE: usize = 256;
 pub type TileKey = (i32, i32);
@@ -172,6 +174,8 @@ pub struct Document {
     dirty: HashSet<TileKey>,
     pub revision: u64,
     next_id: LayerId,
+    /// The stroke being drawn right now (shown on top of its layer until the pen lifts).
+    pub live: Option<LiveStroke>,
 }
 
 impl Document {
@@ -184,6 +188,7 @@ impl Document {
             dirty: HashSet::new(),
             revision: 0,
             next_id: 1,
+            live: None,
         };
         let l1 = d.new_layer("Layer 1", LayerKind::Raster);
         let paper = d.new_layer("Paper", LayerKind::Paper);
@@ -536,7 +541,7 @@ impl Document {
             if !any_clip {
                 match base.kind {
                     LayerKind::Raster => {
-                        if let Some(t) = base.tiles.get(&key) {
+                        if let Some(t) = self.raster_tile(base, key) {
                             for (b, c) in backdrop.iter_mut().zip(t.iter()) {
                                 if c.a() != 0 {
                                     *b = blend::over(*b, blend::to_px(*c), op, mode);
@@ -570,7 +575,7 @@ impl Document {
                 let cop = c.opacity / 100.0;
                 let cmode = if c.blend == Blend::PassThrough { Blend::Normal } else { c.blend };
                 if c.kind == LayerKind::Raster {
-                    if let Some(t) = c.tiles.get(&key) {
+                    if let Some(t) = self.raster_tile(c, key) {
                         for (s, p) in src.iter_mut().zip(t.iter()) {
                             if p.a() != 0 {
                                 *s = blend::atop(*s, blend::to_px(*p), cop, cmode);
@@ -595,10 +600,40 @@ impl Document {
         }
     }
 
+    /// A pixel layer's tile, with the live stroke on top when it is being painted on.
+    fn raster_tile<'a>(&'a self, l: &'a Layer, key: TileKey) -> Option<Cow<'a, Vec<Color32>>> {
+        match &self.live {
+            Some(live) if live.layer == l.id => live.merged(l.tiles.get(&key), key).map(Cow::Owned),
+            _ => l.tiles.get(&key).map(Cow::Borrowed),
+        }
+    }
+
+    /// Merge the live stroke into its layer. Returns the touched tiles (with the layer id).
+    pub fn commit_live(&mut self) -> Option<(LayerId, Vec<TileKey>)> {
+        let live = self.live.take()?;
+        let i = self.index_of(live.layer)?;
+        let keys: Vec<TileKey> = live.tiles.keys().copied().collect();
+        let layer = &mut self.layers[i];
+        for (key, st) in &live.tiles {
+            let t = layer.tile_mut(*key);
+            stroke::apply(t, st, &live.look, *key);
+        }
+        layer.rev += 1;
+        for k in &keys {
+            self.mark_tile_dirty(*k);
+        }
+        Some((live.layer, keys))
+    }
+
+    pub fn mark_tile_dirty(&mut self, key: TileKey) {
+        self.dirty.insert(key);
+        self.revision += 1;
+    }
+
     /// A layer's own pixels for one tile (a folder: its contents flattened on their own).
     fn layer_pixels(&self, l: &Layer, key: TileKey) -> Option<Vec<Px>> {
         match l.kind {
-            LayerKind::Raster => l.tiles.get(&key).map(|t| t.iter().map(|c| blend::to_px(*c)).collect()),
+            LayerKind::Raster => self.raster_tile(l, key).map(|t| t.iter().map(|c| blend::to_px(*c)).collect()),
             LayerKind::Paper => Some(vec![blend::to_px(self.paper); TILE * TILE]),
             LayerKind::Group => {
                 let mut buf = vec![CLEAR; TILE * TILE];
