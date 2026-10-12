@@ -73,6 +73,26 @@ fn screens() {
     h.run_steps(2);
     save(&mut h, "01_draw");
 
+    // Every stroke became a named history step; Ctrl+Z / Ctrl+Y walk through them.
+    let n = h.state().history().entries.len();
+    assert_eq!(n, 4, "steps: {:?}", h.state().history().entries.iter().map(|e| e.label.clone()).collect::<Vec<_>>());
+    assert!(h.state().history().entries[3].label.starts_with("Erase"), "{}", h.state().history().entries[3].label);
+    let painted = |h: &Harness<'_, SeviathApp>| h.state().draw_mut_ref().doc.layers[0].tiles.len();
+    let tiles_before = painted(&h);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(2);
+    assert_eq!(h.state().history().cursor, n - 1);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(2);
+    assert!(painted(&h) <= tiles_before);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Y);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Y);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Y);
+    h.run_steps(2);
+    assert_eq!(h.state().history().cursor, n);
+    assert_eq!(painted(&h), tiles_before);
+
     // Zoom in at the pointer with the wheel, mirror with F, rotate with Alt+wheel.
     wheel(&h, pos2(730.0, 480.0), 4.0, Modifiers::NONE);
     h.run_steps(2);
@@ -128,6 +148,17 @@ fn screens() {
     save(&mut h, "07_layer_menu");
     h.key_press(Key::Escape);
     h.run_steps(2);
+
+    // History window and settings pages
+    h.state_mut().open_window(true, None);
+    h.run_steps(3);
+    save(&mut h, "08_history");
+    h.state_mut().open_window(false, Some(crate::settings_ui::Page::Pen));
+    h.run_steps(3);
+    save(&mut h, "09_settings_pen");
+    h.state_mut().open_window(false, Some(crate::settings_ui::Page::Canvas));
+    h.run_steps(3);
+    save(&mut h, "10_settings_canvas");
 
     h.key_press_modifiers(Modifiers::COMMAND, Key::Num3);
     h.run_steps(3);

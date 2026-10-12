@@ -82,6 +82,31 @@ pub fn apply(ctx: &egui::Context) {
     });
 }
 
+/// Interface preferences from Settings: high contrast, motion, tooltips, scale.
+pub fn apply_prefs(ctx: &egui::Context, set: &crate::settings::Settings) {
+    apply(ctx);
+    if set.high_contrast {
+        ctx.style_mut_of(Theme::Dark, |s| {
+            let v = &mut s.visuals;
+            v.override_text_color = Some(Color32::WHITE);
+            v.window_stroke = Stroke::new(1.5, TEXT);
+            v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_gray(140));
+            v.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_gray(150));
+            v.widgets.inactive.bg_fill = Color32::from_gray(30);
+            v.widgets.inactive.weak_bg_fill = Color32::from_gray(30);
+            v.widgets.hovered.bg_stroke = Stroke::new(2.0, VENOM);
+            v.selection.stroke = Stroke::new(2.0, Color32::WHITE);
+            v.panel_fill = Color32::from_gray(8);
+            v.window_fill = Color32::from_gray(14);
+        });
+    }
+    ctx.all_styles_mut(|s| {
+        s.animation_time = if set.reduced_motion { 0.0 } else { 1.0 / 12.0 };
+        s.interaction.tooltip_delay = if set.show_tooltips { 0.5 } else { 1.0e9 };
+    });
+    ctx.set_zoom_factor(set.ui_scale);
+}
+
 /// A titled card used for the dockable sections in the side panels.
 pub fn card() -> egui::Frame {
     egui::Frame::new()

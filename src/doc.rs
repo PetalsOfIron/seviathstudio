@@ -8,6 +8,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use eframe::egui::Color32;
 
@@ -17,6 +18,9 @@ use crate::stroke::{self, LiveStroke};
 pub const TILE: usize = 256;
 pub type TileKey = (i32, i32);
 pub type LayerId = u64;
+/// Pixels of one tile. Shared and copy-on-write: history steps keep old tiles for free,
+/// and a tile is only copied when it is painted on.
+pub type TileData = Arc<Vec<Color32>>;
 
 /// Color labels for organizing many layers (index = Layer::tag, 0 = none).
 pub const TAG_COLORS: [(Color32, &str); 8] = [
@@ -143,7 +147,7 @@ pub struct Layer {
     pub tag: u8,        // color label, 0 = none (see TAG_COLORS)
     pub opacity: f32,   // 0..100
     pub blend: Blend,
-    pub tiles: HashMap<TileKey, Vec<Color32>>,
+    pub tiles: HashMap<TileKey, TileData>,
     pub rev: u64, // bumped on every pixel change (thumbnails watch it)
 }
 
@@ -154,7 +158,7 @@ impl Layer {
 
     /// Tile for writing, created empty on first use.
     pub fn tile_mut(&mut self, key: TileKey) -> &mut Vec<Color32> {
-        self.tiles.entry(key).or_insert_with(|| vec![Color32::TRANSPARENT; TILE * TILE])
+        Arc::make_mut(self.tiles.entry(key).or_insert_with(|| Arc::new(vec![Color32::TRANSPARENT; TILE * TILE])))
     }
 }
 
@@ -176,6 +180,8 @@ pub struct Document {
     next_id: LayerId,
     /// The stroke being drawn right now (shown on top of its layer until the pen lifts).
     pub live: Option<LiveStroke>,
+    /// Size of the checkerboard squares shown where the picture is transparent.
+    pub checker: usize,
 }
 
 impl Document {
@@ -189,6 +195,7 @@ impl Document {
             revision: 0,
             next_id: 1,
             live: None,
+            checker: 16,
         };
         let l1 = d.new_layer("Layer 1", LayerKind::Raster);
         let paper = d.new_layer("Paper", LayerKind::Paper);
@@ -482,7 +489,8 @@ impl Document {
                 } else if paper {
                     blend::from_px(buf[i])
                 } else {
-                    let g = if ((dx / 16) + (dy / 16)) % 2 == 0 { 0.8 } else { 0.94 };
+                    let c = self.checker.max(1);
+                    let g = if ((dx / c) + (dy / c)) % 2 == 0 { 0.8 } else { 0.94 };
                     let p = buf[i];
                     let k = 1.0 - p[3];
                     blend::from_px([p[0] + g * k, p[1] + g * k, p[2] + g * k, 1.0])
@@ -603,8 +611,8 @@ impl Document {
     /// A pixel layer's tile, with the live stroke on top when it is being painted on.
     fn raster_tile<'a>(&'a self, l: &'a Layer, key: TileKey) -> Option<Cow<'a, Vec<Color32>>> {
         match &self.live {
-            Some(live) if live.layer == l.id => live.merged(l.tiles.get(&key), key).map(Cow::Owned),
-            _ => l.tiles.get(&key).map(Cow::Borrowed),
+            Some(live) if live.layer == l.id => live.merged(l.tiles.get(&key).map(|t| &**t), key).map(Cow::Owned),
+            _ => l.tiles.get(&key).map(|t| Cow::Borrowed(&**t)),
         }
     }
 

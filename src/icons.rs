@@ -44,6 +44,7 @@ pub enum Icon {
     Lock,
     Folder,
     Popout,
+    History,
     // Canvas view
     ZoomIn,
     ZoomOut,
@@ -290,6 +291,13 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             p.add(Shape::line(pts, st));
             let fx = |x: f32| 8.0 + (x - 8.0) * flip;
             line(&[(fx(0.8), 5.0), (fx(2.9), 7.0), (fx(5.0), 4.6)], st);
+        }
+        Icon::History => {
+            // a clock with a little back-arrow
+            let pts: Vec<Pos2> = arc(at(8.0, 8.5), 6.0 * u, PI * 0.95, PI * 2.75, 28);
+            p.add(Shape::line(pts, st));
+            line(&[(1.2, 5.6), (2.3, 8.3), (4.8, 7.0)], st);
+            line(&[(8.0, 4.5), (8.0, 8.5), (10.8, 10.3)], st);
         }
         Icon::Popout => {
             line(&[(8.0, 5.0), (2.0, 5.0), (2.0, 14.0), (11.0, 14.0), (11.0, 8.0)], st);
