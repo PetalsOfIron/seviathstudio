@@ -3,14 +3,17 @@
 
 use std::collections::HashMap;
 
+use rayon::prelude::*;
+
 use eframe::egui::{
     self, Color32, ColorImage, Mesh, Painter, Pos2, Rect, Shape, TextureHandle, TextureOptions, pos2,
 };
 
-use crate::doc::{Document, TILE, TileKey};
+use crate::doc::{Document, Layer, LayerId, LayerKind, TILE, TileKey};
 use crate::view::View;
 
 const THUMB_MAX: usize = 320;
+const LAYER_THUMB: usize = 64;
 
 pub struct CanvasRenderer {
     textures: HashMap<TileKey, TextureHandle>,
@@ -18,7 +21,7 @@ pub struct CanvasRenderer {
     thumb: Option<TextureHandle>,
     thumb_revision: u64,
     thumb_time: f64,
-    buf: Vec<Color32>,
+    layer_thumbs: HashMap<LayerId, (u64, f64, TextureHandle)>, // (layer rev, time, texture)
 }
 
 impl Default for CanvasRenderer {
@@ -29,7 +32,7 @@ impl Default for CanvasRenderer {
             thumb: None,
             thumb_revision: u64::MAX,
             thumb_time: 0.0,
-            buf: vec![Color32::TRANSPARENT; TILE * TILE],
+            layer_thumbs: HashMap::new(),
         }
     }
 }
@@ -51,13 +54,24 @@ impl CanvasRenderer {
         self.composite.clear();
         self.thumb = None;
         self.thumb_revision = u64::MAX;
+        self.layer_thumbs.clear();
     }
 
     /// Re-composite dirty tiles and upload them.
     pub fn sync(&mut self, ctx: &egui::Context, doc: &mut Document) {
-        for key in doc.take_dirty() {
-            doc.composite_tile(key, &mut self.buf);
-            let img = ColorImage::new([TILE, TILE], self.buf.clone());
+        // Composite all dirty tiles in parallel, then upload.
+        let dirty = doc.take_dirty();
+        let doc_ref: &Document = doc;
+        let done: Vec<(TileKey, Vec<Color32>)> = dirty
+            .into_par_iter()
+            .map(|key| {
+                let mut buf = vec![Color32::TRANSPARENT; TILE * TILE];
+                doc_ref.composite_tile(key, &mut buf);
+                (key, buf)
+            })
+            .collect();
+        for (key, buf) in done {
+            let img = ColorImage::new([TILE, TILE], buf.clone());
             match self.textures.get_mut(&key) {
                 Some(t) => t.set(img, tex_options()),
                 None => {
@@ -65,11 +79,14 @@ impl CanvasRenderer {
                     self.textures.insert(key, t);
                 }
             }
-            self.composite.insert(key, self.buf.clone());
+            self.composite.insert(key, buf);
         }
 
         // Navigator thumbnail: at most ~6 times a second while drawing.
         let now = ctx.input(|i| i.time);
+        if doc.revision != self.thumb_revision && now - self.thumb_time <= 0.16 && self.thumb.is_some() {
+            ctx.request_repaint_after_secs(0.17); // come back for the last change
+        }
         if doc.revision != self.thumb_revision && (now - self.thumb_time > 0.16 || self.thumb.is_none()) {
             self.thumb_revision = doc.revision;
             self.thumb_time = now;
@@ -107,6 +124,50 @@ impl CanvasRenderer {
 
     pub fn thumb(&self) -> Option<&TextureHandle> {
         self.thumb.as_ref()
+    }
+
+    /// Small picture of one layer's own pixels for the layer panel, refreshed at most 4× a second.
+    pub fn layer_thumb(&mut self, ctx: &egui::Context, layer: &Layer, doc_w: u32, doc_h: u32) -> Option<egui::TextureId> {
+        if layer.kind != LayerKind::Raster {
+            return None;
+        }
+        let now = ctx.input(|i| i.time);
+        if let Some((rev, time, tex)) = self.layer_thumbs.get(&layer.id) {
+            if *rev == layer.rev {
+                return Some(tex.id());
+            }
+            if now - *time < 0.25 {
+                ctx.request_repaint_after_secs(0.26);
+                return Some(tex.id());
+            }
+        }
+        let s = LAYER_THUMB as f32 / doc_w.max(doc_h) as f32;
+        let tw = ((doc_w as f32 * s).round() as usize).max(1);
+        let th = ((doc_h as f32 * s).round() as usize).max(1);
+        let mut px = vec![Color32::TRANSPARENT; tw * th];
+        for y in 0..th {
+            for x in 0..tw {
+                let dx = ((x as f32 + 0.5) / s) as usize;
+                let dy = ((y as f32 + 0.5) / s) as usize;
+                let key = ((dx / TILE) as i32, (dy / TILE) as i32);
+                if let Some(t) = layer.tiles.get(&key) {
+                    px[y * tw + x] = t[(dy % TILE) * TILE + dx % TILE];
+                }
+            }
+        }
+        let img = ColorImage::new([tw, th], px);
+        match self.layer_thumbs.get_mut(&layer.id) {
+            Some(entry) => {
+                entry.2.set(img, TextureOptions::LINEAR);
+                entry.0 = layer.rev;
+                entry.1 = now;
+            }
+            None => {
+                let tex = ctx.load_texture(format!("layer{}", layer.id), img, TextureOptions::LINEAR);
+                self.layer_thumbs.insert(layer.id, (layer.rev, now, tex));
+            }
+        }
+        self.layer_thumbs.get(&layer.id).map(|e| e.2.id())
     }
 
     /// Draw every tile that's on screen.

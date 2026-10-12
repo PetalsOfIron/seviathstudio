@@ -1,16 +1,36 @@
 // The document: size, paper and a stack of layers. Pixels live in 256×256 tiles that are only
 // created where something is drawn, so big canvases and many layers stay light.
 // Pixels are premultiplied RGBA (egui's Color32), the same as the GPU textures.
+//
+// Layers are one flat list, top first, like the layer panel. A folder is followed directly by its
+// contents (children carry the folder's id as `parent`), so a folder and everything in it is always
+// one contiguous block that can be moved or deleted together.
 
 use std::collections::{HashMap, HashSet};
 
 use eframe::egui::Color32;
 
+use crate::blend::{self, CLEAR, Px};
+
 pub const TILE: usize = 256;
 pub type TileKey = (i32, i32);
+pub type LayerId = u64;
+
+/// Color labels for organizing many layers (index = Layer::tag, 0 = none).
+pub const TAG_COLORS: [(Color32, &str); 8] = [
+    (Color32::TRANSPARENT, "None"),
+    (Color32::from_rgb(226, 88, 88), "Red"),
+    (Color32::from_rgb(236, 150, 64), "Orange"),
+    (Color32::from_rgb(222, 200, 72), "Yellow"),
+    (Color32::from_rgb(76, 196, 110), "Green"),
+    (Color32::from_rgb(80, 150, 236), "Blue"),
+    (Color32::from_rgb(170, 120, 236), "Violet"),
+    (Color32::from_rgb(150, 150, 150), "Gray"),
+];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Blend {
+    PassThrough, // folders only: contents blend straight into what is below
     Normal,
     Multiply,
     Screen,
@@ -31,6 +51,7 @@ pub enum Blend {
 }
 
 impl Blend {
+    /// Modes for normal layers (folders also get Pass through).
     pub const ALL: [Blend; 17] = [
         Blend::Normal,
         Blend::Multiply,
@@ -53,6 +74,7 @@ impl Blend {
 
     pub fn name(self) -> &'static str {
         match self {
+            Blend::PassThrough => "Pass through",
             Blend::Normal => "Normal",
             Blend::Multiply => "Multiply",
             Blend::Screen => "Screen",
@@ -75,6 +97,7 @@ impl Blend {
 
     pub fn about(self) -> &'static str {
         match self {
+            Blend::PassThrough => "The folder's layers blend straight into what is below, as if there were no folder.",
             Blend::Normal => "Covers what is below.",
             Blend::Multiply => "Darkens: good for shadows.",
             Blend::Screen => "Lightens: good for light and glow.",
@@ -106,32 +129,23 @@ pub enum LayerKind {
 
 #[derive(Clone, Debug)]
 pub struct Layer {
+    pub id: LayerId,
+    pub parent: Option<LayerId>,
     pub name: String,
     pub kind: LayerKind,
     pub visible: bool,
     pub locked: bool,
     pub lock_alpha: bool,
     pub clip: bool,
-    pub opacity: f32, // 0..100
+    pub expanded: bool, // folders: open in the panel
+    pub tag: u8,        // color label, 0 = none (see TAG_COLORS)
+    pub opacity: f32,   // 0..100
     pub blend: Blend,
     pub tiles: HashMap<TileKey, Vec<Color32>>,
+    pub rev: u64, // bumped on every pixel change (thumbnails watch it)
 }
 
 impl Layer {
-    pub fn new(name: &str, kind: LayerKind) -> Self {
-        Self {
-            name: name.into(),
-            kind,
-            visible: true,
-            locked: false,
-            lock_alpha: false,
-            clip: false,
-            opacity: 100.0,
-            blend: Blend::Normal,
-            tiles: HashMap::new(),
-        }
-    }
-
     pub fn paintable(&self) -> bool {
         self.kind == LayerKind::Raster && !self.locked
     }
@@ -142,13 +156,22 @@ impl Layer {
     }
 }
 
+/// Where a dragged layer lands, relative to another layer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Drop {
+    Above(LayerId),
+    Below(LayerId),
+    Into(LayerId), // top of a folder
+}
+
 pub struct Document {
     pub w: u32,
     pub h: u32,
     pub paper: Color32,
-    pub layers: Vec<Layer>, // top first, like the layer panel
+    pub layers: Vec<Layer>,
     dirty: HashSet<TileKey>,
     pub revision: u64,
+    next_id: LayerId,
 }
 
 impl Document {
@@ -157,13 +180,40 @@ impl Document {
             w,
             h,
             paper: Color32::WHITE,
-            layers: vec![Layer::new("Layer 1", LayerKind::Raster), Layer::new("Paper", LayerKind::Paper)],
+            layers: Vec::new(),
             dirty: HashSet::new(),
             revision: 0,
+            next_id: 1,
         };
+        let l1 = d.new_layer("Layer 1", LayerKind::Raster);
+        let paper = d.new_layer("Paper", LayerKind::Paper);
+        d.layers = vec![l1, paper];
         d.mark_all_dirty();
         d
     }
+
+    pub fn new_layer(&mut self, name: &str, kind: LayerKind) -> Layer {
+        let id = self.next_id;
+        self.next_id += 1;
+        Layer {
+            id,
+            parent: None,
+            name: name.into(),
+            kind,
+            visible: true,
+            locked: false,
+            lock_alpha: false,
+            clip: false,
+            expanded: true,
+            tag: 0,
+            opacity: 100.0,
+            blend: if kind == LayerKind::Group { Blend::PassThrough } else { Blend::Normal },
+            tiles: HashMap::new(),
+            rev: 0,
+        }
+    }
+
+    // ---------- Tiles and redraw ----------
 
     pub fn tiles_x(&self) -> i32 {
         (self.w as usize).div_ceil(TILE) as i32
@@ -205,10 +255,217 @@ impl Document {
         self.layers.iter().any(|l| l.kind == LayerKind::Paper && l.visible)
     }
 
-    /// Composites one tile for display: paper (or a checkerboard when the paper is hidden),
-    /// then the visible layers from bottom to top. Blend modes and clipping arrive with the layer step;
-    /// until then every layer blends as Normal.
+    // ---------- Tree helpers ----------
+
+    pub fn index_of(&self, id: LayerId) -> Option<usize> {
+        self.layers.iter().position(|l| l.id == id)
+    }
+
+    pub fn depth(&self, idx: usize) -> usize {
+        let mut d = 0;
+        let mut p = self.layers[idx].parent;
+        while let Some(pid) = p {
+            d += 1;
+            p = self.index_of(pid).and_then(|i| self.layers[i].parent);
+        }
+        d
+    }
+
+    /// Number of entries in the block starting at `idx` (1 + everything inside a folder).
+    pub fn block_len(&self, idx: usize) -> usize {
+        let id = self.layers[idx].id;
+        let mut n = 1;
+        while idx + n < self.layers.len() && self.is_inside(self.layers[idx + n].id, id) {
+            n += 1;
+        }
+        n
+    }
+
+    /// True when `id` is somewhere inside folder `folder`.
+    pub fn is_inside(&self, id: LayerId, folder: LayerId) -> bool {
+        let mut p = self.index_of(id).and_then(|i| self.layers[i].parent);
+        while let Some(pid) = p {
+            if pid == folder {
+                return true;
+            }
+            p = self.index_of(pid).and_then(|i| self.layers[i].parent);
+        }
+        false
+    }
+
+    /// Hidden in the panel because some folder above it is closed.
+    pub fn collapsed_away(&self, idx: usize) -> bool {
+        let mut p = self.layers[idx].parent;
+        while let Some(pid) = p {
+            let Some(i) = self.index_of(pid) else { break };
+            if !self.layers[i].expanded {
+                return true;
+            }
+            p = self.layers[i].parent;
+        }
+        false
+    }
+
+    /// The next layer below `idx` in the same folder (skipping folder contents).
+    pub fn sibling_below(&self, idx: usize) -> Option<usize> {
+        let parent = self.layers[idx].parent;
+        let j = idx + self.block_len(idx);
+        (j < self.layers.len() && self.layers[j].parent == parent).then_some(j)
+    }
+
+    // ---------- Layer operations ----------
+
+    /// Insert a new layer above `target` (in the same folder), or at the top inside it
+    /// when the target is an open folder. Returns its id.
+    pub fn insert_layer(&mut self, mut layer: Layer, target: LayerId) -> LayerId {
+        let id = layer.id;
+        let Some(t) = self.index_of(target) else {
+            self.layers.insert(0, layer);
+            return id;
+        };
+        let tl = &self.layers[t];
+        let (at, parent) = if tl.kind == LayerKind::Group && tl.expanded { (t + 1, Some(tl.id)) } else { (t, tl.parent) };
+        layer.parent = parent;
+        self.layers.insert(at, layer);
+        self.mark_all_dirty();
+        id
+    }
+
+    /// Delete a layer (a folder goes with everything in it). The paper can't be deleted.
+    pub fn delete(&mut self, id: LayerId) -> bool {
+        let Some(i) = self.index_of(id) else { return false };
+        if self.layers[i].kind == LayerKind::Paper {
+            return false;
+        }
+        let n = self.block_len(i);
+        self.layers.drain(i..i + n);
+        self.mark_all_dirty();
+        true
+    }
+
+    /// Move a layer (with its contents) to a drop position. Refuses moves into itself and
+    /// anything below the paper.
+    pub fn move_layer(&mut self, id: LayerId, to: Drop) -> bool {
+        let Some(from) = self.index_of(id) else { return false };
+        if self.layers[from].kind == LayerKind::Paper {
+            return false;
+        }
+        let target = match to {
+            Drop::Above(t) | Drop::Below(t) | Drop::Into(t) => t,
+        };
+        if target == id || self.is_inside(target, id) {
+            return false;
+        }
+        let Some(ti) = self.index_of(target) else { return false };
+        let tl = &self.layers[ti];
+        if matches!(to, Drop::Below(_)) && tl.kind == LayerKind::Paper {
+            return false;
+        }
+        if matches!(to, Drop::Into(_)) && tl.kind != LayerKind::Group {
+            return false;
+        }
+        let new_parent = match to {
+            Drop::Into(t) => Some(t),
+            _ => tl.parent,
+        };
+
+        let n = self.block_len(from);
+        let mut block: Vec<Layer> = self.layers.drain(from..from + n).collect();
+        block[0].parent = new_parent;
+        let ti = self.index_of(target).expect("target still there");
+        let at = match to {
+            Drop::Above(_) => ti,
+            Drop::Below(_) => ti + self.block_len(ti),
+            Drop::Into(_) => ti + 1,
+        };
+        self.layers.splice(at..at, block);
+        self.mark_all_dirty();
+        true
+    }
+
+    pub fn duplicate(&mut self, id: LayerId) -> Option<LayerId> {
+        let i = self.index_of(id)?;
+        if self.layers[i].kind == LayerKind::Paper {
+            return None;
+        }
+        let n = self.block_len(i);
+        // Copy the whole block with fresh ids, keeping the folder structure inside it.
+        let mut map = HashMap::new();
+        let mut copies = Vec::with_capacity(n);
+        for k in 0..n {
+            let mut c = self.layers[i + k].clone();
+            let new_id = self.next_id;
+            self.next_id += 1;
+            map.insert(c.id, new_id);
+            c.id = new_id;
+            if k == 0 {
+                c.name = format!("{} copy", c.name);
+            } else {
+                c.parent = c.parent.map(|p| *map.get(&p).unwrap_or(&p));
+            }
+            copies.push(c);
+        }
+        let first = copies[0].id;
+        self.layers.splice(i..i, copies);
+        self.mark_all_dirty();
+        Some(first)
+    }
+
+    /// Put a layer into a new folder in its place. Returns the folder id.
+    pub fn group(&mut self, id: LayerId, name: &str) -> Option<LayerId> {
+        let i = self.index_of(id)?;
+        if self.layers[i].kind == LayerKind::Paper {
+            return None;
+        }
+        let mut folder = self.new_layer(name, LayerKind::Group);
+        folder.parent = self.layers[i].parent;
+        let fid = folder.id;
+        self.layers.insert(i, folder);
+        self.layers[i + 1].parent = Some(fid);
+        self.mark_all_dirty();
+        Some(fid)
+    }
+
+    /// Bake a pixel layer into the pixel layer below it (same folder). Returns the merged layer's id.
+    pub fn merge_down(&mut self, id: LayerId) -> Result<LayerId, &'static str> {
+        let i = self.index_of(id).ok_or("No layer.")?;
+        let below = self.sibling_below(i).ok_or("Nothing below to merge into.")?;
+        let (top, bot) = (&self.layers[i], &self.layers[below]);
+        if top.kind != LayerKind::Raster || bot.kind != LayerKind::Raster {
+            return Err("Merge down works between two pixel layers.");
+        }
+        if bot.locked {
+            return Err("The layer below is locked.");
+        }
+        let src = self.layers.remove(i);
+        let below = below - 1;
+        let dst = &mut self.layers[below];
+        let op = if src.visible { src.opacity / 100.0 } else { 0.0 };
+        for (key, s) in &src.tiles {
+            let d = dst.tile_mut(*key);
+            for (dp, sp) in d.iter_mut().zip(s.iter()) {
+                if sp.a() == 0 {
+                    continue;
+                }
+                let r = if src.clip {
+                    blend::atop(blend::to_px(*dp), blend::to_px(*sp), op, src.blend)
+                } else {
+                    blend::over(blend::to_px(*dp), blend::to_px(*sp), op, src.blend)
+                };
+                *dp = blend::from_px(r);
+            }
+        }
+        dst.rev += 1;
+        let mid = dst.id;
+        self.mark_all_dirty();
+        Ok(mid)
+    }
+
+    // ---------- Compositing ----------
+
+    /// Composites one tile for display. Transparent areas show a checkerboard when the paper is hidden.
     pub fn composite_tile(&self, key: TileKey, out: &mut [Color32]) {
+        let buf = self.flatten_tile(key);
         let (ox, oy) = (key.0 as usize * TILE, key.1 as usize * TILE);
         let paper = self.paper_visible();
         for y in 0..TILE {
@@ -218,47 +475,200 @@ impl Document {
                 out[i] = if dx >= self.w as usize || dy >= self.h as usize {
                     Color32::TRANSPARENT
                 } else if paper {
-                    self.paper
-                } else if ((dx / 16) + (dy / 16)) % 2 == 0 {
-                    Color32::from_gray(204)
+                    blend::from_px(buf[i])
                 } else {
-                    Color32::from_gray(240)
+                    let g = if ((dx / 16) + (dy / 16)) % 2 == 0 { 0.8 } else { 0.94 };
+                    let p = buf[i];
+                    let k = 1.0 - p[3];
+                    blend::from_px([p[0] + g * k, p[1] + g * k, p[2] + g * k, 1.0])
                 };
             }
         }
-        for layer in self.layers.iter().rev() {
-            if !layer.visible || layer.kind != LayerKind::Raster || layer.opacity <= 0.0 {
+    }
+
+    /// The flattened picture of one tile without any checkerboard (for export and color picking).
+    pub fn flatten_tile(&self, key: TileKey) -> Vec<Px> {
+        let mut buf = vec![CLEAR; TILE * TILE];
+        self.composite_into(None, key, &mut buf);
+        buf
+    }
+
+    /// Composite the layers of folder `parent` (None = top level) onto `backdrop`, bottom to top.
+    fn composite_into(&self, parent: Option<LayerId>, key: TileKey, backdrop: &mut [Px]) {
+        let kids: Vec<&Layer> = self.layers.iter().filter(|l| l.parent == parent).collect();
+        // `kids` is top first; walk from the bottom.
+        let mut i = kids.len();
+        while i > 0 {
+            i -= 1;
+            let base = kids[i];
+            // Clipped layers directly above this one (smaller indices) belong to its clip group.
+            let mut top = i;
+            while top > 0 && kids[top - 1].clip {
+                top -= 1;
+            }
+            let clips = &kids[top..i];
+            let next = top;
+            if !base.visible || base.opacity <= 0.0 {
+                i = next;
                 continue;
             }
-            let Some(src) = layer.tiles.get(&key) else { continue };
-            let op = layer.opacity / 100.0;
-            for (d, s) in out.iter_mut().zip(src.iter()) {
-                if s.a() == 0 {
+            let op = base.opacity / 100.0;
+
+            // Pass-through folder without clipped layers: contents go straight onto the backdrop.
+            if base.kind == LayerKind::Group && base.blend == Blend::PassThrough && clips.is_empty() {
+                if op >= 1.0 {
+                    self.composite_into(Some(base.id), key, backdrop);
+                } else {
+                    let mut tmp = backdrop.to_vec();
+                    self.composite_into(Some(base.id), key, &mut tmp);
+                    for (b, t) in backdrop.iter_mut().zip(tmp) {
+                        *b = blend::lerp(*b, t, op);
+                    }
+                }
+                i = next;
+                continue;
+            }
+
+            let mode = if base.blend == Blend::PassThrough { Blend::Normal } else { base.blend };
+            let any_clip = clips.iter().any(|c| c.visible && c.opacity > 0.0);
+
+            // Fast paths (no clip group): blend straight from the stored pixels, no temporary copy.
+            if !any_clip {
+                match base.kind {
+                    LayerKind::Raster => {
+                        if let Some(t) = base.tiles.get(&key) {
+                            for (b, c) in backdrop.iter_mut().zip(t.iter()) {
+                                if c.a() != 0 {
+                                    *b = blend::over(*b, blend::to_px(*c), op, mode);
+                                }
+                            }
+                        }
+                        i = next;
+                        continue;
+                    }
+                    LayerKind::Paper => {
+                        let pp = blend::to_px(self.paper);
+                        for b in backdrop.iter_mut() {
+                            *b = blend::over(*b, pp, op, mode);
+                        }
+                        i = next;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
+            let Some(mut src) = self.layer_pixels(base, key) else {
+                i = next;
+                continue;
+            };
+            // Clipped layers paint only where the base has paint.
+            for c in clips.iter().rev() {
+                if !c.visible || c.opacity <= 0.0 {
                     continue;
                 }
-                *d = over(*d, *s, op);
+                let cop = c.opacity / 100.0;
+                let cmode = if c.blend == Blend::PassThrough { Blend::Normal } else { c.blend };
+                if c.kind == LayerKind::Raster {
+                    if let Some(t) = c.tiles.get(&key) {
+                        for (s, p) in src.iter_mut().zip(t.iter()) {
+                            if p.a() != 0 {
+                                *s = blend::atop(*s, blend::to_px(*p), cop, cmode);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                let Some(cp) = self.layer_pixels(c, key) else { continue };
+                for (s, p) in src.iter_mut().zip(cp.iter()) {
+                    if p[3] > 0.0 {
+                        *s = blend::atop(*s, *p, cop, cmode);
+                    }
+                }
             }
+            for (b, s) in backdrop.iter_mut().zip(src.iter()) {
+                if s[3] > 0.0 {
+                    *b = blend::over(*b, *s, op, mode);
+                }
+            }
+            i = next;
         }
     }
-}
 
-/// Source-over for premultiplied colors with an extra opacity on the source.
-#[inline]
-pub fn over(dst: Color32, src: Color32, opacity: f32) -> Color32 {
-    let sa = src.a() as f32 / 255.0 * opacity;
-    let k = 1.0 - sa;
-    let ch = |s: u8, d: u8| (s as f32 * opacity + d as f32 * k).round().clamp(0.0, 255.0) as u8;
-    Color32::from_rgba_premultiplied(
-        ch(src.r(), dst.r()),
-        ch(src.g(), dst.g()),
-        ch(src.b(), dst.b()),
-        ch(src.a(), dst.a()),
-    )
+    /// A layer's own pixels for one tile (a folder: its contents flattened on their own).
+    fn layer_pixels(&self, l: &Layer, key: TileKey) -> Option<Vec<Px>> {
+        match l.kind {
+            LayerKind::Raster => l.tiles.get(&key).map(|t| t.iter().map(|c| blend::to_px(*c)).collect()),
+            LayerKind::Paper => Some(vec![blend::to_px(self.paper); TILE * TILE]),
+            LayerKind::Group => {
+                let mut buf = vec![CLEAR; TILE * TILE];
+                self.composite_into(Some(l.id), key, &mut buf);
+                Some(buf)
+            }
+            LayerKind::Vector => None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn raster(d: &mut Document, name: &str) -> LayerId {
+        let l = d.new_layer(name, LayerKind::Raster);
+        let top = d.layers[0].id;
+        d.insert_layer(l, top)
+    }
+
+    fn fill(d: &mut Document, id: LayerId, c: Color32) {
+        let i = d.index_of(id).unwrap();
+        for p in d.layers[i].tile_mut((0, 0)).iter_mut().take(10) {
+            *p = c;
+        }
+    }
+
+    fn names(d: &Document) -> Vec<&str> {
+        d.layers.iter().map(|l| l.name.as_str()).collect()
+    }
+
+    /// Full redraw of a 3000×4000 page with every tile painted on 4 layers (one clipped, one in a folder).
+    /// `cargo test --release bench_full_redraw -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_full_redraw() {
+        use rayon::prelude::*;
+        let mut d = Document::new(3000, 4000);
+        for name in ["B", "C", "D"] {
+            raster(&mut d, name);
+        }
+        let ids: Vec<LayerId> = d.layers.iter().filter(|l| l.kind == LayerKind::Raster).map(|l| l.id).collect();
+        for (n, id) in ids.iter().enumerate() {
+            let i = d.index_of(*id).unwrap();
+            for ty in 0..d.tiles_y() {
+                for tx in 0..d.tiles_x() {
+                    d.layers[i].tile_mut((tx, ty)).fill(Color32::from_rgba_premultiplied(60 * n as u8, 40, 90, 200));
+                }
+            }
+        }
+        d.layers[0].clip = true;
+        d.layers[1].blend = Blend::Multiply;
+        let g = d.layers[2].id;
+        d.group(g, "F");
+        d.take_dirty();
+        d.mark_all_dirty();
+        let t = std::time::Instant::now();
+        let keys = d.take_dirty();
+        let n = keys.len();
+        let _: Vec<Vec<Color32>> = keys
+            .into_par_iter()
+            .map(|k| {
+                let mut out = vec![Color32::TRANSPARENT; TILE * TILE];
+                d.composite_tile(k, &mut out);
+                out
+            })
+            .collect();
+        println!("full redraw: {n} tiles in {:?}", t.elapsed());
+    }
 
     #[test]
     fn dirty_rect_maps_to_tiles() {
@@ -279,8 +689,103 @@ mod tests {
         let p = out[0];
         assert_eq!(p.a(), 255);
         assert!(p.b() > 250 && p.r() > 120 && p.r() < 135, "{p:?}");
-        // Outside the document stays transparent.
         d.composite_tile((1, 1), &mut out);
         assert_eq!(out[TILE * TILE - 1], Color32::TRANSPARENT);
+    }
+
+    #[test]
+    fn multiply_layer_over_paper() {
+        let mut d = Document::new(64, 64);
+        let id = d.layers[0].id;
+        fill(&mut d, id, Color32::from_rgb(128, 128, 128));
+        let shade = raster(&mut d, "shade");
+        fill(&mut d, shade, Color32::from_rgb(128, 128, 128));
+        d.layers[0].blend = Blend::Multiply;
+        let px = d.flatten_tile((0, 0))[0];
+        assert!((px[0] - 0.25).abs() < 0.01, "{px:?}");
+    }
+
+    #[test]
+    fn clipping_only_shows_on_base() {
+        let mut d = Document::new(64, 64);
+        let base = d.layers[0].id;
+        // Base has paint on the first 10 pixels only.
+        fill(&mut d, base, Color32::from_rgb(255, 0, 0));
+        let clip = raster(&mut d, "clip");
+        let i = d.index_of(clip).unwrap();
+        for p in d.layers[i].tile_mut((0, 0)).iter_mut() {
+            *p = Color32::from_rgb(0, 0, 255);
+        }
+        d.layers[i].clip = true;
+        let out = d.flatten_tile((0, 0));
+        assert!(out[0][2] > 0.99 && out[0][0] < 0.01, "clip shows on base: {:?}", out[0]);
+        assert!(out[20][0] > 0.99 && out[20][1] > 0.99, "outside base stays paper: {:?}", out[20]);
+    }
+
+    #[test]
+    fn folder_opacity_and_hiding() {
+        let mut d = Document::new(64, 64);
+        let l = d.layers[0].id;
+        fill(&mut d, l, Color32::BLACK);
+        let f = d.group(l, "Folder").unwrap();
+        assert_eq!(names(&d), vec!["Folder", "Layer 1", "Paper"]);
+        let fi = d.index_of(f).unwrap();
+        d.layers[fi].blend = Blend::Normal;
+        d.layers[fi].opacity = 50.0;
+        assert!((d.flatten_tile((0, 0))[0][0] - 0.5).abs() < 0.01);
+        d.layers[fi].visible = false;
+        assert!((d.flatten_tile((0, 0))[0][0] - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn move_into_folder_and_out() {
+        let mut d = Document::new(64, 64);
+        let a = d.layers[0].id; // "Layer 1"
+        let b = raster(&mut d, "B");
+        let f = d.group(b, "F").unwrap();
+        assert_eq!(names(&d), vec!["F", "B", "Layer 1", "Paper"]);
+        assert!(d.move_layer(a, Drop::Into(f)));
+        assert_eq!(names(&d), vec!["F", "Layer 1", "B", "Paper"]);
+        assert!(d.is_inside(a, f));
+        // A folder can't go into itself; nothing goes below the paper.
+        assert!(!d.move_layer(f, Drop::Into(f)));
+        let paper = d.layers.last().unwrap().id;
+        assert!(!d.move_layer(a, Drop::Below(paper)));
+        // Moving the folder carries its contents.
+        assert!(d.move_layer(f, Drop::Above(paper)));
+        assert_eq!(names(&d), vec!["F", "Layer 1", "B", "Paper"]);
+        assert!(d.move_layer(a, Drop::Below(f)));
+        assert_eq!(names(&d), vec!["F", "B", "Layer 1", "Paper"]);
+        assert!(!d.is_inside(a, f));
+    }
+
+    #[test]
+    fn duplicate_and_merge_down() {
+        let mut d = Document::new(64, 64);
+        let a = d.layers[0].id;
+        fill(&mut d, a, Color32::from_rgb(255, 0, 0));
+        let c = d.duplicate(a).unwrap();
+        assert_eq!(names(&d), vec!["Layer 1 copy", "Layer 1", "Paper"]);
+        let ci = d.index_of(c).unwrap();
+        d.layers[ci].opacity = 50.0;
+        for p in d.layers[ci].tile_mut((0, 0)).iter_mut().take(10) {
+            *p = Color32::from_rgb(0, 0, 255);
+        }
+        let m = d.merge_down(c).unwrap();
+        assert_eq!(m, a);
+        assert_eq!(names(&d), vec!["Layer 1", "Paper"]);
+        let px = d.layers[0].tiles[&(0, 0)][0];
+        assert!(px.r() > 120 && px.r() < 135 && px.b() > 120 && px.b() < 135, "{px:?}");
+    }
+
+    #[test]
+    fn delete_folder_takes_contents() {
+        let mut d = Document::new(64, 64);
+        let a = d.layers[0].id;
+        let f = d.group(a, "F").unwrap();
+        assert!(d.delete(f));
+        assert_eq!(names(&d), vec!["Paper"]);
+        let paper = d.layers[0].id;
+        assert!(!d.delete(paper));
     }
 }

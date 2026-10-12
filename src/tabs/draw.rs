@@ -9,13 +9,15 @@ use eframe::egui::{
 
 use crate::canvas::{self as cv, CanvasRenderer};
 use crate::colorpick;
-use crate::doc::{Blend, Document, Layer, LayerKind};
-use crate::icons::{self, Icon};
+use crate::doc::{Document, LayerId, LayerKind};
+use crate::icons::Icon;
 use crate::paint::{self, DabParams, StrokeState};
 use crate::snake;
 use crate::theme::*;
 use crate::view::View;
 use crate::widgets::{self, icon_button, section_title, segmented, slider_row};
+
+mod layers;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tool {
@@ -145,8 +147,14 @@ pub struct DrawState {
     subview_tab: SubTab,
     subview_h: f32,
     pub doc: Document,
-    active: usize,
+    active: LayerId,
     layer_counter: usize,
+    renaming: Option<(LayerId, String)>,
+    drag_layer: Option<LayerId>,
+    layer_query: String,
+    tag_filter: u8,
+    color_open: bool,
+    layer_rows: Vec<(LayerId, Rect)>, // where each layer row was drawn last frame
     view: View,
     view_ready: bool,
     renderer: CanvasRenderer,
@@ -159,6 +167,7 @@ pub struct DrawState {
 
 impl Default for DrawState {
     fn default() -> Self {
+        let doc = Document::new(3000, 4000);
         Self {
             tool: Tool::Brush,
             category: 0,
@@ -190,9 +199,15 @@ impl Default for DrawState {
             subview_open: true,
             subview_tab: SubTab::Navigator,
             subview_h: 170.0,
-            doc: Document::new(3000, 4000),
-            active: 0,
+            active: doc.layers[0].id,
+            doc,
             layer_counter: 1,
+            renaming: None,
+            drag_layer: None,
+            layer_query: String::new(),
+            tag_filter: 0,
+            color_open: true,
+            layer_rows: Vec::new(),
             view: View::default(),
             view_ready: false,
             renderer: CanvasRenderer::default(),
@@ -236,6 +251,7 @@ impl DrawState {
 
     pub fn ui(&mut self, ui: &mut Ui) {
         self.shortcuts(ui.ctx());
+        self.layer_shortcuts(ui.ctx());
 
         Panel::left("draw_tools")
             .exact_size(56.0)
@@ -260,6 +276,22 @@ impl DrawState {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG))
             .show(ui, |ui| self.canvas(ui));
+    }
+
+    #[cfg(test)]
+    pub fn select(&mut self, idx: usize) {
+        self.active = self.doc.layers[idx].id;
+    }
+
+    #[cfg(test)]
+    pub fn layer_row(&self, idx: usize) -> Option<Rect> {
+        let id = self.doc.layers.get(idx)?.id;
+        self.layer_rows.iter().find(|(i, _)| *i == id).map(|(_, r)| *r)
+    }
+
+    #[cfg(test)]
+    pub fn set_color_open(&mut self, open: bool) {
+        self.color_open = open;
     }
 
     /// Rotation back to 0°.
@@ -432,7 +464,19 @@ impl DrawState {
     }
 
     fn color_section(&mut self, ui: &mut Ui) {
-        section_title(ui, "Color");
+        ui.horizontal(|ui| {
+            section_title(ui, "Color");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if widgets::chip(ui, if self.color_open { "Hide" } else { "Show" }, false).clicked() {
+                    self.color_open = !self.color_open;
+                }
+                let (r, _) = ui.allocate_exact_size(vec2(22.0, 16.0), Sense::hover());
+                ui.painter().rect_filled(r, CornerRadius::same(4), self.primary);
+            });
+        });
+        if !self.color_open {
+            return;
+        }
         let before = self.primary;
         colorpick::picker(ui, &mut self.primary, &mut self.hsv);
         ui.add_space(2.0);
@@ -554,146 +598,6 @@ impl DrawState {
         );
     }
 
-    /// What affects the composited picture; when it changes the canvas is redrawn.
-    fn layer_sig(&self) -> (Vec<(bool, u32, Blend, bool, LayerKind)>, Color32) {
-        let v = self.doc.layers.iter().map(|l| (l.visible, l.opacity.to_bits(), l.blend, l.clip, l.kind)).collect();
-        (v, self.doc.paper)
-    }
-
-    fn layers_section(&mut self, ui: &mut Ui) {
-        let before = self.layer_sig();
-        self.layers_section_inner(ui);
-        if self.layer_sig() != before {
-            self.doc.mark_all_dirty();
-        }
-    }
-
-    fn layers_section_inner(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            section_title(ui, "Layers");
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                let can_delete = self.doc.layers[self.active].kind != LayerKind::Paper && self.doc.layers.len() > 1;
-                if icon_button(ui, Icon::Trash, false, 26.0, "Delete layer").clicked() && can_delete {
-                    self.doc.layers.remove(self.active);
-                    self.active = self.active.min(self.doc.layers.len() - 1);
-                }
-                if icon_button(ui, Icon::Folder, false, 26.0, "New folder").clicked() {
-                    self.layer_counter += 1;
-                    let name = format!("Folder {}", self.layer_counter);
-                    self.doc.layers.insert(self.active, Layer::new(&name, LayerKind::Group));
-                }
-                if icon_button(ui, Icon::Pen, false, 26.0, "New vector layer").clicked() {
-                    self.layer_counter += 1;
-                    let name = format!("Vector {}", self.layer_counter);
-                    self.doc.layers.insert(self.active, Layer::new(&name, LayerKind::Vector));
-                }
-                if icon_button(ui, Icon::Plus, false, 26.0, "New layer").clicked() {
-                    self.layer_counter += 1;
-                    let name = format!("Layer {}", self.layer_counter);
-                    self.doc.layers.insert(self.active, Layer::new(&name, LayerKind::Raster));
-                }
-            });
-        });
-
-        let w = ui.available_width();
-        let paper = self.doc.paper;
-        for i in 0..self.doc.layers.len() {
-            let selected = i == self.active;
-            let (row, resp) = ui.allocate_exact_size(vec2(w, 46.0), Sense::click());
-            let layer = &mut self.doc.layers[i];
-            {
-                let p = ui.painter();
-                let bg = if selected { EMERALD_DEEP.gamma_multiply(0.55) } else if resp.hovered() { HOVER } else { RAISED };
-                p.rect_filled(row, CornerRadius::same(8), bg);
-                if selected {
-                    p.rect_stroke(row, CornerRadius::same(8), Stroke::new(1.0, EMERALD), StrokeKind::Inside);
-                }
-                let thumb = Rect::from_min_size(row.min + vec2(36.0, 6.0), Vec2::splat(34.0));
-                match layer.kind {
-                    LayerKind::Paper => {
-                        p.rect_filled(thumb, CornerRadius::same(4), paper);
-                    }
-                    LayerKind::Group => {
-                        p.rect_filled(thumb, CornerRadius::same(4), CARD);
-                        icons::paint(p, thumb.shrink(7.0), Icon::Folder, GOLD);
-                    }
-                    _ => checker(p, thumb),
-                }
-                if layer.kind == LayerKind::Vector {
-                    icons::paint(p, thumb.shrink(9.0), Icon::Pen, EMERALD);
-                }
-                let tx = thumb.right() + 10.0;
-                let name_col = if layer.visible { TEXT } else { TEXT_DIM };
-                p.text(pos2(tx, row.top() + 15.0), Align2::LEFT_CENTER, &layer.name, FontId::proportional(13.0), name_col);
-                let mut sub = match layer.kind {
-                    LayerKind::Paper => "Background".to_owned(),
-                    LayerKind::Group => "Folder".to_owned(),
-                    LayerKind::Vector => format!("Vector · {}", layer.blend.name()),
-                    LayerKind::Raster => layer.blend.name().to_owned(),
-                };
-                if layer.opacity < 100.0 {
-                    sub += &format!(" · {:.0}%", layer.opacity);
-                }
-                if layer.clip {
-                    sub += " · clipped";
-                }
-                p.text(pos2(tx, row.top() + 32.0), Align2::LEFT_CENTER, sub, FontId::proportional(11.0), TEXT_DIM);
-                if layer.locked {
-                    let lr = Rect::from_center_size(pos2(row.right() - 16.0, row.center().y), Vec2::splat(14.0));
-                    icons::paint(p, lr, Icon::Lock, GOLD);
-                }
-                if layer.clip {
-                    p.line_segment(
-                        [pos2(row.left() + 32.0, row.top() + 8.0), pos2(row.left() + 32.0, row.bottom() - 8.0)],
-                        Stroke::new(2.0, VENOM),
-                    );
-                }
-            }
-            // Eye toggle on top of the row.
-            let eye = Rect::from_center_size(pos2(row.left() + 17.0, row.center().y), Vec2::splat(24.0));
-            let eresp = ui.interact(eye, ui.id().with(("eye", i)), Sense::click());
-            let eye_icon = if layer.visible { Icon::Eye } else { Icon::EyeOff };
-            let ecol = if eresp.hovered() { VENOM } else if layer.visible { TEXT } else { TEXT_DIM };
-            icons::paint(ui.painter(), eye.shrink(4.0), eye_icon, ecol);
-            if eresp.on_hover_text("Show / hide").clicked() {
-                layer.visible = !layer.visible;
-            } else if resp.clicked() {
-                self.active = i;
-            }
-            ui.add_space(2.0);
-        }
-
-        ui.add_space(6.0);
-        if self.doc.layers[self.active].kind == LayerKind::Paper {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Paper color").color(TEXT_DIM).size(12.5));
-                egui::color_picker::color_edit_button_srgba(ui, &mut self.doc.paper, egui::color_picker::Alpha::Opaque);
-            });
-            ui.label(RichText::new("Hide the paper (eye) to work on transparency.").color(TEXT_DIM).size(11.5));
-            return;
-        }
-        let layer = &mut self.doc.layers[self.active];
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Blend").color(TEXT_DIM).size(12.5));
-            egui::ComboBox::from_id_salt("blend")
-                .selected_text(layer.blend.name())
-                .width(150.0)
-                .show_ui(ui, |ui| {
-                    for b in Blend::ALL {
-                        ui.selectable_value(&mut layer.blend, b, b.name()).on_hover_text(b.about());
-                    }
-                });
-        });
-        ui.label(RichText::new(layer.blend.about()).color(TEXT_DIM).size(11.5));
-        slider_row(ui, "Opacity", &mut layer.opacity, 0.0..=100.0, "%");
-        ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut layer.clip, "Clipping mask");
-            ui.checkbox(&mut layer.lock_alpha, "Lock alpha");
-            ui.checkbox(&mut layer.locked, "Lock");
-        });
-    }
-
     fn canvas(&mut self, ui: &mut Ui) {
         let rect = ui.max_rect();
         self.canvas_rect = rect;
@@ -806,9 +710,10 @@ impl DrawState {
                 }
             }
         } else if painting_tool && !nav_key && pressed_here {
-            if !self.doc.layers[self.active].paintable() {
-                self.notice = Some(match self.doc.layers[self.active].kind {
-                    _ if self.doc.layers[self.active].locked => "This layer is locked.",
+            let ai = self.active_idx();
+            if !self.doc.layers[ai].paintable() {
+                self.notice = Some(match self.doc.layers[ai].kind {
+                    _ if self.doc.layers[ai].locked => "This layer is locked.",
                     LayerKind::Raster => "This layer can't be painted.",
                     LayerKind::Vector => "Vector layers are drawn with the vector pen (coming soon). Pick a pixel layer to paint.",
                     _ => "Pick a pixel layer to paint on.",
@@ -833,7 +738,7 @@ impl DrawState {
                 pts.extend(events.iter().filter_map(|e| if let Event::PointerMoved(p) = e { Some(*p) } else { None }));
                 for sp in pts {
                     let d = self.view.screen_to_doc(sp);
-                    paint::stroke_to(&mut self.doc, self.active, &mut self.stroke, d, &prm);
+                    paint::stroke_to(&mut self.doc, ai, &mut self.stroke, d, &prm);
                 }
             }
         }
@@ -925,7 +830,7 @@ impl DrawState {
                             .on_hover_text("Click: straighten (0°)")
                             .clicked()
                         {
-                            self.view.set_angle(0.0);
+                            self.straighten();
                         }
                         if icon_button(ui, Icon::RotateRight, false, 28.0, "Rotate right 15°").clicked() {
                             self.view.rotate(step);

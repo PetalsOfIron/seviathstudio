@@ -56,6 +56,11 @@ impl SeviathApp {
         &mut self.draw
     }
 
+    #[cfg(test)]
+    pub fn draw_mut_ref(&self) -> &DrawState {
+        &self.draw
+    }
+
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let keys = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6];
         ctx.input_mut(|i| {
