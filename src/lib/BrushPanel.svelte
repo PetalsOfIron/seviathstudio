@@ -17,7 +17,6 @@
     type BrushSettings,
     type BrushPreset,
   } from './brush';
-  import { brushCard } from './brushimport';
   import TipPad from './TipPad.svelte';
 
   type MyBrush = BrushPreset & { id: string; source?: string };
@@ -31,6 +30,7 @@
     onsave,
     onlibrary,
     ontipfromcanvas,
+    onshare,
     hasSelection = false,
   }: {
     brush: BrushSettings;
@@ -41,6 +41,7 @@
     onsave?: () => void;
     onlibrary?: (tab?: 'mine' | 'import' | 'community') => void;
     ontipfromcanvas?: () => void;
+    onshare?: (name: string, about: string | undefined, settings: BrushSettings) => void;
     hasSelection?: boolean;
   } = $props();
 
@@ -54,7 +55,6 @@
   let remixWith = $state<string | undefined>(undefined);
   let remixT = $state(0.5);
   let remixFrom: BrushSettings | null = null; // the brush before remixing started
-  let sharing = $state(false);
 
   // The other brush for remixing (first one that isn't this brush)
   let remixOther = $derived(all.find((p) => p.name === remixWith) ?? all.find((p) => p.name !== preset));
@@ -67,9 +67,24 @@
     ensureTip(brush);
   }
 
-  function surprise() {
+  // 🎲 A random brush, ready to draw with. `part` randomizes only one group of settings.
+  const PARTS = {
+    tip: ['tip', 'shapeBase', 'sides', 'starInner', 'roundness', 'angle', 'followDirection', 'hardness'],
+    edges: ['edge', 'edgeAmount', 'edgeDetail', 'wetRim', 'grain', 'variants', 'seed'],
+    random: ['scatter', 'sizeJitter', 'angleJitter', 'opacityJitter', 'colorJitter', 'spacing'],
+  } as const;
+  function surprise(part?: keyof typeof PARTS) {
     remixFrom = null;
-    Object.assign(brush, { tipImage: undefined, tipId: undefined }, surpriseBrush());
+    const r = surpriseBrush() as Record<string, unknown>;
+    if (eraser) r.colorJitter = 0;
+    if (!part) {
+      Object.assign(brush, { tipImage: undefined, tipId: undefined }, r);
+      preset = 'Random brush'; // a new brush: save it with ★ Save as my brush to keep it
+      return;
+    }
+    // an image tip stays unless the tip itself is randomized
+    if (part === 'tip') Object.assign(brush, { tipImage: undefined, tipId: undefined });
+    for (const k of PARTS[part]) (brush as Record<string, unknown>)[k] = r[k];
   }
 
   function useDrawnTip(url: string) {
@@ -78,21 +93,9 @@
     remixFrom = null;
   }
 
-  async function share() {
-    sharing = true;
-    try {
-      const s = $state.snapshot(brush) as BrushSettings;
-      const name = prompt('Name on the brush picture', preset || 'My brush')?.trim();
-      if (!name) return;
-      const blob = await brushCard(name, name === preset ? current?.about : undefined, s);
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = name.replace(/[\\/:*?"<>|]+/g, '_') + '.brush.png';
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-    } finally {
-      sharing = false;
-    }
+  // Opens the share window (brush card, shared library, send to apps)
+  function share() {
+    onshare?.(preset || 'My brush', current?.about, $state.snapshot(brush) as BrushSettings);
   }
 
   function choose(p: BrushPreset) {
@@ -378,6 +381,12 @@
         <button onclick={() => (brush.seed = Math.floor(Math.random() * 9999) + 1)} title="A new random pattern for the edges and grain">🎲 New pattern</button>
       </div>
     {:else if tab === 'random'}
+      <button class="dice big" onclick={() => surprise()} title="A completely new random brush. Just draw with it; keep pressing until you like one, then ★ Save as my brush">🎲 Randomize everything</button>
+      <div class="dice-row">
+        <button class="dice" onclick={() => surprise('tip')} title="New random tip shape, angle and roundness">🎲 Tip</button>
+        <button class="dice" onclick={() => surprise('edges')} title="New random edges, wet rim and grain">🎲 Edges</button>
+        <button class="dice" onclick={() => surprise('random')} title="New random scatter, jitter and spacing">🎲 Scatter</button>
+      </div>
       <label title="Dabs spread out to the sides">
         <span>Scatter</span>
         <input type="range" min="0" max="3" step="0.01" bind:value={brush.scatter} />
@@ -413,9 +422,9 @@
       </button>
       <div class="panel-sub">Ideas</div>
       <div class="seg two">
-        <button onclick={surprise} title="A random new brush. Keep pressing until you like one, then save it">🎲 Surprise me</button>
+        <button onclick={() => surprise()} title="A random new brush. Keep pressing until you like one, then save it">🎲 Surprise me</button>
         {#if !eraser}
-          <button onclick={share} disabled={sharing} title="Saves a picture of the brush with the brush inside it. Anyone can drop it into Import to get the brush">🖼 Share as picture</button>
+          <button onclick={share} title="Share with everyone: in the shared library, as a picture that carries the brush, or to other apps">⇪ Share brush</button>
         {/if}
       </div>
       <div class="panel-sub">Remix with another brush</div>
@@ -434,6 +443,7 @@
   {/if}
 
   <div class="bottom-row">
+    <button onclick={() => surprise()} title="A completely new random brush, ready to draw">🎲 Random brush</button>
     <button onclick={reset} disabled={!current} title="Back to how this brush was">↺ Reset brush</button>
   </div>
   <p class="hint">Shift + click: straight line from the last point · [ ] change size</p>
@@ -661,6 +671,22 @@
     padding: 4px 2px;
     font-size: 11px;
   }
+  .dice.big {
+    background: linear-gradient(90deg, #00b5c8, #8a5cf6);
+    border: none;
+    color: #fff;
+    font-weight: 600;
+    padding: 8px;
+  }
+  .dice-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 2px;
+  }
+  .dice-row button {
+    padding: 4px 2px;
+    font-size: 11px;
+  }
   .panel-sub {
     color: #888;
     font-size: 11px;
@@ -677,6 +703,7 @@
   .bottom-row {
     display: flex;
     justify-content: flex-end;
+    gap: 4px;
   }
   .bottom-row button {
     font-size: 11px;
