@@ -1,0 +1,486 @@
+// The Settings window pages. Every setting here is saved and takes effect right away.
+
+use eframe::egui::{self, Align2, Color32, CornerRadius, Event, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
+
+use crate::settings::{CursorStyle, Settings, WheelAction};
+use crate::snake;
+use crate::theme::*;
+use crate::widgets::{section_title, segmented};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Page {
+    Interface,
+    Canvas,
+    Cursor,
+    Pen,
+    Brushes,
+    Color,
+    Undo,
+    Performance,
+    Shortcuts,
+    Info,
+}
+
+impl Page {
+    pub const ALL: [(Page, &'static str); 10] = [
+        (Page::Interface, "Interface"),
+        (Page::Canvas, "Canvas & view"),
+        (Page::Cursor, "Cursor"),
+        (Page::Pen, "Pen & tablet"),
+        (Page::Brushes, "Brushes"),
+        (Page::Color, "Color"),
+        (Page::Undo, "Undo & history"),
+        (Page::Performance, "Performance"),
+        (Page::Shortcuts, "Shortcuts"),
+        (Page::Info, "Info"),
+    ];
+}
+
+/// Watches pen input (Windows Ink pressure) for the Pen & tablet page.
+#[derive(Default)]
+pub struct PenMonitor {
+    pub raw: f32,
+    pub last_time: f64,
+    pub events: u64,
+    scribble: Vec<Vec<(Pos2, f32)>>,
+}
+
+impl PenMonitor {
+    pub fn update(&mut self, ctx: &egui::Context) {
+        ctx.input(|i| {
+            for e in &i.events {
+                if let Event::Touch { force: Some(f), .. } = e {
+                    self.raw = *f;
+                    self.last_time = i.time;
+                    self.events += 1;
+                }
+            }
+        });
+    }
+
+    fn seen_recently(&self, now: f64) -> bool {
+        self.events > 0 && now - self.last_time < 1.0
+    }
+}
+
+fn hint(ui: &mut Ui, text: &str) {
+    ui.label(RichText::new(text).size(11.5).color(TEXT_DIM));
+}
+
+fn row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        let (r, _) = ui.allocate_exact_size(vec2(170.0, 20.0), Sense::hover());
+        ui.painter().text(r.left_center(), Align2::LEFT_CENTER, label, FontId::proportional(13.0), TEXT);
+        add(ui);
+    });
+}
+
+fn reset_button(ui: &mut Ui) -> bool {
+    ui.add_space(10.0);
+    ui.button("Reset this page").on_hover_text("Back to the default values for this page").clicked()
+}
+
+pub fn page(ui: &mut Ui, page: Page, s: &mut Settings, pen: &mut PenMonitor) {
+    let d = Settings::default();
+    match page {
+        Page::Interface => {
+            section_title(ui, "Interface");
+            row(ui, "UI scale", |ui| {
+                ui.add(egui::Slider::new(&mut s.ui_scale, 0.6..=2.5).step_by(0.05).max_decimals(2));
+            });
+            hint(ui, "Makes every panel and button bigger or smaller.");
+            ui.checkbox(&mut s.high_contrast, "High contrast (brighter text and outlines)");
+            ui.checkbox(&mut s.reduced_motion, "Reduce motion (no sliding or fading)");
+            ui.checkbox(&mut s.show_tooltips, "Show help when hovering buttons");
+            ui.checkbox(&mut s.left_handed, "Left-handed layout (tools on the right, layers on the left)");
+            if reset_button(ui) {
+                s.ui_scale = d.ui_scale;
+                s.high_contrast = d.high_contrast;
+                s.reduced_motion = d.reduced_motion;
+                s.show_tooltips = d.show_tooltips;
+                s.left_handed = d.left_handed;
+            }
+        }
+        Page::Canvas => {
+            section_title(ui, "Mouse wheel");
+            segmented(ui, &mut s.wheel, &[(WheelAction::Zoom, "Wheel zooms (CSP)"), (WheelAction::Scroll, "Wheel scrolls (Krita / Photoshop)")]);
+            hint(ui, match s.wheel {
+                WheelAction::Zoom => "Wheel zooms at the pointer. Alt + wheel rotates.",
+                WheelAction::Scroll => "Wheel scrolls, Shift + wheel scrolls sideways, Ctrl + wheel zooms, Alt + wheel rotates.",
+            });
+            row(ui, "Zoom speed", |ui| {
+                ui.add(egui::Slider::new(&mut s.zoom_speed, 0.2..=4.0).max_decimals(2));
+            });
+            ui.checkbox(&mut s.invert_wheel, "Invert wheel zoom direction");
+            row(ui, "Rotation step", |ui| {
+                ui.add(egui::Slider::new(&mut s.rotate_snap, 1.0..=90.0).suffix("°").max_decimals(0));
+            });
+            hint(ui, "Used by the rotate buttons and by Shift while rotating with R + drag.");
+            ui.add_space(6.0);
+            section_title(ui, "Looks");
+            ui.checkbox(&mut s.pixel_grid, "Pixel grid when zoomed in far");
+            if s.pixel_grid {
+                row(ui, "Show grid from", |ui| {
+                    ui.add(egui::Slider::new(&mut s.pixel_grid_from, 4.0..=64.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+                });
+            }
+            ui.checkbox(&mut s.smooth_zoomed_in, "Smooth pixels when zoomed in (off = crisp, see every pixel)");
+            ui.checkbox(&mut s.page_shadow, "Shadow under the page");
+            ui.checkbox(&mut s.show_scales, "Snake-scale pattern behind the page");
+            row(ui, "Background", |ui| {
+                ui.color_edit_button_srgb(&mut s.canvas_bg);
+                if ui.small_button("Default").clicked() {
+                    s.canvas_bg = d.canvas_bg;
+                }
+            });
+            row(ui, "Checkerboard squares", |ui| {
+                ui.add(egui::Slider::new(&mut s.checker_size, 4..=64).suffix(" px"));
+            });
+            hint(ui, "The checkerboard shows where the picture is transparent (hide the paper to see it).");
+            if reset_button(ui) {
+                // only this page's values go back to default
+                let keep = s.clone();
+                *s = pick_canvas(&keep, &d);
+            }
+        }
+        Page::Cursor => {
+            section_title(ui, "Brush cursor");
+            segmented(
+                ui,
+                &mut s.cursor,
+                &[(CursorStyle::Outline, "Circle"), (CursorStyle::OutlineCross, "Circle + cross"), (CursorStyle::Cross, "Cross"), (CursorStyle::Dot, "Dot")],
+            );
+            cursor_preview(ui, s.cursor);
+            row(ui, "Smallest circle", |ui| {
+                ui.add(egui::Slider::new(&mut s.cursor_min_size, 0.0..=30.0).suffix(" px"));
+            });
+            hint(ui, "Keeps tiny brushes visible when zoomed out.");
+            ui.checkbox(&mut s.hide_cursor_while_drawing, "Hide the cursor while drawing");
+            if reset_button(ui) {
+                s.cursor = d.cursor;
+                s.cursor_min_size = d.cursor_min_size;
+                s.hide_cursor_while_drawing = d.hide_cursor_while_drawing;
+            }
+        }
+        Page::Pen => pen_page(ui, s, pen, &d),
+        Page::Brushes => {
+            section_title(ui, "Brushes");
+            ui.checkbox(&mut s.keep_size_on_switch, "Keep my brush size when I pick another brush");
+            row(ui, "Biggest brush size", |ui| {
+                ui.add(egui::Slider::new(&mut s.brush_size_max, 50.0..=5000.0).logarithmic(true).suffix(" px"));
+            });
+            row(ui, "[ and ] step", |ui| {
+                ui.add(egui::Slider::new(&mut s.size_step, 1.02..=2.0).custom_formatter(|v, _| format!("{:.0}%", (v - 1.0) * 100.0)));
+            });
+            hint(ui, "How much [ and ] change the brush size each press.");
+            if reset_button(ui) {
+                s.keep_size_on_switch = d.keep_size_on_switch;
+                s.brush_size_max = d.brush_size_max;
+                s.size_step = d.size_step;
+            }
+        }
+        Page::Color => {
+            section_title(ui, "Color picker");
+            row(ui, "Pick from", |ui| {
+                segmented(ui, &mut s.picker_samples, &[(1, "1 pixel"), (3, "3 × 3 average"), (5, "5 × 5 average")]);
+            });
+            hint(ui, "Averaging ignores single noisy pixels in textured paint.");
+            row(ui, "Most saved swatches", |ui| {
+                ui.add(egui::Slider::new(&mut s.swatches_max, 8..=200));
+            });
+            if reset_button(ui) {
+                s.picker_samples = d.picker_samples;
+                s.swatches_max = d.swatches_max;
+            }
+        }
+        Page::Undo => {
+            section_title(ui, "Undo & history");
+            row(ui, "Undo steps kept", |ui| {
+                ui.add(egui::Slider::new(&mut s.undo_steps, 5..=2000).logarithmic(true));
+            });
+            row(ui, "Memory for undo", |ui| {
+                ui.add(egui::Slider::new(&mut s.undo_memory_mb, 64..=32768).logarithmic(true).suffix(" MB"));
+            });
+            hint(ui, "Steps only cost memory for the parts of the picture they changed. The oldest steps go first.");
+            ui.checkbox(&mut s.warn_other_tab_undo, "Ask before undoing a step that is older than changes in other tabs");
+            hint(ui, "Off = Ctrl+Z quietly undoes only that step and keeps the other tabs' changes.");
+            if reset_button(ui) {
+                s.undo_steps = d.undo_steps;
+                s.undo_memory_mb = d.undo_memory_mb;
+                s.warn_other_tab_undo = d.warn_other_tab_undo;
+            }
+        }
+        Page::Performance => {
+            section_title(ui, "Performance");
+            row(ui, "Brush previews per frame", |ui| {
+                ui.add(egui::Slider::new(&mut s.brush_preview_per_frame, 1..=20));
+            });
+            hint(ui, "Lower = smoother while opening big brush categories on slow computers.");
+            row(ui, "Navigator updates", |ui| {
+                ui.add(egui::Slider::new(&mut s.navigator_fps, 1.0..=30.0).suffix(" / s").max_decimals(0));
+            });
+            hint(ui, "How often the Sub view thumbnail follows your drawing.");
+            if reset_button(ui) {
+                s.brush_preview_per_frame = d.brush_preview_per_frame;
+                s.navigator_fps = d.navigator_fps;
+            }
+        }
+        Page::Shortcuts => shortcuts(ui),
+        Page::Info => info(ui),
+    }
+}
+
+/// The canvas page's values from `d`, everything else from `keep`.
+fn pick_canvas(keep: &Settings, d: &Settings) -> Settings {
+    Settings {
+        wheel: d.wheel,
+        zoom_speed: d.zoom_speed,
+        invert_wheel: d.invert_wheel,
+        rotate_snap: d.rotate_snap,
+        pixel_grid: d.pixel_grid,
+        pixel_grid_from: d.pixel_grid_from,
+        smooth_zoomed_in: d.smooth_zoomed_in,
+        canvas_bg: d.canvas_bg,
+        show_scales: d.show_scales,
+        checker_size: d.checker_size,
+        page_shadow: d.page_shadow,
+        ..keep.clone()
+    }
+}
+
+fn cursor_preview(ui: &mut Ui, style: CursorStyle) {
+    let (r, _) = ui.allocate_exact_size(vec2(220.0, 54.0), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(r, CornerRadius::same(6), Color32::from_rgb(236, 240, 236));
+    let c = r.center();
+    let dark = Stroke::new(2.2, Color32::from_black_alpha(150));
+    let light = Stroke::new(1.0, Color32::from_white_alpha(230));
+    if matches!(style, CursorStyle::Outline | CursorStyle::OutlineCross) {
+        p.circle_stroke(c, 18.0, dark);
+        p.circle_stroke(c, 18.0, light);
+    }
+    if matches!(style, CursorStyle::OutlineCross | CursorStyle::Cross) {
+        for (a, b) in [(vec2(-5.0, 0.0), vec2(5.0, 0.0)), (vec2(0.0, -5.0), vec2(0.0, 5.0))] {
+            p.line_segment([c + a, c + b], dark);
+            p.line_segment([c + a, c + b], light);
+        }
+    }
+    if style == CursorStyle::Dot {
+        p.circle_filled(c, 2.0, Color32::from_black_alpha(160));
+        p.circle_filled(c, 1.2, Color32::WHITE);
+    }
+}
+
+fn pen_page(ui: &mut Ui, s: &mut Settings, pen: &mut PenMonitor, d: &Settings) {
+    let now = ui.input(|i| i.time);
+    section_title(ui, "Pen status");
+    let live = pen.seen_recently(now);
+    let (dot, text) = if live {
+        (EMERALD, format!("Pen connected — pressure {:.0}% from the pen, {:.0}% after your curve", pen.raw * 100.0, s.pressure(pen.raw) * 100.0))
+    } else if pen.events > 0 {
+        (GOLD, "Pen worked before — touch the test area to check again.".to_owned())
+    } else {
+        (Color32::from_rgb(226, 120, 80), "No pen pressure yet — draw in the test area below with your pen.".to_owned())
+    };
+    ui.horizontal(|ui| {
+        let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
+        ui.painter().circle_filled(r.center(), 5.0, dot);
+        ui.label(RichText::new(text).color(TEXT));
+    });
+    // live pressure bars
+    for (label, v) in [("Raw", pen.raw), ("Used", s.pressure(pen.raw))] {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(label).size(12.0).color(TEXT_DIM));
+            let (r, _) = ui.allocate_exact_size(vec2(260.0, 10.0), Sense::hover());
+            ui.painter().rect_filled(r, CornerRadius::same(5), RAISED);
+            let mut f = r;
+            f.set_width(r.width() * if live { v } else { 0.0 });
+            ui.painter().rect_filled(f, CornerRadius::same(5), EMERALD);
+        });
+    }
+    hint(ui, "SeviathStudio reads pressure through Windows Ink. If the bars don't move, turn on \"Windows Ink\" in your tablet driver (Huion, Wacom, XP-Pen…).");
+    if live {
+        ui.ctx().request_repaint();
+    }
+
+    ui.add_space(6.0);
+    section_title(ui, "Test area");
+    let (area, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(460.0), 120.0), Sense::drag());
+    let p = ui.painter_at(area);
+    p.rect_filled(area, CornerRadius::same(8), Color32::from_rgb(244, 241, 234));
+    if resp.drag_started() {
+        pen.scribble.push(Vec::new());
+        if pen.scribble.len() > 12 {
+            pen.scribble.remove(0);
+        }
+    }
+    if resp.dragged() {
+        let pr = if pen.seen_recently(now) { s.pressure(pen.raw) } else { s.mouse_pressure };
+        if let (Some(pos), Some(line)) = (resp.interact_pointer_pos(), pen.scribble.last_mut()) {
+            line.push((pos - area.min.to_vec2(), pr));
+        }
+    }
+    for line in &pen.scribble {
+        for w in line.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let width = 1.0 + (a.1 + b.1) * 0.5 * 14.0;
+            p.line_segment([area.min + a.0.to_vec2(), area.min + b.0.to_vec2()], Stroke::new(width, Color32::from_rgb(29, 29, 36)));
+            p.circle_filled(area.min + b.0.to_vec2(), width / 2.0, Color32::from_rgb(29, 29, 36));
+        }
+    }
+    if pen.scribble.is_empty() {
+        p.text(area.center(), Align2::CENTER_CENTER, "Draw here, from light to heavy pressure", FontId::proportional(13.0), Color32::from_gray(140));
+    }
+    if ui.small_button("Clear test area").clicked() {
+        pen.scribble.clear();
+    }
+
+    ui.add_space(6.0);
+    section_title(ui, "Pressure");
+    ui.horizontal(|ui| {
+        ui.label("Feel:");
+        for (name, g) in [("Very soft", 0.45), ("Soft", 0.7), ("Normal", 1.0), ("Firm", 1.5), ("Very firm", 2.2)] {
+            if ui.selectable_label((s.pressure_curve - g).abs() < 0.01, name).clicked() {
+                s.pressure_curve = g;
+            }
+        }
+    });
+    row(ui, "Curve", |ui| {
+        ui.add(egui::Slider::new(&mut s.pressure_curve, 0.2..=5.0).logarithmic(true).max_decimals(2));
+    });
+    curve_graph(ui, s);
+    hint(ui, "Soft = light pressure already gives thick, dark lines. Firm = you need to press harder.");
+    row(ui, "Ignore below", |ui| {
+        ui.add(egui::Slider::new(&mut s.pressure_min, 0.0..=0.9).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+    });
+    row(ui, "Full pressure at", |ui| {
+        ui.add(egui::Slider::new(&mut s.pressure_max, 0.1..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+    });
+    if s.pressure_max <= s.pressure_min + 0.05 {
+        s.pressure_max = (s.pressure_min + 0.05).min(1.0);
+    }
+    row(ui, "Pressure smoothing", |ui| {
+        ui.add(egui::Slider::new(&mut s.pressure_smoothing, 0.0..=0.95).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+    });
+    hint(ui, "Calms jumpy pressure from older or noisy tablets.");
+    row(ui, "Mouse counts as", |ui| {
+        ui.add(egui::Slider::new(&mut s.mouse_pressure, 0.05..=1.0).custom_formatter(|v, _| format!("{:.0}% pressure", v * 100.0)));
+    });
+
+    ui.add_space(6.0);
+    section_title(ui, "Steady hands");
+    row(ui, "Tremor help", |ui| {
+        ui.add(egui::Slider::new(&mut s.tremor_help, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+    });
+    hint(ui, "Extra steadying on top of every brush's own stabilizer (accessibility).");
+    row(ui, "Start stroke after moving", |ui| {
+        ui.add(egui::Slider::new(&mut s.min_stroke_move, 0.0..=20.0).suffix(" px"));
+    });
+    hint(ui, "Stops accidental dots when the pen just touches the tablet.");
+    if reset_button(ui) {
+        s.pressure_curve = d.pressure_curve;
+        s.pressure_min = d.pressure_min;
+        s.pressure_max = d.pressure_max;
+        s.mouse_pressure = d.mouse_pressure;
+        s.pressure_smoothing = d.pressure_smoothing;
+        s.tremor_help = d.tremor_help;
+        s.min_stroke_move = d.min_stroke_move;
+    }
+}
+
+fn curve_graph(ui: &mut Ui, s: &Settings) {
+    let (r, _) = ui.allocate_exact_size(vec2(160.0, 110.0), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(r, CornerRadius::same(6), BG);
+    p.rect_stroke(r, CornerRadius::same(6), Stroke::new(1.0, LINE), StrokeKind::Inside);
+    let inner = r.shrink(8.0);
+    p.line_segment([inner.left_bottom(), inner.right_top()], Stroke::new(1.0, LINE));
+    let pts: Vec<Pos2> = (0..=40)
+        .map(|i| {
+            let t = i as f32 / 40.0;
+            pos2(inner.left() + t * inner.width(), inner.bottom() - s.pressure(t) * inner.height())
+        })
+        .collect();
+    p.add(Shape::line(pts, Stroke::new(2.0, VENOM)));
+    p.text(inner.left_bottom() + vec2(0.0, 0.0), Align2::LEFT_BOTTOM, "pen", FontId::proportional(9.5), TEXT_DIM);
+    p.text(inner.left_top(), Align2::LEFT_TOP, "brush", FontId::proportional(9.5), TEXT_DIM);
+}
+
+fn shortcuts(ui: &mut Ui) {
+    section_title(ui, "Keyboard");
+    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+        egui::Grid::new("keys").striped(true).spacing(vec2(24.0, 4.0)).show(ui, |ui| {
+            for (k, what) in [
+                ("Ctrl+Z", "Undo in this tab"),
+                ("Ctrl+Alt+Z", "Undo everything (newest first, any tab)"),
+                ("Ctrl+Y / Ctrl+Shift+Z", "Redo"),
+                ("Ctrl+H", "History"),
+                ("Ctrl+1 … Ctrl+6", "Switch tab"),
+                ("Ctrl+,", "Settings"),
+                ("B / E / S", "Brush / Eraser / Smudge"),
+                ("G / Shift+G", "Fill / Gradient"),
+                ("I  ·  Alt + click", "Color picker"),
+                ("M / L / V", "Selection / Lasso / Move"),
+                ("P / U / T", "Vector pen / Shapes / Text"),
+                ("H / Z", "Hand / Zoom"),
+                ("[ / ]", "Smaller / bigger brush"),
+                ("X", "Swap main and second color"),
+                ("Ctrl+Shift+N", "New layer"),
+                ("Ctrl+J", "Duplicate layer"),
+                ("Ctrl+E", "Merge down"),
+                ("Ctrl+G", "Put layer into a new folder"),
+                ("Ctrl+Alt+G", "Clipping mask on / off"),
+                ("Space + drag  ·  middle drag", "Move the view"),
+                ("R + drag (Shift snaps)", "Rotate the view"),
+                ("Wheel  ·  Ctrl+= / Ctrl+-", "Zoom"),
+                ("Alt + wheel", "Rotate"),
+                ("Ctrl+0  ·  Ctrl+Alt+0", "Fit page  ·  100%"),
+                ("F", "Mirror the view"),
+            ] {
+                ui.label(RichText::new(k).monospace().color(VENOM));
+                ui.label(what);
+                ui.end_row();
+            }
+        });
+    });
+    hint(ui, "Changing keys comes with the command palette (Ctrl+K).");
+}
+
+fn info(ui: &mut Ui) {
+    let (r, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
+    snake::logo(ui.painter(), r.center(), 64.0);
+    ui.label(RichText::new("SeviathStudio").size(20.0).strong());
+    ui.label(RichText::new(format!("Version {} — native Rust build", crate::app::VERSION)).color(TEXT_DIM));
+    ui.add_space(8.0);
+    ui.label("Draw, rig, animate and stream a 2D character from one file, with reliable PSD export.");
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label("Made by");
+        ui.hyperlink_to("@SnakeSeviath on X", "https://x.com/SnakeSeviath");
+    });
+    ui.add_space(8.0);
+    section_title(ui, "Open source");
+    ui.label("SeviathStudio is open source: anyone can read, build and improve it.");
+    ui.add_space(4.0);
+    ui.label(RichText::new("Built with:").strong());
+    for (name, lic) in [
+        ("egui / eframe — user interface", "MIT or Apache-2.0"),
+        ("wgpu — graphics", "MIT or Apache-2.0"),
+        ("winit — windows and pen input", "Apache-2.0"),
+        ("rayon — using all CPU cores", "MIT or Apache-2.0"),
+        ("serde, serde_json, dirs — settings", "MIT or Apache-2.0"),
+        ("Ubuntu font", "Ubuntu Font Licence 1.0"),
+        ("Noto Emoji font", "SIL Open Font License 1.1"),
+    ] {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("•").color(GOLD));
+            ui.label(name);
+            ui.label(RichText::new(lic).color(TEXT_DIM).size(12.0));
+        });
+    }
+}
+
+/// Settings window frame size helper (used by the app).
+pub fn window_rect(ctx: &egui::Context) -> Rect {
+    Rect::from_center_size(ctx.content_rect().center(), vec2(760.0, 560.0))
+}

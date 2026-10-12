@@ -205,7 +205,7 @@ impl DrawState {
             }
         };
         let ctx = ui.ctx().clone();
-        let mut budget = 3; // previews made per frame, so opening a category never stutters
+        let mut budget = self.set.brush_preview_per_frame; // previews made per frame, so opening a category never stutters
         egui::ScrollArea::vertical().id_salt("brush_list").max_height(ui.available_height() * 0.42).show(ui, |ui| {
             if list.is_empty() {
                 ui.add_space(10.0);
@@ -218,8 +218,8 @@ impl DrawState {
                     let selected = self.lib.mem[sl].name == p.name;
                     let tex = self.preview(&ctx, p, &mut budget);
                     if brush_card(ui, p, tex, w, selected).clicked() {
-                        // switching brushes keeps your size (like the web version)
-                        let size = self.lib.mem[sl].s.size;
+                        // switching brushes keeps your size (like the web version), unless turned off
+                        let size = if self.set.keep_size_on_switch { self.lib.mem[sl].s.size } else { p.s.size };
                         self.lib.mem[sl].s = BrushSettings { size, ..p.s.clone() };
                         self.lib.mem[sl].name = p.name.to_owned();
                     }
@@ -257,6 +257,7 @@ impl DrawState {
             ui.painter().image(t.id(), r.shrink2(vec2(4.0, 2.0)), egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
 
+        let size_max = self.set.brush_size_max;
         let name = self.lib.mem[sl].name.clone();
         let preset = self.lib.presets.iter().chain(self.lib.erasers.iter()).find(|p| p.name == name).cloned();
         if let Some(p) = &preset {
@@ -266,7 +267,7 @@ impl DrawState {
 
         ui.add_space(4.0);
         row(ui, "Size", "Brush size in pixels ([ and ] change it)", |ui| {
-            ui.add(egui::Slider::new(&mut s.size, 0.5..=1000.0).logarithmic(true).suffix(" px").max_decimals(1)).changed()
+            ui.add(egui::Slider::new(&mut s.size, 0.5..=size_max).logarithmic(true).suffix(" px").max_decimals(1)).changed()
         });
         ui.horizontal(|ui| {
             ui.add_space(92.0);

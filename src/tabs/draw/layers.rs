@@ -19,8 +19,8 @@ impl DrawState {
         self.doc.index_of(self.active).unwrap_or(0)
     }
 
-    /// Keep the selection on an existing layer (after deletes, merges…).
-    fn fix_active(&mut self) {
+    /// Keep the selection on an existing layer (after deletes, merges, undo…).
+    pub(super) fn fix_active(&mut self) {
         if self.doc.index_of(self.active).is_none() {
             self.active = self.doc.layers.first().map(|l| l.id).unwrap_or(0);
         }

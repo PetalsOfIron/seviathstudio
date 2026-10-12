@@ -14,7 +14,7 @@ use super::textures;
 use super::tips::{self, sample};
 use super::{BrushSettings, Edge, Ends, MixRefer};
 use crate::blend::{self, Px};
-use crate::doc::{Document, LayerId, TILE, TileKey};
+use crate::doc::{Document, LayerId, TILE, TileData, TileKey};
 use crate::stroke::{LiveStroke, StrokeLook, StrokeTile};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -39,7 +39,7 @@ pub type SampleAll<'a> = &'a dyn Fn(i32, i32) -> Option<Color32>;
 #[allow(dead_code)]
 pub struct StrokeResult {
     pub layer: LayerId,
-    pub before: HashMap<TileKey, Option<Vec<Color32>>>,
+    pub before: HashMap<TileKey, Option<TileData>>,
 }
 
 pub struct Stroke {
@@ -70,7 +70,7 @@ pub struct Stroke {
     mix_p: [f32; 4],
     last_sample: (f32, f32),
     recent: Vec<(f32, f32, f32)>, // last particles (x, y, r), for "keep particles apart"
-    before: HashMap<TileKey, Option<Vec<Color32>>>,
+    before: HashMap<TileKey, Option<TileData>>,
 }
 
 fn rgb01(c: Color32) -> [f32; 3] {

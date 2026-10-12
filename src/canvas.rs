@@ -22,6 +22,8 @@ pub struct CanvasRenderer {
     thumb_revision: u64,
     thumb_time: f64,
     layer_thumbs: HashMap<LayerId, (u64, f64, TextureHandle)>, // (layer rev, time, texture)
+    smooth: bool,       // smooth (linear) pixels when zoomed in, instead of crisp ones
+    pub nav_fps: f32,   // navigator thumbnail refreshes per second while drawing
 }
 
 impl Default for CanvasRenderer {
@@ -33,13 +35,15 @@ impl Default for CanvasRenderer {
             thumb_revision: u64::MAX,
             thumb_time: 0.0,
             layer_thumbs: HashMap::new(),
+            smooth: false,
+            nav_fps: 6.0,
         }
     }
 }
 
-fn tex_options() -> TextureOptions {
+fn tex_options(smooth: bool) -> TextureOptions {
     TextureOptions {
-        magnification: egui::TextureFilter::Nearest, // see real pixels when zoomed in
+        magnification: if smooth { egui::TextureFilter::Linear } else { egui::TextureFilter::Nearest },
         minification: egui::TextureFilter::Linear,
         wrap_mode: egui::TextureWrapMode::ClampToEdge,
         mipmap_mode: Some(egui::TextureFilter::Linear), // smooth when zoomed out
@@ -55,6 +59,16 @@ impl CanvasRenderer {
         self.thumb = None;
         self.thumb_revision = u64::MAX;
         self.layer_thumbs.clear();
+    }
+
+    /// Smooth or crisp pixels when zoomed in. Returns true when everything must be redrawn.
+    pub fn set_smooth(&mut self, smooth: bool) -> bool {
+        if self.smooth == smooth {
+            return false;
+        }
+        self.smooth = smooth;
+        self.textures.clear();
+        true
     }
 
     /// Re-composite dirty tiles and upload them.
@@ -73,9 +87,9 @@ impl CanvasRenderer {
         for (key, buf) in done {
             let img = ColorImage::new([TILE, TILE], buf.clone());
             match self.textures.get_mut(&key) {
-                Some(t) => t.set(img, tex_options()),
+                Some(t) => t.set(img, tex_options(self.smooth)),
                 None => {
-                    let t = ctx.load_texture(format!("tile{}_{}", key.0, key.1), img, tex_options());
+                    let t = ctx.load_texture(format!("tile{}_{}", key.0, key.1), img, tex_options(self.smooth));
                     self.textures.insert(key, t);
                 }
             }
@@ -84,10 +98,11 @@ impl CanvasRenderer {
 
         // Navigator thumbnail: at most ~6 times a second while drawing.
         let now = ctx.input(|i| i.time);
-        if doc.revision != self.thumb_revision && now - self.thumb_time <= 0.16 && self.thumb.is_some() {
-            ctx.request_repaint_after_secs(0.17); // come back for the last change
+        let gap = 1.0 / self.nav_fps.max(1.0) as f64;
+        if doc.revision != self.thumb_revision && now - self.thumb_time <= gap && self.thumb.is_some() {
+            ctx.request_repaint_after_secs(gap as f32 + 0.01); // come back for the last change
         }
-        if doc.revision != self.thumb_revision && (now - self.thumb_time > 0.16 || self.thumb.is_none()) {
+        if doc.revision != self.thumb_revision && (now - self.thumb_time > gap || self.thumb.is_none()) {
             self.thumb_revision = doc.revision;
             self.thumb_time = now;
             let img = self.thumbnail(doc);

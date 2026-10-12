@@ -9,6 +9,8 @@ use eframe::egui::{
 
 use crate::canvas::{self as cv, CanvasRenderer};
 use crate::colorpick;
+use crate::history::{self, DocState};
+use crate::settings::{CursorStyle, Settings, WheelAction};
 use crate::doc::{Document, LayerId, LayerKind};
 use crate::icons::Icon;
 use crate::brush::engine::{Sample, Stroke as BrushStroke, StrokeResult};
@@ -147,6 +149,14 @@ pub struct DrawState {
     canvas_rect: Rect,
     cursor_doc: Option<Pos2>,
     notice: Option<&'static str>,
+    /// App settings (copied in by the app when they change).
+    pub set: Settings,
+    /// Document as it was when the current change started (recorded when the pointer lifts).
+    pending: Option<DocState>,
+    label_hint: Option<String>,
+    /// Finished changes for the app's history: (label, before, after).
+    pub changes: Vec<(String, DocState, DocState)>,
+    p_smooth: f32,
 }
 
 impl Default for DrawState {
@@ -195,6 +205,11 @@ impl Default for DrawState {
             canvas_rect: Rect::NOTHING,
             cursor_doc: None,
             notice: None,
+            set: Settings::default(),
+            pending: None,
+            label_hint: None,
+            changes: Vec::new(),
+            p_smooth: 1.0,
         }
     }
 }
@@ -229,32 +244,82 @@ impl DrawState {
     }
 
     pub fn ui(&mut self, ui: &mut Ui) {
+        // settings that live in the document and the renderer
+        if self.doc.checker != self.set.checker_size as usize {
+            self.doc.checker = self.set.checker_size as usize;
+            self.doc.mark_all_dirty();
+        }
+        if self.renderer.set_smooth(self.set.smooth_zoomed_in) {
+            self.doc.mark_all_dirty();
+        }
+        self.renderer.nav_fps = self.set.navigator_fps;
+
+        let frame_before = self.doc.snapshot();
         self.shortcuts(ui.ctx());
         self.layer_shortcuts(ui.ctx());
 
-        Panel::left("draw_tools")
+        // left-handed: tools and brushes on the right, color and layers on the left
+        let lefty = self.set.left_handed;
+        let near = |id: &str| if lefty { Panel::right(id.to_owned()) } else { Panel::left(id.to_owned()) };
+        let far = |id: &str| if lefty { Panel::left(id.to_owned()) } else { Panel::right(id.to_owned()) };
+
+        near("draw_tools")
             .exact_size(56.0)
             .resizable(false)
             .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(8, 10)))
             .show(ui, |ui| self.tool_strip(ui));
 
-        Panel::left("draw_brush")
+        near("draw_brush")
             .resizable(true)
             .default_size(270.0)
             .size_range(230.0..=440.0)
             .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::same(10)))
             .show(ui, |ui| self.brush_panel(ui));
 
-        Panel::right("draw_right")
+        far("draw_right")
             .resizable(true)
             .default_size(290.0)
             .size_range(250.0..=480.0)
             .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::same(10)))
             .show(ui, |ui| self.right_panel(ui));
 
+        let [r, g, b] = self.set.canvas_bg;
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG))
+            .frame(egui::Frame::new().fill(Color32::from_rgb(r, g, b)))
             .show(ui, |ui| self.canvas(ui));
+
+        self.track_history(ui.ctx(), frame_before);
+    }
+
+    /// Turns everything that changed the document into history steps. A change counts as
+    /// finished when the pointer is up (so a whole stroke or slider drag is one step).
+    fn track_history(&mut self, ctx: &egui::Context, before: DocState) {
+        if self.pending.is_none() && !self.doc.same_as(&before) {
+            self.pending = Some(before);
+        }
+        let busy = ctx.input(|i| i.pointer.any_down()) || self.stroke.is_some() || self.drag_layer.is_some() || self.renaming.is_some();
+        if busy {
+            return;
+        }
+        if let Some(b) = self.pending.take() {
+            if !self.doc.same_as(&b) {
+                let after = self.doc.snapshot();
+                let label = self.label_hint.take().unwrap_or_else(|| history::describe(&b, &after));
+                self.changes.push((label, b, after));
+            }
+        }
+        self.label_hint = None;
+    }
+
+    /// The document was replaced by undo/redo: drop anything in progress.
+    pub fn after_restore(&mut self) {
+        self.stroke = None;
+        self.pen_stroke = false;
+        self.pending = None;
+        self.label_hint = None;
+        self.renaming = None;
+        self.drag_layer = None;
+        self.fix_active();
     }
 
     #[cfg(test)]
@@ -286,6 +351,7 @@ impl DrawState {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
+        let (step, max) = (self.set.size_step, self.set.brush_size_max);
         ctx.input_mut(|i| {
             // Shift+G before G, so the plain G doesn't steal it.
             let mut tools: Vec<Tool> = TOOL_GROUPS.iter().flat_map(|g| g.iter().copied()).collect();
@@ -302,11 +368,11 @@ impl DrawState {
             }
             if i.consume_key(Modifiers::NONE, Key::OpenBracket) {
                 let s = self.brush_mut();
-                s.size = (s.size / 1.15).max(0.5);
+                s.size = (s.size / step).max(0.5);
             }
             if i.consume_key(Modifiers::NONE, Key::CloseBracket) {
                 let s = self.brush_mut();
-                s.size = (s.size * 1.15).min(1000.0);
+                s.size = (s.size * step).min(max);
             }
             // View: Ctrl+0 fit, Ctrl+Alt+0 100%, Ctrl+= / Ctrl+- zoom, F mirror.
             let c = self.view.screen_center;
@@ -413,6 +479,9 @@ impl DrawState {
                 self.hex = hex_of(self.primary);
             }
             if ui.button("Save").on_hover_text("Add this color to the swatches").clicked() && !self.swatches.contains(&self.primary) {
+                if self.swatches.len() >= self.set.swatches_max {
+                    self.swatches.remove(0);
+                }
                 self.swatches.push(self.primary);
             }
         });
@@ -541,18 +610,25 @@ impl DrawState {
         if let Some(hp) = hover {
             let mut factor = 1.0f32;
             let mut turn = 0.0f32;
+            let mut scroll = Vec2::ZERO;
+            let speed = self.set.zoom_speed * if self.set.invert_wheel { -1.0 } else { 1.0 };
             for e in &events {
                 match e {
                     Event::MouseWheel { unit, delta, modifiers, .. } => {
-                        let dy = match unit {
-                            MouseWheelUnit::Point => delta.y,
-                            MouseWheelUnit::Line => delta.y * 40.0,
-                            MouseWheelUnit::Page => delta.y * 400.0,
+                        let k = match unit {
+                            MouseWheelUnit::Point => 1.0,
+                            MouseWheelUnit::Line => 40.0,
+                            MouseWheelUnit::Page => 400.0,
                         };
+                        let (dx, dy) = (delta.x * k, delta.y * k);
                         if modifiers.alt {
                             turn += dy * 0.0033;
+                        } else if self.set.wheel == WheelAction::Zoom || modifiers.command || modifiers.ctrl {
+                            factor *= (dy * 0.0045 * speed).exp();
+                        } else if modifiers.shift {
+                            scroll += vec2(dy, dx);
                         } else {
-                            factor *= (dy * 0.0045).exp();
+                            scroll += vec2(dx, dy);
                         }
                     }
                     Event::Zoom(f) => factor *= *f,
@@ -565,6 +641,9 @@ impl DrawState {
             }
             if turn != 0.0 {
                 self.view.rotate(turn);
+            }
+            if scroll != Vec2::ZERO {
+                self.view.pan(scroll);
             }
         }
 
@@ -592,7 +671,7 @@ impl DrawState {
                     da += std::f32::consts::TAU;
                 }
                 self.rotate_raw += da;
-                let step = 15f32.to_radians();
+                let step = self.set.rotate_snap.to_radians();
                 let a = if shift { (self.rotate_raw / step).round() * step } else { self.rotate_raw };
                 self.view.set_angle(a);
             }
@@ -620,9 +699,19 @@ impl DrawState {
         if picking && pressed_here && !nav_key {
             if let Some(p) = resp.interact_pointer_pos() {
                 let d = self.view.screen_to_doc(p);
-                if let Some(c) = sample_all(d.x as i32, d.y as i32) {
-                    let [r, g, b, _] = c.to_srgba_unmultiplied();
-                    self.primary = Color32::from_rgb(r, g, b);
+                let half = (self.set.picker_samples as i32 - 1) / 2;
+                let (mut acc, mut n) = ([0u32; 3], 0u32);
+                for oy in -half..=half {
+                    for ox in -half..=half {
+                        if let Some(c) = sample_all(d.x as i32 + ox, d.y as i32 + oy) {
+                            let [r, g, b, _] = c.to_srgba_unmultiplied();
+                            acc = [acc[0] + r as u32, acc[1] + g as u32, acc[2] + b as u32];
+                            n += 1;
+                        }
+                    }
+                }
+                if n > 0 {
+                    self.primary = Color32::from_rgb((acc[0] / n) as u8, (acc[1] / n) as u8, (acc[2] / n) as u8);
                     self.hex = hex_of(self.primary);
                 }
             }
@@ -634,18 +723,27 @@ impl DrawState {
                 let d = view.screen_to_doc(p);
                 Sample { x: d.x, y: d.y, p: pressure.clamp(0.0, 1.0) }
             };
-            let pen: Vec<Sample> = events
-                .iter()
-                .filter_map(|e| match e {
-                    Event::Touch { pos, force: Some(f), phase, .. } if *phase != TouchPhase::Cancel => Some(to_doc(*pos, *f)),
-                    _ => None,
-                })
-                .collect();
+            // pen pressure: your range and curve from Settings, then optional smoothing
+            let smooth = self.set.pressure_smoothing;
+            if self.stroke.is_none() {
+                self.p_smooth = -1.0;
+            }
+            let mut pen: Vec<Sample> = Vec::new();
+            for e in &events {
+                if let Event::Touch { pos, force: Some(f), phase, .. } = e {
+                    if *phase != TouchPhase::Cancel {
+                        let p = self.set.pressure(*f);
+                        self.p_smooth = if self.p_smooth < 0.0 { p } else { self.p_smooth + (p - self.p_smooth) * (1.0 - smooth) };
+                        pen.push(to_doc(*pos, self.p_smooth));
+                    }
+                }
+            }
+            let mouse_p = self.set.mouse_pressure;
             let is_pen = !pen.is_empty() || self.pen_stroke;
             let mut samples = if is_pen {
                 pen
             } else {
-                events.iter().filter_map(|e| if let Event::PointerMoved(p) = e { Some(to_doc(*p, 1.0)) } else { None }).collect()
+                events.iter().filter_map(|e| if let Event::PointerMoved(p) = e { Some(to_doc(*p, mouse_p)) } else { None }).collect()
             };
             if self.stroke.is_none() {
                 let ai = self.active_idx();
@@ -655,16 +753,31 @@ impl DrawState {
                         LayerKind::Vector => "Vector layers are drawn with the vector pen (coming soon). Pick a pixel layer to paint.",
                         _ => "Pick a pixel layer to paint on.",
                     });
+                } else if self.set.min_stroke_move > 0.0
+                    && ctx.input(|i| i.pointer.press_origin().zip(i.pointer.latest_pos()).map(|(o, l)| (l - o).length()).unwrap_or(0.0))
+                        < self.set.min_stroke_move
+                {
+                    // wait until the pen really moves (no accidental dots)
                 } else {
                     self.notice = None;
                     let start = if is_pen && !samples.is_empty() {
                         Some(samples.remove(0))
                     } else {
-                        ctx.input(|i| i.pointer.press_origin()).map(|o| to_doc(o, 1.0))
+                        ctx.input(|i| i.pointer.press_origin()).map(|o| to_doc(o, mouse_p))
                     };
                     if let Some(start) = start {
-                        let settings = self.lib.mem[brushes::slot(self.tool)].s.clone();
+                        let mut settings = self.lib.mem[brushes::slot(self.tool)].s.clone();
+                        // tremor help adds steadiness on top of every brush's own stabilizer
+                        let t = self.set.tremor_help;
+                        settings.stabilize = 1.0 - (1.0 - settings.stabilize) * (1.0 - t);
                         let erase = self.tool == Tool::Eraser;
+                        let verb = match self.tool {
+                            Tool::Eraser => "Erase",
+                            Tool::Smudge => "Smudge",
+                            _ => "Stroke",
+                        };
+                        let layer_name = self.doc.layers[ai].name.clone();
+                        self.label_hint = Some(format!("{verb} · {} · {layer_name}", self.brush_name()));
                         self.pen_stroke = is_pen;
                         self.stroke = Some(BrushStroke::begin(&mut self.doc, ai, &settings, self.primary, erase, view.zoom, is_pen, start, &sample_all));
                     }
@@ -684,11 +797,18 @@ impl DrawState {
         // ---- Draw.
         self.renderer.sync(&ctx, &mut self.doc);
         let p = ui.painter_at(rect);
-        snake::scales(&p, rect, EMERALD.gamma_multiply(0.045));
+        if self.set.show_scales {
+            snake::scales(&p, rect, EMERALD.gamma_multiply(0.045));
+        }
         let quad = cv::page_quad(&self.view, &self.doc);
-        let shadow: Vec<Pos2> = quad.iter().map(|q| *q + vec2(0.0, 8.0)).collect();
-        p.add(Shape::convex_polygon(shadow, Color32::from_black_alpha(90), Stroke::NONE));
+        if self.set.page_shadow {
+            let shadow: Vec<Pos2> = quad.iter().map(|q| *q + vec2(0.0, 8.0)).collect();
+            p.add(Shape::convex_polygon(shadow, Color32::from_black_alpha(90), Stroke::NONE));
+        }
         self.renderer.paint(&p, &self.view, &self.doc);
+        if self.set.pixel_grid && self.view.zoom >= self.set.pixel_grid_from {
+            self.pixel_grid(&p, rect);
+        }
         p.add(Shape::closed_line(quad, Stroke::new(1.0, Color32::from_black_alpha(80))));
 
         // ---- Cursor.
@@ -710,17 +830,59 @@ impl DrawState {
                 }
             };
             ctx.set_cursor_icon(icon);
-            if icon == CursorIcon::None {
-                let r = (self.brush().size / 2.0 * self.view.zoom).max(1.5);
-                p.circle_stroke(hp, r, Stroke::new(2.2, Color32::from_black_alpha(150)));
-                p.circle_stroke(hp, r, Stroke::new(1.0, Color32::from_white_alpha(230)));
-                if r > 6.0 {
+            let hide = self.set.hide_cursor_while_drawing && self.stroke.is_some();
+            if icon == CursorIcon::None && !hide {
+                let r = (self.brush().size / 2.0 * self.view.zoom).max(self.set.cursor_min_size.max(1.5));
+                let dark = Stroke::new(2.2, Color32::from_black_alpha(150));
+                let light = Stroke::new(1.0, Color32::from_white_alpha(230));
+                let circle = matches!(self.set.cursor, CursorStyle::Outline | CursorStyle::OutlineCross);
+                let cross = matches!(self.set.cursor, CursorStyle::OutlineCross | CursorStyle::Cross);
+                if circle {
+                    p.circle_stroke(hp, r, dark);
+                    p.circle_stroke(hp, r, light);
+                }
+                if cross {
+                    for (a, b) in [(vec2(-5.0, 0.0), vec2(5.0, 0.0)), (vec2(0.0, -5.0), vec2(0.0, 5.0))] {
+                        p.line_segment([hp + a, hp + b], dark);
+                        p.line_segment([hp + a, hp + b], light);
+                    }
+                }
+                if self.set.cursor == CursorStyle::Dot || (circle && !cross && r > 6.0) {
+                    p.circle_filled(hp, 2.0, Color32::from_black_alpha(160));
                     p.circle_filled(hp, 1.2, Color32::from_white_alpha(230));
                 }
             }
         }
 
         self.view_bar(ui, rect);
+    }
+
+    /// Thin lines between pixels when zoomed in far (for pixel art and clean edges).
+    fn pixel_grid(&self, p: &egui::Painter, rect: Rect) {
+        let q = self.view.visible_quad(rect);
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for c in q {
+            x0 = x0.min(c.x);
+            y0 = y0.min(c.y);
+            x1 = x1.max(c.x);
+            y1 = y1.max(c.y);
+        }
+        let (x0, y0) = (x0.floor().max(0.0), y0.floor().max(0.0));
+        let (x1, y1) = (x1.ceil().min(self.doc.w as f32), y1.ceil().min(self.doc.h as f32));
+        if x1 - x0 > 600.0 || y1 - y0 > 600.0 {
+            return;
+        }
+        let st = Stroke::new(1.0, Color32::from_black_alpha(45));
+        let mut x = x0;
+        while x <= x1 {
+            p.line_segment([self.view.doc_to_screen(pos2(x, y0)), self.view.doc_to_screen(pos2(x, y1))], st);
+            x += 1.0;
+        }
+        let mut y = y0;
+        while y <= y1 {
+            p.line_segment([self.view.doc_to_screen(pos2(x0, y)), self.view.doc_to_screen(pos2(x1, y))], st);
+            y += 1.0;
+        }
     }
 
     /// Floating bar at the bottom of the canvas: zoom, fit, rotation and mirror.
@@ -755,8 +917,8 @@ impl DrawState {
                         }
                         let (r, _) = ui.allocate_exact_size(vec2(10.0, 22.0), Sense::hover());
                         ui.painter().line_segment([r.center_top(), r.center_bottom()], Stroke::new(1.0, LINE));
-                        let step = 15f32.to_radians();
-                        if icon_button(ui, Icon::RotateLeft, false, 28.0, "Rotate left 15° · R + drag rotates freely").clicked() {
+                        let step = self.set.rotate_snap.to_radians();
+                        if icon_button(ui, Icon::RotateLeft, false, 28.0, "Rotate left · R + drag rotates freely, Shift snaps").clicked() {
                             self.view.rotate(-step);
                         }
                         let a = format!("{:.0}°", self.view.angle_deg());
@@ -767,7 +929,7 @@ impl DrawState {
                         {
                             self.straighten();
                         }
-                        if icon_button(ui, Icon::RotateRight, false, 28.0, "Rotate right 15°").clicked() {
+                        if icon_button(ui, Icon::RotateRight, false, 28.0, "Rotate right").clicked() {
                             self.view.rotate(step);
                         }
                         if icon_button(ui, Icon::Flip, self.view.flip, 28.0, "Mirror the view (F) — only the view, not the drawing").clicked() {
