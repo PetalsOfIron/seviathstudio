@@ -15,12 +15,12 @@ How every part of the project plan (`SeviathStudio_Project_Plan_EN.md`, Parts A�
 | 5 | Undo per tab / everything, history panel, undo-only-this-step; settings (10 pages); pen & tablet page | §2, F3 |
 | 6 | References: add/drop, pick, gray, grid, palette, overlay, pop-out; app icon; GPL-3.0-or-later | §18, J3 (part), F1 |
 | 7 | Files & projects: `.seviath` projects, background save/open, autosave recovery copies, save-changes guard, New project templates, project manager with thumbnails; PNG/JPEG/WebP export; PSD and ORA import/export (folders, blend modes, clipping); KRA import (8-bit, else Krita's merged picture). Baking effects into PSD comes with the effects milestone | §9, §15, §28 |
+| 8 | Selection & tools: rectangle / ellipse / magic wand / lasso / polygon lasso with new-add-subtract-intersect, soft edges, invert, grow, shrink, feather; every brush, eraser, smudge and fill stays inside the selection; quick mask (Q); move & transform (scale, turn, flip, skew, perspective) with the selection moving along; paint bucket with gap closing and color under the lines, lasso fill / erase; Shift + click straight lines; live symmetry (left/right, top/bottom, both, radial, kaleidoscope) with a movable, turnable center | §20, D2 |
 
 ## Drawing — finish the Draw tab (port the first app + Part D2)
 
 | # | Milestone | How |
 |---|---|---|
-| 8 | **Selection & tools** — rectangle/ellipse/lasso with add/subtract/invert/feather, magic wand, quick mask, move/transform (scale/rotate/skew/perspective), fill + lasso fill with gap closing (§20), straight lines (Shift+click), live symmetry incl. multi-axis | Selection = one more mask tile layer; transforms resample tiles; fill = port of `fill.ts` |
 | 9 | **Gradients** — linear/radial/angle/diamond/mirrored/freeform in OKLab, on-canvas handles, rotate, **blend-gradient** that mixes with existing paint, gradient brush, gradient map (§23, D2) | Gradient as an editable layer type that renders into tiles |
 | 10 | **Vector layers** — vector brush with pressure profile, pressure editor graph, smoothing slider, vector eraser, shape recognition, node edit, **auto-trace** (4 modes, center-line) (B8, E4) | Port `vector.ts`/`trace.ts`; tracing on rayon threads |
 | 11 | **Filters & effects** — the first app's 10 filters + C1 basics (blurs, sharpen, noise, levels/curves/HSL), non-destructive layer effects (outline, shadow, glow, color/gradient overlay), adjustment layers, check views (gray, invert, color-blind), "draw from image", lineart separate/add, effects baked into PSD export (§15, §16, C1, D2) | Effects stored per layer, rendered at composite time; filters run on rayon with live preview |

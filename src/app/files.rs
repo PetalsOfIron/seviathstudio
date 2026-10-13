@@ -292,6 +292,8 @@ impl SeviathApp {
     }
 
     fn save_to(&mut self, path: PathBuf, then: Option<Pending>) {
+        // a floating transform is put down first, so nothing is missing from the file
+        self.draw.apply_transform();
         let state = self.draw.doc.snapshot();
         let (w, h) = (self.draw.doc.w, self.draw.doc.h);
         let generation = self.history.generation;
@@ -315,6 +317,7 @@ impl SeviathApp {
             .add_filter("OpenRaster (layers)", &["ora"])
             .save_file();
         let Some(path) = picked else { return };
+        self.draw.apply_transform();
         let state = self.draw.doc.snapshot();
         let (w, h) = (self.draw.doc.w, self.draw.doc.h);
         let q = self.settings.jpeg_quality;
@@ -392,6 +395,7 @@ impl SeviathApp {
         if self.persist
             && minutes > 0.0
             && self.files.job.is_none()
+            && !self.draw.transforming()
             && self.history.generation != self.files.autosaved_generation
             && now - self.files.last_autosave > minutes as f64 * 60.0
             && !ctx.input(|i| i.pointer.any_down())
@@ -843,7 +847,7 @@ impl SeviathApp {
                 ui.close();
                 self.export_dialog();
             }
-            if item(ui, "Picture as a new layer…", "Ctrl+Shift+I") {
+            if item(ui, "Picture as a new layer…", "") {
                 ui.close();
                 self.import_picture_dialog(now);
             }
@@ -854,14 +858,12 @@ impl SeviathApp {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
-        let now = ctx.input(|i| i.time);
         use egui::{Key, Modifiers};
-        let (mut new, mut open, mut manager, mut save, mut save_as, mut export, mut import) = (false, false, false, false, false, false, false);
+        let (mut new, mut open, mut manager, mut save, mut save_as, mut export) = (false, false, false, false, false, false);
         ctx.input_mut(|i| {
             manager = i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::O);
             save_as = i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::S);
             export = i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::E);
-            import = i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::I);
             if !i.modifiers.shift {
                 // plain Ctrl+N must not eat Ctrl+Shift+N (new layer)
                 new = i.consume_key(Modifiers::COMMAND, Key::N);
@@ -885,9 +887,6 @@ impl SeviathApp {
         }
         if export {
             self.export_dialog();
-        }
-        if import {
-            self.import_picture_dialog(now);
         }
     }
 }

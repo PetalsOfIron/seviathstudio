@@ -183,6 +183,8 @@ pub struct Document {
     pub live: Option<LiveStroke>,
     /// Size of the checkerboard squares shown where the picture is transparent.
     pub checker: usize,
+    /// What is selected (None = nothing: tools work everywhere).
+    pub selection: Option<crate::select::Selection>,
 }
 
 impl Document {
@@ -196,6 +198,7 @@ impl Document {
             revision: 0,
             next_id: 1,
             live: None,
+            selection: None,
             checker: 16,
         };
         let l1 = d.new_layer("Layer 1", LayerKind::Raster);
@@ -208,7 +211,7 @@ impl Document {
     /// A document from loaded parts (files). Layer ids are kept; new ids continue after them.
     pub fn from_parts(w: u32, h: u32, paper: Color32, layers: Vec<Layer>) -> Self {
         let next_id = layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
-        let mut d = Self { w, h, paper, layers, dirty: HashSet::new(), revision: 0, next_id, live: None, checker: 16 };
+        let mut d = Self { w, h, paper, layers, dirty: HashSet::new(), revision: 0, next_id, live: None, checker: 16, selection: None };
         d.mark_all_dirty();
         d
     }
@@ -632,8 +635,15 @@ impl Document {
         let keys: Vec<TileKey> = live.tiles.keys().copied().collect();
         let layer = &mut self.layers[i];
         for (key, st) in &live.tiles {
+            let mask = match &live.sel {
+                Some(sel) => match sel.tile(*key) {
+                    Some(m) => Some(m),
+                    None => continue, // nothing selected in this tile
+                },
+                None => None,
+            };
             let t = layer.tile_mut(*key);
-            stroke::apply(t, st, &live.look, *key);
+            stroke::apply(t, st, &live.look, *key, mask);
         }
         layer.rev += 1;
         for k in &keys {

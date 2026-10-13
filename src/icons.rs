@@ -53,6 +53,7 @@ pub enum Icon {
     Flip,
     RotateLeft,
     RotateRight,
+    Symmetry,
 }
 
 pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
@@ -282,6 +283,14 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             line(&[(8.0, 1.5), (8.0, 14.5)], Stroke::new(w * 0.8, color.gamma_multiply(0.6)));
             closed(&[(6.0, 3.5), (6.0, 12.5), (1.5, 12.5)], st);
             p.add(Shape::convex_polygon(vec![at(10.0, 3.5), at(14.5, 12.5), at(10.0, 12.5)], color, Stroke::NONE));
+        }
+        Icon::Symmetry => {
+            // a dashed axis with two mirrored wings
+            for y in [1.5, 5.0, 8.5, 12.0] {
+                line(&[(8.0, y), (8.0, y + 2.0)], st);
+            }
+            closed(&[(6.0, 3.0), (2.0, 5.0), (2.5, 11.0), (6.0, 13.0)], st);
+            closed(&[(10.0, 3.0), (14.0, 5.0), (13.5, 11.0), (10.0, 13.0)], st);
         }
         Icon::RotateLeft | Icon::RotateRight => {
             let flip = if icon == Icon::RotateRight { -1.0 } else { 1.0 };
