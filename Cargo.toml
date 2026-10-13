@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "Draw, rig, animate and stream a 2D character from one file"
+repository = "https://github.com/santamadaraneilande-ctrl/seviathstudio"
 
 [dependencies]
 dirs = "6"
