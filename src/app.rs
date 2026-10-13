@@ -46,10 +46,14 @@ impl SeviathApp {
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let persist = !cfg!(test);
         let settings = if persist { Settings::load() } else { Settings::default() };
+        let mut draw = DrawState::default();
+        if persist {
+            draw.refs = crate::refs::RefStore::load_saved();
+        }
         Self {
             tab: Tab::Draw,
             workspace: Workspace::Character,
-            draw: DrawState::default(),
+            draw,
             saved: settings.clone(),
             settings,
             applied: None,

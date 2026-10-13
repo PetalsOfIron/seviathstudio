@@ -9,6 +9,7 @@ mod canvas;
 mod colorpick;
 mod doc;
 mod history;
+mod refs;
 mod icons;
 mod settings;
 mod settings_ui;
