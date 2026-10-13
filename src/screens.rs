@@ -255,3 +255,137 @@ fn files_screens() {
     assert!(h.state_mut().files_mut().pending.is_some());
     save(&mut h, "unsaved_changes");
 }
+
+/// Alpha of the layer `li` at a screen position.
+fn alpha_at(h: &Harness<'_, SeviathApp>, li: usize, at: Pos2) -> u8 {
+    let d = h.state().draw_mut_ref();
+    let p = d.screen_to_doc(at);
+    let img = crate::files::layer_rgba(&d.doc.layers[li], p.x as i32, p.y as i32, 1, 1);
+    img.get_pixel(0, 0).0[3]
+}
+
+#[test]
+fn selection_screens() {
+    use crate::symmetry::SymMode;
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    let labels = |h: &Harness<'_, SeviathApp>| h.state().history().entries.iter().map(|e| e.label.clone()).collect::<Vec<_>>();
+
+    // Rectangle selection, then a brush stroke only paints inside it.
+    h.key_press(Key::M);
+    stroke(&mut h, &[pos2(560.0, 300.0), pos2(700.0, 450.0), pos2(820.0, 560.0)]);
+    h.run_steps(2);
+    assert!(h.state().draw_mut_ref().doc.selection.is_some());
+    h.key_press(Key::B);
+    h.state_mut().draw_mut().brush_mut().size = 40.0;
+    stroke(&mut h, &wave(pos2(480.0, 430.0), pos2(900.0, 430.0), 10.0, 30));
+    h.run_steps(2);
+    assert!(alpha_at(&h, 0, pos2(760.0, 430.0)) > 0, "inside the selection");
+    assert_eq!(alpha_at(&h, 0, pos2(500.0, 430.0)), 0, "left of the selection");
+    assert_eq!(alpha_at(&h, 0, pos2(880.0, 430.0)), 0, "right of the selection");
+    save(&mut h, "sel_01_rectangle_clip");
+
+    // Move & transform the selected paint: Ctrl+T, then drag inside, then Enter.
+    h.key_press_modifiers(Modifiers::COMMAND, Key::T);
+    h.run_steps(2);
+    assert!(h.state().draw_mut_ref().transforming());
+    stroke(&mut h, &[pos2(760.0, 430.0), pos2(770.0, 480.0), pos2(780.0, 530.0)]);
+    h.state_mut().draw_mut().tools_mut().floating.as_mut().unwrap().rotate(0.4);
+    h.run_steps(2);
+    save(&mut h, "sel_02_transform");
+    h.state_mut().draw_mut().tools_mut().floating.as_mut().unwrap().rotate(-0.4);
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    assert!(!h.state().draw_mut_ref().transforming());
+    assert!(labels(&h).last().unwrap().starts_with("Transform"), "{:?}", labels(&h));
+    assert!(alpha_at(&h, 0, pos2(780.0, 530.0)) > 0, "moved paint is at its new place");
+
+    // Quick mask: Q shows the selection as a red layer, Q again turns it back into a selection.
+    h.key_press(Key::Q);
+    h.run_steps(2);
+    assert_eq!(h.state().draw_mut_ref().doc.layers[0].name, "Quick mask");
+    assert!(h.state().draw_mut_ref().doc.selection.is_none());
+    h.state_mut().draw_mut().brush_mut().size = 80.0;
+    stroke(&mut h, &wave(pos2(500.0, 700.0), pos2(900.0, 700.0), 20.0, 20));
+    h.run_steps(2);
+    save(&mut h, "sel_03_quick_mask");
+    h.key_press(Key::Q);
+    h.run_steps(2);
+    assert_ne!(h.state().draw_mut_ref().doc.layers[0].name, "Quick mask");
+    let sel_ok = {
+        let d = h.state().draw_mut_ref();
+        let p = d.screen_to_doc(pos2(700.0, 680.0));
+        d.doc.selection.as_ref().map(|s| s.at(p.x as i32, p.y as i32)).unwrap_or(0)
+    };
+    assert!(sel_ok > 200, "the painted quick mask became selection: {sel_ok}"); // brush opacity 95%
+
+    // Deselect, then symmetry: one stroke on the left appears on the right too.
+    h.key_press_modifiers(Modifiers::COMMAND, Key::D);
+    h.run_steps(2);
+    assert!(h.state().draw_mut_ref().doc.selection.is_none());
+    let center = {
+        let d = h.state().draw_mut_ref();
+        (d.doc.w as f32 / 2.0, d.doc.h as f32 / 2.0)
+    };
+    {
+        let t = h.state_mut().draw_mut().tools_mut();
+        t.sym.mode = SymMode::Vertical;
+        t.sym.cx = center.0;
+        t.sym.cy = center.1;
+        t.sym_open = true;
+    }
+    h.state_mut().draw_mut().brush_mut().size = 30.0;
+    h.state_mut().draw_mut().primary = Color32::from_rgb(46, 150, 230);
+    stroke(&mut h, &wave(pos2(520.0, 200.0), pos2(600.0, 330.0), 15.0, 20));
+    h.run_steps(3);
+    let (left, right) = {
+        let d = h.state().draw_mut_ref();
+        let p = d.screen_to_doc(pos2(547.0, 258.0));
+        let mirrored = (2.0 * center.0 - p.x, p.y);
+        // the most paint near each point (the stabilizer smooths the line a little off the raw path)
+        let most = |x: f32, y: f32| {
+            let img = crate::files::layer_rgba(&d.doc.layers[0], x as i32 - 100, y as i32 - 100, 200, 200);
+            img.pixels().map(|p| p.0[3]).max().unwrap()
+        };
+        (most(p.x, p.y), most(mirrored.0, mirrored.1))
+    };
+    save(&mut h, "sel_04_symmetry");
+    assert!(left > 0 && right > 0, "mirror copy painted: {left} {right}");
+
+    // Lasso fill: draw a shape with the Fill tool in lasso mode.
+    h.state_mut().draw_mut().tools_mut().sym.mode = SymMode::Off;
+    h.state_mut().draw_mut().tools_mut().sym_open = false;
+    h.key_press(Key::G);
+    h.state_mut().draw_mut().tools_mut().fill_lasso = true;
+    h.state_mut().draw_mut().primary = Color32::from_rgb(214, 168, 76);
+    stroke(&mut h, &[pos2(880.0, 600.0), pos2(960.0, 620.0), pos2(950.0, 720.0), pos2(870.0, 700.0), pos2(860.0, 640.0)]);
+    h.run_steps(2);
+    assert!(alpha_at(&h, 0, pos2(910.0, 660.0)) > 200, "lasso fill painted");
+    assert!(labels(&h).last().unwrap().starts_with("Lasso fill"), "{:?}", labels(&h));
+
+    // Magic wand on the filled shape, then the options panel and selection bar are shown.
+    h.key_press(Key::M);
+    h.state_mut().draw_mut().tools_mut().sel_shape = crate::tabs::draw::SelShape::Wand;
+    h.hover_at(pos2(910.0, 660.0));
+    h.step();
+    button(&h, pos2(910.0, 660.0), true);
+    h.step();
+    button(&h, pos2(910.0, 660.0), false);
+    h.run_steps(3);
+    let wand_ok = {
+        let d = h.state().draw_mut_ref();
+        let p = d.screen_to_doc(pos2(910.0, 660.0));
+        let q = d.screen_to_doc(pos2(1000.0, 800.0));
+        let s = d.doc.selection.as_ref().expect("wand selected something");
+        (s.at(p.x as i32, p.y as i32), s.at(q.x as i32, q.y as i32))
+    };
+    assert_eq!(wand_ok, (255, 0));
+    save(&mut h, "sel_05_wand");
+
+    // Undo walks back through it all, selection included.
+    let n = h.state().history().entries.len();
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::ALT, Key::Z);
+    h.run_steps(2);
+    assert_eq!(h.state().history().cursor, n - 1);
+    assert!(h.state().draw_mut_ref().doc.selection.is_none(), "undoing the wand removes its selection");
+}

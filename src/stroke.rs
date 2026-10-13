@@ -45,20 +45,30 @@ pub struct LiveStroke {
     pub layer: LayerId,
     pub tiles: HashMap<TileKey, StrokeTile>,
     pub look: StrokeLook,
+    /// Paint only lands inside this selection.
+    pub sel: Option<crate::select::Selection>,
 }
 
 impl LiveStroke {
     /// The layer tile with the live stroke applied (None when neither has anything here).
     pub fn merged(&self, layer_tile: Option<&Vec<Color32>>, key: TileKey) -> Option<Vec<Color32>> {
         let Some(st) = self.tiles.get(&key) else { return layer_tile.cloned() };
+        let mask = match &self.sel {
+            Some(sel) => match sel.tile(key) {
+                Some(m) => Some(m),
+                None => return layer_tile.cloned(),
+            },
+            None => None,
+        };
         let mut out = layer_tile.cloned().unwrap_or_else(|| vec![Color32::TRANSPARENT; TILE * TILE]);
-        apply(&mut out, st, &self.look, key);
+        apply(&mut out, st, &self.look, key, mask);
         Some(out)
     }
 }
 
 /// Put the stroke's paint onto layer pixels.
-pub fn apply(dst: &mut [Color32], st: &StrokeTile, look: &StrokeLook, key: TileKey) {
+/// `mask`: selection coverage for this tile (None = everything).
+pub fn apply(dst: &mut [Color32], st: &StrokeTile, look: &StrokeLook, key: TileKey, mask: Option<&[u8]>) {
     let tex = (look.texture > 0.0 || look.tex_color > 0.0).then(|| textures::get(look.tex_kind));
     let (ox, oy) = (key.0 as f32 * TILE as f32, key.1 as f32 * TILE as f32);
     for i in 0..TILE * TILE {
@@ -68,6 +78,12 @@ pub fn apply(dst: &mut [Color32], st: &StrokeTile, look: &StrokeLook, key: TileK
         }
         let (x, y) = (ox + (i % TILE) as f32 + 0.5, oy + (i / TILE) as f32 + 0.5);
         let mut a = s[3] * look.opacity;
+        if let Some(m) = mask {
+            if m[i] == 0 {
+                continue;
+            }
+            a *= m[i] as f32 / 255.0;
+        }
         let mut c = [s[0] / s[3], s[1] / s[3], s[2] / s[3]];
         if let Some(t) = tex {
             if look.texture > 0.0 && look.canvas_texture {
@@ -126,7 +142,7 @@ mod tests {
         let mut st = StrokeTile::new();
         st.px[0] = [1.0, 0.0, 0.0, 1.0]; // fully built-up red
         let mut dst = vec![Color32::TRANSPARENT; TILE * TILE];
-        apply(&mut dst, &st, &look(), (0, 0));
+        apply(&mut dst, &st, &look(), (0, 0), None);
         assert!((dst[0].a() as i32 - 128).abs() <= 1, "{:?}", dst[0]);
     }
 
@@ -141,7 +157,7 @@ mod tests {
         l.texture = 1.0;
         l.tex_kind = TexKind::Dots;
         let mut dst = vec![Color32::TRANSPARENT; TILE * TILE];
-        apply(&mut dst, &st, &l, (0, 0));
+        apply(&mut dst, &st, &l, (0, 0), None);
         let min = dst.iter().map(|c| c.a()).min().unwrap();
         let max = dst.iter().map(|c| c.a()).max().unwrap();
         assert!(min < 60 && max > 200, "{min}..{max}");

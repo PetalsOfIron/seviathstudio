@@ -24,8 +24,11 @@ use crate::widgets::{self, icon_button, section_title, segmented};
 mod brushes;
 mod layers;
 mod references;
+mod tools;
 
 use brushes::BrushLib;
+#[cfg(test)]
+pub use tools::SelShape;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tool {
@@ -166,6 +169,8 @@ pub struct DrawState {
     /// Finished changes for the app's history: (label, before, after).
     pub changes: Vec<(String, DocState, DocState)>,
     p_smooth: f32,
+    /// Selection, fill, move & transform, symmetry.
+    tools: tools::ToolState,
 }
 
 impl Default for DrawState {
@@ -223,20 +228,21 @@ impl Default for DrawState {
             label_hint: None,
             changes: Vec::new(),
             p_smooth: 1.0,
+            tools: tools::ToolState::default(),
         }
     }
 }
 
 impl DrawState {
     pub fn status(&self) -> String {
-        let mut s = format!(
-            "{} · {} · {}×{} px · {:.0}%",
-            self.tool.name(),
-            self.brush_name(),
-            self.doc.w,
-            self.doc.h,
-            self.view.zoom * 100.0
-        );
+        let mut s = self.tool.name().to_owned();
+        if matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Smudge) {
+            s += &format!(" · {}", self.brush_name());
+        }
+        s += &format!(" · {}×{} px · {:.0}%", self.doc.w, self.doc.h, self.view.zoom * 100.0);
+        if let Some(sel) = self.doc.selection.as_ref().and_then(|s| s.bounds()) {
+            s += &format!(" · selection {}×{}", sel.2 - sel.0, sel.3 - sel.1);
+        }
         if self.view.angle.abs() > 0.001 {
             s += &format!(" · {:.0}°", self.view.angle_deg());
         }
@@ -252,8 +258,8 @@ impl DrawState {
     }
 
     /// Short message for the status bar (e.g. why a stroke didn't paint).
-    pub fn notice(&self) -> Option<&'static str> {
-        self.notice
+    pub fn notice(&self) -> Option<&str> {
+        self.tool_notice().or(self.notice)
     }
 
     pub fn ui(&mut self, ui: &mut Ui) {
@@ -269,8 +275,13 @@ impl DrawState {
 
         let frame_before = self.doc.snapshot();
         self.handle_dropped_files(ui.ctx());
+        self.tool_shortcuts(ui.ctx());
         self.shortcuts(ui.ctx());
         self.layer_shortcuts(ui.ctx());
+        // switching away from Move puts a floating picture down; a half-drawn polygon is dropped
+        if self.tool != Tool::Move && self.transforming() {
+            self.apply_transform();
+        }
 
         // left-handed: tools and brushes on the right, color and layers on the left
         let lefty = self.set.left_handed;
@@ -288,7 +299,13 @@ impl DrawState {
             .default_size(270.0)
             .size_range(230.0..=440.0)
             .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::same(10)))
-            .show(ui, |ui| self.brush_panel(ui));
+            .show(ui, |ui| {
+                if matches!(self.tool, Tool::Select | Tool::Lasso | Tool::Fill | Tool::Move) {
+                    egui::ScrollArea::vertical().id_salt("tool_options").show(ui, |ui| self.tool_options(ui));
+                } else {
+                    self.brush_panel(ui);
+                }
+            });
 
         far("draw_right")
             .resizable(true)
@@ -312,7 +329,11 @@ impl DrawState {
         if self.pending.is_none() && !self.doc.same_as(&before) {
             self.pending = Some(before);
         }
-        let busy = ctx.input(|i| i.pointer.any_down()) || self.stroke.is_some() || self.drag_layer.is_some() || self.renaming.is_some();
+        let busy = ctx.input(|i| i.pointer.any_down())
+            || self.stroke.is_some()
+            || self.drag_layer.is_some()
+            || self.renaming.is_some()
+            || self.transforming();
         if busy {
             return;
         }
@@ -329,6 +350,7 @@ impl DrawState {
     /// A different document (opened file or new project): fresh view, selection and caches.
     pub fn replace_document(&mut self, doc: Document) {
         self.doc = doc;
+        self.tools.new_document(self.doc.w, self.doc.h);
         self.renderer.reset();
         self.view_ready = false;
         self.layer_counter = self.doc.layers.len();
@@ -372,6 +394,8 @@ impl DrawState {
 
     /// The document was replaced by undo/redo: drop anything in progress.
     pub fn after_restore(&mut self) {
+        // undo while transforming: the document is already back to before the lift
+        self.tools.floating = None;
         self.stroke = None;
         self.pen_stroke = false;
         self.pending = None;
@@ -401,6 +425,16 @@ impl DrawState {
     pub fn layer_row(&self, idx: usize) -> Option<Rect> {
         let id = self.doc.layers.get(idx)?.id;
         self.layer_rows.iter().find(|(i, _)| *i == id).map(|(_, r)| *r)
+    }
+
+    #[cfg(test)]
+    pub fn tools_mut(&mut self) -> &mut tools::ToolState {
+        &mut self.tools
+    }
+
+    #[cfg(test)]
+    pub fn screen_to_doc(&self, p: Pos2) -> Pos2 {
+        self.view.screen_to_doc(p)
     }
 
     #[cfg(test)]
@@ -754,8 +788,14 @@ impl DrawState {
             }
         }
 
+        // ---- Selections, fill, move & transform, symmetry center.
+        if ctx.input(|i| i.pointer.primary_pressed()) && resp.hovered() {
+            self.tools.notice = None;
+        }
+        let tool_used = !nav_key && self.tool_input(&resp, &ctx);
+
         // ---- Painting and color picking.
-        let painting_tool = matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Smudge);
+        let painting_tool = matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Smudge) && !tool_used;
         let pressed_here = resp.is_pointer_button_down_on() && primary_down;
         let picking = self.tool == Tool::Picker || (painting_tool && alt && self.stroke.is_none());
         let renderer = &self.renderer;
@@ -824,11 +864,16 @@ impl DrawState {
                     // wait until the pen really moves (no accidental dots)
                 } else {
                     self.notice = None;
-                    let start = if is_pen && !samples.is_empty() {
+                    let mut start = if is_pen && !samples.is_empty() {
                         Some(samples.remove(0))
                     } else {
                         ctx.input(|i| i.pointer.press_origin()).map(|o| to_doc(o, mouse_p))
                     };
+                    // Shift + click: a straight line from where the last stroke ended
+                    if let (true, Some(from), Some(click)) = (shift, self.tools.last_end, start) {
+                        samples.insert(0, click);
+                        start = Some(Sample { x: from.x, y: from.y, p: click.p });
+                    }
                     if let Some(start) = start {
                         let mut settings = self.lib.mem[brushes::slot(self.tool)].s.clone();
                         // tremor help adds steadiness on top of every brush's own stabilizer
@@ -843,12 +888,19 @@ impl DrawState {
                         let layer_name = self.doc.layers[ai].name.clone();
                         self.label_hint = Some(format!("{verb} · {} · {layer_name}", self.brush_name()));
                         self.pen_stroke = is_pen;
-                        self.stroke = Some(BrushStroke::begin(&mut self.doc, ai, &settings, self.primary, erase, view.zoom, is_pen, start, &sample_all));
+                        let mirrors = if self.tools.sym.on() { self.tools.sym.mirrors() } else { Vec::new() };
+                        // painting the quick mask: always in its red, only the coverage counts
+                        let color = if self.doc.layers[ai].name == tools::QUICK_MASK { Color32::from_rgb(230, 40, 70) } else { self.primary };
+                        self.stroke =
+                            Some(BrushStroke::begin_mirrored(&mut self.doc, ai, &settings, color, erase, view.zoom, is_pen, start, &sample_all, mirrors));
                     }
                 }
             }
             if let Some(st) = self.stroke.as_mut() {
                 st.add(&mut self.doc, &samples, &sample_all);
+                if let Some(l) = samples.last() {
+                    self.tools.last_end = Some(pos2(l.x, l.y));
+                }
             }
         }
         if !primary_down {
@@ -875,6 +927,7 @@ impl DrawState {
             self.pixel_grid(&p, rect);
         }
         p.add(Shape::closed_line(quad, Stroke::new(1.0, Color32::from_black_alpha(80))));
+        self.tool_overlay(ui, &p, rect);
 
         // ---- Cursor.
         self.cursor_doc = hover.map(|h| self.view.screen_to_doc(h));
@@ -919,6 +972,7 @@ impl DrawState {
             }
         }
 
+        self.selection_bar(ui, rect);
         self.view_bar(ui, rect);
     }
 
@@ -952,7 +1006,7 @@ impl DrawState {
 
     /// Floating bar at the bottom of the canvas: zoom, fit, rotation and mirror.
     fn view_bar(&mut self, ui: &mut Ui, rect: Rect) {
-        let bar = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 30.0), vec2(372.0, 38.0));
+        let bar = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 30.0), vec2(404.0, 38.0));
         let c = rect.center();
         ui.scope_builder(UiBuilder::new().max_rect(bar), |ui| {
             egui::Frame::new()
@@ -1000,6 +1054,7 @@ impl DrawState {
                         if icon_button(ui, Icon::Flip, self.view.flip, 28.0, "Mirror the view (F) — only the view, not the drawing").clicked() {
                             self.view.flip = !self.view.flip;
                         }
+                        self.symmetry_button(ui);
                     });
                 });
         });

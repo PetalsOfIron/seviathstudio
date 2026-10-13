@@ -16,17 +16,19 @@ use crate::tabs::Tab;
 pub struct DocState {
     pub layers: Vec<Layer>,
     pub paper: Color32,
+    pub selection: Option<crate::select::Selection>,
 }
 
 impl Document {
     pub fn snapshot(&self) -> DocState {
-        DocState { layers: self.layers.clone(), paper: self.paper }
+        DocState { layers: self.layers.clone(), paper: self.paper, selection: self.selection.clone() }
     }
 
     pub fn restore(&mut self, s: &DocState) {
         self.live = None;
         self.layers = s.layers.clone();
         self.paper = s.paper;
+        self.selection = s.selection.clone();
         // fresh revisions so cached thumbnails never show an old picture
         for l in &mut self.layers {
             l.rev = l.rev.wrapping_add(1_000_003);
@@ -36,8 +38,14 @@ impl Document {
 
     /// Same picture and layers as `s` (folder open/closed doesn't count).
     pub fn same_as(&self, s: &DocState) -> bool {
-        self.paper == s.paper && self.layers.len() == s.layers.len() && self.layers.iter().zip(&s.layers).all(|(a, b)| layer_same(a, b))
+        sel_id(&self.selection) == sel_id(&s.selection)
+            && self.paper == s.paper
+            && self.layers.len() == s.layers.len() && self.layers.iter().zip(&s.layers).all(|(a, b)| layer_same(a, b))
     }
+}
+
+fn sel_id(s: &Option<crate::select::Selection>) -> u64 {
+    s.as_ref().map(|s| s.id).unwrap_or(0)
 }
 
 fn meta_same(a: &Layer, b: &Layer) -> bool {
@@ -88,6 +96,9 @@ pub fn describe(before: &DocState, after: &DocState) -> String {
     }
     if before.paper != after.paper {
         return "Paper color".into();
+    }
+    if sel_id(&before.selection) != sel_id(&after.selection) && before.layers.iter().zip(&after.layers).all(|(a, b)| layer_same(a, b)) {
+        return if after.selection.is_none() { "Deselect".into() } else { "Selection".into() };
     }
     let order_b: Vec<(LayerId, Option<LayerId>)> = before.layers.iter().map(|l| (l.id, l.parent)).collect();
     let order_a: Vec<(LayerId, Option<LayerId>)> = after.layers.iter().map(|l| (l.id, l.parent)).collect();
@@ -271,6 +282,13 @@ impl History {
 pub fn revert_only(cur: &DocState, before: &DocState, after: &DocState) -> (DocState, bool) {
     let mut out = cur.clone();
     let mut clean = true;
+    if sel_id(&before.selection) != sel_id(&after.selection) {
+        if sel_id(&cur.selection) == sel_id(&after.selection) {
+            out.selection = before.selection.clone();
+        } else {
+            clean = false;
+        }
+    }
     let b_ids: HashSet<LayerId> = before.layers.iter().map(|l| l.id).collect();
     let a_ids: HashSet<LayerId> = after.layers.iter().map(|l| l.id).collect();
     // layers the step added: remove them again

@@ -17,6 +17,7 @@ use super::{BrushSettings, Edge, Ends, MixRefer};
 use crate::blend::{self, Px};
 use crate::doc::{Document, LayerId, TILE, TileData, TileKey};
 use crate::stroke::{LiveStroke, StrokeLook, StrokeTile};
+use crate::symmetry::Mirror;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sample {
@@ -72,6 +73,8 @@ pub struct Stroke {
     last_sample: (f32, f32),
     recent: Vec<(f32, f32, f32)>, // last particles (x, y, r), for "keep particles apart"
     before: HashMap<TileKey, Option<TileData>>,
+    /// Symmetry: every dab is also drawn at these mirror images.
+    mirrors: Vec<Mirror>,
 }
 
 fn rgb01(c: Color32) -> [f32; 3] {
@@ -90,6 +93,23 @@ impl Stroke {
         pen: bool,
         at: Sample,
         sample_all: SampleAll,
+    ) -> Stroke {
+        Self::begin_mirrored(doc, li, s, color, erase, zoom, pen, at, sample_all, Vec::new())
+    }
+
+    /// Like `begin`, with symmetry copies.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_mirrored(
+        doc: &mut Document,
+        li: usize,
+        s: &BrushSettings,
+        color: Color32,
+        erase: bool,
+        zoom: f32,
+        pen: bool,
+        at: Sample,
+        sample_all: SampleAll,
+        mirrors: Vec<Mirror>,
     ) -> Stroke {
         let layer = doc.layers[li].id;
         let direct = s.mix > 0.0 && !erase;
@@ -111,6 +131,7 @@ impl Stroke {
                     erase,
                     lock_alpha: doc.layers[li].lock_alpha,
                 },
+                sel: doc.selection.clone(),
             });
         }
         let seed = (at.x.to_bits() ^ at.y.to_bits().rotate_left(7)) | 1;
@@ -140,6 +161,7 @@ impl Stroke {
             last_sample: (f32::MAX, f32::MAX),
             recent: Vec::new(),
             before: HashMap::new(),
+            mirrors,
         };
         st.stamp(doc, at, sample_all);
         st
@@ -455,23 +477,39 @@ impl Stroke {
         [x0, y0, x1, y1]
     }
 
+    /// Where a dab and its symmetry copies land: (x, y, angle). Copies that fall on the
+    /// original (on the axis) are left out so the line doesn't get heavier there.
+    fn copies(&self, x: f32, y: f32, r: f32, ang: f32) -> Vec<(f32, f32, f32)> {
+        let mut out = vec![(x, y, ang)];
+        for m in &self.mirrors {
+            let (mx, my) = m.point(x, y);
+            if ((mx - x).powi(2) + (my - y).powi(2)).sqrt() < (r * 0.25).max(0.5) {
+                continue;
+            }
+            out.push((mx, my, m.angle(ang)));
+        }
+        out
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn stamp_buffer(&mut self, doc: &mut Document, x: f32, y: f32, r: f32, ang: f32, alpha: f32, color: [f32; 3], p: f32, variant: u32) {
         let (w, h) = (doc.w, doc.h);
-        let Some(live) = doc.live.as_mut() else { return };
-        let tiles = &mut live.tiles;
-        let rect = Self::for_dab_pixels(&self.s, w, h, x, y, r, ang, variant, |key, i, _, _, mv| {
-            let t = tiles.entry(key).or_insert_with(StrokeTile::new);
-            let m = (mv * alpha).min(1.0);
-            let px = &mut t.px[i];
-            let k = 1.0 - m;
-            *px = [px[0] * k + color[0] * m, px[1] * k + color[1] * m, px[2] * k + color[2] * m, px[3] * k + m];
-            if p > t.pr[i] {
-                t.pr[i] = p;
-            }
-        });
-        self.grow(rect);
-        doc.mark_dirty_rect(rect[0], rect[1], rect[2], rect[3]);
+        for (x, y, ang) in self.copies(x, y, r, ang) {
+            let Some(live) = doc.live.as_mut() else { return };
+            let tiles = &mut live.tiles;
+            let rect = Self::for_dab_pixels(&self.s, w, h, x, y, r, ang, variant, |key, i, _, _, mv| {
+                let t = tiles.entry(key).or_insert_with(StrokeTile::new);
+                let m = (mv * alpha).min(1.0);
+                let px = &mut t.px[i];
+                let k = 1.0 - m;
+                *px = [px[0] * k + color[0] * m, px[1] * k + color[1] * m, px[2] * k + color[2] * m, px[3] * k + m];
+                if p > t.pr[i] {
+                    t.pr[i] = p;
+                }
+            });
+            self.grow(rect);
+            doc.mark_dirty_rect(rect[0], rect[1], rect[2], rect[3]);
+        }
     }
 
     fn grow(&mut self, r: [i32; 4]) {
@@ -552,31 +590,40 @@ impl Stroke {
         let v = self.pick_variant();
         let (w, h) = (doc.w, doc.h);
         let li = self.li;
-        let before = &mut self.before;
-        let layer = &mut doc.layers[li];
-        let rect = Self::for_dab_pixels(&self.s, w, h, x, y, r, ang, v, |key, i, px, py, mv| {
-            before.entry(key).or_insert_with(|| layer.tiles.get(&key).cloned());
-            if lock_alpha && !layer.tiles.contains_key(&key) {
-                return;
-            }
-            let mut m = (mv * f).min(1.0);
-            if let Some(t) = tex {
-                m *= 1.0 - texture.min(1.0) * textures::sample_a(t, px as f32 + 0.5, py as f32 + 0.5, tex_scale);
-            }
-            let tile = layer.tile_mut(key);
-            let o = blend::to_px(tile[i]);
-            let k = 1.0 - m;
-            let paint: Px = [rgb[0] * a, rgb[1] * a, rgb[2] * a, a];
-            let mut out = [o[0] * k + paint[0] * m, o[1] * k + paint[1] * m, o[2] * k + paint[2] * m, o[3] * k + paint[3] * m];
-            if lock_alpha {
-                let s = if out[3] > 0.0 { o[3] / out[3] } else { 0.0 };
-                out = [out[0] * s, out[1] * s, out[2] * s, o[3]];
-            }
-            tile[i] = blend::from_px(out);
-        });
-        self.grow(rect);
-        doc.layers[li].rev += 1;
-        doc.mark_dirty_rect(rect[0], rect[1], rect[2], rect[3]);
+        let sel = doc.selection.clone();
+        for (x, y, ang) in self.copies(x, y, r, ang) {
+            let before = &mut self.before;
+            let layer = &mut doc.layers[li];
+            let rect = Self::for_dab_pixels(&self.s, w, h, x, y, r, ang, v, |key, i, px, py, mv| {
+                let mut m = (mv * f).min(1.0);
+                if let Some(sel) = &sel {
+                    match sel.tile(key) {
+                        Some(t) if t[i] > 0 => m *= t[i] as f32 / 255.0,
+                        _ => return,
+                    }
+                }
+                before.entry(key).or_insert_with(|| layer.tiles.get(&key).cloned());
+                if lock_alpha && !layer.tiles.contains_key(&key) {
+                    return;
+                }
+                if let Some(t) = tex {
+                    m *= 1.0 - texture.min(1.0) * textures::sample_a(t, px as f32 + 0.5, py as f32 + 0.5, tex_scale);
+                }
+                let tile = layer.tile_mut(key);
+                let o = blend::to_px(tile[i]);
+                let k = 1.0 - m;
+                let paint: Px = [rgb[0] * a, rgb[1] * a, rgb[2] * a, a];
+                let mut out = [o[0] * k + paint[0] * m, o[1] * k + paint[1] * m, o[2] * k + paint[2] * m, o[3] * k + paint[3] * m];
+                if lock_alpha {
+                    let s = if out[3] > 0.0 { o[3] / out[3] } else { 0.0 };
+                    out = [out[0] * s, out[1] * s, out[2] * s, o[3]];
+                }
+                tile[i] = blend::from_px(out);
+            });
+            self.grow(rect);
+            doc.layers[li].rev += 1;
+            doc.mark_dirty_rect(rect[0], rect[1], rect[2], rect[3]);
+        }
     }
 
     // ---------- Ends ----------
