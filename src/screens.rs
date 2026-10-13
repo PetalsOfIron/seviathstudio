@@ -149,6 +149,35 @@ fn screens() {
     h.key_press(Key::Escape);
     h.run_steps(2);
 
+    // References: a colorful picture in the Sub view, laid over the canvas, color taken by a click.
+    {
+        let pic = image::RgbaImage::from_fn(320, 240, |x, y| {
+            let h = x as f32 / 320.0;
+            let v = 1.0 - y as f32 / 300.0;
+            let c = eframe::egui::Color32::from(eframe::egui::ecolor::Hsva::new(h, 0.85, v, 1.0));
+            image::Rgba([c.r(), c.g(), c.b(), 255])
+        });
+        let mut png = Vec::new();
+        pic.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let d = h.state_mut().draw_mut();
+        d.refs.add_bytes("rainbow", &png).unwrap();
+        d.refs.overlay = true;
+        d.refs.grid = true;
+        d.show_references();
+        d.set_color_open(false);
+    }
+    h.run_steps(4);
+    save(&mut h, "11_references");
+    let before = h.state().draw_mut_ref().primary;
+    let target = h.state().draw_mut_ref().reference_view_rect().expect("reference view").center();
+    h.hover_at(target);
+    h.step();
+    button(&h, target, true);
+    h.step();
+    button(&h, target, false);
+    h.run_steps(2);
+    assert_ne!(h.state().draw_mut_ref().primary, before, "clicking the reference should take its color");
+
     // History window and settings pages
     h.state_mut().open_window(true, None);
     h.run_steps(3);

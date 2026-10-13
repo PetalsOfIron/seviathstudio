@@ -2,7 +2,7 @@
 // Painting itself arrives with the brush engine; this is the layout and all panel state.
 
 use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, CursorIcon, Event, FontId, Key, Layout, Margin, Modifiers,
+    self, Align, Color32, CornerRadius, CursorIcon, Event, Key, Layout, Margin, Modifiers,
     MouseWheelUnit, Panel, PointerButton, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, TouchPhase, Ui, UiBuilder, Vec2,
     ecolor::Hsva, pos2, vec2,
 };
@@ -10,6 +10,7 @@ use eframe::egui::{
 use crate::canvas::{self as cv, CanvasRenderer};
 use crate::colorpick;
 use crate::history::{self, DocState};
+use crate::refs::RefStore;
 use crate::settings::{CursorStyle, Settings, WheelAction};
 use crate::doc::{Document, LayerId, LayerKind};
 use crate::icons::Icon;
@@ -21,6 +22,7 @@ use crate::widgets::{self, icon_button, section_title, segmented};
 
 mod brushes;
 mod layers;
+mod references;
 
 use brushes::BrushLib;
 
@@ -151,6 +153,10 @@ pub struct DrawState {
     notice: Option<&'static str>,
     /// App settings (copied in by the app when they change).
     pub set: Settings,
+    /// Reference pictures (Sub view → References).
+    pub refs: RefStore,
+    ref_popout: bool,
+    ref_view_rect: Option<Rect>, // where the docked reference picture was drawn last frame
     /// Document as it was when the current change started (recorded when the pointer lifts).
     pending: Option<DocState>,
     label_hint: Option<String>,
@@ -206,6 +212,9 @@ impl Default for DrawState {
             cursor_doc: None,
             notice: None,
             set: Settings::default(),
+            refs: RefStore::in_memory(),
+            ref_popout: false,
+            ref_view_rect: None,
             pending: None,
             label_hint: None,
             changes: Vec::new(),
@@ -255,6 +264,7 @@ impl DrawState {
         self.renderer.nav_fps = self.set.navigator_fps;
 
         let frame_before = self.doc.snapshot();
+        self.handle_dropped_files(ui.ctx());
         self.shortcuts(ui.ctx());
         self.layer_shortcuts(ui.ctx());
 
@@ -288,6 +298,7 @@ impl DrawState {
             .frame(egui::Frame::new().fill(Color32::from_rgb(r, g, b)))
             .show(ui, |ui| self.canvas(ui));
 
+        self.reference_window(ui.ctx());
         self.track_history(ui.ctx(), frame_before);
     }
 
@@ -320,6 +331,17 @@ impl DrawState {
         self.renaming = None;
         self.drag_layer = None;
         self.fix_active();
+    }
+
+    #[cfg(test)]
+    pub fn reference_view_rect(&self) -> Option<Rect> {
+        self.ref_view_rect
+    }
+
+    #[cfg(test)]
+    pub fn show_references(&mut self) {
+        self.subview_open = true;
+        self.subview_tab = SubTab::References;
     }
 
     #[cfg(test)]
@@ -532,11 +554,14 @@ impl DrawState {
         ui.add_space(4.0);
 
         let w = ui.available_width();
-        let (rect, resp) = ui.allocate_exact_size(vec2(w, self.subview_h), Sense::click_and_drag());
-        let p = ui.painter_at(rect);
-        p.rect_filled(rect, CornerRadius::same(6), BG);
-        match self.subview_tab {
-            SubTab::Navigator => {
+        if self.subview_tab == SubTab::References {
+            let h = self.subview_h;
+            self.references_panel(ui, w, h, false);
+        } else {
+            let (rect, resp) = ui.allocate_exact_size(vec2(w, self.subview_h), Sense::click_and_drag());
+            let p = ui.painter_at(rect);
+            p.rect_filled(rect, CornerRadius::same(6), BG);
+            {
                 let size = self.doc_size();
                 let z = ((rect.width() - 16.0) / size.x).min((rect.height() - 16.0) / size.y);
                 let page = Rect::from_center_size(rect.center(), size * z);
@@ -559,15 +584,6 @@ impl DrawState {
                 }
                 resp.on_hover_text("Whole drawing. Click or drag to move the view there.")
                     .on_hover_cursor(CursorIcon::Grab);
-            }
-            SubTab::References => {
-                p.text(
-                    rect.center(),
-                    Align2::CENTER_CENTER,
-                    "Reference images arrive with file opening",
-                    FontId::proportional(12.0),
-                    TEXT_DIM,
-                );
             }
         }
 
@@ -806,6 +822,7 @@ impl DrawState {
             p.add(Shape::convex_polygon(shadow, Color32::from_black_alpha(90), Stroke::NONE));
         }
         self.renderer.paint(&p, &self.view, &self.doc);
+        self.reference_overlay(&p);
         if self.set.pixel_grid && self.view.zoom >= self.set.pixel_grid_from {
             self.pixel_grid(&p, rect);
         }
