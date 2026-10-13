@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // SeviathStudio — native Rust version (egui). Being ported from the Svelte app tab by tab.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // no console window in release builds

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Undo history. Every step keeps the document as it was before and after. Tiles are shared
 // copy-on-write, so a step only costs memory for the tiles it really changed.
 // Steps remember their tab, so "undo this tab" and "undo everything" can both work, and any

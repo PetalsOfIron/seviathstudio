@@ -2,6 +2,8 @@
 name = "seviathstudio"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-or-later"
+description = "Draw, rig, animate and stream a 2D character from one file"
 
 [dependencies]
 dirs = "6"

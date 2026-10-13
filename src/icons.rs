@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Line icons drawn on a 16×16 grid, scaled into any rect. Own drawings, no icon font needed.
 
 use std::f32::consts::PI;

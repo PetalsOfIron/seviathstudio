@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // The stroke engine: pen samples → stabilizer rope → smooth curve → evenly spaced dabs (pressure,
 // taper, jitter, scatter, particles, direction) → stroke buffer (or straight onto the layer for
 // color-mixing brushes) → whole-stroke edges when the pen lifts → merged into the layer.

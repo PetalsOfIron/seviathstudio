@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Canvas view: zoom, pan, rotation and mirror. Maps between document pixels and screen points.
 //
 // screen = screen_center + R(angle) · M(flip) · (doc − center) · zoom

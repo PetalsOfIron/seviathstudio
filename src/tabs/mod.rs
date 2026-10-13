@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // The main tabs. One project flows through all of them; each tab keeps its own state
 // (zoom, tool, selection…) while you switch around.
 

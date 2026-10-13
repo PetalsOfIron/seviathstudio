@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Color picker in the Seviath style: a full-width saturation/brightness square, a hue bar,
 // and old → new swatches. Keeps the hue when the color goes gray so dragging back feels right.
 

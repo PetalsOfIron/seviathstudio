@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Reference images: kept as normalized PNG copies in your app-data folder
 // (Windows: %APPDATA%\SeviathStudio\references) so they come back next time.
 // Each reference remembers its own zoom, position, rotation, mirror and grayscale.

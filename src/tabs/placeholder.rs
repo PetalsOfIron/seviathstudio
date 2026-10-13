@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Page for tabs that are not ported to the Rust version yet: says plainly what will be there.
 
 use eframe::egui::{self, Align2, CornerRadius, FontId, Margin, RichText, Sense, Stroke, Ui, Vec2, pos2, vec2};

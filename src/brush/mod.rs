@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Brush settings and the built-in brush collection. Every brush is made of the same settings,
 // so imported and saved brushes work exactly like the built-in ones (same as the web version).
 

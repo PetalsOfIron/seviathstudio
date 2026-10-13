@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // References in the Sub view (and a bigger pop-out window): add pictures, look at them in any
 // zoom/turn/mirror/gray, take colors with a click, make a palette, and lay one over the canvas.
 

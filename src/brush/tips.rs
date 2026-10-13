@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Brush tips ("dabs"): each tip is drawn once as a 256×256 mask, gets its edge effects
 // (ragged, torn, wet rim, grain, bristle streaks, warp, in-tip texture, extra tips), and is kept
 // at several sizes (mip levels) so small dabs stay smooth. Ported from the web version.

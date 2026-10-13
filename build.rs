@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Puts the snake icon into the Windows .exe (Explorer, desktop shortcuts, taskbar).
 // The icon file is made from the logo by `cargo test --release write_app_icon`.
 

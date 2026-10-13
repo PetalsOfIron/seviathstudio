@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // The Settings window pages. Every setting here is saved and takes effect right away.
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, Event, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
@@ -460,7 +461,8 @@ fn info(ui: &mut Ui) {
     });
     ui.add_space(8.0);
     section_title(ui, "Open source");
-    ui.label("SeviathStudio is open source: anyone can read, build and improve it.");
+    ui.label("SeviathStudio is free software under the GNU GPL v3 or later: anyone may run, study, change and share it,");
+    ui.label("and shared changes must stay open under the same license. Brushes and art keep their own licenses.");
     ui.add_space(4.0);
     ui.label(RichText::new("Built with:").strong());
     for (name, lic) in [

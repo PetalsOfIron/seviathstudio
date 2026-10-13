@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Small custom widgets shared by all tabs, styled in the Seviath theme.
 
 use eframe::egui::{

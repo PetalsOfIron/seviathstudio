@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // The stroke being drawn: its paint lives in its own buffer until the pen lifts, so a stroke never
 // gets darker than its opacity where it overlaps itself, and paper grain / textures apply to the
 // whole stroke. The canvas shows layer + live stroke; on pen-up it is merged into the layer.
