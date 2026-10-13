@@ -9,6 +9,7 @@ mod brush;
 mod canvas;
 mod colorpick;
 mod doc;
+mod files;
 mod history;
 mod refs;
 mod icons;

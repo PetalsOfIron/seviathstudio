@@ -57,6 +57,11 @@ impl DrawState {
         let mut paths = Vec::new();
         for f in dropped {
             let p = f.path().to_path_buf();
+            let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+            if ["seviath", "psd", "ora", "kra"].contains(&ext.as_str()) {
+                self.open_requests.push(p); // project files open as documents
+                continue;
+            }
             let ok = p.extension().map(|e| PICTURES.contains(&e.to_string_lossy().to_lowercase().as_str())).unwrap_or(false);
             if ok {
                 paths.push(p);

@@ -1,0 +1,290 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Files: SeviathStudio projects (.seviath), PSD, OpenRaster (.ora) and flat pictures.
+
+pub mod kra;
+pub mod ora;
+pub mod project;
+pub mod psd;
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+
+use eframe::egui::Color32;
+use rayon::prelude::*;
+
+use crate::blend;
+use crate::doc::{Document, Layer, LayerKind, TILE, TileData, TileKey};
+
+/// Biggest canvas side we open (bigger files are refused instead of eating all memory).
+pub const MAX_SIDE: u32 = 30_000;
+
+/// Unpremultiplied RGBA picture → tiles (empty tiles are left out). `ox, oy` = where the
+/// picture's top-left lands on the canvas.
+pub fn tiles_from_rgba(img: &image::RgbaImage, ox: i32, oy: i32, doc_w: u32, doc_h: u32) -> HashMap<TileKey, TileData> {
+    let t = TILE as i32;
+    let (w, h) = (img.width() as i32, img.height() as i32);
+    let x0 = ox.max(0);
+    let y0 = oy.max(0);
+    let x1 = (ox + w).min(doc_w as i32);
+    let y1 = (oy + h).min(doc_h as i32);
+    let mut out = HashMap::new();
+    if x1 <= x0 || y1 <= y0 {
+        return out;
+    }
+    let keys: Vec<TileKey> = (y0.div_euclid(t)..=(y1 - 1).div_euclid(t))
+        .flat_map(|ty| (x0.div_euclid(t)..=(x1 - 1).div_euclid(t)).map(move |tx| (tx, ty)))
+        .collect();
+    let made: Vec<(TileKey, Vec<Color32>)> = keys
+        .into_par_iter()
+        .filter_map(|(tx, ty)| {
+            let mut px = vec![Color32::TRANSPARENT; TILE * TILE];
+            let mut any = false;
+            for j in 0..t {
+                let y = ty * t + j;
+                if y < y0 || y >= y1 {
+                    continue;
+                }
+                for i in 0..t {
+                    let x = tx * t + i;
+                    if x < x0 || x >= x1 {
+                        continue;
+                    }
+                    let p = img.get_pixel((x - ox) as u32, (y - oy) as u32).0;
+                    if p[3] != 0 {
+                        px[(j * t + i) as usize] = Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]);
+                        any = true;
+                    }
+                }
+            }
+            any.then_some(((tx, ty), px))
+        })
+        .collect();
+    for (k, px) in made {
+        out.insert(k, Arc::new(px));
+    }
+    out
+}
+
+/// A layer's own pixels as one unpremultiplied picture covering `(x, y, w, h)` of the canvas.
+pub fn layer_rgba(layer: &Layer, x: i32, y: i32, w: u32, h: u32) -> image::RgbaImage {
+    let mut img = image::RgbaImage::new(w, h);
+    let t = TILE as i32;
+    for (key, tile) in &layer.tiles {
+        let (bx, by) = (key.0 * t, key.1 * t);
+        for j in 0..t {
+            let py = by + j - y;
+            if py < 0 || py >= h as i32 {
+                continue;
+            }
+            for i in 0..t {
+                let px = bx + i - x;
+                if px < 0 || px >= w as i32 {
+                    continue;
+                }
+                let c = tile[(j * t + i) as usize];
+                if c.a() != 0 {
+                    img.put_pixel(px as u32, py as u32, image::Rgba(c.to_srgba_unmultiplied()));
+                }
+            }
+        }
+    }
+    img
+}
+
+/// The smallest rectangle holding all of a layer's paint, or None when it is empty.
+pub fn layer_bounds(layer: &Layer, doc_w: u32, doc_h: u32) -> Option<(i32, i32, i32, i32)> {
+    let t = TILE as i32;
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for (key, tile) in &layer.tiles {
+        for j in 0..t {
+            for i in 0..t {
+                if tile[(j * t + i) as usize].a() != 0 {
+                    let (x, y) = (key.0 * t + i, key.1 * t + j);
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x + 1);
+                    y1 = y1.max(y + 1);
+                }
+            }
+        }
+    }
+    let (x1, y1) = (x1.min(doc_w as i32), y1.min(doc_h as i32));
+    (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
+}
+
+/// The whole picture flattened (paper included when it is shown), unpremultiplied.
+pub fn flatten(doc: &Document) -> image::RgbaImage {
+    let keys: Vec<TileKey> = (0..doc.tiles_y()).flat_map(|ty| (0..doc.tiles_x()).map(move |tx| (tx, ty))).collect();
+    let tiles: Vec<(TileKey, Vec<blend::Px>)> = keys.into_par_iter().map(|k| (k, doc.flatten_tile(k))).collect();
+    let mut img = image::RgbaImage::new(doc.w, doc.h);
+    for ((tx, ty), px) in tiles {
+        for j in 0..TILE {
+            let y = ty as usize * TILE + j;
+            if y >= doc.h as usize {
+                break;
+            }
+            for i in 0..TILE {
+                let x = tx as usize * TILE + i;
+                if x >= doc.w as usize {
+                    break;
+                }
+                let c = blend::from_px(px[j * TILE + i]);
+                img.put_pixel(x as u32, y as u32, image::Rgba(c.to_srgba_unmultiplied()));
+            }
+        }
+    }
+    img
+}
+
+/// A small preview (longest side `max`), for project thumbnails.
+pub fn thumbnail(doc: &Document, max: u32) -> image::RgbaImage {
+    let full = flatten(doc);
+    let k = max as f32 / doc.w.max(doc.h) as f32;
+    if k >= 1.0 {
+        return full;
+    }
+    let (w, h) = (((doc.w as f32 * k).round() as u32).max(1), ((doc.h as f32 * k).round() as u32).max(1));
+    image::imageops::thumbnail(&full, w, h)
+}
+
+/// Picture formats for "Export".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Flat {
+    Png,
+    Jpeg,
+    Webp,
+}
+
+pub fn export_flat(doc: &Document, path: &Path, kind: Flat, jpeg_quality: u8) -> Result<(), String> {
+    let img = flatten(doc);
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let mut w = std::io::BufWriter::new(file);
+    match kind {
+        Flat::Png => img.write_to(&mut w, image::ImageFormat::Png).map_err(|e| e.to_string()),
+        Flat::Webp => img.write_to(&mut w, image::ImageFormat::WebP).map_err(|e| e.to_string()),
+        Flat::Jpeg => {
+            // JPEG has no transparency: put it on the paper color (white when the paper is hidden)
+            let bg = if doc.paper_visible() { doc.paper } else { Color32::WHITE };
+            let rgb = image::RgbImage::from_fn(img.width(), img.height(), |x, y| {
+                let p = img.get_pixel(x, y).0;
+                let a = p[3] as f32 / 255.0;
+                let mix = |c: u8, b: u8| (c as f32 * a + b as f32 * (1.0 - a)).round() as u8;
+                image::Rgb([mix(p[0], bg.r()), mix(p[1], bg.g()), mix(p[2], bg.b())])
+            });
+            let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut w, jpeg_quality.clamp(1, 100));
+            rgb.write_with_encoder(enc).map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// Decode a picture with size limits (also used to start a project from a picture).
+pub fn read_picture(path: &Path) -> Result<image::RgbaImage, String> {
+    let mut reader = image::ImageReader::open(path).map_err(|e| e.to_string())?.with_guessed_format().map_err(|e| e.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_SIDE);
+    limits.max_image_height = Some(MAX_SIDE);
+    limits.max_alloc = Some(2048 << 20);
+    reader.limits(limits);
+    Ok(reader.decode().map_err(|e| format!("Can't read this picture: {e}"))?.to_rgba8())
+}
+
+/// Decode a picture held in memory, with the same size limits.
+pub fn decode_limited(bytes: Vec<u8>) -> Result<image::RgbaImage, String> {
+    let mut r = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|e| e.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_SIDE);
+    limits.max_image_height = Some(MAX_SIDE);
+    limits.max_alloc = Some(2048 << 20);
+    r.limits(limits);
+    Ok(r.decode().map_err(|e| format!("Can't read this picture: {e}"))?.to_rgba8())
+}
+
+/// A new project made from a picture: the picture becomes Layer 1 on a hidden paper.
+pub fn document_from_picture(img: &image::RgbaImage, name: &str) -> Document {
+    let mut doc = Document::new(img.width(), img.height());
+    doc.layers[0].name = name.to_owned();
+    doc.layers[0].tiles = tiles_from_rgba(img, 0, 0, img.width(), img.height());
+    doc.layers[0].rev += 1;
+    if img.pixels().any(|p| p.0[3] < 255) {
+        // keep transparent pictures transparent
+        if let Some(p) = doc.layers.iter_mut().find(|l| l.kind == LayerKind::Paper) {
+            p.visible = false;
+        }
+    }
+    doc.mark_all_dirty();
+    doc
+}
+
+#[cfg(test)]
+pub(crate) mod testdoc {
+    use super::*;
+    use crate::doc::{Blend, LayerKind};
+
+    /// A small document with a folder, a clipped Multiply layer, a locked layer and a hidden one.
+    pub fn sample() -> Document {
+        let mut d = Document::new(300, 200);
+        d.paper = Color32::from_rgb(250, 245, 230);
+        let red = image::RgbaImage::from_fn(120, 80, |x, _| image::Rgba([220, 40, 40, if x < 100 { 255 } else { 128 }]));
+        d.layers[0].name = "Lines".into();
+        d.layers[0].tiles = tiles_from_rgba(&red, 30, 40, 300, 200);
+        let mut shade = d.new_layer("Shadow", LayerKind::Raster);
+        shade.blend = Blend::Multiply;
+        shade.clip = true;
+        shade.opacity = 60.0;
+        let blue = image::RgbaImage::from_pixel(60, 60, image::Rgba([30, 60, 200, 255]));
+        shade.tiles = tiles_from_rgba(&blue, 200, 100, 300, 200);
+        let top = d.layers[0].id;
+        let sid = d.insert_layer(shade, top);
+        let f = d.group(sid, "Hair").unwrap();
+        let fi = d.index_of(f).unwrap();
+        d.layers[fi].blend = Blend::Normal;
+        d.layers[fi].opacity = 80.0;
+        let mut hidden = d.new_layer("Hidden sketch", LayerKind::Raster);
+        hidden.visible = false;
+        hidden.locked = true;
+        hidden.tiles = tiles_from_rgba(&image::RgbaImage::from_pixel(10, 10, image::Rgba([0, 0, 0, 255])), 0, 0, 300, 200);
+        let top = d.layers[0].id;
+        d.insert_layer(hidden, top);
+        d
+    }
+
+    /// Layer structure as plain values, for comparing round trips.
+    pub fn shape(d: &Document) -> Vec<(String, LayerKind, bool, bool, bool, u8, Blend, usize)> {
+        d.layers
+            .iter()
+            .map(|l| (l.name.clone(), l.kind, l.visible, l.clip, l.locked, l.opacity.round() as u8, l.blend, d.depth(d.index_of(l.id).unwrap())))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picture_to_tiles_and_back() {
+        let img = image::RgbaImage::from_fn(300, 270, |x, y| image::Rgba([(x % 256) as u8, (y % 256) as u8, 7, if (x + y) % 3 == 0 { 0 } else { 200 }]));
+        let mut d = Document::new(400, 400);
+        d.layers[0].tiles = tiles_from_rgba(&img, 50, 60, 400, 400);
+        assert_eq!(layer_bounds(&d.layers[0], 400, 400).map(|b| (b.0, b.1)), Some((50, 60)));
+        let back = layer_rgba(&d.layers[0], 50, 60, 300, 270);
+        for (a, b) in img.pixels().zip(back.pixels()) {
+            if a.0[3] == 0 {
+                assert_eq!(b.0[3], 0);
+            } else {
+                for c in 0..4 {
+                    assert!((a.0[c] as i32 - b.0[c] as i32).abs() <= 1, "{a:?} vs {b:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn flatten_includes_paper() {
+        let d = testdoc::sample();
+        let img = flatten(&d);
+        assert_eq!(img.get_pixel(5, 190).0, [250, 245, 230, 255]); // paper only
+        assert_eq!(img.dimensions(), (300, 200));
+    }
+}

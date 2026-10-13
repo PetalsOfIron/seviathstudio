@@ -2,7 +2,7 @@
 
 Open-source app to **draw, rig, animate and stream a 2D character from one file**, with reliable PSD export — made for VTuber artists, riggers and VTubers. Native Rust, built with [egui](https://github.com/emilk/egui).
 
-This is the Rust version. It is being built tab by tab: **Draw** works today (brush engine with 103 brushes and pen pressure, layers with blend modes, clipping and folders, undo history); Parts, Rig, Physics, Animate and Stream follow.
+This is the Rust version. It is being built tab by tab: **Draw** works today (brush engine with 103 brushes and pen pressure, layers with blend modes, clipping and folders, undo history, projects with autosave, PSD / OpenRaster / Krita import and PSD / ORA / PNG / JPEG / WebP export); Parts, Rig, Physics, Animate and Stream follow.
 
 ## Build and run
 
@@ -26,6 +26,7 @@ cargo test --release
 Runs the unit tests and a full UI run that paints, undoes and redoes with simulated input. Pictures land in `target/screens/`:
 
 - `01_draw.png` … `10_settings_canvas.png` — the app at each step of the UI run
+- `projects_manager.png`, `new_project.png`, `unsaved_changes.png` — the file windows (from `cargo test --release files_screens`)
 - `brush_sheet.png` — every brush painted on one image (`cargo test --release brush_sheet`)
 - `texture_sheet.png` — every texture in its natural colors (`cargo test --release texture_sheet`)
 
@@ -33,7 +34,8 @@ Performance check: `cargo test --release bench_full_redraw -- --ignored --nocapt
 
 ## Code map
 
-- `src/app.rs` — shell: top bar, workspaces, tabs, status bar, history and settings windows
+- `src/app/` — shell: top bar, workspaces, tabs, status bar, history and settings windows; `app/files.rs` is the File menu, saving/opening in the background, autosave, the New project dialog and the project manager
+- `src/files/` — file formats: `project.rs` (`.seviath`, a ZIP of layer tiles + JSON), `psd.rs`, `ora.rs`, `kra.rs`, flat picture export
 - `src/settings.rs`, `src/settings_ui.rs` — settings (saved as JSON in your user config folder) and their pages
 - `src/history.rs` — undo: copy-on-write snapshots, undo per tab or everything, undo a single step from the middle
 - `src/tabs/` — one module per tab (`draw.rs` + `draw/layers.rs` + `draw/brushes.rs` is the Draw tab)

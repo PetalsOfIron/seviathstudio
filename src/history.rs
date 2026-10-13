@@ -134,6 +134,9 @@ pub struct History {
     pub cursor: usize,
     pub max_steps: usize,
     pub max_bytes: usize,
+    /// Changes every time the document changes through history (push/undo/redo/jump);
+    /// "unsaved changes" = generation differs from the one at the last save.
+    pub generation: u64,
 }
 
 /// Result of "undo this tab" when other tabs have newer steps.
@@ -146,7 +149,7 @@ pub enum TabUndo {
 
 impl Default for History {
     fn default() -> Self {
-        Self { entries: Vec::new(), cursor: 0, max_steps: 200, max_bytes: 2048 << 20 }
+        Self { entries: Vec::new(), cursor: 0, max_steps: 200, max_bytes: 2048 << 20, generation: 0 }
     }
 }
 
@@ -171,6 +174,7 @@ impl History {
         let bytes = changed_bytes(&before, &after);
         self.entries.push(Entry { label, tab, before, after, time, bytes });
         self.cursor = self.entries.len();
+        self.generation += 1;
         self.trim();
     }
 
@@ -181,6 +185,13 @@ impl History {
             self.entries.remove(0);
             self.cursor = self.cursor.saturating_sub(1);
         }
+    }
+
+    /// Forget all steps (a different document was opened). The generation keeps counting.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.cursor = 0;
+        self.generation += 1;
     }
 
     pub fn set_limits(&mut self, steps: usize, megabytes: usize) {
@@ -203,6 +214,7 @@ impl History {
         }
         self.cursor -= 1;
         doc.restore(&self.entries[self.cursor].before);
+        self.generation += 1;
         Some(&self.entries[self.cursor].label)
     }
 
@@ -212,6 +224,7 @@ impl History {
         }
         doc.restore(&self.entries[self.cursor].after);
         self.cursor += 1;
+        self.generation += 1;
         Some(&self.entries[self.cursor - 1].label)
     }
 
@@ -224,6 +237,7 @@ impl History {
         let state = if n == 0 { &self.entries[0].before } else { &self.entries[n - 1].after };
         doc.restore(state);
         self.cursor = n;
+        self.generation += 1;
     }
 
     /// Undo the newest step of `tab`.

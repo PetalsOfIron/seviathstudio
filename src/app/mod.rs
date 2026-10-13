@@ -13,6 +13,8 @@ use crate::tabs::{self, Tab, draw::DrawState};
 use crate::theme::{self, *};
 use crate::widgets::{self, icon_button, segmented, tab_button};
 
+mod files;
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -38,6 +40,7 @@ pub struct SeviathApp {
     account_open: bool,
     pen: PenMonitor,
     notice: Option<(String, f64)>,
+    files: files::FileState,
 }
 
 impl SeviathApp {
@@ -47,6 +50,7 @@ impl SeviathApp {
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let persist = !cfg!(test);
         let settings = if persist { Settings::load() } else { Settings::default() };
+        let start_projects = settings.start_with_projects;
         let mut draw = DrawState::default();
         if persist {
             draw.refs = crate::refs::RefStore::load_saved();
@@ -68,6 +72,7 @@ impl SeviathApp {
             account_open: false,
             pen: PenMonitor::default(),
             notice: None,
+            files: files::FileState::starting(persist && start_projects),
         }
     }
 
@@ -79,6 +84,36 @@ impl SeviathApp {
     #[cfg(test)]
     pub fn draw_mut_ref(&self) -> &DrawState {
         &self.draw
+    }
+
+    #[cfg(test)]
+    pub fn files_mut(&mut self) -> &mut files::FileState {
+        &mut self.files
+    }
+
+    #[cfg(test)]
+    pub fn settings_mut(&mut self) -> &mut Settings {
+        &mut self.settings
+    }
+
+    #[cfg(test)]
+    pub fn file_name(&self) -> &str {
+        &self.files.name
+    }
+
+    #[cfg(test)]
+    pub fn test_dirty(&self) -> bool {
+        self.is_dirty()
+    }
+
+    #[cfg(test)]
+    pub fn test_busy(&self) -> bool {
+        self.busy().is_some()
+    }
+
+    #[cfg(test)]
+    pub fn test_open(&mut self, path: std::path::PathBuf) {
+        self.request(files::Pending::Open(path));
     }
 
     #[cfg(test)]
@@ -232,7 +267,9 @@ impl SeviathApp {
             ui.label(RichText::new("Seviath").size(17.0).strong().color(TEXT));
             ui.add_space(-8.0);
             ui.label(RichText::new("Studio").size(17.0).color(EMERALD));
-            ui.add_space(14.0);
+            ui.add_space(10.0);
+            self.file_menu(ui);
+            ui.add_space(10.0);
 
             segmented(ui, &mut self.workspace, &[(Workspace::Character, "Character"), (Workspace::Design, "Design")]);
             ui.add_space(14.0);
@@ -295,6 +332,11 @@ impl SeviathApp {
                 (_, t) => format!("{} tab", t.label()),
             };
             ui.label(RichText::new(text).size(12.0).color(TEXT_DIM));
+            if let Some(b) = self.busy() {
+                ui.add_space(12.0);
+                ui.spinner();
+                ui.label(RichText::new(b).size(12.0).color(EMERALD));
+            }
             let draw_notice = (self.tab == Tab::Draw).then(|| self.draw.notice()).flatten();
             if let Some(n) = draw_notice.or(self.notice.as_ref().map(|(s, _)| s.as_str())) {
                 ui.add_space(12.0);
@@ -540,6 +582,7 @@ impl eframe::App for SeviathApp {
         self.apply_settings(&ctx);
         self.pen.update(&ctx);
         self.shortcuts(&ctx);
+        self.file_shortcuts(&ctx);
 
         Panel::top("top_bar")
             .exact_size(54.0)
@@ -570,6 +613,10 @@ impl eframe::App for SeviathApp {
         self.undo_choice_window(&ctx);
         self.settings_window(&ctx);
         self.account_window(&ctx);
+        self.new_project_window(&ctx);
+        self.project_manager(&ctx);
+        self.files_tick(&ctx);
+        self.unsaved_dialog(&ctx);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
