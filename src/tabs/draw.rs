@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Draw tab: tool strip, brush panel, canvas, and the right column (Color → Sub view → Layers).
 // Painting itself arrives with the brush engine; this is the layout and all panel state.
 

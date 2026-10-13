@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Brush panel: categories, search, brush cards with real previews (painted by the engine),
 // and every brush setting in folding sections. Brush, eraser and smudge each remember their own brush.
 

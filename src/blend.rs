@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Blend modes and compositing on premultiplied float pixels, following the W3C Compositing spec
 // (the same math Photoshop-compatible apps use, so PSD export later looks the same).
 

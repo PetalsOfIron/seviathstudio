@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Brush textures: tileable 256×256 patterns. `a` = how much paint is taken away (0..1), the same
 // way paper grain works; textures stay fixed to the canvas so patterns line up across strokes.
 // Every texture also has natural colors, used when "Keep texture colors" is on.

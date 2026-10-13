@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // The Seviath look: night-jungle greens, emerald accents, venom-lime highlights and gold scales.
 
 use eframe::egui::{self, Color32, CornerRadius, Margin, Shadow, Stroke, Theme, Vec2};

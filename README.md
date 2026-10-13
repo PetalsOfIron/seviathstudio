@@ -50,6 +50,11 @@ Issues and pull requests are welcome. Please run `cargo test --release` before s
 
 ## License
 
-To be decided by the author (MIT or MPL-2.0). Third-party code and fonts keep their own licenses (listed in *Settings → Info*).
+SeviathStudio is free software: you can redistribute it and/or modify it under the terms of the **GNU General Public License, version 3 or (at your option) any later version** — see [COPYING](COPYING). Every source file carries `SPDX-License-Identifier: GPL-3.0-or-later`.
+
+- Modified versions you share must publish their source under the same license.
+- Programs that only talk to SeviathStudio over its planned WebSocket/OSC API are not covered and may use any license.
+- Brushes, textures and other art in the library keep their own licenses (CC0 / CC BY); the GPL covers the program code.
+- Third-party libraries and fonts keep their own (GPL-compatible) licenses, listed in *Settings → Info*.
 
 Made by [@SnakeSeviath](https://x.com/SnakeSeviath).

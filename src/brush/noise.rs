@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Repeatable noise and random numbers, so procedural tips and textures look the same every time.
 // Same functions as the web version (brush.ts), so brushes behave alike in both.
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // App settings, saved as JSON in your user config folder
 // (Windows: %APPDATA%\SeviathStudio\settings.json) and loaded on start.
 

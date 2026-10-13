@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Layer panel: tree with folders, drag & drop, rename, thumbnails, and the active layer's settings.
 
 use eframe::egui::{

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Visual checks: drive the app with simulated input, render offscreen, write PNGs to target/screens/.
 // Run with `cargo test screens -- --nocapture`.
 

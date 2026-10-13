@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Canvas display: composites dirty tiles, keeps one GPU texture per tile, draws them through the
 // view transform (so zoom/rotate/mirror are free), and keeps a small thumbnail for the navigator.
 

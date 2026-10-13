@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // App shell: top bar with the logo, workspace switch and tabs; status bar; undo history;
 // settings (saved to disk); account window.
 

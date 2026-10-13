@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // A tiny anti-aliased painter for one-channel masks (brush tips): filled paths, round lines,
 // circles, radial gradients and blur. Coordinates are in mask pixels.
 

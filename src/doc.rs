@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // The document: size, paper and a stack of layers. Pixels live in 256×256 tiles that are only
 // created where something is drawn, so big canvases and many layers stay light.
 // Pixels are premultiplied RGBA (egui's Color32), the same as the GPU textures.

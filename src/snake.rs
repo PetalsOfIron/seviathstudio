@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Snake artwork drawn with the painter, so it stays sharp at every UI scale:
 // the coiled-S logo, the snake divider under the top bar and the scale pattern behind the canvas.
 
