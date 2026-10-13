@@ -158,6 +158,8 @@ pub struct DrawState {
     pub refs: RefStore,
     ref_popout: bool,
     ref_view_rect: Option<Rect>, // where the docked reference picture was drawn last frame
+    /// Project files dropped onto the window (the app opens them).
+    pub open_requests: Vec<std::path::PathBuf>,
     /// Document as it was when the current change started (recorded when the pointer lifts).
     pending: Option<DocState>,
     label_hint: Option<String>,
@@ -216,6 +218,7 @@ impl Default for DrawState {
             refs: RefStore::in_memory(),
             ref_popout: false,
             ref_view_rect: None,
+            open_requests: Vec::new(),
             pending: None,
             label_hint: None,
             changes: Vec::new(),
@@ -321,6 +324,50 @@ impl DrawState {
             }
         }
         self.label_hint = None;
+    }
+
+    /// A different document (opened file or new project): fresh view, selection and caches.
+    pub fn replace_document(&mut self, doc: Document) {
+        self.doc = doc;
+        self.renderer.reset();
+        self.view_ready = false;
+        self.layer_counter = self.doc.layers.len();
+        // start on the top layer you can paint on (visible, not locked), else any raster layer
+        let paintable = self.doc.layers.iter().find(|l| l.kind == LayerKind::Raster && l.visible && !l.locked);
+        let raster = self.doc.layers.iter().find(|l| l.kind == LayerKind::Raster);
+        self.active = paintable.or(raster).or(self.doc.layers.first()).map(|l| l.id).unwrap_or(0);
+        self.after_restore();
+        self.changes.clear();
+        self.doc.mark_all_dirty();
+    }
+
+    /// A change made from outside the Draw tab's own panels (menus, imports): recorded as one history step.
+    pub fn apply_external(&mut self, label: &str, f: impl FnOnce(&mut Self)) {
+        let before = self.doc.snapshot();
+        f(self);
+        if !self.doc.same_as(&before) {
+            let after = self.doc.snapshot();
+            self.changes.push((label.to_owned(), before, after));
+        }
+    }
+
+    /// A picture as a new layer above the selected one, centered and fit inside the canvas.
+    pub fn import_picture_layer(&mut self, img: &image::RgbaImage, name: &str) {
+        let (w, h) = (self.doc.w, self.doc.h);
+        let k = (w as f32 / img.width() as f32).min(h as f32 / img.height() as f32).min(1.0);
+        let pic = if k < 1.0 {
+            let (nw, nh) = (((img.width() as f32 * k).round() as u32).max(1), ((img.height() as f32 * k).round() as u32).max(1));
+            image::imageops::resize(img, nw, nh, image::imageops::FilterType::Lanczos3)
+        } else {
+            img.clone()
+        };
+        let (ox, oy) = ((w as i32 - pic.width() as i32) / 2, (h as i32 - pic.height() as i32) / 2);
+        self.apply_external(&format!("Import picture · {name}"), |d| {
+            let mut layer = d.doc.new_layer(name, LayerKind::Raster);
+            layer.tiles = crate::files::tiles_from_rgba(&pic, ox, oy, w, h);
+            layer.rev += 1;
+            d.active = d.doc.insert_layer(layer, d.active);
+        });
     }
 
     /// The document was replaced by undo/redo: drop anything in progress.

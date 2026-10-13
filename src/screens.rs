@@ -194,3 +194,64 @@ fn screens() {
     h.run_steps(3);
     save(&mut h, "04_rig");
 }
+
+/// Steps until the background file job is done.
+fn wait_job(h: &mut Harness<'_, SeviathApp>) {
+    for _ in 0..600 {
+        h.step();
+        if !h.state().test_busy() {
+            h.step();
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("file job never finished");
+}
+
+#[test]
+fn files_screens() {
+    use crate::files::{project, testdoc};
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("test-projects");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sample = testdoc::sample();
+    project::save(sample.w, sample.h, sample.paper, &sample.layers, &dir.join("Hair study.seviath")).unwrap();
+    let mut big = crate::doc::Document::new(400, 600);
+    big.paper = Color32::from_rgb(40, 60, 50);
+    project::save(big.w, big.h, big.paper, &big.layers, &dir.join("Night sky.seviath")).unwrap();
+
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.state_mut().settings_mut().projects_dir = dir.display().to_string();
+    h.state_mut().files_mut().manager_open = true;
+    h.run_steps(8);
+    save(&mut h, "projects_manager");
+    h.state_mut().files_mut().manager_open = false;
+    h.state_mut().files_mut().new_open = true;
+    h.run_steps(4);
+    save(&mut h, "new_project");
+    h.state_mut().files_mut().new_open = false;
+    h.run_steps(2);
+
+    // open a project: the document is replaced and nothing is unsaved
+    h.state_mut().test_open(dir.join("Hair study.seviath"));
+    wait_job(&mut h);
+    assert_eq!(testdoc::shape(&h.state().draw_mut_ref().doc), testdoc::shape(&sample));
+    assert!(!h.state().test_dirty());
+    assert_eq!(h.state().file_name(), "Hair study");
+
+    // paint: now there are unsaved changes; Ctrl+S saves them in the background
+    stroke(&mut h, &wave(pos2(500.0, 400.0), pos2(800.0, 450.0), 30.0, 12));
+    assert!(h.state().test_dirty());
+    h.key_press_modifiers(Modifiers::COMMAND, Key::S);
+    wait_job(&mut h);
+    assert!(!h.state().test_dirty());
+    let back = project::load(&dir.join("Hair study.seviath")).unwrap();
+    assert_eq!(back.layers.len(), h.state().draw_mut_ref().doc.layers.len());
+
+    // opening another file with unsaved changes asks first
+    stroke(&mut h, &wave(pos2(500.0, 500.0), pos2(800.0, 550.0), 30.0, 8));
+    h.state_mut().test_open(dir.join("Night sky.seviath"));
+    h.run_steps(3);
+    assert!(h.state_mut().files_mut().pending.is_some());
+    save(&mut h, "unsaved_changes");
+}

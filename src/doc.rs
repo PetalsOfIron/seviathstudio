@@ -205,6 +205,14 @@ impl Document {
         d
     }
 
+    /// A document from loaded parts (files). Layer ids are kept; new ids continue after them.
+    pub fn from_parts(w: u32, h: u32, paper: Color32, layers: Vec<Layer>) -> Self {
+        let next_id = layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+        let mut d = Self { w, h, paper, layers, dirty: HashSet::new(), revision: 0, next_id, live: None, checker: 16 };
+        d.mark_all_dirty();
+        d
+    }
+
     pub fn new_layer(&mut self, name: &str, kind: LayerKind) -> Layer {
         let id = self.next_id;
         self.next_id += 1;

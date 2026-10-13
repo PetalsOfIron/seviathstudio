@@ -17,13 +17,14 @@ pub enum Page {
     Brushes,
     Color,
     Undo,
+    Files,
     Performance,
     Shortcuts,
     Info,
 }
 
 impl Page {
-    pub const ALL: [(Page, &'static str); 10] = [
+    pub const ALL: [(Page, &'static str); 11] = [
         (Page::Interface, "Interface"),
         (Page::Canvas, "Canvas & view"),
         (Page::Cursor, "Cursor"),
@@ -31,6 +32,7 @@ impl Page {
         (Page::Brushes, "Brushes"),
         (Page::Color, "Color"),
         (Page::Undo, "Undo & history"),
+        (Page::Files, "Files & autosave"),
         (Page::Performance, "Performance"),
         (Page::Shortcuts, "Shortcuts"),
         (Page::Info, "Info"),
@@ -209,6 +211,64 @@ pub fn page(ui: &mut Ui, page: Page, s: &mut Settings, pen: &mut PenMonitor) {
                 s.undo_steps = d.undo_steps;
                 s.undo_memory_mb = d.undo_memory_mb;
                 s.warn_other_tab_undo = d.warn_other_tab_undo;
+            }
+        }
+        Page::Files => {
+            section_title(ui, "Projects folder");
+            let folder = s.projects_folder();
+            ui.label(RichText::new(folder.display().to_string()).color(TEXT).monospace());
+            ui.horizontal(|ui| {
+                if ui.button("Change…").clicked() {
+                    let _ = std::fs::create_dir_all(&folder);
+                    if let Some(p) = rfd::FileDialog::new().set_title("Projects folder").set_directory(&folder).pick_folder() {
+                        s.projects_dir = p.display().to_string();
+                    }
+                }
+                if ui.button("Open in Explorer").clicked() {
+                    let _ = std::fs::create_dir_all(&folder);
+                    open_folder(&folder);
+                }
+                if !s.projects_dir.is_empty() && ui.button("Use the default").clicked() {
+                    s.projects_dir.clear();
+                }
+            });
+            hint(ui, "Where Save suggests to put projects, and what the project manager lists under My projects.");
+            ui.add_space(6.0);
+            section_title(ui, "Autosave");
+            row(ui, "Recovery copy every", |ui| {
+                ui.add(egui::Slider::new(&mut s.autosave_minutes, 0.0..=30.0).step_by(0.5).suffix(" min").max_decimals(1));
+            });
+            hint(ui, if s.autosave_minutes <= 0.0 { "Off: no recovery copies are made." } else { "Only while there are new changes, and never in the middle of a stroke." });
+            row(ui, "Keep the newest", |ui| {
+                ui.add(egui::Slider::new(&mut s.recovery_copies, 1..=50).suffix(" copies"));
+            });
+            ui.checkbox(&mut s.autosave_project_file, "Also save the project file itself on autosave");
+            hint(ui, "Off = your project file only changes when you press Save; the copies are kept separately.");
+            if ui.button("Open the recovery folder").clicked() {
+                let f = Settings::recovery_folder();
+                let _ = std::fs::create_dir_all(&f);
+                open_folder(&f);
+            }
+            ui.add_space(6.0);
+            section_title(ui, "Export & start");
+            row(ui, "JPEG quality", |ui| {
+                ui.add(egui::Slider::new(&mut s.jpeg_quality, 40..=100));
+            });
+            hint(ui, "Higher = sharper and bigger files. PNG and WebP are saved without any loss.");
+            ui.checkbox(&mut s.start_with_projects, "Show the project manager when the app starts");
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{} recent files remembered", s.recent.len())).color(TEXT_DIM));
+                if !s.recent.is_empty() && ui.small_button("Clear list").clicked() {
+                    s.recent.clear();
+                }
+            });
+            if reset_button(ui) {
+                s.projects_dir = d.projects_dir.clone();
+                s.autosave_minutes = d.autosave_minutes;
+                s.recovery_copies = d.recovery_copies;
+                s.autosave_project_file = d.autosave_project_file;
+                s.jpeg_quality = d.jpeg_quality;
+                s.start_with_projects = d.start_with_projects;
             }
         }
         Page::Performance => {
@@ -407,6 +467,14 @@ fn curve_graph(ui: &mut Ui, s: &Settings) {
     p.text(inner.left_top(), Align2::LEFT_TOP, "brush", FontId::proportional(9.5), TEXT_DIM);
 }
 
+pub fn open_folder(dir: &std::path::Path) {
+    #[cfg(windows)]
+    let cmd = "explorer";
+    #[cfg(not(windows))]
+    let cmd = "xdg-open";
+    let _ = std::process::Command::new(cmd).arg(dir).spawn();
+}
+
 fn shortcuts(ui: &mut Ui) {
     section_title(ui, "Keyboard");
     egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
@@ -418,6 +486,11 @@ fn shortcuts(ui: &mut Ui) {
                 ("Ctrl+H", "History"),
                 ("Ctrl+1 … Ctrl+6", "Switch tab"),
                 ("Ctrl+,", "Settings"),
+                ("Ctrl+N  ·  Ctrl+O", "New project  ·  Open"),
+                ("Ctrl+S  ·  Ctrl+Shift+S", "Save  ·  Save as"),
+                ("Ctrl+Shift+O", "Project manager"),
+                ("Ctrl+Shift+E", "Export (PNG, JPEG, WebP, PSD, ORA)"),
+                ("Ctrl+Shift+I", "Picture as a new layer"),
                 ("B / E / S", "Brush / Eraser / Smudge"),
                 ("G / Shift+G", "Fill / Gradient"),
                 ("I  ·  Alt + click", "Color picker"),

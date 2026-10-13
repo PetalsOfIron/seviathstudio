@@ -71,6 +71,15 @@ pub struct Settings {
     // ---- Performance
     pub brush_preview_per_frame: u32,
     pub navigator_fps: f32,
+    // ---- Files
+    /// Where projects are kept (empty = Documents\SeviathStudio\Projects).
+    pub projects_dir: String,
+    pub autosave_minutes: f32, // 0 = off; recovery copies are made this often while you work
+    pub recovery_copies: usize,
+    pub autosave_project_file: bool, // also save the project file itself automatically
+    pub jpeg_quality: u8,
+    pub start_with_projects: bool,
+    pub recent: Vec<String>,
 }
 
 impl Default for Settings {
@@ -112,6 +121,13 @@ impl Default for Settings {
             warn_other_tab_undo: true,
             brush_preview_per_frame: 3,
             navigator_fps: 6.0,
+            projects_dir: String::new(),
+            autosave_minutes: 3.0,
+            recovery_copies: 10,
+            autosave_project_file: false,
+            jpeg_quality: 92,
+            start_with_projects: true,
+            recent: Vec::new(),
         }
     }
 }
@@ -164,7 +180,32 @@ impl Settings {
         self.undo_memory_mb = self.undo_memory_mb.clamp(64, 32768);
         self.brush_preview_per_frame = self.brush_preview_per_frame.clamp(1, 20);
         self.navigator_fps = self.navigator_fps.clamp(1.0, 30.0);
+        self.autosave_minutes = self.autosave_minutes.clamp(0.0, 120.0);
+        self.recovery_copies = self.recovery_copies.clamp(1, 200);
+        self.jpeg_quality = self.jpeg_quality.clamp(10, 100);
+        self.recent.truncate(12);
         self
+    }
+
+    /// The folder where projects live.
+    pub fn projects_folder(&self) -> std::path::PathBuf {
+        if !self.projects_dir.trim().is_empty() {
+            return std::path::PathBuf::from(self.projects_dir.trim());
+        }
+        dirs::document_dir().or_else(dirs::home_dir).unwrap_or_else(|| std::path::PathBuf::from(".")).join("SeviathStudio").join("Projects")
+    }
+
+    /// Where automatic recovery copies go.
+    pub fn recovery_folder() -> std::path::PathBuf {
+        dirs::config_dir().unwrap_or_else(std::env::temp_dir).join("SeviathStudio").join("recovery")
+    }
+
+    /// Remember a file in the recent list (newest first).
+    pub fn add_recent(&mut self, path: &std::path::Path) {
+        let p = path.to_string_lossy().into_owned();
+        self.recent.retain(|r| r != &p);
+        self.recent.insert(0, p);
+        self.recent.truncate(12);
     }
 
     /// Raw pen pressure → pressure used by brushes (range, then curve).
