@@ -46,11 +46,11 @@
 ## Where the work stands
 - Milestones **1–18b done** (see ROADMAP "Done"). 275 tests pass.
 - Plan Part AT core is done (Info screen, PNG credit, README credit). ROADMAP now includes Parts AS (milestone **9a**) and AV (**37a**).
-- Milestones 9 (layer organizer), 9a (new project dialog), 10 (gradients, color randomizer), 11 (vector layers) 11b (auto-trace) and 12a (filters, adjustments, check views) are done. **Next: 18c — font from handwriting**, then 19 (recorder and process log), 20 (panels and workspaces), then platform / rigging / animation / streaming / games / AI (21–51), and the serverless accounts and libraries (52–56)
+- Milestones 9 (layer organizer), 9a (new project dialog), 10 (gradients, color randomizer), 11 (vector layers) 11b (auto-trace) and 12a (filters, adjustments, check views) are done. **Next: 18c — font from handwriting**, then 19 (recorder and process log), 20 (panels and workspaces), then platform / rigging / animation / streaming / games / AI (21–51), 
 - Gotcha: egui `consume_key(Modifiers::NONE, key)` also matches when Alt is held, so check keys with Alt/Ctrl **before** plain tool keys (see the order in `DrawState::ui`). In kittest, hold modifiers for clicks with `Event::ModifiersChanged`.
 - Gotcha: inside `DrawState::ui` a change made by code is picked up by `track_history` by itself: set `label_hint` instead of using `apply_external` (that is for code that runs outside the draw frame, e.g. menus), or the step is recorded twice.
 - Gotcha: very long bash heredocs sometimes fail to parse — write the Python patch script with the Write tool into the scratchpad and run it.
 - Decisions already made (don't re-ask): no Mixbox (license) → own Kubelka–Munk mixing; project-file verification can only be tamper-evident (open-source app); game runtimes in separate MIT repos; payments only via hand-off (PayPal), the app never touches money.
 
-## Online scope (user decision 2026-10-17)
-Only accounts and libraries are online. No chat, no rigger/asset search, no servers of our own: free services or free intermediaries only (GitHub, free Supabase tier). Skip or drop roadmap items that need more than that.
+## Online scope (user decision 2026-10-17, updated)
+The app is **offline for now**: no accounts, no online library, no shop, no chat, no servers. The library is only the user's own brushes. Sharing is done by people themselves on other sites. Drop or skip any roadmap item that needs the internet (AI features use the user's own local AI).
