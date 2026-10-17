@@ -14,6 +14,7 @@ use crate::theme::{self, *};
 use crate::widgets::{self, icon_button, segmented, tab_button};
 
 mod files;
+mod fontmaker;
 mod newproject;
 mod signs;
 
@@ -44,6 +45,7 @@ pub struct SeviathApp {
     notice: Option<(String, f64)>,
     files: files::FileState,
     signs: signs::SignState,
+    maker: fontmaker::FontMaker,
 }
 
 impl SeviathApp {
@@ -81,6 +83,7 @@ impl SeviathApp {
             notice: None,
             files: files::FileState::starting(persist && start_projects),
             signs: Default::default(),
+            maker: Default::default(),
         }
     }
 
@@ -644,6 +647,7 @@ impl eframe::App for SeviathApp {
         self.new_project_window(&ctx);
         self.project_info_window(&ctx);
         self.signatures_window(&ctx);
+        self.font_maker_window(&ctx);
         self.project_manager(&ctx);
         self.files_tick(&ctx);
         self.unsaved_dialog(&ctx);

@@ -472,7 +472,6 @@ impl DrawState {
         self.mixchart.open = true;
     }
 
-    #[cfg(test)]
     pub fn active_id(&self) -> LayerId {
         self.active
     }

@@ -1571,3 +1571,51 @@ fn signature_screens() {
     save(&mut h, "sign_01_window");
     crate::signature::delete_in(&crate::signature::dir(), crate::signature::Slot::Full);
 }
+
+#[test]
+fn font_maker_screens() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = Harness::builder().with_size([1440.0, 1300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().test_open_font_maker();
+    h.run_steps(4);
+    assert_eq!(h.state().test_font_maker().order[0], 'A', "starts with the first letter");
+    let rect = h.state().test_font_maker().pad_rect;
+    assert!(rect.width() > 300.0);
+    // a gothic-ish A: two slanted strokes and a bar, then B as a ring
+    let at = |x: f32, y: f32| rect.min + vec2(x, y);
+    stroke(&mut h, &[at(60.0, 288.0), at(120.0, 120.0), at(160.0, 80.0)]);
+    stroke(&mut h, &[at(160.0, 80.0), at(220.0, 200.0), at(260.0, 288.0)]);
+    stroke(&mut h, &[at(100.0, 220.0), at(160.0, 205.0), at(225.0, 220.0)]);
+    h.run_steps(2);
+    assert_eq!(h.state().test_font_maker().font.glyphs[&'A'].len(), 3, "three lines on A");
+    h.get_by_label("Next letter").click();
+    h.run_steps(3);
+    assert_eq!(h.state().test_font_maker().current_char(), Some('B'), "moved to B without picking a key");
+    let ring: Vec<Pos2> = (0..=30).map(|i| {
+        let a = i as f32 / 30.0 * std::f32::consts::TAU;
+        at(160.0 + a.cos() * 80.0, 190.0 + a.sin() * 95.0)
+    }).collect();
+    stroke(&mut h, &ring);
+    h.run_steps(2);
+    assert!(h.state().test_font_maker().font.glyphs.contains_key(&'B'));
+    // in the project, and used as text
+    h.get_by_label("Use in this project").click();
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().doc.meta.fonts.len(), 1);
+    assert_eq!(h.state().draw_mut_ref().doc.meta.fonts[0].name, "My handwriting");
+    {
+        let d = h.state_mut().draw_mut();
+        d.add_text_layer(pos2(200.0, 600.0));
+        let i = d.doc.index_of(d.active_id()).unwrap();
+        let t = d.doc.layers[i].text.as_mut().unwrap();
+        t.font = "My handwriting".into();
+        t.text = "AB BA".into();
+        t.size = 500.0;
+        d.rebuild_text(i);
+        assert!(!d.doc.layers[i].tiles.is_empty(), "the text is painted with my letters");
+    }
+    h.run_steps(4);
+    save(&mut h, "font_01_maker");
+    crate::handfont::save_draft(&crate::handfont::HandFont::default());
+}
