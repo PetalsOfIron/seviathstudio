@@ -61,4 +61,4 @@ SeviathStudio is free software: you can redistribute it and/or modify it under t
 - Brushes, textures and other art in the library keep their own licenses (CC0 / CC BY); the GPL covers the program code.
 - Third-party libraries and fonts keep their own (GPL-compatible) licenses, listed in *Settings → Info*.
 
-Made by [@SnakeSeviath](https://x.com/SnakeSeviath).
+**Created by Seviath** — <https://x.com/SnakeSeviath>

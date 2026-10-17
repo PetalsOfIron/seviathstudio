@@ -48,6 +48,10 @@ impl SeviathApp {
         theme::apply(&cc.egui_ctx);
         // Ctrl+0 / Ctrl+plus / Ctrl+minus zoom the canvas, not the whole interface.
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        if let Some(rs) = cc.wgpu_render_state.as_ref() {
+            let i = rs.adapter.get_info();
+            let _ = settings_ui::GPU_INFO.set(format!("{} ({:?})", i.name, i.backend));
+        }
         let persist = !cfg!(test);
         let settings = if persist { Settings::load() } else { Settings::default() };
         let start_projects = settings.start_with_projects;

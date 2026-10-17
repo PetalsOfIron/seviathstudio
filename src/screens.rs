@@ -389,3 +389,12 @@ fn selection_screens() {
     assert_eq!(h.state().history().cursor, n - 1);
     assert!(h.state().draw_mut_ref().doc.selection.is_none(), "undoing the wand removes its selection");
 }
+
+#[test]
+fn info_screen() {
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().open_window(false, Some(crate::settings_ui::Page::Info));
+    h.run_steps(4);
+    save(&mut h, "info_screen");
+}
