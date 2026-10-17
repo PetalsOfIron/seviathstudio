@@ -9,6 +9,7 @@ mod brush;
 mod canvas;
 mod check;
 mod colorpick;
+mod colorprofiles;
 mod doc;
 mod effects;
 mod fill;

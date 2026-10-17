@@ -10,7 +10,7 @@ use eframe::egui::{
     self, Color32, ColorImage, Mesh, Painter, Pos2, Rect, Shape, TextureHandle, TextureOptions, pos2,
 };
 
-use crate::check::CheckView;
+use crate::colorprofiles::{Display, Look};
 use crate::doc::{Document, Layer, LayerId, LayerKind, TILE, TileKey};
 use crate::view::View;
 
@@ -25,7 +25,7 @@ pub struct CanvasRenderer {
     thumb_time: f64,
     layer_thumbs: HashMap<LayerId, (u64, f64, TextureHandle)>, // (layer rev, time, texture)
     smooth: bool,       // smooth (linear) pixels when zoomed in, instead of crisp ones
-    check: CheckView,   // how the drawing is shown (black and white, color blindness…)
+    look: Display,      // how the drawing is shown (profile, print proof, black and white, color blindness…)
     pub nav_fps: f32,   // navigator thumbnail refreshes per second while drawing
 }
 
@@ -39,7 +39,7 @@ impl Default for CanvasRenderer {
             thumb_time: 0.0,
             layer_thumbs: HashMap::new(),
             smooth: false,
-            check: CheckView::Normal,
+            look: Display::new(Look::default()),
             nav_fps: 6.0,
         }
     }
@@ -76,11 +76,11 @@ impl CanvasRenderer {
     }
 
     /// Show the drawing through a check view. Returns true when everything must be redrawn.
-    pub fn set_check(&mut self, c: CheckView) -> bool {
-        if self.check == c {
+    pub fn set_look(&mut self, l: &Look) -> bool {
+        if &self.look.look == l {
             return false;
         }
-        self.check = c;
+        self.look = Display::new(l.clone());
         self.textures.clear();
         true
     }
@@ -99,7 +99,7 @@ impl CanvasRenderer {
             })
             .collect();
         for (key, buf) in done {
-            let shown = if self.check == CheckView::Normal { buf.clone() } else { buf.iter().map(|c| self.check.apply(*c)).collect() };
+            let shown = if self.look.is_plain() { buf.clone() } else { buf.iter().map(|c| self.look.apply(*c)).collect() };
             let img = ColorImage::new([TILE, TILE], shown);
             match self.textures.get_mut(&key) {
                 Some(t) => t.set(img, tex_options(self.smooth)),

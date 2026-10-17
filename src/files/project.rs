@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn save_and_load_round_trip() {
         let mut d = testdoc::sample();
-        d.meta = ProjectMeta { dpi: 300, notes: "for the 2 PM stream".into(), tags: vec!["hair".into(), "wip".into()], guides: crate::meta::GuidePreset::Thirds.build(d.w, d.h), autosave_minutes: Some(1.5), recovery_copies: None };
+        d.meta = ProjectMeta { dpi: 300, notes: "for the 2 PM stream".into(), tags: vec!["hair".into(), "wip".into()], guides: crate::meta::GuidePreset::Thirds.build(d.w, d.h), autosave_minutes: Some(1.5), recovery_copies: None, ..Default::default() };
         d.layers[1].fav = true;
         d.layers[0].vector = Some(std::sync::Arc::new(VecData {
             strokes: vec![crate::vector::VecStroke { pts: vec![[10.0, 10.0, 0.5], [50.0, 40.0, 1.0], [90.0, 12.5, 0.25]], style: Default::default() }],

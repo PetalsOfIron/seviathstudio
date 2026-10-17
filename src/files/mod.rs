@@ -230,18 +230,28 @@ pub const CREDIT: &str = "Made with SeviathStudio — created by Seviath, https:
 
 /// `credit`: put "Software: SeviathStudio" and the app credit into the PNG's text fields.
 pub fn export_flat(doc: &Document, path: &Path, kind: Flat, jpeg_quality: u8, credit: bool) -> Result<(), String> {
-    let img = flatten(doc);
+    let mut img = flatten(doc);
+    // wide or special profiles travel with the file (ICC) or are baked into plain sRGB pixels
+    let profile = doc.meta.rgb_profile.as_str();
+    let embed = profile != "srgb" && !doc.meta.export_bake && kind != Flat::Webp;
+    if profile != "srgb" && !embed {
+        crate::colorprofiles::bake_to_srgb(&mut img, profile);
+    }
     let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
     let mut w = std::io::BufWriter::new(file);
     match kind {
         Flat::Png => {
-            let mut enc = png::Encoder::new(&mut w, img.width(), img.height());
-            enc.set_color(png::ColorType::Rgba);
-            enc.set_depth(png::BitDepth::Eight);
-            enc.set_compression(png::Compression::Balanced);
+            let mut info = png::Info::with_size(img.width(), img.height());
+            info.color_type = png::ColorType::Rgba;
+            info.bit_depth = png::BitDepth::Eight;
             // pixels per metre, so other programs know the print size
             let ppm = (doc.meta.dpi as f64 / 0.0254).round() as u32;
-            enc.set_pixel_dims(Some(png::PixelDimensions { xppu: ppm, yppu: ppm, unit: png::Unit::Meter }));
+            info.pixel_dims = Some(png::PixelDimensions { xppu: ppm, yppu: ppm, unit: png::Unit::Meter });
+            if embed {
+                info.icc_profile = Some(std::borrow::Cow::Owned(crate::colorprofiles::icc_profile(profile)));
+            }
+            let mut enc = png::Encoder::with_info(&mut w, info).map_err(|e| e.to_string())?;
+            enc.set_compression(png::Compression::Balanced);
             if credit {
                 let soft = format!("SeviathStudio {}", env!("CARGO_PKG_VERSION"));
                 enc.add_text_chunk("Software".into(), soft).map_err(|e| e.to_string())?;
@@ -262,6 +272,9 @@ pub fn export_flat(doc: &Document, path: &Path, kind: Flat, jpeg_quality: u8, cr
             });
             let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut w, jpeg_quality.clamp(1, 100));
             enc.set_pixel_density(image::codecs::jpeg::PixelDensity::dpi(doc.meta.dpi.clamp(1, 65535) as u16));
+            if embed {
+                image::ImageEncoder::set_icc_profile(&mut enc, crate::colorprofiles::icc_profile(profile)).map_err(|e| e.to_string())?;
+            }
             rgb.write_with_encoder(enc).map_err(|e| e.to_string())
         }
     }

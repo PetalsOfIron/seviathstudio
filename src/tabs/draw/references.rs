@@ -325,6 +325,7 @@ impl DrawState {
         self.ref_popout = open;
     }
 
+    #[cfg(test)]
     pub fn ref_window_rect(&self) -> Rect {
         self.ref_rect
     }

@@ -22,11 +22,19 @@ pub struct ProjectMeta {
     pub autosave_minutes: Option<f32>,
     pub recovery_copies: Option<usize>,
     pub guides: Vec<Guide>,
+    /// How the RGB numbers are meant to look (see colorprofiles.rs).
+    pub rgb_profile: String,
+    /// The press used for the print preview.
+    pub cmyk_profile: String,
+    /// How colors that can't be printed are brought in.
+    pub intent: String,
+    /// Turn the profile into plain sRGB pixels on export instead of embedding it.
+    pub export_bake: bool,
 }
 
 impl Default for ProjectMeta {
     fn default() -> Self {
-        Self { dpi: 72, notes: String::new(), tags: Vec::new(), autosave_minutes: None, recovery_copies: None, guides: Vec::new() }
+        Self { dpi: 72, notes: String::new(), tags: Vec::new(), autosave_minutes: None, recovery_copies: None, guides: Vec::new(), rgb_profile: "srgb".into(), cmyk_profile: "japan2001".into(), intent: "perceptual".into(), export_bake: false }
     }
 }
 
@@ -40,6 +48,13 @@ impl ProjectMeta {
         self.recovery_copies = self.recovery_copies.map(|c| c.clamp(1, 100));
         self.guides.retain(|g| g.pos.is_finite());
         self.guides.truncate(200);
+        if !crate::colorprofiles::known_rgb(&self.rgb_profile) {
+            self.rgb_profile = "srgb".into();
+        }
+        if !crate::colorprofiles::known_press(&self.cmyk_profile) {
+            self.cmyk_profile = "japan2001".into();
+        }
+        self.intent = crate::colorprofiles::Intent::from_id(&self.intent).id().into();
         self
     }
 }
