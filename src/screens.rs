@@ -1659,3 +1659,47 @@ fn recorder_screens() {
     assert!(h.state().test_recording().is_none());
     std::fs::remove_file(out).ok();
 }
+
+#[test]
+fn work_history_screens() {
+    let mut h = Harness::builder().with_size([1440.0, 1300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    stroke(&mut h, &[pos2(560.0, 300.0), pos2(700.0, 330.0), pos2(820.0, 300.0)]);
+    h.run_steps(3);
+    stroke(&mut h, &[pos2(560.0, 500.0), pos2(700.0, 530.0), pos2(820.0, 500.0)]);
+    h.run_steps(3);
+    // an imported picture counts too
+    h.state_mut().draw_mut().import_picture_layer(&image::RgbaImage::from_pixel(40, 40, image::Rgba([200, 30, 30, 255])), "my photo");
+    h.run_steps(4);
+    {
+        let log = &h.state().draw_mut_ref().doc.log;
+        assert_eq!(log.entries.len(), 3, "{:?}", log.entries.iter().map(|e| e.label.clone()).collect::<Vec<_>>());
+        assert_eq!(log.entries.iter().filter(|e| e.kind == "stroke").count(), 2);
+        assert_eq!(log.entries[2].kind, "import");
+        assert_eq!(log.verify(), Ok(()));
+    }
+    h.state_mut().test_open_work_history();
+    h.run_steps(4);
+    save(&mut h, "log_01_work_history");
+    // a reference that stays on show is counted, and written down when it is hidden
+    {
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(32, 32, image::Rgba([10, 120, 200, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let d = h.state_mut().draw_mut();
+        d.refs.add_bytes("pose sheet", &png).unwrap();
+        d.show_references();
+    }
+    let t0 = std::time::Instant::now();
+    while t0.elapsed().as_secs_f32() < 2.6 {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    h.state_mut().test_open_work_history(); // writes the time so far into the log
+    h.run_steps(3);
+    let log = &h.state().draw_mut_ref().doc.log;
+    let r = log.entries.iter().find(|e| e.kind == "reference").expect("the reference time is in the log");
+    assert_eq!(r.layer, "pose sheet");
+    assert!(r.secs >= 2.0, "{}", r.secs); // the test clock runs faster than the wall clock
+    assert_eq!(log.verify(), Ok(()));
+}
+

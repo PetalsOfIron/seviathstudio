@@ -17,6 +17,7 @@ mod files;
 mod fontmaker;
 mod newproject;
 mod recording;
+mod worklog;
 mod signs;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -48,6 +49,7 @@ pub struct SeviathApp {
     signs: signs::SignState,
     maker: fontmaker::FontMaker,
     rec: recording::RecUi,
+    work: worklog::WorkClock,
 }
 
 impl SeviathApp {
@@ -87,6 +89,7 @@ impl SeviathApp {
             signs: Default::default(),
             maker: Default::default(),
             rec: Default::default(),
+            work: Default::default(),
         }
     }
 
@@ -642,6 +645,7 @@ impl eframe::App for SeviathApp {
         let now = ctx.input(|i| i.time);
         for (label, before, after) in std::mem::take(&mut self.draw.changes) {
             self.recorder_step(&after);
+            self.log_step(&label, now);
             self.history.push(label, Tab::Draw, before, after, now);
         }
 
@@ -655,6 +659,8 @@ impl eframe::App for SeviathApp {
         self.font_maker_window(&ctx);
         self.recorder_window(&ctx);
         self.recorder_tick(&ctx);
+        self.work_history_window(&ctx);
+        self.reference_clock(&ctx);
         self.project_manager(&ctx);
         self.files_tick(&ctx);
         self.unsaved_dialog(&ctx);
