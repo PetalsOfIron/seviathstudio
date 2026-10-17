@@ -287,12 +287,14 @@ impl DrawState {
         let mut open = true;
         egui::Window::new(RichText::new("Reference").strong())
             .open(&mut open)
-            .default_size(ctx.content_rect().size() * 0.7)
+            .default_size(vec2(380.0, 440.0))
+            .min_size(vec2(240.0, 260.0))
+            .max_size(ctx.content_rect().size())
             .resizable(true)
             .collapsible(true)
             .show(ctx, |ui| {
                 let w = ui.available_width().max(200.0);
-                let h = (ui.available_height() - 110.0).max(160.0);
+                let h = (ui.available_height() - 110.0).max(120.0);
                 self.references_panel(ui, w, h, true);
             });
         self.ref_popout = open;
