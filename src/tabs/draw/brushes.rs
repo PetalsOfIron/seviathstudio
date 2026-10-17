@@ -461,6 +461,36 @@ impl DrawState {
             }
         });
 
+        section(ui, "Hair strands", s.strands > 0 || s.comb > 0.0, |ui| {
+            row(ui, "Strands", "How many fine hairs the stroke is made of (0 = off)", |ui| ui.add(egui::Slider::new(&mut s.strands, 0..=40)).changed());
+            if s.strands > 0 {
+                num(ui, "Thickness", &mut s.strand_width, 0.005..=0.15, "Strand width (× brush size)");
+                pct(ui, "Clumps", &mut s.clump, "Strands gather in clumps instead of spreading evenly");
+                if s.clump > 0.0 {
+                    row(ui, "Clump count", "How many clumps", |ui| ui.add(egui::Slider::new(&mut s.clump_count, 1..=8)).changed());
+                }
+                pct(ui, "Curl", &mut s.curl, "Strands wind from side to side");
+                if s.curl > 0.0 {
+                    num(ui, "Curl length", &mut s.curl_len, 20.0..=500.0, "Pixels of stroke for one curl");
+                }
+                pct(ui, "Wobble", &mut s.strand_wobble, "Each strand wanders a little");
+                pct(ui, "Flyaways", &mut s.flyaways, "Stray hairs lift off the edge");
+                pct(ui, "Shine", &mut s.sheen, "A band of shine glides across the strands");
+                pct(ui, "Underpaint", &mut s.strand_fill, "A soft solid fill between the strands, for volume");
+            }
+            pct(ui, "Comb", &mut s.comb, "A blending brush pulls colors along the strands under it, not across them (set Mix up)");
+            pct(ui, "Gloss", &mut s.gloss, "A blending brush leaves a little shine");
+        });
+
+        section(ui, "Skin", s.terminator > 0.0 || s.tint != 0.0 || s.keep_detail > 0.0 || s.sss > 0.0 || s.temp_blend || s.dot_cluster > 0.0, |ui| {
+            pct(ui, "Shade edge", &mut s.terminator, "A clearer edge between light and shade (100% = cel style)");
+            num(ui, "Warm / cool", &mut s.tint, -1.0..=1.0, "Nudges the color toward warm (right) or cool (left)");
+            pct(ui, "Dot patches", &mut s.dot_cluster, "Dots (freckles, blush) land in natural patches");
+            pct(ui, "Keep texture", &mut s.keep_detail, "A blending brush changes the soft color and keeps the fine texture (pores)");
+            pct(ui, "Skin glow", &mut s.sss, "Mid tones glow a little red, like light through skin");
+            ui.checkbox(&mut s.temp_blend, "Even out warm and cool").on_hover_text("A blending brush moves warm and cool patches together without flattening lights and darks");
+        });
+
         section(ui, "Width behavior", s.pinch > 0.0 || s.pressure_curve != 0.0, |ui| {
             pct(ui, "Pinch", &mut s.pinch, "The stroke narrows at regular points, like a bamboo stem or a bead chain");
             if s.pinch > 0.0 {
@@ -725,5 +755,59 @@ mod tests {
         img.save(dir.join("designer_sheet.png")).unwrap();
         std::fs::write(dir.join("designer_sheet.txt"), all.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().chunks(cols).map(|r| r.join(" | ")).collect::<Vec<_>>().join("
 ")).unwrap();
+    }
+
+    /// Every hair and skin brush on a small canvas: target/screens/hair_skin_sheet.png
+    #[test]
+    fn hair_skin_sheet() {
+        use crate::doc::Document;
+        let all: Vec<Preset> = presets().into_iter().filter(|p| p.category == "Hair" || p.category == "Skin").collect();
+        let (cw, ch, cols) = (420usize, 150usize, 4usize);
+        let rows = all.len().div_ceil(cols);
+        let mut sheet = image::RgbaImage::from_pixel((cw * cols) as u32, (ch * rows) as u32, image::Rgba([244, 241, 234, 255]));
+        for (i, p) in all.iter().enumerate() {
+            let mut d = Document::new(cw as u32, ch as u32);
+            d.layers[1].visible = false; // transparent paper: the sheet color shows
+            let blender = p.s.mix > 0.5 || p.s.keep_detail > 0.0;
+            let hair = p.category == "Hair";
+            if blender {
+                // something to blend: bands of two tones with fine grain
+                for y in 0..ch {
+                    for x in 0..cw {
+                        let n = crate::brush::noise::hash(x as i32, y as i32, 9);
+                        let (band, base) = if hair { (y / 5 % 2 == 0, [[150.0, 100.0, 70.0], [60.0, 38.0, 28.0]]) } else { (x < cw / 2, [[232.0, 176.0, 150.0], [200.0, 150.0, 160.0]]) };
+                        let c = if band { base[0] } else { base[1] };
+                        let v = 1.0 + (n - 0.5) * 0.18;
+                        let col = eframe::egui::Color32::from_rgb((c[0] * v).min(255.0) as u8, (c[1] * v).min(255.0) as u8, (c[2] * v).min(255.0) as u8);
+                        d.layers[0].tile_mut(((x / TILE) as i32, (y / TILE) as i32))[(y % TILE) * TILE + x % TILE] = col;
+                    }
+                }
+            }
+            let color = if hair { Color32::from_rgb(78, 48, 34) } else { Color32::from_rgb(214, 150, 128) };
+            let mut s = p.s.clone();
+            s.size = s.size.clamp(10.0, 80.0);
+            let none = |_: i32, _: i32| None;
+            let mut st = Stroke::begin(&mut d, 0, &s, color, false, 1.0, true, Sample { x: 30.0, y: ch as f32 / 2.0, p: 0.4 }, &none);
+            let pts: Vec<Sample> = (1..=70).map(|k| Sample { x: 30.0 + k as f32 * 5.2, y: ch as f32 / 2.0 + (k as f32 * 0.11).sin() * 28.0, p: 0.4 + 0.6 * (k as f32 / 70.0).min(1.0) }).collect();
+            for c in pts.chunks(5) {
+                st.add(&mut d, c, &none);
+            }
+            st.finish(&mut d, &none);
+            let img = crate::files::flatten(&d);
+            let (ox, oy) = ((i % cols) * cw, (i / cols) * ch);
+            for y in 0..ch {
+                for x in 0..cw {
+                    let c = img.get_pixel(x as u32, y as u32).0;
+                    let a = c[3] as f32 / 255.0;
+                    let bg = sheet.get_pixel((ox + x) as u32, (oy + y) as u32).0;
+                    let mixc = |s: u8, b: u8| (s as f32 * a + b as f32 * (1.0 - a)).round() as u8;
+                    sheet.put_pixel((ox + x) as u32, (oy + y) as u32, image::Rgba([mixc(c[0], bg[0]), mixc(c[1], bg[1]), mixc(c[2], bg[2]), 255]));
+                }
+            }
+        }
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("screens");
+        std::fs::create_dir_all(&dir).unwrap();
+        sheet.save(dir.join("hair_skin_sheet.png")).unwrap();
+        std::fs::write(dir.join("hair_skin_sheet.txt"), all.iter().map(|p| p.name).collect::<Vec<_>>().chunks(cols).map(|r| r.join(" | ")).collect::<Vec<_>>().join("\n")).unwrap();
     }
 }

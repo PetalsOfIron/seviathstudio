@@ -3,6 +3,7 @@
 // so imported and saved brushes work exactly like the built-in ones (same as the web version).
 
 pub mod engine;
+pub mod local;
 pub mod noise;
 pub mod random;
 pub mod raster;
@@ -474,6 +475,42 @@ pub struct BrushSettings {
     /// Pixels painted, then `gap_len` pixels left empty (0 = no gaps).
     pub dash_len: f32,
     pub gap_len: f32,
+    // hair
+    /// Strands drawn along the stroke (0 = off).
+    pub strands: u32,
+    /// Strand thickness as a share of the stroke width.
+    pub strand_width: f32,
+    /// 0..1: a solid underpaint between the strands (volume).
+    pub strand_fill: f32,
+    /// 0..1: strands gather in clumps instead of spreading evenly.
+    pub clump: f32,
+    pub clump_count: u32,
+    /// 0..1: strands wave from side to side like curls.
+    pub curl: f32,
+    /// Pixels of stroke for one curl.
+    pub curl_len: f32,
+    pub strand_wobble: f32,
+    /// 0..1: stray hairs lift off the edge.
+    pub flyaways: f32,
+    /// 0..1: a band of shine moves across the strands.
+    pub sheen: f32,
+    /// 0..1: a blender pulls colors along the strands under the brush, not across them.
+    pub comb: f32,
+    /// 0..1: shine added by a blender.
+    pub gloss: f32,
+    // skin
+    /// 0..1: dots gather in natural clusters.
+    pub dot_cluster: f32,
+    /// 0..1: a clear, readable edge between light and shade (0 = the tip's own softness).
+    pub terminator: f32,
+    /// -1 cool .. 1 warm.
+    pub tint: f32,
+    /// 0..1: a blender changes the soft color and keeps the fine texture (pores).
+    pub keep_detail: f32,
+    /// 0..1: light through skin: mid tones glow a little red.
+    pub sss: f32,
+    /// A blender that evens out warm and cool patches without flattening the lights and darks.
+    pub temp_blend: bool,
     // tip and shape
     pub tip: Tip,
     pub roundness: f32,
@@ -566,6 +603,24 @@ impl Default for BrushSettings {
             fray_len: 6.0,
             dash_len: 40.0,
             gap_len: 0.0,
+            strands: 0,
+            strand_width: 0.05,
+            strand_fill: 0.0,
+            clump: 0.5,
+            clump_count: 3,
+            curl: 0.0,
+            curl_len: 110.0,
+            strand_wobble: 0.3,
+            flyaways: 0.0,
+            sheen: 0.0,
+            comb: 0.0,
+            gloss: 0.0,
+            dot_cluster: 0.0,
+            terminator: 0.0,
+            tint: 0.0,
+            keep_detail: 0.0,
+            sss: 0.0,
+            temp_blend: false,
             tip: Tip::Round,
             roundness: 1.0,
             angle: 0.0,
@@ -650,7 +705,7 @@ pub struct Preset {
     pub s: BrushSettings,
 }
 
-pub const CATEGORIES: [&str; 11] = [
+pub const CATEGORIES: [&str; 13] = [
     "Pens",
     "Pencils",
     "Markers",
@@ -660,6 +715,8 @@ pub const CATEGORIES: [&str; 11] = [
     "Blend",
     "Textures",
     "Rough & particles",
+    "Hair",
+    "Skin",
     "Nature & FX",
     "My brushes",
 ];
@@ -757,7 +814,7 @@ pub fn presets() -> Vec<Preset> {
         p("Spray paint", "Airbrush", "Grainy spray can.", BrushSettings { size: 90.0, tip: T::Splatter, flow: 0.35, spacing: 0.15, scatter: 0.4, size_jitter: 0.4, angle_jitter: 1.0, size_pressure: false, min_size: 1.0, opacity_pressure: true, stabilize: 0.0, ..d() }),
         p("Bark", "Nature & FX", "Wavy threads run inside the stroke: tree bark, wood grain, rope.", BrushSettings { size: 46.0, hardness: 0.8, lines: 6, line_wave: 0.3, line_len: 80.0, line_width: 0.09, line_strength: 0.75, line_shade: -0.6, fray: Fray::Knotted, fray_amount: 0.45, fray_len: 7.0, stabilize: 0.25, min_size: 0.8, ..d() }),
         p("Leopard dots", "Nature & FX", "Big soft dots in several colors: animal fur patterns.", BrushSettings { size: 90.0, hardness: 0.55, spacing: 0.5, dots: 1.0, dot_min: 0.12, dot_max: 0.38, dot_count: 2, dot_spread: 1.1, dot_colors: 0.9, trans_color: [0.25, 0.15, 0.08], transition: Transition::Off, size_pressure: false, stabilize: 0.0, ..d() }),
-        p("Skin pores", "Nature & FX", "Tiny scattered dots, soft and faint: pores, freckles, sand.", BrushSettings { size: 60.0, hardness: 0.5, opacity: 0.6, flow: 0.5, spacing: 0.3, dots: 1.0, dot_min: 0.015, dot_max: 0.05, dot_count: 7, dot_spread: 1.0, dot_colors: 0.5, trans_color: [0.55, 0.3, 0.25], size_pressure: false, stabilize: 0.0, ..d() }),
+        p("Skin pores", "Skin", "Tiny scattered dots, soft and faint: pores, freckles, sand.", BrushSettings { size: 60.0, hardness: 0.5, opacity: 0.6, flow: 0.5, spacing: 0.3, dots: 1.0, dot_min: 0.015, dot_max: 0.05, dot_count: 7, dot_spread: 1.0, dot_colors: 0.5, trans_color: [0.55, 0.3, 0.25], size_pressure: false, stabilize: 0.0, ..d() }),
         p("Running dry", "Pens", "Starts dark and full, then the paint runs out: warmer, lighter, thinner.", BrushSettings { size: 26.0, drift: -0.9, drift_len: 450.0, min_size: 0.5, opacity_pressure: true, ..d() }),
         p("Color ribbon", "Pens", "The color glides to a second color and back along the stroke.", BrushSettings { size: 34.0, hardness: 0.9, transition: Transition::Cycle, trans_color: [0.15, 0.65, 0.95], trans_len: 420.0, min_size: 0.7, ..d() }),
         p("Speed ink", "Pens", "Slow strokes keep your color; fast strokes lean toward the second color.", BrushSettings { size: 22.0, hardness: 0.9, transition: Transition::Speed, trans_color: [0.9, 0.2, 0.3], min_size: 0.6, ..d() }),
@@ -766,6 +823,28 @@ pub fn presets() -> Vec<Preset> {
         p("Serrated pen", "Pens", "An edge with tiny regular teeth.", BrushSettings { size: 30.0, hardness: 0.95, fray: Fray::Serrated, fray_amount: 0.7, fray_len: 5.0, ..d() }),
         p("Split brush", "Paint", "A dry brush with split hairs: long splits run along the stroke.", BrushSettings { size: 56.0, hardness: 0.8, fray: Fray::Split, fray_amount: 0.85, fray_len: 5.0, stabilize: 0.3, ..d() }),
         p("Worn chalk", "Pencils", "Lumpy, bitten, broken edges like a worn piece of chalk.", BrushSettings { size: 34.0, hardness: 0.85, fray: Fray::Knotted, fray_amount: 0.8, fray_len: 4.0, texture: 0.25, ..d() }),
+        // ---- Hair
+        p("Hair clumps", "Hair", "Tapered clumps of fine strands that follow your stroke: the main line-hair brush.", BrushSettings { size: 70.0, strands: 14, strand_width: 0.035, clump: 0.8, clump_count: 4, sheen: 0.4, flyaways: 0.2, ends: Taper, taper: 0.6, spacing: 0.035, stabilize: 0.35, flow: 0.9, min_size: 0.5, hardness: 1.0, ..d() }),
+        p("Straight hair", "Hair", "Long, smooth, nearly parallel strands with a soft shine.", BrushSettings { size: 80.0, strands: 22, strand_width: 0.03, clump: 0.3, strand_wobble: 0.15, sheen: 0.5, ends: Taper, taper: 0.7, spacing: 0.035, stabilize: 0.4, flow: 0.9, min_size: 0.5, hardness: 1.0, ..d() }),
+        p("Wavy hair", "Hair", "Strands that sway in long waves.", BrushSettings { size: 70.0, strands: 18, strand_width: 0.032, clump: 0.6, curl: 0.35, curl_len: 150.0, sheen: 0.35, flyaways: 0.15, ends: Taper, taper: 0.6, spacing: 0.035, stabilize: 0.4, flow: 0.9, min_size: 0.5, hardness: 1.0, ..d() }),
+        p("Curly hair", "Hair", "Tight curls: strands that wind around each other.", BrushSettings { size: 60.0, strands: 12, strand_width: 0.045, clump: 0.7, clump_count: 3, curl: 0.9, curl_len: 70.0, strand_wobble: 0.5, sheen: 0.3, ends: Taper, taper: 0.5, spacing: 0.03, stabilize: 0.3, flow: 0.95, min_size: 0.5, hardness: 1.0, ..d() }),
+        p("Flyaways", "Hair", "Loose stray hairs that lift off the edge.", BrushSettings { size: 50.0, strands: 3, strand_width: 0.02, flyaways: 1.0, curl: 0.2, ends: Taper, taper: 0.7, spacing: 0.05, stabilize: 0.3, flow: 0.8, min_size: 0.5, hardness: 1.0, ..d() }),
+        p("Baby hairs", "Hair", "A single fine strand with a little curl, for hairlines and baby hairs.", BrushSettings { size: 22.0, strands: 1, strand_width: 0.09, curl: 0.4, curl_len: 60.0, strand_wobble: 0.5, ends: Taper, taper: 0.9, spacing: 0.03, stabilize: 0.5, flow: 0.95, min_size: 0.4, hardness: 1.0, ..d() }),
+        p("Hair volume", "Hair", "Texture hair: a mass of strands over a soft underpaint, to build volume fast.", BrushSettings { size: 100.0, strands: 30, strand_width: 0.04, strand_fill: 0.35, clump: 0.5, flyaways: 0.3, color_jitter: 0.12, opacity_jitter: 0.2, sheen: 0.3, tex_kind: TexKind::Hair, texture: 0.15, ends: Taper, taper: 0.5, spacing: 0.04, stabilize: 0.3, flow: 0.85, min_size: 0.5, hardness: 0.8, ..d() }),
+        p("Hair sheen", "Hair", "A band of shine that glides across the strands.", BrushSettings { size: 60.0, strands: 10, strand_width: 0.03, sheen: 1.0, clump: 0.4, ends: Taper, taper: 0.7, spacing: 0.035, stabilize: 0.4, flow: 0.75, min_size: 0.5, hardness: 1.0, ..d() }),
+        p("Comb blender", "Hair", "Blends along the strands under the brush instead of across them, so strands never mush together.", BrushSettings { size: 60.0, mix: 1.0, comb: 1.0, follow_direction: true, hardness: 0.6, spacing: 0.06, flow: 0.9, min_size: 0.5, stabilize: 0.15, ..d() }),
+        p("Gloss blender", "Hair", "Combs the color along the strands and adds shine.", BrushSettings { size: 60.0, mix: 0.85, comb: 0.8, gloss: 1.0, follow_direction: true, hardness: 0.5, spacing: 0.06, flow: 0.8, min_size: 0.5, stabilize: 0.15, ..d() }),
+        p("Tone blender", "Hair", "Combs along the strands and shifts the tone warmer: roots to tips.", BrushSettings { size: 60.0, mix: 0.9, comb: 0.6, tint: 0.5, follow_direction: true, hardness: 0.5, spacing: 0.06, flow: 0.8, min_size: 0.5, stabilize: 0.15, ..d() }),
+        // ---- Skin
+        p("Skin grain", "Skin", "Soft skin with a fine natural grain that stays put on the canvas.", BrushSettings { size: 90.0, hardness: 0.2, flow: 0.4, tex_kind: TexKind::Skin, texture: 0.4, tex_scale: 0.8, tint: 0.2, opacity_pressure: true, min_size: 0.6, ..d() }),
+        p("Freckles", "Skin", "Freckles in natural patches, not an even sprinkle.", BrushSettings { size: 50.0, hardness: 0.6, opacity: 0.7, spacing: 0.3, dots: 1.0, dot_min: 0.03, dot_max: 0.09, dot_count: 3, dot_spread: 1.2, dot_cluster: 0.9, dot_colors: 0.4, trans_color: [0.5, 0.28, 0.2], size_pressure: false, stabilize: 0.0, ..d() }),
+        p("Blush scatter", "Skin", "Big, faint, soft patches of color for blush, in natural clusters.", BrushSettings { size: 90.0, hardness: 0.1, opacity: 0.4, flow: 0.5, spacing: 0.35, dots: 1.0, dot_min: 0.2, dot_max: 0.5, dot_count: 3, dot_spread: 0.9, dot_cluster: 0.8, tint: 0.8, color_jitter: 0.15, size_pressure: false, stabilize: 0.0, ..d() }),
+        p("Vellus fuzz", "Skin", "Fine, pale peach fuzz at the edge of skin.", BrushSettings { size: 40.0, strands: 8, strand_width: 0.012, clump: 0.0, flyaways: 1.0, strand_wobble: 0.6, opacity: 0.5, ends: Taper, taper: 0.5, spacing: 0.05, stabilize: 0.3, min_size: 0.5, hardness: 1.0, ..d() }),
+        p("Soft skin shading", "Skin", "Ultra soft airbrush shading with a gentle, readable edge between light and shade.", BrushSettings { size: 120.0, hardness: 0.05, flow: 0.25, terminator: 0.35, opacity_pressure: true, spacing: 0.05, min_size: 0.6, ..d() }),
+        p("Anime skin cel", "Skin", "The same shading with a hard step between light and shade: cel style.", BrushSettings { size: 70.0, hardness: 0.5, flow: 1.0, terminator: 1.0, spacing: 0.05, min_size: 0.6, ..d() }),
+        p("Skin blender", "Skin", "Smooths the color but keeps the pores: only the soft tone is blended.", BrushSettings { size: 60.0, hardness: 0.3, mix: 0.9, keep_detail: 0.85, flow: 0.8, spacing: 0.06, min_size: 0.6, stabilize: 0.1, ..d() }),
+        p("Subsurface blend", "Skin", "Blends and lets mid tones glow a little red, like light through skin.", BrushSettings { size: 60.0, hardness: 0.3, mix: 0.7, keep_detail: 0.6, sss: 1.0, tint: 0.3, flow: 0.7, spacing: 0.06, min_size: 0.6, stabilize: 0.1, ..d() }),
+        p("Temperature blender", "Skin", "Evens out warm and cool patches without flattening the lights and darks.", BrushSettings { size: 80.0, hardness: 0.2, mix: 1.0, temp_blend: true, flow: 0.8, spacing: 0.06, min_size: 0.6, stabilize: 0.1, ..d() }),
         p("Splatter", "Airbrush", "Random paint drops.", BrushSettings { size: 70.0, tip: T::Splatter, spacing: 0.7, scatter: 1.4, size_jitter: 0.8, angle_jitter: 1.0, opacity_jitter: 0.3, min_size: 0.4, stabilize: 0.0, ..d() }),
         p("Soft blush", "Airbrush", "Gentle color for cheeks, glow and soft shading in anime art.", BrushSettings { size: 80.0, flow: 0.12, hardness: 0.1, spacing: 0.08, size_pressure: false, min_size: 1.0, opacity_pressure: true, opacity: 0.7, stabilize: 0.0, ..d() }),
         // ---- Blend

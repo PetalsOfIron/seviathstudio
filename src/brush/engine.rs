@@ -9,7 +9,8 @@ use std::f32::consts::{PI, TAU};
 
 use eframe::egui::Color32;
 
-use super::noise::{Rng, fbm, noise, smoothstep};
+use super::local::Local;
+use super::noise::{Rng, fbm, hash, noise, smoothstep};
 use super::raster::blur;
 use super::textures;
 use super::tips::{self, sample};
@@ -94,6 +95,8 @@ pub struct Stroke {
     /// Threads (and dots next to a normal stroke) wait here until the main dabs near them are done,
     /// so a later dab doesn't paint over them.
     queue: Vec<QueuedDot>,
+    /// Where each strand or thread was last drawn, so the dabs between are joined into a line.
+    path_last: HashMap<usize, (f32, f32)>,
     recent: Vec<(f32, f32, f32)>, // last particles (x, y, r), for "keep particles apart"
     before: HashMap<TileKey, Option<TileData>>,
     /// Symmetry: every dab is also drawn at these mirror images.
@@ -191,6 +194,7 @@ impl Stroke {
             last_dip: 0.0,
             speed: 0.0,
             queue: Vec::new(),
+            path_last: HashMap::new(),
             dot_s: BrushSettings {
                 tip: Tip::Round,
                 roundness: 1.0,
@@ -208,6 +212,7 @@ impl Stroke {
                 extra_tips: Vec::new(),
                 tex_kind: crate::brush::TexKind::Paper,
                 hardness: s.hardness.clamp(0.0, 0.92),
+                terminator: 0.0,
                 antialias: true,
                 ..s.clone()
             },
@@ -355,6 +360,7 @@ impl Stroke {
         // while drawing only the start can be tapered; the end is tapered when the stroke ends
         let f = self.taper_at(dab.d, f32::INFINITY);
         if self.in_gap() {
+            self.path_last.clear();
             return;
         }
         self.draw_dab(doc, pt, f, sa);
@@ -529,6 +535,7 @@ impl Stroke {
         let base = self.transition_color(base, pt.p, d);
         let color = self.jitter_color(base, d);
         let (color, thin) = self.drift(color, d);
+        let color = warm_cool(color, self.s.tint);
         let alpha = self.s.flow * press * dens * grad_alpha * thin;
         if self.s.dots > 0.0 {
             let dots = self.s.dots.clamp(0.0, 1.0);
@@ -536,6 +543,14 @@ impl Stroke {
                 let rr = (size * (self.s.dot_min + self.rng.next() * (self.s.dot_max - self.s.dot_min).max(0.0)).max(0.01)).max(0.5);
                 let (pa, pd) = (self.rng.next() * TAU, self.rng.next().sqrt() * self.s.dot_spread);
                 let (px, py) = (x + pa.cos() * pd * size, y + pa.sin() * pd * size);
+                if self.s.dot_cluster > 0.0 {
+                    // freckles and blush come in patches: a slow noise decides where dots may land
+                    let n = noise(px / (self.s.size * 1.1).max(8.0), py / (self.s.size * 1.1).max(8.0), self.s.seed as i32 + 11);
+                    let keep = 1.0 + (smoothstep(0.38, 0.7, n) - 1.0) * self.s.dot_cluster.clamp(0.0, 1.0);
+                    if self.rng.next() > keep {
+                        continue;
+                    }
+                }
                 let c = if self.s.dot_colors > 0.0 {
                     let t = self.rng.next() * self.s.dot_colors.clamp(0.0, 1.0);
                     shade_oklab(mix_oklab(color, self.s.trans_color, t), (self.rng.signed()) * 0.05 * self.s.dot_colors)
@@ -555,6 +570,17 @@ impl Stroke {
             }
         }
         let alpha = if self.s.dots > 0.0 { alpha * (1.0 - self.s.dots.clamp(0.0, 1.0)) } else { alpha };
+        if self.s.strands > 0 {
+            self.hair(doc, x, y, size, dir, d, color, alpha, pt.p);
+            let fill = self.s.strand_fill.clamp(0.0, 1.0);
+            if fill > 0.0 {
+                let v = self.pick_variant();
+                self.stamp_buffer(doc, x, y, size.max(0.4), ang, alpha * fill, color, pt.p, v);
+            }
+            self.threads(doc, x, y, size, dir, d, color, alpha, pt.p);
+            self.flush_queue(doc, false);
+            return;
+        }
         if self.s.particles > 0 {
             let gap = self.s.particle_gap.clamp(0.0, 1.0);
             for _ in 0..self.s.particles {
@@ -595,7 +621,7 @@ impl Stroke {
 
     /// Lines and waves inside the stroke: thin threads that follow the stroke and swing sideways.
     #[allow(clippy::too_many_arguments)]
-    fn threads(&mut self, doc: &mut Document, x: f32, y: f32, size: f32, dir: f32, d: f32, color: [f32; 3], alpha: f32, p: f32) {
+    fn threads(&mut self, _doc: &mut Document, x: f32, y: f32, size: f32, dir: f32, d: f32, color: [f32; 3], alpha: f32, p: f32) {
         let n = self.s.lines.min(12);
         if n == 0 || self.s.line_strength <= 0.0 {
             return;
@@ -607,8 +633,76 @@ impl Stroke {
             let v = (i as f32 + 0.5) / n as f32 * 2.0 - 1.0;
             let wave = (TAU * d / self.s.line_len.max(8.0) + i as f32 * 1.7).sin() * self.s.line_wave;
             let off = (v * 0.8 + wave) * size;
-            self.queue.push(QueuedDot { x: x + nx * off, y: y + ny * off, r: lw, alpha: alpha * self.s.line_strength, color: c, p, d });
+            self.queue_path(100 + i as usize, x + nx * off, y + ny * off, lw, alpha * self.s.line_strength, c, p, d);
         }
+    }
+
+    /// Strands: many fine hairs along the stroke, in clumps, with curl, wobble, shine and stray hairs.
+    #[allow(clippy::too_many_arguments)]
+    fn hair(&mut self, doc: &mut Document, x: f32, y: f32, size: f32, dir: f32, d: f32, color: [f32; 3], alpha: f32, p: f32) {
+        let _ = doc;
+        let n = self.s.strands.min(40) as usize;
+        let seed = self.s.seed as i32 * 7 + 3;
+        let (nx, ny) = ((dir + PI / 2.0).cos(), (dir + PI / 2.0).sin());
+        let clumps = self.s.clump_count.clamp(1, 8) as i32;
+        for i in 0..n {
+            let hi = |k: i32| hash(i as i32, k, seed);
+            // strands begin at different places, so the ends are not lined up
+            let start = hi(1) * size * 1.6;
+            if d < start {
+                self.path_last.remove(&i);
+                continue;
+            }
+            let center = ((i as i32 % clumps) as f32 + 0.5) / clumps as f32 * 2.0 - 1.0;
+            let spread = hi(2) * 2.0 - 1.0;
+            let tight = center + (hi(3) - 0.5) * 0.35;
+            let v = (spread + (tight - spread) * self.s.clump.clamp(0.0, 1.0)).clamp(-1.0, 1.0);
+            let wobble = (TAU * d / (60.0 + hi(4) * 120.0) + hi(5) * TAU).sin() * self.s.strand_wobble * 0.25;
+            let curl = (TAU * d / self.s.curl_len.max(20.0) + hi(6) * TAU).sin() * self.s.curl * 0.9;
+            let off = (v * 0.85 + wobble + curl) * size;
+            let along = ((d - start) / (size * 10.0)).min(1.0);
+            let w = (self.s.strand_width * size * (0.6 + 0.8 * hi(7)) * (1.0 - 0.45 * along)).max(0.35);
+            let band = (d / (size * 3.0)).sin() * 0.5 + hi(8) * 0.2;
+            let shine = self.s.sheen.clamp(0.0, 1.0) * 0.22 * (-((v - band) * (v - band)) / 0.08).exp();
+            let col = shade_oklab(color, (hi(9) - 0.5) * 0.14 + shine);
+            self.queue_path(i, x + nx * off, y + ny * off, w, alpha * (0.75 + 0.25 * hi(10)), col, p, d);
+        }
+        // stray hairs lifting off the edge
+        let fly = self.s.flyaways.clamp(0.0, 1.0);
+        if fly > 0.0 && self.rng.next() < fly * 0.05 {
+            let side = if self.rng.next() < 0.5 { -1.0 } else { 1.0 };
+            let (mut hx, mut hy) = (x + nx * side * size * 0.85, y + ny * side * size * 0.85);
+            let ang0 = dir + side * (0.5 + self.rng.next() * 1.0);
+            let len = size * (0.7 + self.rng.next() * 1.8);
+            let curve = self.rng.signed() * 1.3;
+            let steps = ((len / 1.4).ceil() as usize).clamp(4, 120);
+            let col = shade_oklab(color, 0.05);
+            for k in 0..steps {
+                let t = k as f32 / steps as f32;
+                let a = ang0 + curve * t;
+                hx += a.cos() * 1.4;
+                hy += a.sin() * 1.4;
+                self.queue.push(QueuedDot { x: hx, y: hy, r: 0.45 + 0.35 * (1.0 - t), alpha: alpha * (0.85 - 0.45 * t), color: col, p, d });
+            }
+        }
+    }
+
+    /// Add a point of a strand or thread, with the points between it and the last one so the line is unbroken.
+    #[allow(clippy::too_many_arguments)]
+    fn queue_path(&mut self, key: usize, x: f32, y: f32, r: f32, alpha: f32, color: [f32; 3], p: f32, d: f32) {
+        if let Some(&(lx, ly)) = self.path_last.get(&key) {
+            let dist = ((x - lx).powi(2) + (y - ly).powi(2)).sqrt();
+            let step = (r * 0.7).max(0.6);
+            if dist > step && dist < r * 60.0 + 40.0 {
+                let n = ((dist / step).ceil() as usize).min(200);
+                for k in 1..n {
+                    let t = k as f32 / n as f32;
+                    self.queue.push(QueuedDot { x: lx + (x - lx) * t, y: ly + (y - ly) * t, r, alpha, color, p, d });
+                }
+            }
+        }
+        self.path_last.insert(key, (x, y));
+        self.queue.push(QueuedDot { x, y, r, alpha, color, p, d });
     }
 
     /// Paint the waiting dots and threads: those the stroke has moved far enough away from, or all of them.
@@ -669,7 +763,12 @@ impl Stroke {
                 if u < -1.0 || v < -1.0 || u > n + 1.0 || v > n + 1.0 {
                     continue;
                 }
-                let mv = sample(m, u, v);
+                let mut mv = sample(m, u, v);
+                if s.terminator > 0.0 {
+                    // a clear step between light and shade, the softer the lower the setting
+                    let half = 0.5 * (1.0 - s.terminator.clamp(0.0, 1.0) * 0.92);
+                    mv = smoothstep(0.5 - half, 0.5 + half, mv);
+                }
                 if mv <= 0.001 {
                     continue;
                 }
@@ -823,6 +922,11 @@ impl Stroke {
         let a = self.mix_p[3].clamp(0.0, 1.0);
         let mut rgb = if a > 0.001 { [self.mix_p[0] / a, self.mix_p[1] / a, self.mix_p[2] / a] } else { [0.0; 3] };
         rgb = self.jitter_color(rgb.map(|v| v.clamp(0.0, 1.0)), self.cur_d);
+        // skin and shine: a touch of warmth, light through the skin, gloss
+        // a blender deposits again and again, so its warmth is a gentler nudge than a paint brush's
+        rgb = warm_cool(rgb, self.s.tint * 0.35);
+        rgb = subsurface(rgb, self.s.sss);
+        rgb = shade_oklab(rgb, self.s.gloss.clamp(0.0, 1.0) * 0.08);
         let f = self.s.opacity * self.s.flow * amount * (1.0 - 0.55 * self.s.water);
         let gran = self.s.granulation;
         let lock_alpha = doc.layers[self.li].lock_alpha;
@@ -834,6 +938,13 @@ impl Stroke {
         let sel = doc.selection.clone();
         let real = self.s.paint != Paint::Normal;
         let paint_pg = real.then(|| Pigment::new(rgb));
+        let (keep, comb, temp) = (self.s.keep_detail.clamp(0.0, 1.0), self.s.comb.clamp(0.0, 1.0), self.s.temp_blend);
+        let local = (keep > 0.0 || comb > 0.0).then(|| Local::build(&doc.layers[self.li], w, h, x, y, r * 1.42 + 2.0, if keep > 0.0 { (r * 0.35).max(1.5) } else { 0.0 }, if comb > 0.0 { (r * 0.6).clamp(3.0, 14.0) } else { 0.0 }));
+        // combing: the deposit follows the strands under the brush
+        let ang = match (&local, self.s.follow_direction) {
+            (Some(l), true) => l.flow.map(|(fx, fy)| fy.atan2(fx)).unwrap_or(ang),
+            _ => ang,
+        };
         for (x, y, ang) in self.copies(x, y, r, ang) {
             let before = &mut self.before;
             let mixer = &mut self.mixer;
@@ -864,10 +975,35 @@ impl Stroke {
                 let o = blend::to_px(tile[i]);
                 let k = 1.0 - m;
                 let paint: Px = [(rgb[0] * dens).clamp(0.0, 1.0) * a, (rgb[1] * dens).clamp(0.0, 1.0) * a, (rgb[2] * dens).clamp(0.0, 1.0) * a, a];
+                let mut paint = paint;
+                if let Some(l) = &local {
+                    if let Some(c) = l.comb_at(px, py).filter(|c| c[3] > 0.02) {
+                        // pulled along the strands: what is already there, smeared in the flow direction
+                        paint = [0, 1, 2, 3].map(|j| paint[j] + (c[j] - paint[j]) * comb);
+                    }
+                }
                 let mut out = match &paint_pg {
-                    Some(pg) if o[3] > 0.0 => mixer.mix_premult(o, paint, pg, m),
+                    Some(pg) if o[3] > 0.0 && comb == 0.0 => mixer.mix_premult(o, paint, pg, m),
                     _ => [o[0] * k + paint[0] * m, o[1] * k + paint[1] * m, o[2] * k + paint[2] * m, o[3] * k + paint[3] * m],
                 };
+                if keep > 0.0 && o[3] > 0.0 {
+                    // change the soft color, keep the fine texture: the old detail is added back
+                    if let Some(lp) = local.as_ref().and_then(|l| l.low_at(px, py)) {
+                        let a = out[3];
+                        for j in 0..3 {
+                            let soft = lp[j] * k + paint[j] * m;
+                            out[j] = (soft + (o[j] - lp[j]) * keep).clamp(0.0, a.max(0.0));
+                        }
+                    }
+                }
+                if temp && o[3] > 0.0 {
+                    // temperature: warm and cool move toward the brush's, the lights and darks stay
+                    let old = [o[0] / o[3], o[1] / o[3], o[2] / o[3]].map(|v| v.clamp(0.0, 1.0));
+                    let [lo, ao, bo] = crate::oklab::rgb_to_oklab(old);
+                    let [_, ap, bp] = crate::oklab::rgb_to_oklab(rgb);
+                    let c = crate::oklab::oklab_to_rgb([lo, ao + (ap - ao) * m, bo + (bp - bo) * m]);
+                    out = [c[0] * o[3], c[1] * o[3], c[2] * o[3], o[3]];
+                }
                 if lock_alpha {
                     let s = if out[3] > 0.0 { o[3] / out[3] } else { 0.0 };
                     out = [out[0] * s, out[1] * s, out[2] * s, o[3]];
@@ -934,6 +1070,7 @@ impl Stroke {
     /// Undo what this stroke painted so far (for the tapered redraw).
     fn clear_painted(&mut self, doc: &mut Document) {
         self.queue.clear();
+        self.path_last.clear();
         if self.direct {
             let li = self.li;
             for (key, b) in self.before.drain() {
@@ -1078,6 +1215,26 @@ pub fn mix_oklab(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     }
     let (la, lb) = (rgb_to_oklab(a), rgb_to_oklab(b));
     oklab_to_rgb([la[0] + (lb[0] - la[0]) * t, la[1] + (lb[1] - la[1]) * t, la[2] + (lb[2] - la[2]) * t])
+}
+
+/// A color nudged warmer (positive) or cooler (negative).
+pub fn warm_cool(c: [f32; 3], t: f32) -> [f32; 3] {
+    if t == 0.0 {
+        return c;
+    }
+    let [l, a, b] = rgb_to_oklab(c);
+    let t = t.clamp(-1.0, 1.0);
+    oklab_to_rgb([l, a + 0.02 * t, b + 0.035 * t])
+}
+
+/// Light through skin: mid tones get a little more red.
+pub fn subsurface(c: [f32; 3], amount: f32) -> [f32; 3] {
+    if amount <= 0.0 {
+        return c;
+    }
+    let [l, a, b] = rgb_to_oklab(c);
+    let bell = (-((l - 0.72) / 0.22).powi(2)).exp();
+    oklab_to_rgb([l, a + 0.025 * amount * bell, b - 0.005 * amount * bell])
 }
 
 /// A color made lighter (positive) or darker (negative) in OKLab.
@@ -1597,5 +1754,225 @@ mod tests {
         let plain = BrushSettings::default();
         assert_eq!((plain.pinch, plain.dots, plain.lines, plain.gap_len, plain.drift, plain.pressure_curve), (0.0, 0.0, 0, 0.0, 0.0, 0.0));
         assert!(plain.transition == Transition::Off && plain.fray == Fray::Off, "everything is off by default");
+    }
+
+    // ---------- hair and skin ----------
+
+    /// Runs of painted pixels down one column (how many separate strands the stroke is made of).
+    fn runs(doc: &Document, x: i32, y: i32, alpha: u8) -> usize {
+        let mut n = 0;
+        let mut inside = false;
+        for yy in y - 60..y + 60 {
+            let on = crate::files::layer_rgba(&doc.layers[0], x, yy, 1, 1).get_pixel(0, 0).0[3] > alpha;
+            if on && !inside {
+                n += 1;
+            }
+            inside = on;
+        }
+        n
+    }
+
+    fn hairy() -> BrushSettings {
+        BrushSettings { strands: 8, strand_width: 0.05, clump: 0.0, strand_wobble: 0.0, hardness: 1.0, ..designer() }
+    }
+
+    #[test]
+    fn strands_make_a_stroke_of_separate_hairs_and_zero_strands_is_solid() {
+        let mut d = Document::new(800, 300);
+        line_p(&mut d, &BrushSettings { size: 80.0, ..hairy() }, BLUE, 150.0, 1.0, 600.0);
+        assert!(runs(&d, 500, 150, 100) >= 4, "several separate strands: {}", runs(&d, 500, 150, 100));
+        let mut d = Document::new(800, 300);
+        line_p(&mut d, &BrushSettings { size: 80.0, strands: 0, ..hairy() }, BLUE, 150.0, 1.0, 600.0);
+        assert_eq!(runs(&d, 500, 150, 100), 1, "no strands: a solid line");
+        // an underpaint fills the space between the strands
+        let mut d = Document::new(800, 300);
+        line_p(&mut d, &BrushSettings { size: 80.0, strand_fill: 1.0, ..hairy() }, BLUE, 150.0, 1.0, 600.0);
+        assert_eq!(runs(&d, 500, 150, 100), 1, "full underpaint: no gaps");
+    }
+
+    #[test]
+    fn curl_makes_a_strand_wind_and_flyaways_leave_the_edge() {
+        let single = |curl: f32| {
+            let mut d = Document::new(800, 300);
+            line_p(&mut d, &BrushSettings { size: 80.0, strands: 1, strand_width: 0.06, curl, curl_len: 100.0, ..hairy() }, BLUE, 150.0, 1.0, 600.0);
+            let ys: Vec<i32> = (300..560)
+                .step_by(10)
+                .filter_map(|x| (60..240).find(|&y| crate::files::layer_rgba(&d.layers[0], x, y, 1, 1).get_pixel(0, 0).0[3] > 100))
+                .collect();
+            ys.iter().max().unwrap_or(&0) - ys.iter().min().unwrap_or(&0)
+        };
+        assert!(single(0.9) > single(0.0) + 15, "a curly strand swings across the stroke: {} vs {}", single(0.9), single(0.0));
+        // stray hairs reach outside the stroke's own width
+        let outside = |fly: f32| {
+            let mut d = Document::new(800, 300);
+            line_p(&mut d, &BrushSettings { size: 50.0, strands: 3, strand_width: 0.04, flyaways: fly, ..hairy() }, BLUE, 150.0, 1.0, 650.0);
+            d.layers[0].tiles.values().enumerate().map(|(_, t)| t.iter().enumerate().filter(|(i, c)| c.a() > 30 && ((*i / TILE) as i32 + 0) > 0).count()).sum::<usize>();
+            let mut n = 0;
+            for y in 0..300 {
+                for x in 100..700 {
+                    if (y as i32 - 150).abs() > 30 && crate::files::layer_rgba(&d.layers[0], x, y, 1, 1).get_pixel(0, 0).0[3] > 30 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        assert!(outside(1.0) > outside(0.0) + 40, "flyaways leave the edge: {} vs {}", outside(1.0), outside(0.0));
+    }
+
+    #[test]
+    fn shine_runs_across_the_strands() {
+        let spread = |sheen: f32| {
+            let mut d = Document::new(800, 300);
+            line_p(&mut d, &BrushSettings { size: 90.0, strands: 12, strand_width: 0.05, sheen, ..hairy() }, Color32::from_rgb(90, 60, 40), 150.0, 1.0, 650.0);
+            let ls: Vec<f32> = (120..650).step_by(3).flat_map(|x| (110..190).filter(move |_| true).map(move |y| (x, y))).filter_map(|(x, y)| {
+                let p = crate::files::layer_rgba(&d.layers[0], x, y, 1, 1).get_pixel(0, 0).0;
+                (p[3] > 200).then(|| lum([p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0]))
+            }).collect();
+            ls.iter().cloned().fold(0.0, f32::max)
+        };
+        assert!(spread(1.0) > spread(0.0) + 0.05, "a shine makes some strands lighter: {} vs {}", spread(1.0), spread(0.0));
+    }
+
+    fn stripes(doc: &mut Document, band: usize) {
+        for y in 0..doc.h as usize {
+            for x in 0..doc.w as usize {
+                let c = if y / band % 2 == 0 { Color32::from_rgb(220, 40, 40) } else { Color32::from_rgb(30, 40, 200) };
+                doc.layers[0].tile_mut(((x / TILE) as i32, (y / TILE) as i32))[(y % TILE) * TILE + x % TILE] = c;
+            }
+        }
+    }
+
+    #[test]
+    fn a_comb_blender_pulls_along_the_strands_not_across_them() {
+        let contrast_after = |comb: f32| {
+            let mut d = Document::new(400, 400);
+            stripes(&mut d, 3);
+            let s = BrushSettings { size: 60.0, mix: 1.0, comb, hardness: 0.7, spacing: 0.06, flow: 1.0, size_pressure: false, stabilize: 0.0, mix_refer: crate::brush::MixRefer::Layer, ..BrushSettings::default() };
+            // a vertical stroke across horizontal stripes
+            let mut st = Stroke::begin(&mut d, 0, &s, Color32::BLACK, false, 1.0, false, Sample { x: 200.0, y: 100.0, p: 1.0 }, &none);
+            let pts: Vec<Sample> = (1..=60).map(|i| Sample { x: 200.0, y: 100.0 + i as f32 * 4.0, p: 1.0 }).collect();
+            for c in pts.chunks(5) {
+                st.add(&mut d, c, &none);
+            }
+            st.finish(&mut d, &none);
+            // how different neighbouring rows still are in the middle of the stroke
+            (200..260).map(|y| {
+                let (a, b) = (at(&d, 200, y), at(&d, 200, y + 3));
+                (a[0] - b[0]).abs() + (a[2] - b[2]).abs()
+            }).sum::<f32>()
+        };
+        let (plain, combed) = (contrast_after(0.0), contrast_after(1.0));
+        assert!(combed > plain * 1.5, "the combed stripes stay distinct, the plain smudge mixes them: {combed} vs {plain}");
+    }
+
+    #[test]
+    fn terminator_makes_the_edge_between_light_and_shade_clearer() {
+        let edge_width = |term: f32| {
+            let mut d = Document::new(500, 300);
+            line_p(&mut d, &BrushSettings { size: 100.0, hardness: 0.1, terminator: term, ..designer() }, BLUE, 150.0, 1.0, 400.0);
+            // pixels between 10% and 90% paint across the stroke's edge
+            (80..160).filter(|&y| {
+                let a = crate::files::layer_rgba(&d.layers[0], 300, y, 1, 1).get_pixel(0, 0).0[3];
+                (25..230).contains(&a)
+            }).count()
+        };
+        assert!(edge_width(1.0) * 2 < edge_width(0.0), "a clear edge versus the soft airbrush: {} vs {}", edge_width(1.0), edge_width(0.0));
+    }
+
+    #[test]
+    fn a_skin_blender_keeps_the_pores_and_a_plain_blender_loses_them() {
+        let detail_after = |keep: f32| {
+            let mut d = Document::new(400, 300);
+            // skin with fine noisy pores
+            for y in 0..300usize {
+                for x in 0..400usize {
+                    let n = crate::brush::noise::hash(x as i32, y as i32, 5);
+                    let v = 190.0 + (n - 0.5) * 60.0;
+                    d.layers[0].tile_mut(((x / TILE) as i32, (y / TILE) as i32))[(y % TILE) * TILE + x % TILE] = Color32::from_rgb(v as u8, (v * 0.78) as u8, (v * 0.68) as u8);
+                }
+            }
+            let s = BrushSettings { size: 80.0, mix: 0.9, keep_detail: keep, hardness: 0.5, spacing: 0.05, size_pressure: false, stabilize: 0.0, mix_refer: crate::brush::MixRefer::Layer, ..BrushSettings::default() };
+            let mut st = Stroke::begin(&mut d, 0, &s, Color32::from_rgb(200, 150, 130), false, 1.0, false, Sample { x: 100.0, y: 150.0, p: 1.0 }, &none);
+            let pts: Vec<Sample> = (1..=50).map(|i| Sample { x: 100.0 + i as f32 * 4.0, y: 150.0, p: 1.0 }).collect();
+            for c in pts.chunks(5) {
+                st.add(&mut d, c, &none);
+            }
+            st.finish(&mut d, &none);
+            // variance of the red channel in the middle of the stroke
+            let vals: Vec<f32> = (150..250).flat_map(|x| (140..160).map(move |y| (x, y))).map(|(x, y)| at(&d, x, y)[0]).collect();
+            let mean = vals.iter().sum::<f32>() / vals.len() as f32;
+            vals.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / vals.len() as f32
+        };
+        let (plain, kept) = (detail_after(0.0), detail_after(1.0));
+        assert!(kept > plain * 3.0, "the pores survive the blend: {kept} vs {plain}");
+    }
+
+    #[test]
+    fn a_temperature_blender_moves_hue_but_not_lightness_and_skin_glow_warms() {
+        let mut d = Document::new(400, 300);
+        for y in 0..300usize {
+            for x in 0..400usize {
+                let c = if x < 200 { Color32::from_rgb(215, 150, 120) } else { Color32::from_rgb(150, 160, 200) };
+                d.layers[0].tile_mut(((x / TILE) as i32, (y / TILE) as i32))[(y % TILE) * TILE + x % TILE] = c;
+            }
+        }
+        let (l0, l1) = (lum(at(&d, 100, 150)), lum(at(&d, 300, 150)));
+        let s = BrushSettings { size: 80.0, mix: 1.0, temp_blend: true, hardness: 0.6, spacing: 0.05, size_pressure: false, stabilize: 0.0, mix_refer: crate::brush::MixRefer::Layer, ..BrushSettings::default() };
+        let mut st = Stroke::begin(&mut d, 0, &s, Color32::from_rgb(190, 150, 150), false, 1.0, false, Sample { x: 120.0, y: 150.0, p: 1.0 }, &none);
+        let pts: Vec<Sample> = (1..=40).map(|i| Sample { x: 120.0 + i as f32 * 4.0, y: 150.0, p: 1.0 }).collect();
+        for c in pts.chunks(5) {
+            st.add(&mut d, c, &none);
+        }
+        st.finish(&mut d, &none);
+        let (a, b) = (at(&d, 100, 150), at(&d, 300, 150));
+        assert!((lum(a) - l0).abs() < 0.03 && (lum(b) - l1).abs() < 0.03, "lights and darks are kept: {} {} / {l0} {l1}", lum(a), lum(b));
+        assert!(a != at(&d, 100, 100) || b != at(&d, 300, 100), "but the colors moved");
+        // skin glow: mid tones get a little more red
+        let skin = [225.0 / 255.0, 170.0 / 255.0, 150.0 / 255.0];
+        let glow = subsurface(skin, 1.0);
+        assert!(glow[0] - glow[1] > skin[0] - skin[1], "redder: {glow:?} vs {skin:?}");
+        assert!(warm_cool(skin, 1.0)[2] < skin[2] && warm_cool(skin, -1.0)[2] > skin[2], "warm = less blue, cool = more");
+    }
+
+    #[test]
+    fn freckles_come_in_patches() {
+        let patchiness = |cluster: f32| {
+            let mut d = Document::new(900, 300);
+            let s = BrushSettings { size: 60.0, dots: 1.0, spacing: 0.3, dot_min: 0.05, dot_max: 0.1, dot_count: 4, dot_spread: 1.2, dot_cluster: cluster, size_pressure: false, hardness: 0.8, ..designer() };
+            line_p(&mut d, &s, Color32::from_rgb(120, 70, 50), 150.0, 1.0, 850.0);
+            // painted pixels in 30x30 cells along the stroke: how uneven are they?
+            let counts: Vec<f32> = (0..24)
+                .map(|c| {
+                    let x0 = 130 + c * 30;
+                    (0..60).flat_map(|dx| (0..60).map(move |dy| (dx, dy))).filter(|(dx, dy)| {
+                        crate::files::layer_rgba(&d.layers[0], x0 + dx / 2, 120 + dy / 2, 1, 1).get_pixel(0, 0).0[3] > 60
+                    }).count() as f32
+                })
+                .collect();
+            let mean = counts.iter().sum::<f32>() / counts.len() as f32;
+            (counts.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / counts.len() as f32).sqrt() / mean.max(1.0)
+        };
+        assert!(patchiness(1.0) > patchiness(0.0) * 1.3, "clustered dots are patchier than an even sprinkle: {} vs {}", patchiness(1.0), patchiness(0.0));
+    }
+
+    #[test]
+    fn there_are_hair_and_skin_brushes_and_they_all_paint() {
+        let hair: Vec<_> = presets().into_iter().filter(|p| p.category == "Hair").collect();
+        let skin: Vec<_> = presets().into_iter().filter(|p| p.category == "Skin").collect();
+        assert!(hair.len() >= 10 && skin.len() >= 10, "ten ready brushes each: {} hair, {} skin", hair.len(), skin.len());
+        for pr in hair.iter().chain(skin.iter()) {
+            let mut d = Document::new(800, 400);
+            // some paint to blend, for the blenders
+            color_line(&mut d, &BrushSettings { size: 60.0, ..solid() }, Color32::from_rgb(190, 130, 100), 200.0);
+            let before = painted(&d);
+            line_at(&mut d, &pr.s, false, 200.0);
+            assert!(painted(&d) >= before, "{} paints or blends", pr.name);
+            let mut e = Document::new(800, 400);
+            line_at(&mut e, &pr.s, false, 200.0);
+            if pr.s.mix < 0.5 {
+                assert!(painted(&e) > 30, "{} paints on empty canvas", pr.name);
+            }
+        }
     }
 }
