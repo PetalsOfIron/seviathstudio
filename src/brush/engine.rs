@@ -13,7 +13,8 @@ use super::noise::{Rng, fbm, noise, smoothstep};
 use super::raster::blur;
 use super::textures;
 use super::tips::{self, sample};
-use super::{BrushSettings, Dip, Edge, Ends, MixRefer, Paint};
+use super::{BrushSettings, Dip, Edge, Ends, Fray, MixRefer, Paint, Tip, Transition};
+use crate::oklab::{oklab_to_rgb, rgb_to_oklab};
 use crate::pigment::{Mixer, Pigment};
 use crate::blend::{self, Px};
 use crate::doc::{Document, LayerId, TILE, TileData, TileKey};
@@ -25,6 +26,17 @@ pub struct Sample {
     pub x: f32,
     pub y: f32,
     pub p: f32, // pen pressure 0..1 (mouse: 1)
+}
+
+struct QueuedDot {
+    x: f32,
+    y: f32,
+    r: f32,
+    alpha: f32,
+    color: [f32; 3],
+    p: f32,
+    /// Distance along the stroke where it was made.
+    d: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -75,6 +87,13 @@ pub struct Stroke {
     /// Real paint: remembers colors while pigments are mixed, and where the brush was last dipped.
     mixer: Mixer,
     last_dip: f32,
+    /// How fast the pen moves (pixels per pen sample, smoothed): for the speed color transition.
+    speed: f32,
+    /// The round soft brush used for dots and threads.
+    dot_s: BrushSettings,
+    /// Threads (and dots next to a normal stroke) wait here until the main dabs near them are done,
+    /// so a later dab doesn't paint over them.
+    queue: Vec<QueuedDot>,
     recent: Vec<(f32, f32, f32)>, // last particles (x, y, r), for "keep particles apart"
     before: HashMap<TileKey, Option<TileData>>,
     /// Symmetry: every dab is also drawn at these mirror images.
@@ -170,6 +189,28 @@ impl Stroke {
             last_sample: (f32::MAX, f32::MAX),
             mixer: Mixer::default(),
             last_dip: 0.0,
+            speed: 0.0,
+            queue: Vec::new(),
+            dot_s: BrushSettings {
+                tip: Tip::Round,
+                roundness: 1.0,
+                edge: Edge::Smooth,
+                edge_amount: 0.0,
+                grain: 0.0,
+                variants: 1,
+                streaks: 0.0,
+                deform: 0.0,
+                hollow: 0.0,
+                edge_holes: 0.0,
+                particles: 0,
+                wet_rim: 0.0,
+                texture: 0.0,
+                extra_tips: Vec::new(),
+                tex_kind: crate::brush::TexKind::Paper,
+                hardness: s.hardness.clamp(0.0, 0.92),
+                antialias: true,
+                ..s.clone()
+            },
             recent: Vec::new(),
             before: HashMap::new(),
             mirrors,
@@ -192,6 +233,8 @@ impl Stroke {
         let rope = s.powf(1.5) * 90.0 / self.zoom;
         let k = 1.0 - s * 0.6;
         for &q in raw {
+            let moved = ((q.x - self.last_raw.x).powi(2) + (q.y - self.last_raw.y).powi(2)).sqrt();
+            self.speed += (moved - self.speed) * 0.25;
             self.last_raw = q;
             let (dx, dy) = (q.x - self.rope_end.x, q.y - self.rope_end.y);
             let d = (dx * dx + dy * dy).sqrt();
@@ -225,6 +268,7 @@ impl Stroke {
             self.segment(doc, a, b, sample_all);
         }
         self.shape_ends(doc, sample_all);
+        self.flush_queue(doc, true);
         if self.direct {
             if let Some(i) = doc.index_of(self.layer) {
                 doc.layers[i].rev += 1;
@@ -310,13 +354,77 @@ impl Stroke {
         self.cur_d = dab.d;
         // while drawing only the start can be tapered; the end is tapered when the stroke ends
         let f = self.taper_at(dab.d, f32::INFINITY);
+        if self.in_gap() {
+            return;
+        }
         self.draw_dab(doc, pt, f, sa);
+    }
+
+    /// The pen pressure after the brush's own response curve.
+    fn curve(&self, p: f32) -> f32 {
+        let c = self.s.pressure_curve.clamp(-1.0, 1.0);
+        let p = p.clamp(0.0, 1.0);
+        if c == 0.0 { p } else { p.powf(2f32.powf(c * 1.5)) }
     }
 
     fn radius_at(&self, p: f32) -> f32 {
         let s = &self.s;
-        let f = if s.size_pressure { s.min_size + (1.0 - s.min_size) * p.clamp(0.0, 1.0) } else { 1.0 };
+        let f = if s.size_pressure { s.min_size + (1.0 - s.min_size) * self.curve(p) } else { 1.0 };
         s.size / 2.0 * f
+    }
+
+    /// 1 = full width; pinch points make the stroke narrow every `pinch_every` pixels.
+    fn pinch_at(&self, d: f32) -> f32 {
+        let s = &self.s;
+        if s.pinch <= 0.0 {
+            return 1.0;
+        }
+        1.0 - s.pinch.clamp(0.0, 1.0) * 0.9 * (0.5 - 0.5 * (TAU * d / s.pinch_every.max(10.0)).cos())
+    }
+
+    /// True while the stroke is in a gap of a dashed line.
+    fn in_gap(&self) -> bool {
+        let s = &self.s;
+        if s.gap_len <= 0.0 {
+            return false;
+        }
+        // dab centers paint for `paint` pixels and rest for gap + size, so the dash you see is
+        // `dash_len` long and the gap you see is `gap_len` long
+        let paint = (s.dash_len - s.size).max(s.size * s.spacing.max(0.05));
+        self.stroke_len % (paint + s.gap_len + s.size) > paint
+    }
+
+    /// The brush color moved toward the second color (in OKLab, so the middle stays clean).
+    fn transition_color(&self, c: [f32; 3], p: f32, d: f32) -> [f32; 3] {
+        let s = &self.s;
+        let mut t = match s.transition {
+            Transition::Off => return c,
+            Transition::Length => d / s.trans_len.max(20.0),
+            Transition::Speed => self.speed / (s.size * 0.6).max(4.0),
+            Transition::Pressure => self.curve(p),
+            Transition::Cycle => 0.5 - 0.5 * (TAU * d / s.trans_len.max(20.0)).cos(),
+        }
+        .clamp(0.0, 1.0);
+        if s.trans_back {
+            t = 1.0 - t;
+        }
+        mix_oklab(c, s.trans_color, t)
+    }
+
+    /// Paint running out: the color shifts (darker or lighter, warmer, duller) and thins along the stroke.
+    fn drift(&self, c: [f32; 3], d: f32) -> ([f32; 3], f32) {
+        let s = &self.s;
+        if s.drift == 0.0 || self.erase {
+            return (c, 1.0);
+        }
+        let run = smoothstep(0.0, 1.0, d / s.drift_len.max(50.0));
+        let k = s.drift.clamp(-1.0, 1.0) * run;
+        let [l, a, b] = rgb_to_oklab(c);
+        let (sn, cs) = (0.14 * k).sin_cos();
+        let (a2, b2) = (a * cs - b * sn, a * sn + b * cs); // a little warmer (or cooler)
+        let dull = 1.0 - 0.3 * k.abs();
+        let out = oklab_to_rgb([(l - 0.22 * k).clamp(0.0, 1.0), a2 * dull, b2 * dull]);
+        (out, 1.0 - 0.25 * k.max(0.0))
     }
 
     fn taper_len(&self) -> f32 {
@@ -330,10 +438,10 @@ impl Stroke {
         }
         let l = self.taper_len();
         let ease = |t: f32| 1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(2);
-        let tip = 0.06;
-        let mut f = tip + (1.0 - tip) * ease(d / l);
+        let (ts, te) = (self.s.tip_start.clamp(0.0, 1.0), self.s.tip_end.clamp(0.0, 1.0));
+        let mut f = ts + (1.0 - ts) * ease(d / l);
         if total.is_finite() {
-            f = f.min(tip + (1.0 - tip) * ease((total - d) / l));
+            f = f.min(te + (1.0 - te) * ease((total - d) / l));
         }
         f
     }
@@ -383,9 +491,9 @@ impl Stroke {
     }
 
     fn draw_dab(&mut self, doc: &mut Document, pt: Sample, factor: f32, sa: SampleAll) {
-        let r = (self.radius_at(pt.p) * factor).max(0.3);
+        let r = (self.radius_at(pt.p) * factor * self.pinch_at(self.cur_d)).max(0.3);
         let dir = self.direction(pt.x, pt.y);
-        let press = if self.s.opacity_pressure { 0.25 + 0.75 * pt.p } else { 1.0 };
+        let press = if self.s.opacity_pressure { 0.25 + 0.75 * self.curve(pt.p) } else { 1.0 };
 
         // where and how this dab lands
         let s = &self.s;
@@ -418,8 +526,35 @@ impl Stroke {
             Some(g) => g.at(d),
             None => (self.color, 1.0),
         };
+        let base = self.transition_color(base, pt.p, d);
         let color = self.jitter_color(base, d);
-        let alpha = self.s.flow * press * dens * grad_alpha;
+        let (color, thin) = self.drift(color, d);
+        let alpha = self.s.flow * press * dens * grad_alpha * thin;
+        if self.s.dots > 0.0 {
+            let dots = self.s.dots.clamp(0.0, 1.0);
+            for _ in 0..self.s.dot_count.max(1) {
+                let rr = (size * (self.s.dot_min + self.rng.next() * (self.s.dot_max - self.s.dot_min).max(0.0)).max(0.01)).max(0.5);
+                let (pa, pd) = (self.rng.next() * TAU, self.rng.next().sqrt() * self.s.dot_spread);
+                let (px, py) = (x + pa.cos() * pd * size, y + pa.sin() * pd * size);
+                let c = if self.s.dot_colors > 0.0 {
+                    let t = self.rng.next() * self.s.dot_colors.clamp(0.0, 1.0);
+                    shade_oklab(mix_oklab(color, self.s.trans_color, t), (self.rng.signed()) * 0.05 * self.s.dot_colors)
+                } else {
+                    color
+                };
+                if dots >= 1.0 {
+                    self.stamp_dot(doc, px, py, rr, alpha, c, pt.p);
+                } else {
+                    self.queue.push(QueuedDot { x: px, y: py, r: rr, alpha, color: c, p: pt.p, d });
+                }
+            }
+            if dots >= 1.0 {
+                self.threads(doc, x, y, size, dir, d, color, alpha, pt.p);
+                self.flush_queue(doc, false);
+                return;
+            }
+        }
+        let alpha = if self.s.dots > 0.0 { alpha * (1.0 - self.s.dots.clamp(0.0, 1.0)) } else { alpha };
         if self.s.particles > 0 {
             let gap = self.s.particle_gap.clamp(0.0, 1.0);
             for _ in 0..self.s.particles {
@@ -454,6 +589,46 @@ impl Stroke {
             let v = self.pick_variant();
             self.stamp_buffer(doc, x, y, size.max(0.4), ang, alpha, color, pt.p, v);
         }
+        self.threads(doc, x, y, size, dir, d, color, alpha, pt.p);
+        self.flush_queue(doc, false);
+    }
+
+    /// Lines and waves inside the stroke: thin threads that follow the stroke and swing sideways.
+    #[allow(clippy::too_many_arguments)]
+    fn threads(&mut self, doc: &mut Document, x: f32, y: f32, size: f32, dir: f32, d: f32, color: [f32; 3], alpha: f32, p: f32) {
+        let n = self.s.lines.min(12);
+        if n == 0 || self.s.line_strength <= 0.0 {
+            return;
+        }
+        let c = shade_oklab(color, self.s.line_shade.clamp(-1.0, 1.0) * 0.3);
+        let (nx, ny) = ((dir + PI / 2.0).cos(), (dir + PI / 2.0).sin());
+        let lw = (self.s.line_width * size).max(0.5);
+        for i in 0..n {
+            let v = (i as f32 + 0.5) / n as f32 * 2.0 - 1.0;
+            let wave = (TAU * d / self.s.line_len.max(8.0) + i as f32 * 1.7).sin() * self.s.line_wave;
+            let off = (v * 0.8 + wave) * size;
+            self.queue.push(QueuedDot { x: x + nx * off, y: y + ny * off, r: lw, alpha: alpha * self.s.line_strength, color: c, p, d });
+        }
+    }
+
+    /// Paint the waiting dots and threads: those the stroke has moved far enough away from, or all of them.
+    fn flush_queue(&mut self, doc: &mut Document, all: bool) {
+        let limit = self.cur_d - self.s.size * 1.3;
+        let mut keep = Vec::new();
+        for q in std::mem::take(&mut self.queue) {
+            if all || q.d <= limit {
+                self.stamp_dot(doc, q.x, q.y, q.r, q.alpha, q.color, q.p);
+            } else {
+                keep.push(q);
+            }
+        }
+        self.queue = keep;
+    }
+
+    /// A small round soft dab (dots and threads).
+    #[allow(clippy::too_many_arguments)]
+    fn stamp_dot(&mut self, doc: &mut Document, x: f32, y: f32, r: f32, alpha: f32, color: [f32; 3], p: f32) {
+        self.stamp_buffer_with(doc, x, y, r, 0.0, alpha, color, p, 0, true);
     }
 
     fn pick_variant(&mut self) -> u32 {
@@ -522,11 +697,17 @@ impl Stroke {
 
     #[allow(clippy::too_many_arguments)]
     fn stamp_buffer(&mut self, doc: &mut Document, x: f32, y: f32, r: f32, ang: f32, alpha: f32, color: [f32; 3], p: f32, variant: u32) {
+        self.stamp_buffer_with(doc, x, y, r, ang, alpha, color, p, variant, false);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stamp_buffer_with(&mut self, doc: &mut Document, x: f32, y: f32, r: f32, ang: f32, alpha: f32, color: [f32; 3], p: f32, variant: u32, dot: bool) {
         let (w, h) = (doc.w, doc.h);
         for (x, y, ang) in self.copies(x, y, r, ang) {
             let Some(live) = doc.live.as_mut() else { return };
             let tiles = &mut live.tiles;
-            let rect = Self::for_dab_pixels(&self.s, w, h, x, y, r, ang, variant, |key, i, _, _, mv| {
+            let settings = if dot { &self.dot_s } else { &self.s };
+            let rect = Self::for_dab_pixels(settings, w, h, x, y, r, ang, variant, |key, i, _, _, mv| {
                 let t = tiles.entry(key).or_insert_with(StrokeTile::new);
                 let m = (mv * alpha).min(1.0);
                 let px = &mut t.px[i];
@@ -593,7 +774,14 @@ impl Stroke {
             let avg = [acc[0] / n, acc[1] / n, acc[2] / n, acc[3] / n];
             if self.s.paint != Paint::Normal && avg[3] > 0.001 {
                 let rgb = [(avg[0] / avg[3]).clamp(0.0, 1.0), (avg[1] / avg[3]).clamp(0.0, 1.0), (avg[2] / avg[3]).clamp(0.0, 1.0)];
-                self.mix_p = self.mixer.mix_premult(self.mix_p, avg, &Pigment::new(rgb), amount);
+                // real paint keeps its load: picking up from bare canvas changes the color, not how much paint there is
+                let old_a = self.mix_p[3];
+                let mut m = self.mixer.mix_premult(self.mix_p, avg, &Pigment::new(rgb), amount);
+                if m[3] > 0.0 && m[3] < old_a {
+                    let k = old_a / m[3];
+                    m = [m[0] * k, m[1] * k, m[2] * k, old_a];
+                }
+                self.mix_p = m;
             } else {
                 for j in 0..4 {
                     self.mix_p[j] += (avg[j] - self.mix_p[j]) * amount;
@@ -609,7 +797,8 @@ impl Stroke {
             // how much fresh paint comes back: slowly (unless mix is 100%), never, or all of it when dipped
             let reload = match self.s.dip {
                 Dip::Gradual => (1.0 - s_mix) * 0.3,
-                Dip::Once => 0.0,
+                Dip::Once if self.s.paint != Paint::Normal => 0.0,
+                Dip::Once => (1.0 - s_mix) * 0.3,
                 Dip::Every => {
                     if self.cur_d - self.last_dip >= self.s.dip_every.max(10.0) {
                         self.last_dip = self.cur_d;
@@ -744,6 +933,7 @@ impl Stroke {
 
     /// Undo what this stroke painted so far (for the tapered redraw).
     fn clear_painted(&mut self, doc: &mut Document) {
+        self.queue.clear();
         if self.direct {
             let li = self.li;
             for (key, b) in self.before.drain() {
@@ -838,7 +1028,17 @@ impl Stroke {
             return;
         }
         let cov: Vec<f32> = px.iter().map(|p| p[3] / amax).collect();
-        let f = edge_factors(&cov, w, h, x0, y0, &s);
+        let mut f = edge_factors(&cov, w, h, x0, y0, &s);
+        if s.fray != Fray::Off {
+            let angle = match (self.dabs.first(), self.dabs.last()) {
+                (Some(a), Some(b)) if (b.x - a.x).abs() + (b.y - a.y).abs() > 4.0 => (b.y - a.y).atan2(b.x - a.x),
+                _ => 0.0,
+            };
+            let g = fray_factors(&cov, w, h, x0, y0, &s, angle);
+            for (k, v) in f.iter_mut().zip(g) {
+                *k *= v;
+            }
+        }
         for (p, k) in px.iter_mut().zip(f.iter()) {
             if *k != 1.0 {
                 for c in p.iter_mut() {
@@ -869,6 +1069,73 @@ impl Stroke {
             doc.mark_tile_dirty(k);
         }
     }
+}
+
+/// Two colors mixed in OKLab (t = how much of b).
+pub fn mix_oklab(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    if t <= 0.0 {
+        return a;
+    }
+    let (la, lb) = (rgb_to_oklab(a), rgb_to_oklab(b));
+    oklab_to_rgb([la[0] + (lb[0] - la[0]) * t, la[1] + (lb[1] - la[1]) * t, la[2] + (lb[2] - la[2]) * t])
+}
+
+/// A color made lighter (positive) or darker (negative) in OKLab.
+pub fn shade_oklab(c: [f32; 3], dl: f32) -> [f32; 3] {
+    if dl == 0.0 {
+        return c;
+    }
+    let [l, a, b] = rgb_to_oklab(c);
+    oklab_to_rgb([(l + dl).clamp(0.0, 1.0), a, b])
+}
+
+/// The edge fray engine, for the whole stroke: factors 0..1 that break up the edge.
+fn fray_factors(cov: &[f32], w: usize, h: usize, x: i32, y: i32, s: &BrushSettings, angle: f32) -> Vec<f32> {
+    let mut f = vec![1.0f32; w * h];
+    let cover: Vec<f32> = cov.iter().map(|c| (c * 3.0).min(1.0)).collect();
+    let size = s.size.max(4.0);
+    let mut near = cover.clone();
+    blur(&mut near, w, h, (size * 0.1).max(1.5) * 2.0);
+    let amt = s.fray_amount.clamp(0.0, 1.0);
+    let len = s.fray_len.clamp(1.0, 80.0);
+    let seed = s.seed as i32 * 17 + 3;
+    let (sn, cs) = angle.sin_cos();
+    for j in 0..h {
+        for i in 0..w {
+            let p = j * w + i;
+            if cov[p] <= 0.0 {
+                continue;
+            }
+            // how far into the edge band this pixel is: 0.5 = right on the outline
+            let n0 = near[p];
+            let band = amt * 0.45 + 0.05;
+            if n0 >= 0.5 + band {
+                continue;
+            }
+            let (gx, gy) = ((x + i as i32) as f32, (y + j as i32) as f32);
+            let k = match s.fray {
+                Fray::Off => 1.0,
+                Fray::Serrated => {
+                    // small teeth: a fast, sharp noise bites into the edge
+                    let n = noise(gx / (len * 0.5), gy / (len * 0.5), seed) - 0.5;
+                    smoothstep(0.48, 0.52, n0 + n * amt * 1.8)
+                }
+                Fray::Split => {
+                    // streaks along the stroke: noise stretched in the direction of travel
+                    let (u, v) = (gx * cs + gy * sn, -gx * sn + gy * cs);
+                    let n = noise(u / (len * 9.0), v / (len * 0.45), seed + 5) - 0.5;
+                    smoothstep(0.47, 0.53, n0 + n * amt * 2.4)
+                }
+                Fray::Knotted => {
+                    // big lumps and bites, hard edged
+                    let n = fbm(gx / (len * 2.5), gy / (len * 2.5), seed + 9) - 0.5;
+                    smoothstep(0.495, 0.505, n0 + n * amt * 2.2)
+                }
+            };
+            f[p] = k;
+        }
+    }
+    f
 }
 
 fn mid(a: Sample, b: Sample) -> Sample {
@@ -1184,5 +1451,151 @@ mod tests {
             assert!(painted(&d) > 100, "{name} paints");
         }
         assert!(presets().iter().filter(|p| !matches!(p.name, "Real oil" | "Real gouache" | "Glaze" | "Wet watercolor" | "Wet ink wash" | "Granulating wash")).all(|p| p.s.paint == Paint::Normal), "nothing else changed");
+    }
+
+    // ---------- brush designer v2 ----------
+
+    fn line_p(doc: &mut Document, s: &BrushSettings, color: Color32, y: f32, p: f32, x1: f32) {
+        let mut st = Stroke::begin(doc, 0, s, color, false, 1.0, true, Sample { x: 100.0, y, p }, &none);
+        let pts: Vec<Sample> = (1..=((x1 - 100.0) / 5.0) as usize).map(|i| Sample { x: 100.0 + i as f32 * 5.0, y, p }).collect();
+        for c in pts.chunks(5) {
+            st.add(doc, c, &none);
+        }
+        st.finish(doc, &none);
+    }
+
+    fn column(doc: &Document, x: i32, y: i32) -> usize {
+        (y - 80..y + 80).filter(|&yy| crate::files::layer_rgba(&doc.layers[0], x, yy, 1, 1).get_pixel(0, 0).0[3] > 128).count()
+    }
+
+    fn lum(c: [f32; 3]) -> f32 {
+        crate::oklab::rgb_to_oklab(c)[0]
+    }
+
+    fn designer() -> BrushSettings {
+        BrushSettings { size: 40.0, hardness: 1.0, spacing: 0.08, size_pressure: false, stabilize: 0.0, ..BrushSettings::default() }
+    }
+
+    #[test]
+    fn pinch_points_narrow_the_stroke_regularly() {
+        let mut d = Document::new(700, 300);
+        line_p(&mut d, &BrushSettings { pinch: 0.9, pinch_every: 160.0, ..designer() }, BLUE, 150.0, 1.0, 560.0);
+        let (narrow, wide) = (column(&d, 180, 150), column(&d, 260, 150));
+        assert!(narrow * 2 < wide, "pinched at one place, full at the next: {narrow} vs {wide}");
+        assert!(column(&d, 340, 150) * 2 < wide + 4 && column(&d, 340, 150) >= 1, "and pinched again after one more period");
+    }
+
+    #[test]
+    fn the_pressure_curve_changes_how_hard_you_have_to_press() {
+        let width = |curve: f32| {
+            let mut d = Document::new(700, 300);
+            line_p(&mut d, &BrushSettings { size_pressure: true, min_size: 0.1, pressure_curve: curve, ..designer() }, BLUE, 150.0, 0.5, 400.0);
+            column(&d, 250, 150)
+        };
+        let (light, normal, firm) = (width(-1.0), width(0.0), width(1.0));
+        assert!(light > normal && normal > firm, "light touch {light}, normal {normal}, firm {firm}");
+    }
+
+    #[test]
+    fn start_and_end_width_are_chosen_per_brush() {
+        let start = |tip: f32| {
+            let mut d = Document::new(700, 300);
+            line_p(&mut d, &BrushSettings { ends: Ends::Taper, taper: 0.5, tip_start: tip, ..designer() }, BLUE, 150.0, 1.0, 500.0);
+            column(&d, 104, 150)
+        };
+        assert!(start(0.6) > start(0.06) + 8, "a blunt start versus a pointed one: {} {}", start(0.6), start(0.06));
+    }
+
+    #[test]
+    fn the_color_moves_toward_the_second_color_along_the_stroke() {
+        let mut d = Document::new(800, 300);
+        let s = BrushSettings { transition: Transition::Length, trans_color: [0.1, 0.8, 0.3], trans_len: 300.0, ..designer() };
+        line_p(&mut d, &s, Color32::from_rgb(220, 30, 30), 150.0, 1.0, 600.0);
+        let (a, b) = (at(&d, 115, 150), at(&d, 560, 150));
+        assert!(a[0] > 0.7 && a[1] < 0.3, "starts as the brush color: {a:?}");
+        assert!(b[1] > 0.55 && b[0] < 0.3, "ends as the second color: {b:?}");
+        // the other way round
+        let mut d = Document::new(800, 300);
+        line_p(&mut d, &BrushSettings { trans_back: true, ..s.clone() }, Color32::from_rgb(220, 30, 30), 150.0, 1.0, 600.0);
+        assert!(at(&d, 115, 150)[1] > 0.55, "backwards: starts with the second color");
+        // pressure: light touch = brush color, firm = second color
+        let by_press = |p: f32| {
+            let mut d = Document::new(800, 300);
+            line_p(&mut d, &BrushSettings { transition: Transition::Pressure, trans_color: [0.1, 0.8, 0.3], ..designer() }, Color32::from_rgb(220, 30, 30), 150.0, p, 400.0);
+            at(&d, 300, 150)
+        };
+        assert!(by_press(0.05)[0] > 0.6 && by_press(1.0)[1] > 0.6, "pressure picks the color");
+    }
+
+    #[test]
+    fn paint_that_runs_out_darkens_or_lightens() {
+        let end_lum = |drift: f32| {
+            let mut d = Document::new(800, 300);
+            line_p(&mut d, &BrushSettings { drift, drift_len: 300.0, ..designer() }, Color32::from_rgb(200, 90, 60), 150.0, 1.0, 600.0);
+            (lum(at(&d, 130, 150)), lum(at(&d, 560, 150)))
+        };
+        let (s0, e0) = end_lum(0.0);
+        let (sd, ed) = end_lum(0.9);
+        let (sl, el) = end_lum(-0.9);
+        assert!((s0 - e0).abs() < 0.02 && (sd - s0).abs() < 0.05 && (sl - s0).abs() < 0.05, "all start the same");
+        assert!(ed < s0 - 0.1 && el > s0 + 0.1, "darker or lighter at the end: {ed} / {el} vs {s0}");
+    }
+
+    #[test]
+    fn dots_replace_the_solid_line_and_lines_run_inside_the_stroke() {
+        let painted_in = |s: &BrushSettings| {
+            let mut d = Document::new(800, 300);
+            line_p(&mut d, s, BLUE, 150.0, 1.0, 600.0);
+            (d.layers[0].tiles.values().flat_map(|t| t.iter()).filter(|c| c.a() > 100).count(), d)
+        };
+        let (solid_n, _) = painted_in(&designer());
+        let (dots_n, _) = painted_in(&BrushSettings { dots: 1.0, spacing: 0.5, dot_min: 0.05, dot_max: 0.12, dot_count: 2, dot_spread: 0.8, ..designer() });
+        assert!(dots_n > 40 && dots_n * 3 < solid_n, "separate dots, far less paint than a solid line: {dots_n} vs {solid_n}");
+        // threads: darker lines inside a solid stroke
+        let (_, d) = painted_in(&BrushSettings { lines: 3, line_shade: -1.0, line_strength: 1.0, line_width: 0.15, line_wave: 0.0, ..designer() });
+        let base = lum(at(&d, 300, 150 - 19));
+        let darkest = (-18..18).map(|dy| lum(at(&d, 300, 150 + dy))).fold(1.0, f32::min);
+        assert!(darkest < base - 0.08, "a darker thread inside: {darkest} vs {base}");
+        // waves: the thread moves up and down along the stroke
+        let (_, d) = painted_in(&BrushSettings { lines: 1, line_shade: -1.0, line_strength: 1.0, line_width: 0.12, line_wave: 0.5, line_len: 120.0, ..designer() });
+        let dark_y = |x: i32| (-18..18).min_by(|a, b| lum(at(&d, x, 150 + a)).total_cmp(&lum(at(&d, x, 150 + b)))).unwrap();
+        let ys: Vec<i32> = (0..8).map(|k| dark_y(150 + k * 15)).collect();
+        assert!(ys.iter().max().unwrap() - ys.iter().min().unwrap() > 8, "the thread waves: {ys:?}");
+    }
+
+    #[test]
+    fn dashes_leave_gaps_and_fray_breaks_the_edge() {
+        let mut d = Document::new(800, 300);
+        line_p(&mut d, &BrushSettings { dash_len: 40.0, gap_len: 40.0, ..designer() }, BLUE, 150.0, 1.0, 560.0);
+        let empty = (110..540).filter(|&x| column(&d, x, 150) == 0).count();
+        assert!(empty > 150, "a dashed line has empty stretches: {empty}");
+        assert!(column(&d, 101, 150) > 20, "and painted ones");
+        // fray: the outline of the stroke is rougher
+        let rough = |s: &BrushSettings| {
+            let mut d = Document::new(800, 300);
+            line_p(&mut d, s, BLUE, 150.0, 1.0, 600.0);
+            let tops: Vec<i32> = (150..550)
+                .map(|x| (100..200).find(|&y| crate::files::layer_rgba(&d.layers[0], x, y, 1, 1).get_pixel(0, 0).0[3] > 128).unwrap_or(150))
+                .collect();
+            tops.windows(2).map(|w| (w[0] - w[1]).abs()).sum::<i32>()
+        };
+        let smooth = rough(&designer());
+        for fray in [Fray::Serrated, Fray::Split, Fray::Knotted] {
+            let r = rough(&BrushSettings { fray, fray_amount: 0.9, fray_len: 6.0, ..designer() });
+            assert!(r > smooth + 10, "{fray:?} is rougher than a smooth edge: {r} vs {smooth}");
+        }
+    }
+
+    #[test]
+    fn new_brushes_exist_and_old_ones_are_unchanged() {
+        for name in ["Bark", "Leopard dots", "Skin pores", "Running dry", "Color ribbon", "Speed ink", "Bamboo", "Dashed pen", "Serrated pen", "Split brush", "Worn chalk"] {
+            let pr = presets().into_iter().find(|p| p.name == name).unwrap_or_else(|| panic!("{name} exists"));
+            let mut d = Document::new(800, 400);
+            line_at(&mut d, &pr.s, false, 200.0);
+            assert!(painted(&d) > 100, "{name} paints");
+        }
+        let plain = BrushSettings::default();
+        assert_eq!((plain.pinch, plain.dots, plain.lines, plain.gap_len, plain.drift, plain.pressure_curve), (0.0, 0.0, 0, 0.0, 0.0, 0.0));
+        assert!(plain.transition == Transition::Off && plain.fray == Fray::Off, "everything is off by default");
     }
 }

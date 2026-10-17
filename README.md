@@ -26,6 +26,7 @@ cargo test --release
 Runs the unit tests and a full UI run that paints, undoes and redoes with simulated input. Pictures land in `target/screens/`:
 
 - `01_draw.png` … `10_settings_canvas.png` — the app at each step of the UI run
+- `designer_sheet.png` — the new brushes and rolled ones (`cargo test --release designer_sheet`)
 - `wet_sheet.png` — wet watercolor, ink and lift / scrape strokes (`cargo test --release wet_sheet`)
 - `mix_01_chart.png` — the mixing chart (`cargo test --release mixing_chart_screens`)
 - `light_01_from_the_left.png` … `light_04_light_panel.png` — light and depth layers (`cargo test --release light_and_depth_screens`)
@@ -57,6 +58,7 @@ Performance check: `cargo test --release bench_full_redraw -- --ignored --nocapt
 - `src/view.rs`, `src/canvas.rs` — zoom/pan/rotate/mirror and GPU tile display
 - `src/brush/` — brush engine: settings + presets, tips, textures, stroke engine (stabilizer, pressure, taper, mixing, whole-stroke edges)
 - `src/stroke.rs` — the live stroke buffer shown on top of its layer until the pen lifts
+- `src/brush/random.rs` — the brush randomizer (groups, locks)
 - `src/wet.rs` — wet paint: bleed, edge pooling, the wet memory
 - `src/pigment.rs` + `tabs/draw/mixchart_ui.rs` — pigment (Kubelka-Munk) mixing, and the mixing chart
 - `src/light.rs` — depth layers and light layers (the shading)
