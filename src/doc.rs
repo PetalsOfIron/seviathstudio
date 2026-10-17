@@ -163,6 +163,10 @@ pub struct Layer {
     pub depth: bool,
     /// A material layer: the paint is shaded live as metal, glass, velvet, neon…
     pub material: Option<crate::material::Material>,
+    /// A shadow, glow or ray layer: the paint is a shape the light works on.
+    pub lightfx: Option<crate::lightfx::LightFx>,
+    /// Blocks light: casts shadows and stops rays of the light-effect layers.
+    pub solid: bool,
     pub opacity: f32,   // 0..100
     pub blend: Blend,
     pub tiles: HashMap<TileKey, TileData>,
@@ -172,7 +176,7 @@ pub struct Layer {
 impl Layer {
     /// Pixel layer with at least one effect switched on, or a material (both need the area around a tile).
     pub fn fx_active(&self) -> bool {
-        matches!(self.kind, LayerKind::Raster | LayerKind::Vector) && (crate::effects::any_on(&self.fx) || self.material.is_some())
+        matches!(self.kind, LayerKind::Raster | LayerKind::Vector) && (crate::effects::any_on(&self.fx) || self.material.is_some() || self.lightfx.is_some())
     }
 
     pub fn paintable(&self) -> bool {
@@ -279,6 +283,8 @@ impl Document {
             light: None,
             depth: false,
             material: None,
+            lightfx: None,
+            solid: false,
             rev: 0,
         }
     }
@@ -743,7 +749,7 @@ impl Document {
     /// None when there is no paint within reach.
     pub(crate) fn fx_pixels(&self, l: &Layer, key: TileKey) -> Option<Vec<Px>> {
         let fx_on = crate::effects::any_on(&l.fx);
-        let m = if fx_on { crate::effects::reach(&l.fx) } else { 0 }.max(l.material.as_ref().map(|x| x.reach()).unwrap_or(0));
+        let m = if fx_on { crate::effects::reach(&l.fx) } else { 0 }.max(l.material.as_ref().map(|x| x.reach()).unwrap_or(0)).max(l.lightfx.as_ref().map(|x| x.reach()).unwrap_or(0));
         let n = TILE + 2 * m;
         let mut near: Vec<Option<Cow<Vec<Color32>>>> = Vec::with_capacity(9);
         for dy in -1..=1 {
@@ -751,7 +757,9 @@ impl Document {
                 near.push(self.raster_tile(l, (key.0 + dx, key.1 + dy)));
             }
         }
-        if near.iter().all(|t| t.is_none()) {
+        let casts_solid = l.lightfx.as_ref().is_some_and(|f| f.from_solid);
+        let near_empty = near.iter().all(|t| t.is_none());
+        if near_empty && !casts_solid {
             return None;
         }
         let (ox, oy) = (key.0 * TILE as i32 - m as i32, key.1 * TILE as i32 - m as i32);
@@ -783,7 +791,18 @@ impl Document {
                 let height: Vec<f32> = (0..n * n).map(|i| field.at((ox + (i % n) as i32) as f32 + 0.5, (oy + (i / n) as i32) as f32 + 0.5)).collect();
                 crate::material::shade_with_height(mat, &light, &buf, height, depth.as_deref(), n)
             }
-            None => buf,
+            None => match &l.lightfx {
+                Some(lfx) => {
+                    let at = self.index_of(l.id).unwrap_or(0);
+                    let solid = self.solid_alpha(l.id, key, m, n);
+                    if casts_solid && near_empty && solid.iter().all(|v| *v <= 0.0) {
+                        return None;
+                    }
+                    let depth = self.depth_height(at, l.parent, key, m, n);
+                    crate::lightfx::render(lfx, &self.scene_light(), &buf, &solid, depth.as_deref(), n, (ox, oy))
+                }
+                None => buf,
+            },
         };
         let out = if fx_on { crate::effects::render(&l.fx, &buf, n, (ox, oy), (self.w, self.h)) } else { buf };
         let mut tile = vec![CLEAR; TILE * TILE];
@@ -829,6 +848,36 @@ impl Document {
             cache.insert(l.id, f.clone());
         }
         f
+    }
+
+    /// How much the layers marked "blocks light" cover each pixel of the square of `n` pixels around a tile.
+    pub(crate) fn solid_alpha(&self, except: LayerId, key: TileKey, m: usize, n: usize) -> Vec<f32> {
+        let mut out = vec![0f32; n * n];
+        let (ox, oy) = (key.0 * TILE as i32 - m as i32, key.1 * TILE as i32 - m as i32);
+        let (wmax, hmax) = (self.w as i32 - 1, self.h as i32 - 1);
+        for s in self.layers.iter().filter(|s| s.solid && s.visible && s.id != except && matches!(s.kind, LayerKind::Raster | LayerKind::Vector)) {
+            let near: Vec<Option<Cow<Vec<Color32>>>> = (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (dx, dy))).map(|(dx, dy)| self.raster_tile(s, (key.0 + dx, key.1 + dy))).collect();
+            if near.iter().all(|t| t.is_none()) {
+                continue;
+            }
+            let op = (s.opacity / 100.0).clamp(0.0, 1.0);
+            for y in 0..n {
+                let py = (oy + y as i32).clamp(0, hmax);
+                for x in 0..n {
+                    let px = (ox + x as i32).clamp(0, wmax);
+                    let (ix, iy) = ((px.div_euclid(TILE as i32) - key.0 + 1) as usize, (py.div_euclid(TILE as i32) - key.1 + 1) as usize);
+                    if ix > 2 || iy > 2 {
+                        continue;
+                    }
+                    if let Some(t) = &near[iy * 3 + ix] {
+                        let a = t[py.rem_euclid(TILE as i32) as usize * TILE + px.rem_euclid(TILE as i32) as usize].a() as f32 / 255.0 * op;
+                        let o = &mut out[y * n + x];
+                        *o = o.max(a);
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// The light of the scene: the first visible light layer, or a default from the upper left.

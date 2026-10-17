@@ -170,6 +170,7 @@ pub fn bake(mut doc: Document) -> Document {
         }
         l.fx.clear();
         l.material = None;
+        l.lightfx = None;
         l.rev += 1;
     }
     // light layers become plain layers with the shading drawn in; depth layers stay as hidden layers

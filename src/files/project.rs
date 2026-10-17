@@ -63,6 +63,10 @@ struct LayerJson {
     depth: bool,
     #[serde(default)]
     material: Option<crate::material::Material>,
+    #[serde(default)]
+    lightfx: Option<crate::lightfx::LightFx>,
+    #[serde(default)]
+    solid: bool,
     opacity: f32,
     blend: String,
     tiles: Vec<[i32; 2]>,
@@ -182,6 +186,8 @@ pub fn save(w: u32, h: u32, paper: Color32, layers: &[Layer], presets: &[Preset]
                     light: l.light.clone(),
                     depth: l.depth,
                     material: l.material.clone(),
+                    lightfx: l.lightfx.clone(),
+                    solid: l.solid,
                     opacity: l.opacity,
                     blend: blend_name(l.blend).into(),
                     tiles,
@@ -306,6 +312,8 @@ pub fn load(path: &Path) -> Result<Document, String> {
             light: l.light.map(|x| x.sanitized()),
             depth: l.depth,
             material: l.material.map(|m| m.sanitized()),
+            lightfx: l.lightfx.map(|x| x.sanitized()),
+            solid: l.solid,
             opacity: l.opacity.clamp(0.0, 100.0),
             blend: blend_from_name(&l.blend),
             tiles: tiles.remove(&l.id).unwrap_or_default(),
