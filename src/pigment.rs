@@ -223,6 +223,16 @@ impl Pigment {
     pub fn rgb(&self) -> [f32; 3] {
         self.rgb
     }
+
+    /// Absorption over scattering per band (mixing is a weighted sum of these).
+    pub fn ks(&self) -> [f32; N] {
+        self.ks
+    }
+}
+
+/// Screen color of a K/S spectrum (the result of mixing or spreading pigments).
+pub fn rgb_from_ks(ks: &[f32; N]) -> [f32; 3] {
+    to_rgb(&ks.map(r_of))
 }
 
 /// Mix paints in proportion to the weights (they don't have to add up to one).

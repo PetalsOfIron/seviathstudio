@@ -457,6 +457,12 @@ impl DrawState {
             }
         });
 
+        section(ui, "Wet paint", s.water > 0.0 || s.bleed > 0.0 || s.pool > 0.0 || s.granulation > 0.0, |ui| {
+            pct(ui, "Water", &mut s.water, "Thins the paint and leaves it wet for twenty seconds");
+            pct(ui, "Bleed", &mut s.bleed, "Wet paint spreads into the paint around it when the pen lifts");
+            pct(ui, "Edge pooling", &mut s.pool, "Pigment collects at the edge of a wash and makes it darker");
+            pct(ui, "Granulation", &mut s.granulation, "Pigment settles into the paper tooth (see Texture for the paper)");
+        });
         let mut open_chart = false;
         section(ui, "Real paint", s.paint != Paint::Normal, |ui| {
             let opts: Vec<(Paint, &str)> = Paint::ALL.iter().map(|(p, l, _)| (*p, *l)).collect();

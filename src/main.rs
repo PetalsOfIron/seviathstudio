@@ -38,6 +38,7 @@ mod trace;
 mod transform;
 mod vector;
 mod view;
+mod wet;
 mod widgets;
 
 #[cfg(test)]

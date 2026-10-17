@@ -367,6 +367,17 @@ pub struct BrushSettings {
     pub dip: Dip,
     /// Pixels of stroke between dips (Dip::Every).
     pub dip_every: f32,
+    // wet paint
+    /// 0..1: thins the paint and leaves it wet.
+    pub water: f32,
+    /// 0..1: how far wet paint spreads into the paint around it.
+    pub bleed: f32,
+    /// 0..1: pigment pools darker at the edge of a wash.
+    pub pool: f32,
+    /// 0..1: pigment settles into the paper tooth.
+    pub granulation: f32,
+    /// An eraser that only dries wet paint (and lifts a little).
+    pub blot: bool,
     // tip and shape
     pub tip: Tip,
     pub roundness: f32,
@@ -426,6 +437,11 @@ impl Default for BrushSettings {
             paint: Paint::Normal,
             dip: Dip::Gradual,
             dip_every: 300.0,
+            water: 0.0,
+            bleed: 0.0,
+            pool: 0.0,
+            granulation: 0.0,
+            blot: false,
             tip: Tip::Round,
             roundness: 1.0,
             angle: 0.0,
@@ -594,6 +610,9 @@ pub fn presets() -> Vec<Preset> {
         p("Watercolor bloom", "Watercolor", "Drops of water spreading into paint: blotchy cauliflower edges.", BrushSettings { size: 70.0, hardness: 0.6, edge: Ragged, edge_amount: 0.6, edge_detail: 0.7, wet_rim: 0.8, variants: 8, angle_jitter: 1.0, size_jitter: 0.3, scatter: 0.25, opacity: 0.7, flow: 0.5, spacing: 0.3, min_size: 0.6, texture: 0.3, ..d() }),
         p("Transparent watercolor", "Watercolor", "Clear, even glaze with soft edges and no rim: builds up where layers overlap.", BrushSettings { size: 50.0, hardness: 0.45, edge: Feathered, edge_amount: 0.35, edge_detail: 0.4, variants: 3, opacity: 0.45, flow: 0.5, spacing: 0.06, min_size: 0.6, opacity_pressure: true, texture: 0.1, tex_kind: TK::Watercolor, ..d() }),
         p("Dark rim watercolor", "Watercolor", "Strong dark edge where the water dried, light middle.", BrushSettings { size: 55.0, hardness: 0.7, edge: Ragged, edge_amount: 0.5, edge_detail: 0.4, wet_rim: 1.0, variants: 5, angle_jitter: 1.0, opacity: 0.8, flow: 0.45, spacing: 0.07, min_size: 0.6, texture: 0.2, ..d() }),
+        p("Wet watercolor", "Watercolor", "A real wet wash: colors bleed into each other while wet, the edge darkens as it dries, pigment settles into the paper.", BrushSettings { size: 60.0, hardness: 0.35, opacity: 0.75, flow: 0.6, spacing: 0.06, paint: Paint::Mix, water: 0.8, bleed: 0.65, pool: 0.7, granulation: 0.5, tex_kind: TexKind::Watercolor, texture: 0.2, min_size: 0.6, opacity_pressure: true, ..d() }),
+        p("Wet ink wash", "Watercolor", "Thin ink in water: soft clouds that spread into each other and pool at the edges.", BrushSettings { size: 70.0, hardness: 0.3, opacity: 0.6, flow: 0.55, paint: Paint::Mix, water: 0.9, bleed: 0.85, pool: 0.4, granulation: 0.2, tex_kind: TexKind::Watercolor, min_size: 0.5, opacity_pressure: true, ..d() }),
+        p("Granulating wash", "Watercolor", "A dry-ish wash where the pigment collects in the valleys of rough paper.", BrushSettings { size: 55.0, hardness: 0.5, opacity: 0.8, flow: 0.65, paint: Paint::Mix, water: 0.45, bleed: 0.2, pool: 0.3, granulation: 1.0, tex_kind: TexKind::Watercolor, texture: 0.35, tex_scale: 1.2, min_size: 0.6, opacity_pressure: true, ..d() }),
         p("Wet blending watercolor", "Watercolor", "Wet into wet: blends softly with the color already there.", BrushSettings { size: 60.0, hardness: 0.35, edge: Feathered, edge_amount: 0.7, edge_detail: 0.3, wet_rim: 0.3, variants: 4, angle_jitter: 1.0, opacity: 0.7, flow: 0.45, spacing: 0.08, mix: 0.55, mix_refer: layer, min_size: 0.6, opacity_pressure: true, ..d() }),
         p("Dry watercolor", "Watercolor", "Little water: broken, grainy strokes that catch the paper.", BrushSettings { size: 45.0, hardness: 0.8, edge: Dry, edge_amount: 0.55, edge_detail: 0.7, grain: 0.35, variants: 4, roundness: 0.7, follow_direction: true, opacity: 0.8, flow: 0.55, spacing: 0.05, min_size: 0.6, texture: 0.45, tex_kind: TK::Watercolor, ..d() }),
         p("Granulating watercolor", "Watercolor", "Pigment settles into the paper grain (like ultramarine).", BrushSettings { size: 60.0, hardness: 0.55, edge: Ragged, edge_amount: 0.45, edge_detail: 0.35, wet_rim: 0.6, grain: 0.45, variants: 5, angle_jitter: 1.0, opacity: 0.75, flow: 0.4, spacing: 0.07, min_size: 0.6, texture: 0.55, tex_kind: TK::Watercolor, tex_scale: 0.8, ..d() }),
@@ -677,6 +696,9 @@ pub fn eraser_presets() -> Vec<Preset> {
     vec![
         Preset { name: "Hard eraser", category: "Eraser", about: "Removes everything it touches, completely.", s: BrushSettings { size: 20.0, hardness: 0.9, spacing: 0.05, min_size: 0.5, stabilize: 0.0, ..d() } },
         Preset { name: "Soft eraser", category: "Eraser", about: "Fades paint out gently. Go over again to erase more.", s: BrushSettings { size: 80.0, flow: 0.3, hardness: 0.1, min_size: 0.4, opacity_pressure: true, stabilize: 0.0, ..d() } },
+        Preset { name: "Lift", category: "Eraser", about: "Lifts paint back off the paper a little at a time, like a damp brush: the stain stays.", s: BrushSettings { size: 60.0, flow: 0.25, hardness: 0.3, min_size: 0.4, opacity_pressure: true, texture: 0.3, tex_kind: TexKind::Watercolor, stabilize: 0.0, ..d() } },
+        Preset { name: "Blot", category: "Eraser", about: "A tissue on wet paint: stops it bleeding and soaks a little up. Dry paint stays as it is.", s: BrushSettings { size: 50.0, flow: 0.12, hardness: 0.35, min_size: 0.4, blot: true, stabilize: 0.0, ..d() } },
+        Preset { name: "Scrape", category: "Eraser", about: "A blade scraping paint back to bare paper: hard edge, the paper tooth shows.", s: BrushSettings { size: 18.0, hardness: 1.0, spacing: 0.04, min_size: 0.8, texture: 0.5, tex_kind: TexKind::Paper, tex_scale: 0.8, stabilize: 0.0, ..d() } },
         Preset { name: "Textured eraser", category: "Eraser", about: "Grainy, like a rubber on pencil.", s: BrushSettings { size: 30.0, hardness: 0.7, min_size: 0.5, opacity_pressure: true, texture: 0.45, stabilize: 0.0, ..d() } },
     ]
 }
