@@ -25,6 +25,7 @@ mod layerfilter;
 mod light;
 mod meta;
 mod oklab;
+mod pigment;
 mod settings;
 mod shapes;
 mod settings_ui;

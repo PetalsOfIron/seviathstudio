@@ -1358,3 +1358,23 @@ fn light_and_depth_screens() {
     h.run_steps(6);
     save(&mut h, "light_04_light_panel");
 }
+
+#[test]
+fn mixing_chart_screens() {
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    let cols = [
+        Color32::from_rgb(250, 224, 25),
+        Color32::from_rgb(25, 50, 217),
+        Color32::from_rgb(230, 30, 30),
+        Color32::from_rgb(255, 255, 255),
+        Color32::from_rgb(30, 160, 80),
+    ];
+    h.state_mut().draw_mut().open_mix_chart(&cols);
+    h.run_steps(6);
+    save(&mut h, "mix_01_chart");
+    let before = h.state().draw_mut_ref().doc.layers.len();
+    h.state_mut().draw_mut().apply_external("Mixing chart", |d| d.import_picture_layer(&crate::tabs::draw::DrawState::mix_chart_image(&cols, 60), "Mixing chart"));
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().doc.layers.len(), before + 1, "the chart becomes a layer");
+}

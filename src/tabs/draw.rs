@@ -24,6 +24,7 @@ use crate::widgets::{self, icon_button, section_title, segmented};
 mod brushes;
 pub mod effects_ui;
 pub mod filters_ui;
+pub mod mixchart_ui;
 pub mod gradient_ui;
 mod layers;
 pub mod organizer;
@@ -174,6 +175,7 @@ pub struct DrawState {
     /// Reference pictures (Sub view → References).
     pub refs: RefStore,
     ref_popout: bool,
+    mixchart: mixchart_ui::MixChart,
     /// Where the reference pop-out window was last drawn.
     ref_rect: Rect,
     ref_view_rect: Option<Rect>, // where the docked reference picture was drawn last frame
@@ -244,6 +246,7 @@ impl Default for DrawState {
             set: Settings::default(),
             refs: RefStore::in_memory(),
             ref_popout: false,
+            mixchart: Default::default(),
             ref_rect: Rect::NOTHING,
             ref_view_rect: None,
             open_requests: Vec::new(),
@@ -348,6 +351,7 @@ impl DrawState {
             .show(ui, |ui| self.canvas(ui));
 
         self.reference_window(ui.ctx());
+        self.mix_chart_window(ui.ctx());
         self.layer_quick_bar(ui.ctx());
         self.randomizer_window(ui.ctx());
         self.trace_window(ui.ctx());
@@ -452,6 +456,12 @@ impl DrawState {
     }
 
     #[cfg(test)]
+    #[cfg(test)]
+    pub fn open_mix_chart(&mut self, colors: &[Color32]) {
+        self.swatches = colors.to_vec();
+        self.mixchart.open = true;
+    }
+
     #[cfg(test)]
     pub fn active_id(&self) -> LayerId {
         self.active
