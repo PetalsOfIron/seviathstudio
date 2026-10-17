@@ -52,17 +52,27 @@ pub struct VecStroke {
     pub style: LineStyle,
 }
 
+/// A flat color shape (from Auto-trace): one or more outlines filled with one color.
+/// An outline inside another one is a hole.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct VecFill {
+    pub rings: Vec<Vec<[f32; 2]>>,
+    pub color: [u8; 3],
+}
+
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VecData {
     pub strokes: Vec<VecStroke>,
     /// Line width multiplier for the whole layer (1 = as drawn).
     pub width: f32,
+    /// Color shapes, drawn under the lines.
+    pub fills: Vec<VecFill>,
 }
 
 impl Default for VecData {
     fn default() -> Self {
-        Self { strokes: Vec::new(), width: 1.0 }
+        Self { strokes: Vec::new(), width: 1.0, fills: Vec::new() }
     }
 }
 
@@ -83,6 +93,16 @@ impl VecData {
             st.taper = st.taper.clamp(0.0, 3.0);
             st.opacity = st.opacity.clamp(0.0, 1.0);
             s.pts.len() >= 2
+        });
+        self.fills.truncate(5_000);
+        self.fills.retain_mut(|f| {
+            f.rings.truncate(20_000);
+            f.rings.retain_mut(|r| {
+                r.truncate(200_000);
+                r.retain(|p| p[0].is_finite() && p[1].is_finite());
+                r.len() >= 3
+            });
+            !f.rings.is_empty()
         });
         self
     }
@@ -435,6 +455,11 @@ pub fn render_region(layer: &mut Layer, bounds: Bounds) {
         return;
     };
     clear_region(layer, bounds);
+    for f in &data.fills {
+        if intersects(fill_bounds(f), bounds) {
+            draw_fill(layer, f, bounds);
+        }
+    }
     for s in &data.strokes {
         if intersects(stroke_bounds(s, data.width), bounds) {
             draw_stroke(layer, s, data.width, bounds);
@@ -446,6 +471,102 @@ pub fn render_region(layer: &mut Layer, bounds: Bounds) {
 /// Redraw a whole vector layer.
 pub fn render_all(layer: &mut Layer, doc_w: u32, doc_h: u32) {
     render_region(layer, (0, 0, doc_w as i32, doc_h as i32));
+}
+
+// ---------- Color shapes ----------
+
+pub fn fill_bounds(f: &VecFill) -> Bounds {
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for r in &f.rings {
+        for p in r {
+            x0 = x0.min(p[0]);
+            y0 = y0.min(p[1]);
+            x1 = x1.max(p[0]);
+            y1 = y1.max(p[1]);
+        }
+    }
+    ((x0 - 2.0).floor() as i32, (y0 - 2.0).floor() as i32, (x1 + 2.0).ceil() as i32, (y1 + 2.0).ceil() as i32)
+}
+
+/// Is (x, y) inside the shape (even-odd, so inner outlines are holes)?
+pub fn inside_fill(f: &VecFill, x: f32, y: f32) -> bool {
+    let mut inside = false;
+    for r in &f.rings {
+        let mut j = r.len() - 1;
+        for i in 0..r.len() {
+            let (a, b) = (r[i], r[j]);
+            if (a[1] > y) != (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0] {
+                inside = !inside;
+            }
+            j = i;
+        }
+    }
+    inside
+}
+
+/// Anti-aliased even-odd coverage of a shape over `clip`.
+fn fill_coverage(f: &VecFill, clip: Bounds) -> Option<Cov> {
+    let b = fill_bounds(f);
+    let (bx0, by0, bx1, by1) = (b.0.max(clip.0), b.1.max(clip.1), b.2.min(clip.2), b.3.min(clip.3));
+    if bx1 <= bx0 || by1 <= by0 {
+        return None;
+    }
+    let (w, h) = ((bx1 - bx0) as usize, (by1 - by0) as usize);
+    // edges, listed for every pixel row they cross
+    let mut edges: Vec<(f32, f32, f32, f32)> = Vec::new(); // (x at top, top y, x at bottom, bottom y)
+    for r in &f.rings {
+        for i in 0..r.len() {
+            let (a, c) = (r[i], r[(i + 1) % r.len()]);
+            if a[1] == c[1] {
+                continue;
+            }
+            edges.push(if a[1] < c[1] { (a[0], a[1], c[0], c[1]) } else { (c[0], c[1], a[0], a[1]) });
+        }
+    }
+    let mut rows: Vec<Vec<u32>> = vec![Vec::new(); h];
+    for (k, e) in edges.iter().enumerate() {
+        let r0 = (e.1.floor() as i32 - by0).max(0);
+        let r1 = (e.3.ceil() as i32 - by0).min(h as i32);
+        for r in r0..r1 {
+            rows[r as usize].push(k as u32);
+        }
+    }
+    const SUB: usize = 4;
+    let mut v = vec![0f32; w * h];
+    v.par_chunks_mut(w).enumerate().for_each(|(j, row)| {
+        let mut xs: Vec<f32> = Vec::new();
+        for s in 0..SUB {
+            let sy = (by0 + j as i32) as f32 + (s as f32 + 0.5) / SUB as f32;
+            xs.clear();
+            for &k in &rows[j] {
+                let e = edges[k as usize];
+                if sy >= e.1 && sy < e.3 {
+                    xs.push(e.0 + (e.2 - e.0) * (sy - e.1) / (e.3 - e.1));
+                }
+            }
+            xs.sort_by(|a, b| a.total_cmp(b));
+            for pair in xs.chunks_exact(2) {
+                let (xa, xb) = ((pair[0] - bx0 as f32).max(0.0), (pair[1] - bx0 as f32).min(w as f32));
+                if xb <= xa {
+                    continue;
+                }
+                for (i, c) in row.iter_mut().enumerate().take((xb.ceil() as usize).min(w)).skip(xa.floor() as usize) {
+                    *c += (xb.min(i as f32 + 1.0) - xa.max(i as f32)).clamp(0.0, 1.0) / SUB as f32;
+                }
+            }
+        }
+        for c in row.iter_mut() {
+            // a little extra at the edge hides the thin seams between neighbouring shapes
+            *c = (*c * 1.5).min(1.0);
+        }
+    });
+    Some(Cov { x0: bx0, y0: by0, w, h, v })
+}
+
+pub fn draw_fill(layer: &mut Layer, f: &VecFill, clip: Bounds) {
+    if let Some(cov) = fill_coverage(f, clip) {
+        composite(layer, &cov, f.color, 1.0);
+    }
 }
 
 // ---------- Erasing ----------
@@ -530,6 +651,22 @@ pub fn erase(strokes: &[VecStroke], path: &[(f32, f32, f32)], mode: EraseMode, w
 }
 
 // ---------- Editing existing lines ----------
+
+/// The "remove whole lines" eraser also removes color shapes it passes over.
+/// Returns the remaining shapes and the area that changed.
+pub fn erase_fills(fills: &[VecFill], path: &[(f32, f32, f32)]) -> Option<(Vec<VecFill>, Bounds)> {
+    let er = fill_path(path);
+    let mut changed: Option<Bounds> = None;
+    let mut out = Vec::with_capacity(fills.len());
+    for f in fills {
+        if er.iter().any(|e| inside_fill(f, e.0, e.1)) {
+            changed = Some(union(changed, fill_bounds(f)));
+        } else {
+            out.push(f.clone());
+        }
+    }
+    changed.map(|b| (out, b))
+}
 
 /// The top-most line under (x, y), within `tol` pixels of its edge.
 pub fn hit_stroke(strokes: &[VecStroke], x: f32, y: f32, tol: f32, width: f32) -> Option<usize> {
@@ -822,6 +959,28 @@ mod tests {
     }
 
     #[test]
+    fn color_shapes_have_holes_and_sit_under_lines() {
+        let (mut d, i) = vec_layer();
+        let ring = |x0: f32, y0: f32, x1: f32, y1: f32| vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+        let data = data_mut(&mut d.layers[i]);
+        data.fills.push(VecFill { rings: vec![ring(20.0, 20.0, 180.0, 160.0), ring(70.0, 60.0, 130.0, 120.0)], color: [200, 40, 40] });
+        data.strokes.push(line(&[(10.0, 90.0), (190.0, 90.0)], style(8.0)));
+        render_all(&mut d.layers[i], 300, 200);
+        let l = &d.layers[i];
+        assert_eq!(alpha_at(l, 40, 40), 255, "inside the shape");
+        assert_eq!(alpha_at(l, 100, 110), 0, "the hole is empty");
+        assert_eq!(alpha_at(l, 250, 100), 0, "outside");
+        let img = crate::files::layer_rgba(l, 0, 0, 300, 200);
+        assert_eq!(img.get_pixel(40, 40).0, [200, 40, 40, 255]);
+        assert_eq!(img.get_pixel(100, 90).0[..3], [34, 34, 34], "the line is on top, even across the hole");
+        let f = &l.vector.as_ref().unwrap().fills[0];
+        assert!(inside_fill(f, 40.0, 40.0) && !inside_fill(f, 100.0, 100.0));
+        let (left, area) = erase_fills(&l.vector.as_ref().unwrap().fills, &[(40.0, 40.0, 5.0)]).unwrap();
+        assert!(left.is_empty() && area.0 <= 20);
+        assert!(erase_fills(&l.vector.as_ref().unwrap().fills, &[(100.0, 100.0, 5.0)]).is_none(), "the hole is not the shape");
+    }
+
+    #[test]
     fn node_editing() {
         let s = line(&[(0.0, 0.0), (100.0, 0.0), (200.0, 0.0)], style(4.0));
         let m = move_node(&s, 1, 0.0, 30.0, 0.0);
@@ -860,10 +1019,12 @@ mod tests {
                 VecStroke { pts: vec![[0.0, 0.0, 1.0]], style: Default::default() },
             ],
             width: f32::NAN,
+            fills: vec![VecFill { rings: vec![vec![[0.0, 0.0], [1.0, 1.0]]], color: [0, 0, 0] }],
         }
         .sanitized();
         assert_eq!(d.strokes.len(), 1);
         assert_eq!((d.width, d.strokes[0].pts.len(), d.strokes[0].pts[0][2]), (1.0, 2, 1.0));
         assert!(d.strokes[0].style.size.is_finite());
+        assert!(d.fills.is_empty(), "a shape needs three points");
     }
 }

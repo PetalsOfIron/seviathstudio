@@ -28,6 +28,7 @@ pub mod organizer;
 mod random_ui;
 mod references;
 mod tools;
+pub mod trace_ui;
 pub mod vector_ui;
 
 use brushes::BrushLib;
@@ -148,6 +149,7 @@ pub struct DrawState {
     grad: gradient_ui::GradState,
     rand: random_ui::RandState,
     vec: vector_ui::VecState,
+    trace: trace_ui::TraceUi,
     color_open: bool,
     layer_rows: Vec<(LayerId, Rect)>, // where each layer row was drawn last frame
     view: View,
@@ -215,6 +217,7 @@ impl Default for DrawState {
             grad: gradient_ui::GradState::default(),
             rand: random_ui::RandState::default(),
             vec: vector_ui::VecState::default(),
+            trace: trace_ui::TraceUi::default(),
             color_open: true,
             layer_rows: Vec::new(),
             view: View::default(),
@@ -335,6 +338,7 @@ impl DrawState {
         self.reference_window(ui.ctx());
         self.layer_quick_bar(ui.ctx());
         self.randomizer_window(ui.ctx());
+        self.trace_window(ui.ctx());
         self.track_history(ui.ctx(), frame_before);
     }
 
@@ -368,6 +372,7 @@ impl DrawState {
         self.doc = doc;
         self.tools.new_document(self.doc.w, self.doc.h);
         self.vec.reset();
+        self.trace.open = false;
         self.lui = organizer::LayerUi::default();
         self.grad.edit = None;
         self.renderer.reset();
@@ -417,6 +422,7 @@ impl DrawState {
         self.tools.floating = None;
         self.grad.edit = None;
         self.vec.reset();
+        self.trace.open = false;
         self.stroke = None;
         self.pen_stroke = false;
         self.pending = None;
