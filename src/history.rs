@@ -18,11 +18,12 @@ pub struct DocState {
     pub paper: Color32,
     pub selection: Option<crate::select::Selection>,
     pub presets: Vec<crate::layerfilter::Preset>,
+    pub meta: crate::meta::ProjectMeta,
 }
 
 impl Document {
     pub fn snapshot(&self) -> DocState {
-        DocState { layers: self.layers.clone(), paper: self.paper, selection: self.selection.clone(), presets: self.filter_presets.clone() }
+        DocState { layers: self.layers.clone(), paper: self.paper, selection: self.selection.clone(), presets: self.filter_presets.clone(), meta: self.meta.clone() }
     }
 
     pub fn restore(&mut self, s: &DocState) {
@@ -31,6 +32,7 @@ impl Document {
         self.paper = s.paper;
         self.selection = s.selection.clone();
         self.filter_presets = s.presets.clone();
+        self.meta = s.meta.clone();
         // fresh revisions so cached thumbnails never show an old picture
         for l in &mut self.layers {
             l.rev = l.rev.wrapping_add(1_000_003);
@@ -42,6 +44,7 @@ impl Document {
     pub fn same_as(&self, s: &DocState) -> bool {
         sel_id(&self.selection) == sel_id(&s.selection)
             && self.filter_presets == s.presets
+            && self.meta == s.meta
             && self.paper == s.paper
             && self.layers.len() == s.layers.len() && self.layers.iter().zip(&s.layers).all(|(a, b)| layer_same(a, b))
     }
@@ -100,6 +103,9 @@ pub fn describe(before: &DocState, after: &DocState) -> String {
     }
     if before.paper != after.paper {
         return "Paper color".into();
+    }
+    if before.meta != after.meta && before.layers.iter().zip(&after.layers).all(|(a, b)| layer_same(a, b)) {
+        return if before.meta.guides != after.meta.guides && before.meta.dpi == after.meta.dpi { "Guides".into() } else { "Project info".into() };
     }
     if before.presets != after.presets && before.layers.iter().zip(&after.layers).all(|(a, b)| layer_same(a, b)) {
         return "Layer filter preset".into();

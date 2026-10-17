@@ -777,6 +777,17 @@ impl DrawState {
         let light = Stroke::new(1.0, Color32::WHITE);
         let march = if self.set.reduced_motion { 0.0 } else { (now * 12.0 % 8.0) as f32 };
 
+        // the project's guide lines
+        if self.set.show_guides {
+            let (dw, dh) = (self.doc.w as f32, self.doc.h as f32);
+            for g in &self.doc.meta.guides {
+                let (a, b) = if g.vertical { (pos2(g.pos, 0.0), pos2(g.pos, dh)) } else { (pos2(0.0, g.pos), pos2(dw, g.pos)) };
+                let line = [to_s(a), to_s(b)];
+                p.line_segment(line, Stroke::new(2.5, Color32::from_black_alpha(70)));
+                p.line_segment(line, Stroke::new(1.5, Color32::from_rgb(70, 200, 235)));
+            }
+        }
+
         // symmetry axes and center
         if self.tools.sym.on() {
             let reach = (self.doc.w as f32).hypot(self.doc.h as f32) * 1.5;

@@ -121,6 +121,7 @@ pub fn page(ui: &mut Ui, page: Page, s: &mut Settings, pen: &mut PenMonitor) {
             hint(ui, "Used by the rotate buttons and by Shift while rotating with R + drag.");
             ui.add_space(6.0);
             section_title(ui, "Looks");
+            ui.checkbox(&mut s.show_guides, "Show the project's guide lines");
             ui.checkbox(&mut s.pixel_grid, "Pixel grid when zoomed in far");
             if s.pixel_grid {
                 row(ui, "Show grid from", |ui| {
@@ -302,6 +303,7 @@ fn pick_canvas(keep: &Settings, d: &Settings) -> Settings {
         invert_wheel: d.invert_wheel,
         rotate_snap: d.rotate_snap,
         pixel_grid: d.pixel_grid,
+        show_guides: d.show_guides,
         pixel_grid_from: d.pixel_grid_from,
         smooth_zoomed_in: d.smooth_zoomed_in,
         canvas_bg: d.canvas_bg,

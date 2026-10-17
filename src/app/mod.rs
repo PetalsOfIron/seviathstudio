@@ -14,6 +14,7 @@ use crate::theme::{self, *};
 use crate::widgets::{self, icon_button, segmented, tab_button};
 
 mod files;
+mod newproject;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -618,6 +619,7 @@ impl eframe::App for SeviathApp {
         self.settings_window(&ctx);
         self.account_window(&ctx);
         self.new_project_window(&ctx);
+        self.project_info_window(&ctx);
         self.project_manager(&ctx);
         self.files_tick(&ctx);
         self.unsaved_dialog(&ctx);

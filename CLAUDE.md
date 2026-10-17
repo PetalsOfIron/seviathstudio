@@ -42,9 +42,9 @@
 - Look: `theme.rs` (colors EMERALD, VENOM, GOLD, PANEL, TEXT, TEXT_DIM…), `snake.rs` (logo, scales, divider), `icons.rs` (line icons drawn in code), `widgets.rs` (chip, segmented, icon_button, section_title).
 
 ## Where the work stands
-- Milestones **1–9 done** (see ROADMAP "Done"). 76 tests pass.
+- Milestones **1–9a done** (see ROADMAP "Done"). 86 tests pass.
 - Plan Part AT core is done (Info screen, PNG credit, README credit). ROADMAP now includes Parts AS (milestone **9a**) and AV (**37a**).
-- Milestone 9 (layer organizer v2) is done. **Next: 9a — New project dialog v2**, then 10 (gradients & color randomizer), ...
+- Milestones 9 (layer organizer) and 9a (new project dialog, DPI, guides, templates) are done. **Next: 10 — Gradients & color randomizer**, then 11 (vector layers), 12 (filters, effects, color management), ...
 - Gotcha: egui `consume_key(Modifiers::NONE, key)` also matches when Alt is held, so check keys with Alt/Ctrl **before** plain tool keys (see the order in `DrawState::ui`). In kittest, hold modifiers for clicks with `Event::ModifiersChanged`.
 - Gotcha: very long bash heredocs sometimes fail to parse — write the Python patch script with the Write tool into the scratchpad and run it.
 - Decisions already made (don't re-ask): no Mixbox (license) → own Kubelka–Munk mixing; project-file verification can only be tamper-evident (open-source app); game runtimes in separate MIT repos; payments only via hand-off (PayPal), the app never touches money.
