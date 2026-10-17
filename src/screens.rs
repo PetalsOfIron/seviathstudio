@@ -1232,3 +1232,34 @@ fn effects_panel_screens() {
     h.run_steps(4);
     save(&mut h, "fx_04_adjustment_panel");
 }
+
+#[test]
+fn reference_window_resizes_from_every_side() {
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    {
+        let pic = image::RgbaImage::from_fn(320, 240, |x, y| image::Rgba([(x * 255 / 320) as u8, (y * 255 / 240) as u8, 120, 255]));
+        let mut png = Vec::new();
+        pic.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let d = h.state_mut().draw_mut();
+        d.refs.add_bytes("pic", &png).unwrap();
+        d.show_references();
+        d.set_popout(true);
+    }
+    h.run_steps(6);
+    let r0 = h.state().draw_mut_ref().ref_window_rect();
+    assert!(r0.width() > 300.0 && r0.width() < 450.0, "small by default: {r0:?}");
+    save(&mut h, "ref_popout_small");
+    // drag the left edge to the left, the top edge up, the bottom edge down and the right edge right
+    let c = r0.center();
+    stroke(&mut h, &[pos2(r0.left() + 1.0, c.y), pos2(r0.left() - 60.0, c.y), pos2(r0.left() - 120.0, c.y)]);
+    h.run_steps(3);
+    let r1 = h.state().draw_mut_ref().ref_window_rect();
+    assert!(r1.width() > r0.width() + 80.0, "left edge: {r0:?} -> {r1:?}");
+    let c = r1.center();
+    stroke(&mut h, &[pos2(c.x, r1.top() + 1.0), pos2(c.x, r1.top() - 40.0), pos2(c.x, r1.top() - 80.0)]);
+    h.run_steps(3);
+    let r2 = h.state().draw_mut_ref().ref_window_rect();
+    assert!(r2.height() > r1.height() + 50.0, "top edge: {r1:?} -> {r2:?}");
+    save(&mut h, "ref_popout_bigger");
+}

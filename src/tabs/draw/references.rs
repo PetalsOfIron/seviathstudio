@@ -285,7 +285,13 @@ impl DrawState {
             return;
         }
         let mut open = true;
-        egui::Window::new(RichText::new("Reference").strong())
+        // fat grab zones on every side and corner, so resizing is easy to find and hit
+        let saved = ctx.global_style().interaction.clone();
+        ctx.global_style_mut(|st| {
+            st.interaction.resize_grab_radius_side = 10.0;
+            st.interaction.resize_grab_radius_corner = 18.0;
+        });
+        let shown = egui::Window::new(RichText::new("Reference").strong())
             .open(&mut open)
             .default_size(vec2(380.0, 440.0))
             .min_size(vec2(240.0, 260.0))
@@ -296,8 +302,31 @@ impl DrawState {
                 let w = ui.available_width().max(200.0);
                 let h = (ui.available_height() - 110.0).max(120.0);
                 self.references_panel(ui, w, h, true);
+                ui.label(RichText::new("Drag any edge or corner to make this window bigger or smaller.").size(11.0).color(TEXT_DIM));
             });
+        ctx.global_style_mut(|st| st.interaction = saved);
+        if let Some(r) = shown {
+            // a visible grip in every corner, and the edges light up when the pointer is near
+            let rect = r.response.rect;
+            self.ref_rect = rect;
+            let p = ctx.layer_painter(egui::LayerId::new(Order::Foreground, Id::new("ref_grips")));
+            let hover = ctx.pointer_latest_pos().is_some_and(|q| rect.expand(10.0).contains(q));
+            let col = if hover { VENOM } else { TEXT_DIM };
+            for (c, dx, dy) in [(rect.left_top(), 1.0, 1.0), (rect.right_top(), -1.0, 1.0), (rect.left_bottom(), 1.0, -1.0), (rect.right_bottom(), -1.0, -1.0)] {
+                for k in 0..3 {
+                    let o = 4.0 + k as f32 * 4.0;
+                    p.line_segment([c + vec2(dx * o, dy * 2.0), c + vec2(dx * 2.0, dy * o)], Stroke::new(1.5, col));
+                }
+            }
+            if hover {
+                p.rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.5, VENOM.gamma_multiply(0.7)), StrokeKind::Outside);
+            }
+        }
         self.ref_popout = open;
+    }
+
+    pub fn ref_window_rect(&self) -> Rect {
+        self.ref_rect
     }
 
     /// The current reference laid see-through over the page (fit inside it, turning with the view).

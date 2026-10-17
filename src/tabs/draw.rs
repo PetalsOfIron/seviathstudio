@@ -172,6 +172,8 @@ pub struct DrawState {
     /// Reference pictures (Sub view → References).
     pub refs: RefStore,
     ref_popout: bool,
+    /// Where the reference pop-out window was last drawn.
+    ref_rect: Rect,
     ref_view_rect: Option<Rect>, // where the docked reference picture was drawn last frame
     /// Project files dropped onto the window (the app opens them).
     pub open_requests: Vec<std::path::PathBuf>,
@@ -239,6 +241,7 @@ impl Default for DrawState {
             set: Settings::default(),
             refs: RefStore::in_memory(),
             ref_popout: false,
+            ref_rect: Rect::NOTHING,
             ref_view_rect: None,
             open_requests: Vec::new(),
             pending: None,
@@ -446,6 +449,10 @@ impl DrawState {
     }
 
     #[cfg(test)]
+    pub fn set_popout(&mut self, on: bool) {
+        self.ref_popout = on;
+    }
+
     pub fn show_references(&mut self) {
         self.subview_open = true;
         self.subview_tab = SubTab::References;
