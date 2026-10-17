@@ -22,6 +22,7 @@ use crate::view::View;
 use crate::widgets::{self, icon_button, section_title, segmented};
 
 mod brushes;
+pub mod effects_ui;
 pub mod filters_ui;
 pub mod gradient_ui;
 mod layers;

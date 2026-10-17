@@ -271,6 +271,10 @@ impl DrawState {
                         p.rect_filled(thumb, CornerRadius::same(4), CARD);
                         icons::paint(p, thumb.shrink(7.0), Icon::Folder, GOLD);
                     }
+                    LayerKind::Adjust => {
+                        p.rect_filled(thumb, CornerRadius::same(4), CARD);
+                        icons::paint(p, thumb.shrink(7.0), Icon::Gradient, VENOM);
+                    }
                     LayerKind::Raster | LayerKind::Vector => {
                         checker(p, thumb);
                         if let Some(t) = tex {
@@ -332,7 +336,11 @@ impl DrawState {
                     }
                     LayerKind::Vector => format!("Vector · {}", layer.blend.name()),
                     LayerKind::Raster => layer.blend.name().to_owned(),
+                    LayerKind::Adjust => format!("Adjustment · {}", layer.adjust.as_ref().map(|a| a.label()).unwrap_or("none")),
                 };
+                if layer.fx_active() {
+                    sub += " · fx";
+                }
                 if layer.opacity < 100.0 {
                     sub += &format!(" · {:.0}%", layer.opacity);
                 }
@@ -540,6 +548,18 @@ impl DrawState {
             if widgets::chip(ui, "Into folder", false).on_hover_text("Put this layer in a new folder (Ctrl+G)").clicked() {
                 self.group_active();
             }
+            ui.menu_button("Adjust", |ui| {
+                for fid in crate::effects::ADJUSTMENTS {
+                    if let Some(d) = crate::filters::find(fid) {
+                        if ui.button(d.label).on_hover_text(d.about).clicked() {
+                            self.add_adjustment(fid);
+                            ui.close();
+                        }
+                    }
+                }
+            })
+            .response
+            .on_hover_text("New adjustment layer: changes the colors of everything below it, and you can undo it any time");
             let clipped = self.doc.layers[self.active_idx()].clip;
             if widgets::chip(ui, "Clip", clipped)
                 .on_hover_text("Clipping mask: show only where the layer below has paint (Ctrl+Alt+G)")
@@ -561,23 +581,25 @@ impl DrawState {
             return;
         }
         let layer = &mut self.doc.layers[ai];
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Blend").color(TEXT_DIM).size(12.5));
-            egui::ComboBox::from_id_salt("blend")
-                .selected_text(layer.blend.name())
-                .width(150.0)
-                .height(420.0)
-                .show_ui(ui, |ui| {
-                    if layer.kind == LayerKind::Group {
-                        ui.selectable_value(&mut layer.blend, Blend::PassThrough, Blend::PassThrough.name())
-                            .on_hover_text(Blend::PassThrough.about());
-                    }
-                    for b in Blend::ALL {
-                        ui.selectable_value(&mut layer.blend, b, b.name()).on_hover_text(b.about());
-                    }
-                });
-        });
-        ui.label(RichText::new(layer.blend.about()).color(TEXT_DIM).size(11.5));
+        if layer.kind != LayerKind::Adjust {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Blend").color(TEXT_DIM).size(12.5));
+                egui::ComboBox::from_id_salt("blend")
+                    .selected_text(layer.blend.name())
+                    .width(150.0)
+                    .height(420.0)
+                    .show_ui(ui, |ui| {
+                        if layer.kind == LayerKind::Group {
+                            ui.selectable_value(&mut layer.blend, Blend::PassThrough, Blend::PassThrough.name())
+                                .on_hover_text(Blend::PassThrough.about());
+                        }
+                        for b in Blend::ALL {
+                            ui.selectable_value(&mut layer.blend, b, b.name()).on_hover_text(b.about());
+                        }
+                    });
+            });
+            ui.label(RichText::new(layer.blend.about()).color(TEXT_DIM).size(11.5));
+        }
         slider_row(ui, "Opacity", &mut layer.opacity, 0.0..=100.0, "%");
         ui.horizontal_wrapped(|ui| {
             if layer.kind == LayerKind::Raster {
@@ -586,6 +608,7 @@ impl DrawState {
             ui.checkbox(&mut layer.locked, "Lock").on_hover_text("No painting or moving");
         });
         ui.label(RichText::new("Double-click a layer to rename. Drag to reorder or drop onto a folder.").color(TEXT_DIM).size(11.0));
+        self.effects_section(ui);
     }
 }
 

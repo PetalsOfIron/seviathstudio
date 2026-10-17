@@ -10,6 +10,7 @@ mod canvas;
 mod check;
 mod colorpick;
 mod doc;
+mod effects;
 mod fill;
 mod filters;
 mod gradient;

@@ -41,10 +41,12 @@
 - `src/settings.rs` (serde JSON in `%APPDATA%\SeviathStudio\settings.json`, `#[serde(default)]`, `persist=false` in tests) + `src/settings_ui.rs` pages.
 - Look: `theme.rs` (colors EMERALD, VENOM, GOLD, PANEL, TEXT, TEXT_DIM…), `snake.rs` (logo, scales, divider), `icons.rs` (line icons drawn in code), `widgets.rs` (chip, segmented, icon_button, section_title).
 
+- Effects/adjustments: `Layer.fx` + `Layer.adjust` (LayerKind::Adjust); drawn in `Document::composite_into`; effect reach is capped at 200 px so a tile only needs its 8 neighbours (`take_dirty` widens by one ring when effects exist); `files::bake` for PSD/ORA.
+
 ## Where the work stands
-- Milestones **1–12b done** (see ROADMAP "Done"). 143 tests pass.
+- Milestones **1–12c done** (see ROADMAP "Done"). 143 tests pass.
 - Plan Part AT core is done (Info screen, PNG credit, README credit). ROADMAP now includes Parts AS (milestone **9a**) and AV (**37a**).
-- Milestones 9 (layer organizer), 9a (new project dialog), 10 (gradients, color randomizer), 11 (vector layers) 11b (auto-trace) and 12a (filters, adjustments, check views) are done. **Next: 12c — Layer effects & adjustment layers**, then 12d (color management, light/depth layers), 13 (pigment mixing brush engine), ...
+- Milestones 9 (layer organizer), 9a (new project dialog), 10 (gradients, color randomizer), 11 (vector layers) 11b (auto-trace) and 12a (filters, adjustments, check views) are done. **Next: 12d — Color management & light/depth layers**, then 13 (pigment mixing brush engine), ...
 - Gotcha: egui `consume_key(Modifiers::NONE, key)` also matches when Alt is held, so check keys with Alt/Ctrl **before** plain tool keys (see the order in `DrawState::ui`). In kittest, hold modifiers for clicks with `Event::ModifiersChanged`.
 - Gotcha: inside `DrawState::ui` a change made by code is picked up by `track_history` by itself: set `label_hint` instead of using `apply_external` (that is for code that runs outside the draw frame, e.g. menus), or the step is recorded twice.
 - Gotcha: very long bash heredocs sometimes fail to parse — write the Python patch script with the Write tool into the scratchpad and run it.

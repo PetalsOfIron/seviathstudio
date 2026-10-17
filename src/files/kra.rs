@@ -165,6 +165,8 @@ fn layer(id: LayerId, parent: Option<LayerId>, name: String, kind: LayerKind) ->
         tiles: HashMap::new(),
         fav: false,
         vector: None,
+        fx: Vec::new(),
+        adjust: None,
         rev: 1,
     }
 }

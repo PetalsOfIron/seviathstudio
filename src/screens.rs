@@ -1165,3 +1165,70 @@ fn shape_filter_screens() {
         h.run_steps(2);
     }
 }
+
+#[test]
+fn effects_screens() {
+    use crate::doc::LayerKind;
+    use crate::effects::{Effect, FxKind, Place};
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    let (w, hh) = (3000u32, 4000u32);
+    {
+        let d = h.state_mut().draw_mut();
+        let img = image::RgbaImage::from_fn(w, hh, |x, y| {
+            if (x as f32 - 1500.0).hypot(y as f32 - 1800.0) < 700.0 { image::Rgba([220, 60, 60, 255]) } else { image::Rgba([0, 0, 0, 0]) }
+        });
+        d.doc.layers[0].tiles = crate::files::tiles_from_rgba(&img, 0, 0, w, hh);
+        d.doc.layers[0].rev += 1;
+        d.doc.mark_all_dirty();
+    }
+    h.run_steps(3);
+    let flat = |h: &Harness<'_, SeviathApp>, x: u32, y: u32| *crate::files::flatten(&h.state().draw_mut_ref().doc).get_pixel(x, y);
+    assert_eq!(flat(&h, 2300, 1800).0[..3], [255, 255, 255], "plain paper right of the disc");
+
+    // a shadow and an outline appear around the disc, and the paint itself is untouched
+    {
+        let d = h.state_mut().draw_mut();
+        d.doc.layers[0].fx = vec![
+            Effect { on: true, kind: FxKind::Shadow { color: [0, 0, 0], opacity: 1.0, dx: 90.0, dy: 0.0, blur: 0.0, spread: 0.0 } },
+            Effect { on: true, kind: FxKind::Outline { color: [20, 20, 160], opacity: 1.0, width: 30.0, place: Place::Outside } },
+        ];
+        d.doc.mark_all_dirty();
+    }
+    h.run_steps(6);
+    let tiles_before = h.state().draw_mut_ref().doc.layers[0].tiles.len();
+    assert_eq!(flat(&h, 2215, 1800).0[2], 160, "the blue outline just outside the disc (700 + 30)");
+    assert!(flat(&h, 2260, 1800).0[0] < 30, "the shadow reaches to the right: {:?}", flat(&h, 2260, 1800));
+    assert_eq!(flat(&h, 1500, 1800).0[..3], [220, 60, 60], "the paint is still the same red");
+    save(&mut h, "fx_01_effects_on_canvas");
+    assert_eq!(h.state().draw_mut_ref().doc.layers[0].tiles.len(), tiles_before);
+
+    // an adjustment layer: invert turns the paper black and the red cyan, and it undoes in one step
+    h.state_mut().draw_mut().apply_external("New adjustment layer", |d| d.add_adjustment("invert"));
+    h.run_steps(6);
+    assert_eq!(h.state().draw_mut_ref().doc.layers[0].kind, LayerKind::Adjust);
+    assert_eq!(flat(&h, 100, 100).0[..3], [0, 0, 0], "the paper is inverted");
+    let c = flat(&h, 1500, 1800).0;
+    assert!(c[0] < 40 && c[1] > 190, "red became cyan: {c:?}");
+    assert_eq!(h.state().history().entries.last().unwrap().label, "New adjustment layer");
+    save(&mut h, "fx_02_adjustment_layer");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(4);
+    assert_eq!(flat(&h, 100, 100).0[..3], [255, 255, 255], "undo takes the adjustment away");
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+    h.run_steps(4);
+    assert_eq!(flat(&h, 100, 100).0[..3], [0, 0, 0], "redo brings it back");
+}
+
+#[test]
+fn effects_panel_screens() {
+    use crate::effects::Effect;
+    let mut h = Harness::builder().with_size([1440.0, 1500.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().doc.layers[0].fx = vec![Effect::presets().remove(0), Effect::presets().remove(2)];
+    h.run_steps(4);
+    save(&mut h, "fx_03_effects_panel");
+    h.state_mut().draw_mut().add_adjustment("levels");
+    h.run_steps(4);
+    save(&mut h, "fx_04_adjustment_panel");
+}

@@ -382,7 +382,7 @@ fn box_pass(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
 }
 
 /// Gaussian blur of one channel, as three box blurs.
-fn gauss_channel(c: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
+pub(crate) fn gauss_channel(c: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
     if sigma < 0.3 {
         return c.to_vec();
     }

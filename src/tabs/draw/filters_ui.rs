@@ -177,56 +177,7 @@ impl DrawState {
                             ui.label(RichText::new(f.def.about).size(11.5).color(TEXT_DIM));
                             ui.add_space(4.0);
                             section_title(ui, f.def.label);
-                            for pd in f.def.params {
-                                match &pd.kind {
-                                    Kind::Slider { min, max, step, suffix, .. } => {
-                                        ui.horizontal(|ui| {
-                                            ui.label(RichText::new(pd.label).size(12.5).color(TEXT_DIM));
-                                            let v = f.params.v.entry(pd.key).or_insert(0.0);
-                                            let mut s = egui::Slider::new(v, *min..=*max).step_by(*step as f64).suffix(*suffix);
-                                            if *step >= 1.0 {
-                                                s = s.max_decimals(0);
-                                            }
-                                            ui.add(s);
-                                        });
-                                    }
-                                    Kind::Choice { options, .. } => {
-                                        ui.horizontal(|ui| {
-                                            ui.label(RichText::new(pd.label).size(12.5).color(TEXT_DIM));
-                                            let cur = f.params.f(pd.key) as usize;
-                                            for (i, o) in options.iter().enumerate() {
-                                                if widgets::chip(ui, o, cur == i).clicked() {
-                                                    f.params.v.insert(pd.key, i as f32);
-                                                }
-                                            }
-                                        });
-                                    }
-                                    Kind::Check { .. } => {
-                                        let mut b = f.params.b(pd.key);
-                                        if ui.checkbox(&mut b, pd.label).changed() {
-                                            f.params.v.insert(pd.key, b as u8 as f32);
-                                        }
-                                    }
-                                    Kind::Color { .. } => {
-                                        ui.horizontal(|ui| {
-                                            ui.label(RichText::new(pd.label).size(12.5).color(TEXT_DIM));
-                                            let c = f.params.colors.entry(pd.key).or_insert([0, 0, 0]);
-                                            egui::color_picker::color_edit_button_srgb(ui, c);
-                                        });
-                                    }
-                                }
-                            }
-                            if f.def.curve {
-                                curve_editor(ui, &mut f.params.curve);
-                                if ui.button("Straighten the curve").clicked() {
-                                    f.params.curve = vec![[0.0, 0.0], [1.0, 1.0]];
-                                }
-                            }
-                            if f.def.group == Group::Adjust || !f.def.params.is_empty() {
-                                if ui.small_button("Reset").clicked() {
-                                    f.params = Params::defaults(f.def);
-                                }
-                            }
+                            params_editor(ui, f.def, &mut f.params);
                         });
                     });
                     ui.vertical(|ui| {
@@ -394,6 +345,60 @@ impl DrawState {
                 });
             });
         self.filter.check_open = open;
+    }
+}
+
+/// The settings of one filter: sliders, choices, colors and the curve.
+pub(super) fn params_editor(ui: &mut Ui, def: &'static FilterDef, params: &mut Params) {
+    for pd in def.params {
+        match &pd.kind {
+            Kind::Slider { min, max, step, suffix, .. } => {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(pd.label).size(12.5).color(TEXT_DIM));
+                    let v = params.v.entry(pd.key).or_insert(0.0);
+                    let mut s = egui::Slider::new(v, *min..=*max).step_by(*step as f64).suffix(*suffix);
+                    if *step >= 1.0 {
+                        s = s.max_decimals(0);
+                    }
+                    ui.add(s);
+                });
+            }
+            Kind::Choice { options, .. } => {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(pd.label).size(12.5).color(TEXT_DIM));
+                    let cur = params.f(pd.key) as usize;
+                    for (i, o) in options.iter().enumerate() {
+                        if widgets::chip(ui, o, cur == i).clicked() {
+                            params.v.insert(pd.key, i as f32);
+                        }
+                    }
+                });
+            }
+            Kind::Check { .. } => {
+                let mut b = params.b(pd.key);
+                if ui.checkbox(&mut b, pd.label).changed() {
+                    params.v.insert(pd.key, b as u8 as f32);
+                }
+            }
+            Kind::Color { .. } => {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(pd.label).size(12.5).color(TEXT_DIM));
+                    let c = params.colors.entry(pd.key).or_insert([0, 0, 0]);
+                    egui::color_picker::color_edit_button_srgb(ui, c);
+                });
+            }
+        }
+    }
+    if def.curve {
+        curve_editor(ui, &mut params.curve);
+        if ui.button("Straighten the curve").clicked() {
+            params.curve = vec![[0.0, 0.0], [1.0, 1.0]];
+        }
+    }
+    if def.group == Group::Adjust || !def.params.is_empty() {
+        if ui.small_button("Reset").clicked() {
+            *params = Params::defaults(def);
+        }
     }
 }
 

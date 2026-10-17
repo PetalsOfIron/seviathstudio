@@ -68,6 +68,8 @@ fn meta_same(a: &Layer, b: &Layer) -> bool {
         && crate::vector::same(&a.vector, &b.vector)
         && a.opacity == b.opacity
         && a.blend == b.blend
+        && a.fx == b.fx
+        && a.adjust == b.adjust
 }
 
 fn tiles_same(a: &Layer, b: &Layer) -> bool {
@@ -94,6 +96,8 @@ pub fn describe(before: &DocState, after: &DocState) -> String {
             "New folder".into()
         } else if l.kind == LayerKind::Vector {
             "New vector layer".into()
+        } else if l.kind == LayerKind::Adjust {
+            "New adjustment layer".into()
         } else {
             "New layer".into()
         };
@@ -128,6 +132,10 @@ pub fn describe(before: &DocState, after: &DocState) -> String {
             if a.visible { "Show layer" } else { "Hide layer" }
         } else if a.opacity != b.opacity {
             "Layer opacity"
+        } else if a.fx != b.fx {
+            "Layer effects"
+        } else if a.adjust != b.adjust {
+            "Adjustment"
         } else if a.blend != b.blend {
             "Blend mode"
         } else if a.clip != b.clip {
