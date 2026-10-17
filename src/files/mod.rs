@@ -138,6 +138,74 @@ pub fn flatten(doc: &Document) -> image::RgbaImage {
     img
 }
 
+/// A copy for formats that know nothing of our effects and adjustment layers (PSD, OpenRaster):
+/// effects are drawn into the pixels; each adjustment is applied to the layers below it in its folder
+/// and then dropped. (The flat picture always looks exactly like the canvas; layered files are close.)
+pub fn bake(mut doc: Document) -> Document {
+    use std::collections::HashSet;
+    let (tx, ty) = (doc.tiles_x(), doc.tiles_y());
+    let with_fx: Vec<usize> = (0..doc.layers.len()).filter(|&i| doc.layers[i].fx_active()).collect();
+    for i in with_fx {
+        let mut keys: HashSet<TileKey> = HashSet::new();
+        for k in doc.layers[i].tiles.keys() {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let q = (k.0 + dx, k.1 + dy);
+                    if q.0 >= 0 && q.1 >= 0 && q.0 < tx && q.1 < ty {
+                        keys.insert(q);
+                    }
+                }
+            }
+        }
+        let baked: Vec<(TileKey, Vec<Color32>)> = keys
+            .into_par_iter()
+            .filter_map(|k| doc.fx_pixels(&doc.layers[i], k).map(|px| (k, px.into_iter().map(blend::from_px).collect())))
+            .collect();
+        let l = &mut doc.layers[i];
+        l.tiles.clear();
+        for (k, px) in baked {
+            if px.iter().any(|c| c.a() != 0) {
+                l.tiles.insert(k, Arc::new(px));
+            }
+        }
+        l.fx.clear();
+        l.rev += 1;
+    }
+    let len = doc.layers.len();
+    let adjusts: Vec<usize> = (0..len).rev().filter(|&i| doc.layers[i].kind == LayerKind::Adjust).collect();
+    for ia in adjusts {
+        let (visible, op, parent, adj) = {
+            let l = &doc.layers[ia];
+            (l.visible, l.opacity / 100.0, l.parent, l.adjust.clone())
+        };
+        let Some(adj) = adj.filter(|_| visible && op > 0.0) else { continue };
+        for j in ia + 1..len {
+            if let Some(p) = parent {
+                if !doc.is_inside(doc.layers[j].id, p) {
+                    continue;
+                }
+            }
+            match doc.layers[j].kind {
+                LayerKind::Raster | LayerKind::Vector => {
+                    for t in doc.layers[j].tiles.values_mut() {
+                        let mut px: Vec<blend::Px> = t.iter().map(|c| blend::to_px(*c)).collect();
+                        adj.apply(&mut px, TILE, op);
+                        *t = Arc::new(px.into_iter().map(blend::from_px).collect());
+                    }
+                }
+                LayerKind::Paper if parent.is_none() => {
+                    let mut px = [blend::to_px(doc.paper)];
+                    adj.apply(&mut px, 1, op);
+                    doc.paper = blend::from_px(px[0]);
+                }
+                _ => {}
+            }
+        }
+    }
+    doc.layers.retain(|l| l.kind != LayerKind::Adjust);
+    doc
+}
+
 /// A small preview (longest side `max`), for project thumbnails.
 pub fn thumbnail(doc: &Document, max: u32) -> image::RgbaImage {
     let full = flatten(doc);

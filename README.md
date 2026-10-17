@@ -26,6 +26,7 @@ cargo test --release
 Runs the unit tests and a full UI run that paints, undoes and redoes with simulated input. Pictures land in `target/screens/`:
 
 - `01_draw.png` … `10_settings_canvas.png` — the app at each step of the UI run
+- `fx_01_effects_on_canvas.png` … `fx_04_adjustment_panel.png` — effects and adjustment layers (`cargo test --release effects_screens effects_panel_screens`)
 - `flt_shape_1_cubes.png` … `flt_shape_5_illustrate.png` — shape filters (`cargo test --release shape_filter_screens`)
 - `flt_01_blur_preview.png` … `flt_04_check_colorblind.png` — filters and check views (`cargo test --release filter_screens`)
 - `trace_01_lines_preview.png` … `trace_03_result.png` — Auto-trace (`cargo test --release trace_screens`)
@@ -52,6 +53,7 @@ Performance check: `cargo test --release bench_full_redraw -- --ignored --nocapt
 - `src/view.rs`, `src/canvas.rs` — zoom/pan/rotate/mirror and GPU tile display
 - `src/brush/` — brush engine: settings + presets, tips, textures, stroke engine (stabilizer, pressure, taper, mixing, whole-stroke edges)
 - `src/stroke.rs` — the live stroke buffer shown on top of its layer until the pen lifts
+- `src/effects.rs` + `tabs/draw/effects_ui.rs` — layer effects (shadow, glow, outline, overlays) and adjustment layers
 - `src/filters.rs`, `src/check.rs` + `tabs/draw/filters_ui.rs` — filters (blurs, stylize, line art, levels, curves, HSL…) with live preview, and the check views
 - `src/trace.rs` + `tabs/draw/trace_ui.rs` — Auto-trace: pixel drawing to vector lines (center line, width as pressure) and color shapes
 - `src/vector.rs`, `src/shapes.rs` + `tabs/draw/vector_ui.rs` — vector layers: lines with pressure, rasterizer, eraser, node editing, hold-to-straighten

@@ -132,6 +132,8 @@ pub enum LayerKind {
     Raster,
     Vector,
     Group,
+    /// Changes the colors of everything below it (one of the color filters).
+    Adjust,
 }
 
 #[derive(Clone, Debug)]
@@ -149,6 +151,10 @@ pub struct Layer {
     pub fav: bool,      // starred: shows in the favorites row
     /// The lines of a vector layer (its tiles are drawn from them).
     pub vector: Option<Arc<crate::vector::VecData>>,
+    /// Non-destructive effects (shadow, glow, outline, overlays), drawn when the picture is put together.
+    pub fx: Vec<crate::effects::Effect>,
+    /// Adjustment layers: which color filter and its settings.
+    pub adjust: Option<crate::effects::Adjust>,
     pub opacity: f32,   // 0..100
     pub blend: Blend,
     pub tiles: HashMap<TileKey, TileData>,
@@ -156,6 +162,11 @@ pub struct Layer {
 }
 
 impl Layer {
+    /// Pixel layer with at least one effect switched on.
+    pub fn fx_active(&self) -> bool {
+        matches!(self.kind, LayerKind::Raster | LayerKind::Vector) && crate::effects::any_on(&self.fx)
+    }
+
     pub fn paintable(&self) -> bool {
         self.kind == LayerKind::Raster && !self.locked
     }
@@ -244,6 +255,8 @@ impl Document {
             tiles: HashMap::new(),
             fav: false,
             vector: None,
+            fx: Vec::new(),
+            adjust: None,
             rev: 0,
         }
     }
@@ -283,6 +296,12 @@ impl Document {
     }
 
     pub fn take_dirty(&mut self) -> Vec<TileKey> {
+        // effects reach into the neighbouring tiles
+        if self.layers.iter().any(|l| l.visible && l.fx_active()) {
+            let (tx, ty) = (self.tiles_x(), self.tiles_y());
+            let near: Vec<TileKey> = self.dirty.iter().flat_map(|&(x, y)| (-1..=1).flat_map(move |dy| (-1..=1).map(move |dx| (x + dx, y + dy)))).collect();
+            self.dirty.extend(near.into_iter().filter(|&(x, y)| x >= 0 && y >= 0 && x < tx && y < ty));
+        }
         self.dirty.drain().collect()
     }
 
@@ -566,6 +585,14 @@ impl Document {
             }
             let op = base.opacity / 100.0;
 
+            // Adjustment layer: changes what is below it (layers clipped to it paint on their own)
+            if base.kind == LayerKind::Adjust {
+                if let Some(a) = &base.adjust {
+                    a.apply(backdrop, TILE, op);
+                }
+                continue;
+            }
+
             // Pass-through folder without clipped layers: contents go straight onto the backdrop.
             if base.kind == LayerKind::Group && base.blend == Blend::PassThrough && clips.is_empty() {
                 if op >= 1.0 {
@@ -585,7 +612,7 @@ impl Document {
             let any_clip = clips.iter().any(|c| c.visible && c.opacity > 0.0);
 
             // Fast paths (no clip group): blend straight from the stored pixels, no temporary copy.
-            if !any_clip {
+            if !any_clip && !base.fx_active() {
                 match base.kind {
                     LayerKind::Raster | LayerKind::Vector => {
                         if let Some(t) = self.raster_tile(base, key) {
@@ -621,7 +648,7 @@ impl Document {
                 }
                 let cop = c.opacity / 100.0;
                 let cmode = if c.blend == Blend::PassThrough { Blend::Normal } else { c.blend };
-                if matches!(c.kind, LayerKind::Raster | LayerKind::Vector) {
+                if matches!(c.kind, LayerKind::Raster | LayerKind::Vector) && !c.fx_active() {
                     if let Some(t) = self.raster_tile(c, key) {
                         for (s, p) in src.iter_mut().zip(t.iter()) {
                             if p.a() != 0 {
@@ -684,10 +711,55 @@ impl Document {
         self.revision += 1;
     }
 
+    /// One tile of a pixel layer with its effects drawn (shadows and glows spill in from the neighbours).
+    /// None when there is no paint within reach.
+    pub(crate) fn fx_pixels(&self, l: &Layer, key: TileKey) -> Option<Vec<Px>> {
+        let m = crate::effects::reach(&l.fx);
+        let n = TILE + 2 * m;
+        let mut near: Vec<Option<Cow<Vec<Color32>>>> = Vec::with_capacity(9);
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                near.push(self.raster_tile(l, (key.0 + dx, key.1 + dy)));
+            }
+        }
+        if near.iter().all(|t| t.is_none()) {
+            return None;
+        }
+        let (ox, oy) = (key.0 * TILE as i32 - m as i32, key.1 * TILE as i32 - m as i32);
+        let (wmax, hmax) = (self.w as i32 - 1, self.h as i32 - 1);
+        let mut buf = vec![CLEAR; n * n];
+        for y in 0..n {
+            // outside the page the edge pixel carries on, so nothing looks cut off at the border
+            let dy = (oy + y as i32).clamp(0, hmax);
+            for x in 0..n {
+                let dx = (ox + x as i32).clamp(0, wmax);
+                let (tx, ty) = (dx.div_euclid(TILE as i32), dy.div_euclid(TILE as i32));
+                let (ix, iy) = ((tx - key.0 + 1) as usize, (ty - key.1 + 1) as usize);
+                if ix > 2 || iy > 2 {
+                    continue;
+                }
+                if let Some(t) = &near[iy * 3 + ix] {
+                    let c = t[dy.rem_euclid(TILE as i32) as usize * TILE + dx.rem_euclid(TILE as i32) as usize];
+                    if c.a() != 0 {
+                        buf[y * n + x] = blend::to_px(c);
+                    }
+                }
+            }
+        }
+        let out = crate::effects::render(&l.fx, &buf, n, (ox, oy), (self.w, self.h));
+        let mut tile = vec![CLEAR; TILE * TILE];
+        for y in 0..TILE {
+            tile[y * TILE..(y + 1) * TILE].copy_from_slice(&out[(y + m) * n + m..(y + m) * n + m + TILE]);
+        }
+        Some(tile)
+    }
+
     /// A layer's own pixels for one tile (a folder: its contents flattened on their own).
     fn layer_pixels(&self, l: &Layer, key: TileKey) -> Option<Vec<Px>> {
         match l.kind {
+            LayerKind::Raster | LayerKind::Vector if l.fx_active() => self.fx_pixels(l, key),
             LayerKind::Raster | LayerKind::Vector => self.raster_tile(l, key).map(|t| t.iter().map(|c| blend::to_px(*c)).collect()),
+            LayerKind::Adjust => None,
             LayerKind::Paper => Some(vec![blend::to_px(self.paper); TILE * TILE]),
             LayerKind::Group => {
                 let mut buf = vec![CLEAR; TILE * TILE];

@@ -301,8 +301,8 @@ impl SeviathApp {
             match kind_of(&path).as_str() {
                 "jpg" | "jpeg" => files::export_flat(&doc, &path, Flat::Jpeg, q, credit)?,
                 "webp" => files::export_flat(&doc, &path, Flat::Webp, q, credit)?,
-                "psd" => std::fs::write(&path, psd::write(&doc)).map_err(|e| e.to_string())?,
-                "ora" => ora::write(&doc, &path)?,
+                "psd" => std::fs::write(&path, psd::write(&files::bake(doc))).map_err(|e| e.to_string())?,
+                "ora" => ora::write(&files::bake(doc), &path)?,
                 _ => {
                     let p = if kind_of(&path) == "png" { path.clone() } else { path.with_extension("png") };
                     files::export_flat(&doc, &p, Flat::Png, q, credit)?;
