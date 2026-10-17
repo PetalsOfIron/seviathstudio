@@ -345,7 +345,9 @@ impl DrawState {
                     LayerKind::Raster => layer.blend.name().to_owned(),
                     LayerKind::Adjust => format!("Adjustment · {}", layer.adjust.as_ref().map(|a| a.label()).unwrap_or("none")),
                 };
-                if layer.fx_active() {
+                if let Some(m) = &layer.material {
+                    sub = format!("Material · {}", m.name);
+                } else if layer.fx_active() {
                     sub += " · fx";
                 }
                 if layer.opacity < 100.0 {
@@ -569,6 +571,9 @@ impl DrawState {
             .on_hover_text("New adjustment layer: changes the colors of everything below it, and you can undo it any time");
             if widgets::chip(ui, "Depth", false).on_hover_text("New depth layer: paint white where things are near and black where they are far").clicked() {
                 self.add_depth_layer();
+            }
+            if widgets::chip(ui, "Material", false).on_hover_text("New material layer: paint a shape and it shines as metal, glass, velvet, neon or a gem").clicked() {
+                self.add_material_layer();
             }
             if widgets::chip(ui, "Light", false).on_hover_text("New light layer: shades the depth layers below it, and you can move the light any time").clicked() {
                 self.add_light_layer();

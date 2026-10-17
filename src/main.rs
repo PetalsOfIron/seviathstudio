@@ -23,6 +23,7 @@ mod select;
 mod icons;
 mod layerfilter;
 mod light;
+mod material;
 mod meta;
 mod oklab;
 mod pigment;

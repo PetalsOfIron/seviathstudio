@@ -161,6 +161,8 @@ pub struct Layer {
     pub light: Option<crate::light::Light>,
     /// A depth layer: paint white where things are near, black where they are far. Only shown while selected.
     pub depth: bool,
+    /// A material layer: the paint is shaded live as metal, glass, velvet, neon…
+    pub material: Option<crate::material::Material>,
     pub opacity: f32,   // 0..100
     pub blend: Blend,
     pub tiles: HashMap<TileKey, TileData>,
@@ -168,9 +170,9 @@ pub struct Layer {
 }
 
 impl Layer {
-    /// Pixel layer with at least one effect switched on.
+    /// Pixel layer with at least one effect switched on, or a material (both need the area around a tile).
     pub fn fx_active(&self) -> bool {
-        matches!(self.kind, LayerKind::Raster | LayerKind::Vector) && crate::effects::any_on(&self.fx)
+        matches!(self.kind, LayerKind::Raster | LayerKind::Vector) && (crate::effects::any_on(&self.fx) || self.material.is_some())
     }
 
     pub fn paintable(&self) -> bool {
@@ -205,6 +207,8 @@ pub struct Document {
     pub depth_view: Option<LayerId>,
     /// Which paint is still wet (for bleeding), and the clock it is measured on (seconds).
     pub wet: crate::wet::WetMap,
+    /// Relief of material layers, made once per change of the layer (see material.rs).
+    height_cache: std::sync::Mutex<HashMap<LayerId, Arc<crate::material::HeightField>>>,
     pub clock: f64,
     /// Size of the checkerboard squares shown where the picture is transparent.
     pub checker: usize,
@@ -229,6 +233,7 @@ impl Document {
             live: None,
             depth_view: None,
             wet: Default::default(),
+            height_cache: Default::default(),
             clock: 0.0,
             selection: None,
             filter_presets: Vec::new(),
@@ -245,7 +250,7 @@ impl Document {
     /// A document from loaded parts (files). Layer ids are kept; new ids continue after them.
     pub fn from_parts(w: u32, h: u32, paper: Color32, layers: Vec<Layer>) -> Self {
         let next_id = layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
-        let mut d = Self { w, h, paper, layers, dirty: HashSet::new(), revision: 0, next_id, live: None, depth_view: None, wet: Default::default(), clock: 0.0, checker: 16, selection: None, filter_presets: Vec::new(), meta: crate::meta::ProjectMeta::default() };
+        let mut d = Self { w, h, paper, layers, dirty: HashSet::new(), revision: 0, next_id, live: None, depth_view: None, wet: Default::default(), height_cache: Default::default(), clock: 0.0, checker: 16, selection: None, filter_presets: Vec::new(), meta: crate::meta::ProjectMeta::default() };
         d.mark_all_dirty();
         d
     }
@@ -273,6 +278,7 @@ impl Document {
             adjust: None,
             light: None,
             depth: false,
+            material: None,
             rev: 0,
         }
     }
@@ -736,7 +742,8 @@ impl Document {
     /// One tile of a pixel layer with its effects drawn (shadows and glows spill in from the neighbours).
     /// None when there is no paint within reach.
     pub(crate) fn fx_pixels(&self, l: &Layer, key: TileKey) -> Option<Vec<Px>> {
-        let m = crate::effects::reach(&l.fx);
+        let fx_on = crate::effects::any_on(&l.fx);
+        let m = if fx_on { crate::effects::reach(&l.fx) } else { 0 }.max(l.material.as_ref().map(|x| x.reach()).unwrap_or(0));
         let n = TILE + 2 * m;
         let mut near: Vec<Option<Cow<Vec<Color32>>>> = Vec::with_capacity(9);
         for dy in -1..=1 {
@@ -768,7 +775,17 @@ impl Document {
                 }
             }
         }
-        let out = crate::effects::render(&l.fx, &buf, n, (ox, oy), (self.w, self.h));
+        let buf = match &l.material {
+            Some(mat) => {
+                let light = self.scene_light();
+                let depth = self.depth_height(self.index_of(l.id).unwrap_or(0), l.parent, key, m, n);
+                let field = self.height_field(l, mat);
+                let height: Vec<f32> = (0..n * n).map(|i| field.at((ox + (i % n) as i32) as f32 + 0.5, (oy + (i / n) as i32) as f32 + 0.5)).collect();
+                crate::material::shade_with_height(mat, &light, &buf, height, depth.as_deref(), n)
+            }
+            None => buf,
+        };
+        let out = if fx_on { crate::effects::render(&l.fx, &buf, n, (ox, oy), (self.w, self.h)) } else { buf };
         let mut tile = vec![CLEAR; TILE * TILE];
         for y in 0..TILE {
             tile[y * TILE..(y + 1) * TILE].copy_from_slice(&out[(y + m) * n + m..(y + m) * n + m + TILE]);
@@ -781,16 +798,51 @@ impl Document {
     pub(crate) fn light_pixels(&self, l: &Layer, key: TileKey) -> Option<Vec<Px>> {
         let light = l.light.as_ref()?;
         let at = self.index_of(l.id)?;
-        let depth: Vec<&Layer> = self.layers[at + 1..]
-            .iter()
-            .rev()
-            .filter(|d| d.depth && d.visible && l.parent.is_none_or(|p| self.is_inside(d.id, p)))
-            .collect();
+        let m = light.reach();
+        let n = TILE + 2 * m;
+        let height = self.depth_height(at, l.parent, key, m, n)?;
+        let out = crate::light::shade(light, &height, n);
+        let mut tile = vec![CLEAR; TILE * TILE];
+        for y in 0..TILE {
+            tile[y * TILE..(y + 1) * TILE].copy_from_slice(&out[(y + m) * n + m..(y + m) * n + m + TILE]);
+        }
+        Some(tile)
+    }
+
+    /// The relief of a material layer: made again only when the layer or the roundness changes.
+    fn height_field(&self, l: &Layer, mat: &crate::material::Material) -> Arc<crate::material::HeightField> {
+        let key = crate::material::HeightField::key_of(l.rev, mat, self.w, self.h);
+        if let Ok(cache) = self.height_cache.lock() {
+            if let Some(f) = cache.get(&l.id).filter(|f| f.key == key) {
+                return f.clone();
+            }
+        }
+        let t = TILE as i32;
+        let alpha = |x: i32, y: i32| {
+            if x < 0 || y < 0 || x >= self.w as i32 || y >= self.h as i32 {
+                return 0.0;
+            }
+            self.raster_tile(l, (x.div_euclid(t), y.div_euclid(t))).map(|tile| tile[(y.rem_euclid(t) * t + x.rem_euclid(t)) as usize].a() as f32 / 255.0).unwrap_or(0.0)
+        };
+        let f = Arc::new(crate::material::HeightField::build(alpha, self.w, self.h, mat, key));
+        if let Ok(mut cache) = self.height_cache.lock() {
+            cache.insert(l.id, f.clone());
+        }
+        f
+    }
+
+    /// The light of the scene: the first visible light layer, or a default from the upper left.
+    pub fn scene_light(&self) -> crate::light::Light {
+        self.layers.iter().find(|l| l.visible && l.kind == LayerKind::Light).and_then(|l| l.light.clone()).unwrap_or_default()
+    }
+
+    /// The height (0..1, white = near) of the visible depth layers below layer index `at` (in the same
+    /// folder), for the square of `n` pixels around a tile with `m` pixels to spare. None if there is no depth paint.
+    pub(crate) fn depth_height(&self, at: usize, parent: Option<LayerId>, key: TileKey, m: usize, n: usize) -> Option<Vec<f32>> {
+        let depth: Vec<&Layer> = self.layers[at + 1..].iter().rev().filter(|d| d.depth && d.visible && parent.is_none_or(|p| self.is_inside(d.id, p))).collect();
         if depth.is_empty() {
             return None;
         }
-        let m = light.reach();
-        let n = TILE + 2 * m;
         let (ox, oy) = (key.0 * TILE as i32 - m as i32, key.1 * TILE as i32 - m as i32);
         let (wmax, hmax) = (self.w as i32 - 1, self.h as i32 - 1);
         let mut height = vec![0f32; n * n];
@@ -828,15 +880,7 @@ impl Document {
                 }
             }
         }
-        if !any {
-            return None;
-        }
-        let out = crate::light::shade(light, &height, n);
-        let mut tile = vec![CLEAR; TILE * TILE];
-        for y in 0..TILE {
-            tile[y * TILE..(y + 1) * TILE].copy_from_slice(&out[(y + m) * n + m..(y + m) * n + m + TILE]);
-        }
-        Some(tile)
+        any.then_some(height)
     }
 
     /// A layer's own pixels for one tile (a folder: its contents flattened on their own).

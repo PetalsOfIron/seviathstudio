@@ -101,6 +101,14 @@ impl DrawState {
         self.doc.mark_all_dirty();
     }
 
+    /// New material layer above the selected layer.
+    pub fn add_material_layer(&mut self) {
+        let mut l = self.doc.new_layer("Material", LayerKind::Raster);
+        l.material = Some(crate::material::presets().remove(1));
+        self.active = self.doc.insert_layer(l, self.active);
+        self.doc.mark_all_dirty();
+    }
+
     /// New light layer above the selected layer.
     pub fn add_light_layer(&mut self) {
         let mut l = self.doc.new_layer("Light", LayerKind::Light);
@@ -194,6 +202,56 @@ impl DrawState {
                 ui.label(RichText::new("Shades the Depth layers below it in the same folder. It is a layer like any other: hide it, fade it or change its blend mode.").size(11.0).color(TEXT_DIM));
                 if l != before {
                     self.doc.layers[i].light = Some(l.sanitized());
+                    self.doc.layers[i].rev += 1;
+                    self.doc.mark_all_dirty();
+                }
+            }
+            LayerKind::Raster if self.doc.layers[i].material.is_some() => {
+                ui.add_space(6.0);
+                section_title(ui, "Material");
+                let before = self.doc.layers[i].material.clone().unwrap_or_default();
+                let mut m = before.clone();
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                    for p in crate::material::presets() {
+                        if widgets::chip(ui, &p.name, m.name == p.name).clicked() {
+                            m = p;
+                        }
+                    }
+                });
+                ui.label(RichText::new("Paint the shape; the material shines from it. The light is your Light layer (or from the upper left).").size(11.0).color(TEXT_DIM));
+                percent(ui, "Metal", &mut m.metallic);
+                percent(ui, "Rough", &mut m.roughness);
+                percent(ui, "Brushed", &mut m.aniso);
+                if m.aniso > 0.0 {
+                    slider(ui, "Brush angle", &mut m.aniso_angle, -180.0..=180.0, " deg");
+                }
+                percent(ui, "Edge shine", &mut m.fresnel);
+                percent(ui, "Mirror", &mut m.reflect);
+                percent(ui, "Clear coat", &mut m.coat);
+                percent(ui, "Velvet", &mut m.sheen);
+                slider(ui, "Glow", &mut m.emission, 0.0..=3.0, "");
+                if m.emission > 0.0 {
+                    slider(ui, "Glow spread", &mut m.bloom, 0.0..=crate::material::MAX_BLOOM, " px");
+                }
+                percent(ui, "Glass", &mut m.transmission);
+                if m.transmission > 0.0 {
+                    color(ui, "Glass tint", &mut m.tint);
+                }
+                row(ui, "Facets", |ui| {
+                    ui.add(egui::Slider::new(&mut m.facets, 0..=12));
+                });
+                slider(ui, "Roundness", &mut m.round, 0.0..=crate::material::MAX_ROUND, " px (0 = auto)");
+                slider(ui, "Relief", &mut m.bump, 0.0..=crate::material::MAX_BUMP, "");
+                let mut use_base = m.base.is_some();
+                if ui.checkbox(&mut use_base, "Use a fixed color").on_hover_text("Off: the color you paint with is the base color").changed() {
+                    m.base = use_base.then(|| m.base.unwrap_or([200, 200, 200]));
+                }
+                if let Some(b) = &mut m.base {
+                    color(ui, "Base color", b);
+                }
+                if m != before {
+                    self.doc.layers[i].material = Some(m.sanitized());
                     self.doc.layers[i].rev += 1;
                     self.doc.mark_all_dirty();
                 }

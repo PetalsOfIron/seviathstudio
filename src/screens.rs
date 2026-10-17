@@ -1378,3 +1378,28 @@ fn mixing_chart_screens() {
     h.run_steps(3);
     assert_eq!(h.state().draw_mut_ref().doc.layers.len(), before + 1, "the chart becomes a layer");
 }
+
+#[test]
+fn material_screens() {
+    let mut h = Harness::builder().with_size([1440.0, 1500.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    {
+        let d = h.state_mut().draw_mut();
+        d.add_material_layer();
+        let i = d.doc.index_of(d.active_id()).unwrap();
+        let (w, hh) = (d.doc.w, d.doc.h);
+        let disc = image::RgbaImage::from_fn(w, hh, |x, y| {
+            if (x as f32 - 1500.0).hypot(y as f32 - 2000.0) < 900.0 { image::Rgba([200, 200, 200, 255]) } else { image::Rgba([0, 0, 0, 0]) }
+        });
+        d.doc.layers[i].tiles = crate::files::tiles_from_rgba(&disc, 0, 0, w, hh);
+        d.doc.layers[i].rev += 1;
+        d.doc.mark_all_dirty();
+    }
+    h.run_steps(8);
+    save(&mut h, "mat_01_chrome_ball_and_panel");
+    let shown = |h: &mut Harness<'_, SeviathApp>, x: u32, y: u32| h.render().expect("render").get_pixel(x, y).0;
+    let top = shown(&mut h, 747, 600);
+    let bottom = shown(&mut h, 747, 930);
+    assert!(top[2] as i32 > bottom[2] as i32 + 20, "chrome: sky above, ground below: {top:?} {bottom:?}");
+    assert_eq!(h.state().history().entries.len(), 0);
+}
