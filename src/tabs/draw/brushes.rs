@@ -12,7 +12,7 @@ use eframe::egui::{
 use super::{DrawState, Tool};
 use crate::brush::engine::{Sample, Stroke};
 use crate::brush::{
-    BrushSettings, CATEGORIES, Dip, Edge, Ends, MixRefer, Paint, Preset, ShapeBase, SubMode, SubTip, TexKind, TexPalette, Tip, eraser_presets,
+    BrushSettings, CATEGORIES, Dip, Edge, Ends, Fray, MixRefer, Paint, Preset, Transition, ShapeBase, SubMode, SubTip, TexKind, TexPalette, Tip, eraser_presets,
     presets,
 };
 use crate::doc::{Document, TILE};
@@ -37,6 +37,9 @@ pub struct BrushLib {
     previews: HashMap<String, TextureHandle>,
     current_preview: Option<(String, TextureHandle)>,
     query: String,
+    /// The groups the randomizer rolls (the others are locked).
+    pub rolled: Vec<crate::brush::random::Group>,
+    roll_count: u32,
 }
 
 impl Default for BrushLib {
@@ -52,7 +55,7 @@ impl Default for BrushLib {
             ToolBrush { s: erasers[0].s.clone(), name: erasers[0].name.into(), category: 0 },
             ToolBrush { s: smudge.s.clone(), name: smudge.name.into(), category: cat(&smudge) },
         ];
-        Self { presets, erasers, mem, previews: HashMap::new(), current_preview: None, query: String::new() }
+        Self { presets, erasers, mem, previews: HashMap::new(), current_preview: None, query: String::new(), rolled: crate::brush::random::Group::ALL.iter().map(|g| g.0).collect(), roll_count: 0 }
     }
 }
 
@@ -270,6 +273,7 @@ impl DrawState {
             ui.label(RichText::new(p.about).size(11.5).color(TEXT_DIM));
         }
         let s = &mut self.lib.mem[sl].s;
+        let rolled = &mut self.lib.rolled;
 
         ui.add_space(4.0);
         row(ui, "Size", "Brush size in pixels ([ and ] change it)", |ui| {
@@ -457,11 +461,115 @@ impl DrawState {
             }
         });
 
+        section(ui, "Width behavior", s.pinch > 0.0 || s.pressure_curve != 0.0, |ui| {
+            pct(ui, "Pinch", &mut s.pinch, "The stroke narrows at regular points, like a bamboo stem or a bead chain");
+            if s.pinch > 0.0 {
+                num(ui, "Pinch every", &mut s.pinch_every, 20.0..=800.0, "Pixels from one pinch to the next");
+            }
+            num(ui, "Pressure curve", &mut s.pressure_curve, -1.0..=1.0, "Negative: a light touch is enough. Positive: you have to press harder");
+            if s.ends == Ends::Taper {
+                pct(ui, "Start width", &mut s.tip_start, "How thin the stroke begins");
+                pct(ui, "End width", &mut s.tip_end, "How thin the stroke ends");
+            } else {
+                ui.label(RichText::new("Set Stroke ends to Taper to choose the start and end widths.").size(11.0).color(TEXT_DIM));
+            }
+        });
+
+        section(ui, "Color along the stroke", s.transition != Transition::Off || s.drift != 0.0, |ui| {
+            let opts: Vec<(Transition, &str)> = Transition::ALL.iter().map(|(t, l, _)| (*t, *l)).collect();
+            widgets::segmented(ui, &mut s.transition, &opts);
+            if let Some((_, _, about)) = Transition::ALL.iter().find(|(t, _, _)| *t == s.transition) {
+                ui.label(RichText::new(*about).size(11.5).color(TEXT_DIM));
+            }
+            if s.transition != Transition::Off {
+                row(ui, "Second color", "The color the stroke moves toward (also used by dots)", |ui| egui::color_picker::color_edit_button_rgb(ui, &mut s.trans_color).changed());
+                if matches!(s.transition, Transition::Length | Transition::Cycle) {
+                    num(ui, "Over", &mut s.trans_len, 30.0..=3000.0, "Pixels of stroke for the whole change");
+                }
+                ui.checkbox(&mut s.trans_back, "Backwards").on_hover_text("Start with the second color");
+            }
+            num(ui, "Paint runs out", &mut s.drift, -1.0..=1.0, "The color changes as the brush runs dry: positive darkens and warms, negative lightens");
+            if s.drift != 0.0 {
+                num(ui, "Runs out after", &mut s.drift_len, 100.0..=3000.0, "Pixels of stroke");
+            }
+        });
+
+        section(ui, "Dots", s.dots > 0.0, |ui| {
+            pct(ui, "Dots", &mut s.dots, "100% = the stroke is made of separate dots; less keeps part of the normal stroke");
+            if s.dots > 0.0 {
+                num(ui, "Smallest", &mut s.dot_min, 0.01..=0.8, "× brush size");
+                num(ui, "Biggest", &mut s.dot_max, 0.01..=0.9, "× brush size");
+                row(ui, "Dots per dab", "How many dots each dab drops", |ui| ui.add(egui::Slider::new(&mut s.dot_count, 1..=16)).changed());
+                num(ui, "Spread", &mut s.dot_spread, 0.0..=2.5, "How far from the line the dots land (× brush size)");
+                pct(ui, "Many colors", &mut s.dot_colors, "Each dot takes a color between the brush color and the second color (set under Color along the stroke)");
+                ui.label(RichText::new("Raise Spacing so the dots don't pile up.").size(11.0).color(TEXT_DIM));
+            }
+        });
+
+        section(ui, "Lines inside the stroke", s.lines > 0, |ui| {
+            row(ui, "Threads", "How many lines run inside the stroke (0 = off)", |ui| ui.add(egui::Slider::new(&mut s.lines, 0..=12)).changed());
+            if s.lines > 0 {
+                num(ui, "Wave", &mut s.line_wave, 0.0..=1.0, "How far each thread swings sideways");
+                num(ui, "Wave length", &mut s.line_len, 10.0..=600.0, "Pixels of stroke for one wave");
+                num(ui, "Thickness", &mut s.line_width, 0.01..=0.4, "Thread width (× half the stroke width)");
+                pct(ui, "Strength", &mut s.line_strength, "How visible the threads are");
+                num(ui, "Shade", &mut s.line_shade, -1.0..=1.0, "Darker (left) or lighter (right) than the stroke");
+            }
+        });
+
+        section(ui, "Edge fray", s.fray != Fray::Off, |ui| {
+            let opts: Vec<(Fray, &str)> = Fray::ALL.iter().map(|(t, l, _)| (*t, *l)).collect();
+            widgets::segmented(ui, &mut s.fray, &opts);
+            if let Some((_, _, about)) = Fray::ALL.iter().find(|(t, _, _)| *t == s.fray) {
+                ui.label(RichText::new(*about).size(11.5).color(TEXT_DIM));
+            }
+            if s.fray != Fray::Off {
+                pct(ui, "Amount", &mut s.fray_amount, "How much of the edge breaks up");
+                num(ui, "Size", &mut s.fray_len, 1.0..=60.0, "Pixels: the size of the teeth, splits or lumps");
+                ui.label(RichText::new("Works for strokes drawn in one go (not scattered dabs).").size(11.0).color(TEXT_DIM));
+            }
+        });
+
+        section(ui, "Dashes", s.gap_len > 0.0, |ui| {
+            num(ui, "Gap", &mut s.gap_len, 0.0..=400.0, "Pixels left empty between dashes (0 = a solid line)");
+            if s.gap_len > 0.0 {
+                num(ui, "Dash", &mut s.dash_len, 2.0..=800.0, "Pixels painted before each gap");
+            }
+        });
+
         section(ui, "Wet paint", s.water > 0.0 || s.bleed > 0.0 || s.pool > 0.0 || s.granulation > 0.0, |ui| {
             pct(ui, "Water", &mut s.water, "Thins the paint and leaves it wet for twenty seconds");
             pct(ui, "Bleed", &mut s.bleed, "Wet paint spreads into the paint around it when the pen lifts");
             pct(ui, "Edge pooling", &mut s.pool, "Pigment collects at the edge of a wash and makes it darker");
             pct(ui, "Granulation", &mut s.granulation, "Pigment settles into the paper tooth (see Texture for the paper)");
+        });
+        let mut roll: Option<Vec<crate::brush::random::Group>> = None;
+        section(ui, "Randomizer", false, |ui| {
+            ui.label(RichText::new("Roll the dice on this brush. Highlighted groups are rolled; click one to lock it so it stays as it is.").size(11.5).color(TEXT_DIM));
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                for (g, label, about) in crate::brush::random::Group::ALL {
+                    let on = rolled.contains(&g);
+                    if widgets::chip(ui, label, on).on_hover_text(about).clicked() {
+                        if on {
+                            rolled.retain(|x| *x != g);
+                        } else {
+                            rolled.push(g);
+                        }
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Roll the dice").on_hover_text("Randomizes the highlighted groups (never the size or opacity)").clicked() {
+                    roll = Some(rolled.clone());
+                }
+                if ui.small_button("All").clicked() {
+                    *rolled = crate::brush::random::Group::ALL.iter().map(|g| g.0).collect();
+                }
+                if ui.small_button("None").clicked() {
+                    rolled.clear();
+                }
+            });
         });
         let mut open_chart = false;
         section(ui, "Real paint", s.paint != Paint::Normal, |ui| {
@@ -500,6 +608,11 @@ impl DrawState {
             });
         });
 
+        if let Some(groups) = roll {
+            self.lib.roll_count = self.lib.roll_count.wrapping_add(1);
+            let seed = self.lib.roll_count.wrapping_mul(7919).wrapping_add(self.lib.mem[sl].s.seed);
+            crate::brush::random::randomize(&mut self.lib.mem[sl].s, &groups, seed);
+        }
         ui.add_space(6.0);
         if let Some(p) = preset {
             if ui.button("Reset brush").on_hover_text("Back to the original settings (keeps your size)").clicked() {
@@ -574,6 +687,43 @@ mod tests {
         // names, in the same order, for reading the sheet
         let names: Vec<&str> = all.iter().map(|p| p.name).collect();
         std::fs::write(dir.join("brush_sheet.txt"), names.chunks(cols).map(|r| r.join(" | ")).collect::<Vec<_>>().join("
+")).unwrap();
+    }
+
+    /// The brush designer v2 brushes and some rolled ones: target/screens/designer_sheet.png
+    #[test]
+    fn designer_sheet() {
+        use crate::brush::random::{Group, randomize};
+        let names = ["Bark", "Leopard dots", "Skin pores", "Running dry", "Color ribbon", "Speed ink", "Bamboo", "Dashed pen", "Serrated pen", "Split brush", "Worn chalk", "Real oil"];
+        let mut all: Vec<(String, BrushSettings)> = names.iter().map(|n| (n.to_string(), presets().into_iter().find(|p| p.name == *n).unwrap().s)).collect();
+        for seed in 0..12u32 {
+            let mut s = BrushSettings { size: 40.0, ..BrushSettings::default() };
+            randomize(&mut s, &Group::ALL.iter().map(|g| g.0).collect::<Vec<_>>(), seed * 31 + 7);
+            all.push((format!("rolled {seed}"), s));
+        }
+        let (cw, ch, cols) = (420usize, 120usize, 4usize);
+        let rows = all.len().div_ceil(cols);
+        let mut img = image::RgbaImage::from_pixel((cw * cols) as u32, (ch * rows) as u32, image::Rgba([244, 241, 234, 255]));
+        let inks = [Color32::from_rgb(29, 29, 36), Color32::from_rgb(46, 110, 70), Color32::from_rgb(170, 60, 50), Color32::from_rgb(60, 90, 190)];
+        for (i, (_, s)) in all.iter().enumerate() {
+            let mut s = s.clone();
+            s.size = s.size.clamp(8.0, 70.0);
+            let pv = render_preview_sized(&s, cw, ch, inks[i % inks.len()]);
+            let (ox, oy) = ((i % cols) * cw, (i / cols) * ch);
+            for y in 0..ch {
+                for x in 0..cw {
+                    let c = pv.pixels[y * cw + x];
+                    let a = c.a() as f32 / 255.0;
+                    let bg = img.get_pixel((ox + x) as u32, (oy + y) as u32).0;
+                    let mixc = |s: u8, b: u8| (s as f32 + b as f32 * (1.0 - a)).round().min(255.0) as u8;
+                    img.put_pixel((ox + x) as u32, (oy + y) as u32, image::Rgba([mixc(c.r(), bg[0]), mixc(c.g(), bg[1]), mixc(c.b(), bg[2]), 255]));
+                }
+            }
+        }
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("screens");
+        std::fs::create_dir_all(&dir).unwrap();
+        img.save(dir.join("designer_sheet.png")).unwrap();
+        std::fs::write(dir.join("designer_sheet.txt"), all.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().chunks(cols).map(|r| r.join(" | ")).collect::<Vec<_>>().join("
 ")).unwrap();
     }
 }

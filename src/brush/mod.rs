@@ -4,6 +4,7 @@
 
 pub mod engine;
 pub mod noise;
+pub mod random;
 pub mod raster;
 pub mod textures;
 pub mod tips;
@@ -172,6 +173,51 @@ impl Paint {
         (Paint::Normal, "Plain", "Colors lie over each other, as in most drawing programs."),
         (Paint::Mix, "Mix like paint", "Blue and yellow make green with life in it, red and yellow make orange: never muddy gray."),
         (Paint::Glaze, "Glaze", "A transparent layer over dry paint: yellow under blue turns deep green, the paint below shines through."),
+    ];
+}
+
+/// What changes the color along a stroke (from the brush color toward the second color).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Transition {
+    Off,
+    /// Over the length of the stroke.
+    Length,
+    /// The faster you draw, the more of the second color.
+    Speed,
+    /// The harder you press, the more of the second color.
+    Pressure,
+    /// Back and forth between the two colors along the stroke.
+    Cycle,
+}
+
+impl Transition {
+    pub const ALL: [(Transition, &'static str, &'static str); 5] = [
+        (Transition::Off, "Off", "One color all along."),
+        (Transition::Length, "Length", "The color slides from the brush color to the second color over the stroke."),
+        (Transition::Speed, "Speed", "Fast strokes lean toward the second color, slow ones stay the brush color."),
+        (Transition::Pressure, "Pressure", "Light touch is the brush color, firm touch is the second color."),
+        (Transition::Cycle, "Cycle", "Back and forth between the two colors, again and again."),
+    ];
+}
+
+/// The edge fray engine: how the edge of a stroke breaks up (on top of the edge type).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fray {
+    Off,
+    /// Tiny regular teeth, like a cheap saw.
+    Serrated,
+    /// Long splits along the stroke, like a dry brush with split hairs.
+    Split,
+    /// Lumpy, bitten and broken, like a worn crayon or chalk.
+    Knotted,
+}
+
+impl Fray {
+    pub const ALL: [(Fray, &'static str, &'static str); 4] = [
+        (Fray::Off, "Smooth", "No extra fraying."),
+        (Fray::Serrated, "Serrated", "Tiny teeth along the edge."),
+        (Fray::Split, "Split ends", "Long splits along the stroke, like a dry brush with split hairs."),
+        (Fray::Knotted, "Knotted", "Lumpy and broken, like worn chalk."),
     ];
 }
 
@@ -378,6 +424,56 @@ pub struct BrushSettings {
     pub granulation: f32,
     /// An eraser that only dries wet paint (and lifts a little).
     pub blot: bool,
+    // width behavior
+    /// 0..1: how deep the stroke pinches in.
+    pub pinch: f32,
+    /// Pixels of stroke from one pinch to the next.
+    pub pinch_every: f32,
+    /// -1..1: bends the pressure response (negative = light touch is enough, positive = press harder).
+    pub pressure_curve: f32,
+    /// Width at the very start and end of a tapered stroke, as a share of the full width.
+    pub tip_start: f32,
+    pub tip_end: f32,
+    // color along the stroke
+    pub transition: Transition,
+    pub trans_color: [f32; 3],
+    /// Pixels over which the color goes from one to the other.
+    pub trans_len: f32,
+    pub trans_back: bool,
+    /// -1..1: the paint runs out along the stroke: positive darkens, negative lightens.
+    pub drift: f32,
+    /// Pixels until the paint has run out.
+    pub drift_len: f32,
+    // dots
+    /// 0..1: how much of the stroke is made of separate dots.
+    pub dots: f32,
+    pub dot_min: f32,
+    pub dot_max: f32,
+    pub dot_count: u32,
+    /// How far from the line the dots land (x brush size).
+    pub dot_spread: f32,
+    /// 0..1: dots take colors between the brush color and the second color.
+    pub dot_colors: f32,
+    // lines and waves inside the stroke
+    pub lines: u32,
+    /// Sideways swing of each thread, as a share of the stroke's half width.
+    pub line_wave: f32,
+    /// Pixels of stroke for one wave.
+    pub line_len: f32,
+    /// Thread width, as a share of the stroke's half width.
+    pub line_width: f32,
+    pub line_strength: f32,
+    /// -1..1: threads are darker (negative) or lighter (positive) than the stroke.
+    pub line_shade: f32,
+    // edge fray
+    pub fray: Fray,
+    pub fray_amount: f32,
+    /// Pixels: size of the teeth, splits or lumps.
+    pub fray_len: f32,
+    // dashes
+    /// Pixels painted, then `gap_len` pixels left empty (0 = no gaps).
+    pub dash_len: f32,
+    pub gap_len: f32,
     // tip and shape
     pub tip: Tip,
     pub roundness: f32,
@@ -442,6 +538,34 @@ impl Default for BrushSettings {
             pool: 0.0,
             granulation: 0.0,
             blot: false,
+            pinch: 0.0,
+            pinch_every: 160.0,
+            pressure_curve: 0.0,
+            tip_start: 0.06,
+            tip_end: 0.06,
+            transition: Transition::Off,
+            trans_color: [0.9, 0.35, 0.2],
+            trans_len: 500.0,
+            trans_back: false,
+            drift: 0.0,
+            drift_len: 700.0,
+            dots: 0.0,
+            dot_min: 0.08,
+            dot_max: 0.3,
+            dot_count: 3,
+            dot_spread: 0.8,
+            dot_colors: 0.0,
+            lines: 0,
+            line_wave: 0.25,
+            line_len: 90.0,
+            line_width: 0.08,
+            line_strength: 0.7,
+            line_shade: -0.5,
+            fray: Fray::Off,
+            fray_amount: 0.5,
+            fray_len: 6.0,
+            dash_len: 40.0,
+            gap_len: 0.0,
             tip: Tip::Round,
             roundness: 1.0,
             angle: 0.0,
@@ -506,10 +630,11 @@ impl BrushSettings {
         if self.hollow > 0.0 || self.edge_holes > 0.0 {
             return true;
         }
-        if self.spacing > 0.2 || self.scatter > 0.5 || self.particles > 0 {
+        if self.spacing > 0.2 || self.scatter > 0.5 || self.particles > 0 || self.dots >= 0.5 {
             return false;
         }
         self.wet_rim > 0.0
+            || self.fray != Fray::Off
             || matches!(self.edge, Edge::Ragged | Edge::Torn | Edge::Feathered | Edge::Bristly)
             || self.grain > 0.0
             || self.deform > 0.0
@@ -630,6 +755,17 @@ pub fn presets() -> Vec<Preset> {
         p("Hard airbrush", "Airbrush", "Builds up slowly but keeps a firm edge.", BrushSettings { size: 60.0, flow: 0.12, hardness: 0.65, size_pressure: false, min_size: 1.0, opacity_pressure: true, stabilize: 0.0, ..d() }),
         p("Grainy airbrush", "Airbrush", "Soft spray with visible grain, for gritty shading.", BrushSettings { size: 120.0, flow: 0.15, hardness: 0.1, grain: 0.5, variants: 2, spacing: 0.08, size_pressure: false, min_size: 1.0, opacity_pressure: true, texture: 0.35, stabilize: 0.0, ..d() }),
         p("Spray paint", "Airbrush", "Grainy spray can.", BrushSettings { size: 90.0, tip: T::Splatter, flow: 0.35, spacing: 0.15, scatter: 0.4, size_jitter: 0.4, angle_jitter: 1.0, size_pressure: false, min_size: 1.0, opacity_pressure: true, stabilize: 0.0, ..d() }),
+        p("Bark", "Nature & FX", "Wavy threads run inside the stroke: tree bark, wood grain, rope.", BrushSettings { size: 46.0, hardness: 0.8, lines: 6, line_wave: 0.3, line_len: 80.0, line_width: 0.09, line_strength: 0.75, line_shade: -0.6, fray: Fray::Knotted, fray_amount: 0.45, fray_len: 7.0, stabilize: 0.25, min_size: 0.8, ..d() }),
+        p("Leopard dots", "Nature & FX", "Big soft dots in several colors: animal fur patterns.", BrushSettings { size: 90.0, hardness: 0.55, spacing: 0.5, dots: 1.0, dot_min: 0.12, dot_max: 0.38, dot_count: 2, dot_spread: 1.1, dot_colors: 0.9, trans_color: [0.25, 0.15, 0.08], transition: Transition::Off, size_pressure: false, stabilize: 0.0, ..d() }),
+        p("Skin pores", "Nature & FX", "Tiny scattered dots, soft and faint: pores, freckles, sand.", BrushSettings { size: 60.0, hardness: 0.5, opacity: 0.6, flow: 0.5, spacing: 0.3, dots: 1.0, dot_min: 0.015, dot_max: 0.05, dot_count: 7, dot_spread: 1.0, dot_colors: 0.5, trans_color: [0.55, 0.3, 0.25], size_pressure: false, stabilize: 0.0, ..d() }),
+        p("Running dry", "Pens", "Starts dark and full, then the paint runs out: warmer, lighter, thinner.", BrushSettings { size: 26.0, drift: -0.9, drift_len: 450.0, min_size: 0.5, opacity_pressure: true, ..d() }),
+        p("Color ribbon", "Pens", "The color glides to a second color and back along the stroke.", BrushSettings { size: 34.0, hardness: 0.9, transition: Transition::Cycle, trans_color: [0.15, 0.65, 0.95], trans_len: 420.0, min_size: 0.7, ..d() }),
+        p("Speed ink", "Pens", "Slow strokes keep your color; fast strokes lean toward the second color.", BrushSettings { size: 22.0, hardness: 0.9, transition: Transition::Speed, trans_color: [0.9, 0.2, 0.3], min_size: 0.6, ..d() }),
+        p("Bamboo", "Pens", "A line that pinches in at regular points, like a bamboo stem or a bead chain.", BrushSettings { size: 36.0, hardness: 0.9, pinch: 0.85, pinch_every: 110.0, size_pressure: false, stabilize: 0.2, ..d() }),
+        p("Dashed pen", "Pens", "A dashed line: set the dash and gap under Dashes.", BrushSettings { size: 8.0, hardness: 0.95, gap_len: 22.0, dash_len: 36.0, size_pressure: false, stabilize: 0.4, ..d() }),
+        p("Serrated pen", "Pens", "An edge with tiny regular teeth.", BrushSettings { size: 30.0, hardness: 0.95, fray: Fray::Serrated, fray_amount: 0.7, fray_len: 5.0, ..d() }),
+        p("Split brush", "Paint", "A dry brush with split hairs: long splits run along the stroke.", BrushSettings { size: 56.0, hardness: 0.8, fray: Fray::Split, fray_amount: 0.85, fray_len: 5.0, stabilize: 0.3, ..d() }),
+        p("Worn chalk", "Pencils", "Lumpy, bitten, broken edges like a worn piece of chalk.", BrushSettings { size: 34.0, hardness: 0.85, fray: Fray::Knotted, fray_amount: 0.8, fray_len: 4.0, texture: 0.25, ..d() }),
         p("Splatter", "Airbrush", "Random paint drops.", BrushSettings { size: 70.0, tip: T::Splatter, spacing: 0.7, scatter: 1.4, size_jitter: 0.8, angle_jitter: 1.0, opacity_jitter: 0.3, min_size: 0.4, stabilize: 0.0, ..d() }),
         p("Soft blush", "Airbrush", "Gentle color for cheeks, glow and soft shading in anime art.", BrushSettings { size: 80.0, flow: 0.12, hardness: 0.1, spacing: 0.08, size_pressure: false, min_size: 1.0, opacity_pressure: true, opacity: 0.7, stabilize: 0.0, ..d() }),
         // ---- Blend
