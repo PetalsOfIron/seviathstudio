@@ -3,7 +3,7 @@
 // Painting itself arrives with the brush engine; this is the layout and all panel state.
 
 use eframe::egui::{
-    self, Align, Color32, CornerRadius, CursorIcon, Event, Key, Layout, Margin, Modifiers,
+    self, Align, Color32, CornerRadius, CursorIcon, Event, Key, Layout, Margin,
     MouseWheelUnit, Panel, PointerButton, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, TouchPhase, Ui, UiBuilder, Vec2,
     ecolor::Hsva, pos2, vec2,
 };
@@ -32,6 +32,7 @@ pub mod organizer;
 mod random_ui;
 mod references;
 mod tools;
+pub mod actions_ui;
 pub mod sign_ui;
 pub mod text_ui;
 pub mod trace_ui;
@@ -85,25 +86,6 @@ impl Tool {
             Tool::Text => "Text",
             Tool::Hand => "Hand (pan)",
             Tool::Zoom => "Zoom",
-        }
-    }
-
-    fn key(self) -> (Modifiers, Key, &'static str) {
-        match self {
-            Tool::Brush => (Modifiers::NONE, Key::B, "B"),
-            Tool::Eraser => (Modifiers::NONE, Key::E, "E"),
-            Tool::Smudge => (Modifiers::NONE, Key::S, "S"),
-            Tool::Fill => (Modifiers::NONE, Key::G, "G"),
-            Tool::Gradient => (Modifiers::SHIFT, Key::G, "Shift+G"),
-            Tool::Picker => (Modifiers::NONE, Key::I, "I"),
-            Tool::Select => (Modifiers::NONE, Key::M, "M"),
-            Tool::Lasso => (Modifiers::NONE, Key::L, "L"),
-            Tool::Move => (Modifiers::NONE, Key::V, "V"),
-            Tool::Pen => (Modifiers::NONE, Key::P, "P"),
-            Tool::Shape => (Modifiers::NONE, Key::U, "U"),
-            Tool::Text => (Modifiers::NONE, Key::T, "T"),
-            Tool::Hand => (Modifiers::NONE, Key::H, "H"),
-            Tool::Zoom => (Modifiers::NONE, Key::Z, "Z"),
         }
     }
 
@@ -313,9 +295,8 @@ impl DrawState {
             self.apply_gradient();
         }
         // keys with Alt / Ctrl first: a plain tool key (like L) would also swallow Alt+L
-        self.layer_shortcuts(ui.ctx());
+        self.action_keys(ui.ctx());
         self.tool_shortcuts(ui.ctx());
-        self.shortcuts(ui.ctx());
         // switching away from Move puts a floating picture down; a half-drawn polygon is dropped
         if self.tool != Tool::Move && self.transforming() {
             self.apply_transform();
@@ -533,62 +514,6 @@ impl DrawState {
         vec2(self.doc.w as f32, self.doc.h as f32)
     }
 
-    fn shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() {
-            return;
-        }
-        let (step, max) = (self.set.size_step, self.set.brush_size_max);
-        let pen_tool = self.tool == Tool::Pen;
-        ctx.input_mut(|i| {
-            // Shift+G before G, so the plain G doesn't steal it.
-            let mut tools: Vec<Tool> = TOOL_GROUPS.iter().flat_map(|g| g.iter().copied()).collect();
-            tools.sort_by_key(|t| if t.key().0 == Modifiers::NONE { 1 } else { 0 });
-            for t in tools {
-                let (m, k, _) = t.key();
-                if i.consume_key(m, k) {
-                    self.tool = t;
-                }
-            }
-            if i.consume_key(Modifiers::NONE, Key::X) {
-                std::mem::swap(&mut self.primary, &mut self.secondary);
-                self.hex = hex_of(self.primary);
-            }
-            if i.consume_key(Modifiers::NONE, Key::OpenBracket) {
-                if pen_tool {
-                    self.vec.style.size = (self.vec.style.size / step).max(0.5);
-                } else {
-                    let s = self.brush_mut();
-                    s.size = (s.size / step).max(0.5);
-                }
-            }
-            if i.consume_key(Modifiers::NONE, Key::CloseBracket) {
-                if pen_tool {
-                    self.vec.style.size = (self.vec.style.size * step).min(max);
-                } else {
-                    let s = self.brush_mut();
-                    s.size = (s.size * step).min(max);
-                }
-            }
-            // View: Ctrl+0 fit, Ctrl+Alt+0 100%, Ctrl+= / Ctrl+- zoom, F mirror.
-            let c = self.view.screen_center;
-            if i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::Num0) {
-                self.view.set_zoom(1.0);
-            }
-            if i.consume_key(Modifiers::COMMAND, Key::Num0) {
-                self.view.fit(self.canvas_rect, vec2(self.doc.w as f32, self.doc.h as f32));
-            }
-            if i.consume_key(Modifiers::COMMAND, Key::Equals) || i.consume_key(Modifiers::COMMAND, Key::Plus) {
-                self.view.zoom_at(c, 1.25);
-            }
-            if i.consume_key(Modifiers::COMMAND, Key::Minus) {
-                self.view.zoom_at(c, 0.8);
-            }
-            if i.consume_key(Modifiers::NONE, Key::F) {
-                self.view.flip = !self.view.flip;
-            }
-        });
-    }
-
     fn tool_strip(&mut self, ui: &mut Ui) {
         ui.spacing_mut().item_spacing.y = 4.0;
         ui.vertical_centered(|ui| {
@@ -598,7 +523,8 @@ impl DrawState {
                     ui.painter().line_segment([r.left_center(), r.right_center()], Stroke::new(1.0, LINE));
                 }
                 for &tool in group.iter() {
-                    let tip = format!("{} ({})", tool.name(), tool.key().2);
+                    let key = crate::actions::effective_text(&self.set.shortcuts, tool.action_id());
+                    let tip = if key.is_empty() { tool.name().to_owned() } else { format!("{} ({})", tool.name(), key) };
                     if icon_button(ui, tool.icon(), self.tool == tool, 36.0, &tip).clicked() {
                         self.tool = tool;
                     }

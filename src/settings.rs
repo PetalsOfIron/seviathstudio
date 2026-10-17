@@ -33,6 +33,8 @@ pub struct Settings {
     pub reduced_motion: bool,
     pub show_tooltips: bool,
     pub left_handed: bool,
+    /// Keys you changed: action id → shortcut text ("" = no key). See actions.rs.
+    pub shortcuts: std::collections::BTreeMap<String, String>,
     // ---- Canvas & view
     pub wheel: WheelAction,
     pub zoom_speed: f32,
@@ -93,6 +95,7 @@ impl Default for Settings {
             reduced_motion: false,
             show_tooltips: true,
             left_handed: false,
+            shortcuts: Default::default(),
             wheel: WheelAction::Zoom,
             zoom_speed: 1.0,
             invert_wheel: false,
@@ -170,6 +173,7 @@ impl Settings {
         self.pixel_grid_from = self.pixel_grid_from.clamp(4.0, 64.0);
         self.checker_size = self.checker_size.clamp(4, 64);
         self.cursor_min_size = self.cursor_min_size.clamp(0.0, 30.0);
+        self.shortcuts.retain(|id, s| crate::actions::def(id).is_some() && (s.is_empty() || crate::actions::Shortcut::parse(s).is_some()));
         self.pressure_curve = self.pressure_curve.clamp(0.2, 5.0);
         self.pressure_min = self.pressure_min.clamp(0.0, 0.9);
         self.pressure_max = self.pressure_max.clamp(self.pressure_min + 0.05, 1.0);
