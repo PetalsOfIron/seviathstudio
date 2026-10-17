@@ -65,6 +65,7 @@ fn meta_same(a: &Layer, b: &Layer) -> bool {
         && a.clip == b.clip
         && a.tag == b.tag
         && a.fav == b.fav
+        && crate::vector::same(&a.vector, &b.vector)
         && a.opacity == b.opacity
         && a.blend == b.blend
 }
@@ -339,6 +340,13 @@ pub fn revert_only(cur: &DocState, before: &DocState, after: &DocState) -> (DocS
         field!(tag);
         field!(opacity);
         field!(blend);
+        if !crate::vector::same(&b.vector, &a.vector) {
+            if crate::vector::same(&o.vector, &a.vector) {
+                o.vector = b.vector.clone();
+            } else {
+                clean = false;
+            }
+        }
         let keys: HashSet<_> = b.tiles.keys().chain(a.tiles.keys()).copied().collect();
         for k in keys {
             let (tb, ta, tc) = (b.tiles.get(&k), a.tiles.get(&k), o.tiles.get(&k));

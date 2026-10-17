@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::doc::{Blend, Document, Layer, LayerKind, TILE, TileData, TileKey};
 use crate::layerfilter::{LayerFilter, Preset};
 use crate::meta::ProjectMeta;
+use crate::vector::VecData;
 
 pub const EXT: &str = "seviath";
 const FORMAT: &str = "seviath";
@@ -50,6 +51,8 @@ struct LayerJson {
     tag: u8,
     #[serde(default)]
     fav: bool,
+    #[serde(default)]
+    vector: Option<VecData>,
     opacity: f32,
     blend: String,
     tiles: Vec<[i32; 2]>,
@@ -159,6 +162,7 @@ pub fn save(w: u32, h: u32, paper: Color32, layers: &[Layer], presets: &[Preset]
                     expanded: l.expanded,
                     tag: l.tag,
                     fav: l.fav,
+                    vector: l.vector.as_deref().cloned(),
                     opacity: l.opacity,
                     blend: blend_name(l.blend).into(),
                     tiles,
@@ -277,6 +281,7 @@ pub fn load(path: &Path) -> Result<Document, String> {
             expanded: l.expanded,
             tag: l.tag.min(7),
             fav: l.fav,
+            vector: l.vector.map(|v| Arc::new(v.sanitized())),
             opacity: l.opacity.clamp(0.0, 100.0),
             blend: blend_from_name(&l.blend),
             tiles: tiles.remove(&l.id).unwrap_or_default(),
@@ -358,6 +363,10 @@ mod tests {
         let mut d = testdoc::sample();
         d.meta = ProjectMeta { dpi: 300, notes: "for the 2 PM stream".into(), tags: vec!["hair".into(), "wip".into()], guides: crate::meta::GuidePreset::Thirds.build(d.w, d.h), autosave_minutes: Some(1.5), recovery_copies: None };
         d.layers[1].fav = true;
+        d.layers[0].vector = Some(std::sync::Arc::new(VecData {
+            strokes: vec![crate::vector::VecStroke { pts: vec![[10.0, 10.0, 0.5], [50.0, 40.0, 1.0], [90.0, 12.5, 0.25]], style: Default::default() }],
+            width: 1.5,
+        }));
         let mut f = LayerFilter { query: "hair".into(), label: 2, chips: Vec::new() };
         f.cycle(crate::layerfilter::ChipKind::Locked);
         f.cycle(crate::layerfilter::ChipKind::Locked);
@@ -370,6 +379,8 @@ mod tests {
         assert_eq!(back.filter_presets, presets, "filter presets are part of the project");
         assert_eq!(back.meta, d.meta, "print size, notes, tags, guides and autosave override are saved");
         assert!(back.layers[1].fav && !back.layers[0].fav, "favorites are saved");
+        assert_eq!(back.layers[0].vector, d.layers[0].vector, "vector lines are saved, so they stay editable");
+        assert!(back.layers[1].vector.is_none());
         assert_eq!((back.w, back.h, back.paper), (d.w, d.h, d.paper));
         assert_eq!(testdoc::shape(&back), testdoc::shape(&d));
         // pixels identical after a save/load cycle (premultiplied → PNG → premultiplied is exact)

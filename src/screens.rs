@@ -820,3 +820,138 @@ fn randomizer_screens() {
     }
     save(&mut h, "rand_03_recolor");
 }
+
+#[test]
+fn vector_screens() {
+    use crate::doc::LayerKind;
+    use crate::vector::{EraseMode, LineEnds};
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    let labels = |h: &Harness<'_, SeviathApp>| h.state().history().entries.iter().map(|e| e.label.clone()).collect::<Vec<_>>();
+
+    // The vector pen on a pixel layer starts a vector layer
+    h.key_press(Key::P);
+    h.run_steps(2);
+    h.state_mut().draw_mut().vec_mut().style.size = 14.0;
+    h.state_mut().draw_mut().vec_mut().style.size_pressure = false;
+    stroke(&mut h, &wave(pos2(520.0, 220.0), pos2(940.0, 240.0), 30.0, 40));
+    h.run_steps(3);
+    {
+        let d = h.state().draw_mut_ref();
+        assert_eq!(d.doc.layers[0].kind, LayerKind::Vector, "a vector layer was made");
+        assert_eq!(d.vector_strokes(0).len(), 1);
+        assert!(d.vector_strokes(0)[0].pts.len() >= 2);
+    }
+    assert!(labels(&h).last().unwrap().starts_with("Vector line"), "{:?}", labels(&h));
+    assert!(!h.state().draw_mut_ref().doc.layers[0].tiles.is_empty(), "pixels were drawn from the line");
+
+    // A pointed, thick, colored line
+    {
+        let v = h.state_mut().draw_mut().vec_mut();
+        v.style.size = 30.0;
+        v.style.ends = LineEnds::Taper;
+    }
+    h.state_mut().draw_mut().primary = Color32::from_rgb(46, 150, 230);
+    stroke(&mut h, &wave(pos2(520.0, 380.0), pos2(940.0, 420.0), 40.0, 50));
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().vector_strokes(0).len(), 2, "same layer, second line");
+    save(&mut h, "vec_01_lines");
+
+    // Hold still at the end of a rough circle: it becomes a clean one
+    let center = pos2(730.0, 620.0);
+    let circle: Vec<Pos2> = (0..=44).map(|i| {
+        let a = i as f32 / 44.0 * 6.2;
+        center + vec2(a.cos() * 110.0 + ((i * 7) % 5) as f32 - 2.0, a.sin() * 110.0 + ((i * 3) % 5) as f32 - 2.0)
+    }).collect();
+    h.state_mut().draw_mut().vec_mut().style.size = 10.0;
+    h.state_mut().draw_mut().vec_mut().style.ends = LineEnds::Round;
+    h.hover_at(circle[0]);
+    h.step();
+    button(&h, circle[0], true);
+    h.step();
+    for p in &circle[1..] {
+        h.hover_at(*p);
+        h.step();
+    }
+    for _ in 0..6 {
+        h.step(); // the pen rests
+    }
+    button(&h, *circle.last().unwrap(), false);
+    h.run_steps(3);
+    let n = h.state().draw_mut_ref().vector_strokes(0).len();
+    assert_eq!(n, 3);
+    {
+        let s = h.state().draw_mut_ref().vector_strokes(0).pop().unwrap();
+        let d = h.state().draw_mut_ref();
+        let c = d.screen_to_doc(center);
+        let radii: Vec<f32> = s.pts.iter().map(|p| (p[0] - c.x).hypot(p[1] - c.y)).collect();
+        let mean = radii.iter().sum::<f32>() / radii.len() as f32;
+        let worst = radii.iter().map(|r| (r - mean).abs()).fold(0.0f32, f32::max);
+        assert!(worst < mean * 0.012, "a clean circle: worst deviation {worst} px (radius {mean})");
+        assert!(s.pts.len() > 40);
+    }
+    save(&mut h, "vec_02_circle");
+
+    // The eraser cuts the first line into two pieces
+    h.key_press(Key::E);
+    h.run_steps(2);
+    h.state_mut().draw_mut().brush_mut().size = 40.0;
+    h.state_mut().draw_mut().vec_mut().erase = EraseMode::Cut;
+    let before = h.state().draw_mut_ref().vector_strokes(0).len();
+    // a point of the first line, right where the eraser will cross it
+    let probe = {
+        let d = h.state().draw_mut_ref();
+        let dense = crate::vector::densify(&d.vector_strokes(0)[0].pts, 2.0);
+        dense.iter().map(|p| d.test_doc_to_screen(pos2(p[0], p[1]))).min_by(|a, b| (a.x - 730.0).abs().total_cmp(&(b.x - 730.0).abs())).unwrap()
+    };
+    assert!(alpha_at(&h, 0, probe) > 0, "the probe is on the line");
+    stroke(&mut h, &[pos2(probe.x, probe.y - 80.0), pos2(probe.x, probe.y), pos2(probe.x, probe.y + 80.0)]);
+    h.run_steps(3);
+    let after = h.state().draw_mut_ref().vector_strokes(0).len();
+    assert_eq!(after, before + 1, "the touched line is now two lines");
+    assert_eq!(alpha_at(&h, 0, probe), 0, "the gap is empty");
+    assert!(labels(&h).last().unwrap().starts_with("Vector erase"), "{:?}", labels(&h));
+    // Cmd+Z brings the line back
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().vector_strokes(0).len(), before, "undo restores the lines");
+    assert!(alpha_at(&h, 0, probe) > 0, "the line is whole again");
+
+    // Edit lines: drag a node
+    h.key_press(Key::P);
+    h.run_steps(2);
+    h.state_mut().draw_mut().vec_mut().mode = crate::tabs::draw::vector_ui::VecMode::Edit;
+    h.state_mut().draw_mut().test_vec_select(1); // the blue line
+    h.run_steps(2);
+    save(&mut h, "vec_03_edit");
+    let s = h.state().draw_mut_ref().vector_strokes(0)[1].clone();
+    let last = *s.pts.last().unwrap();
+    let from = h.state().draw_mut_ref().test_doc_to_screen(pos2(last[0], last[1]));
+    h.hover_at(from);
+    h.step();
+    button(&h, from, true);
+    h.step();
+    for k in 1..=4 {
+        let p = from + vec2(0.0, -15.0 * k as f32);
+        h.hover_at(p);
+        h.step();
+    }
+    button(&h, from + vec2(0.0, -60.0), false);
+    h.run_steps(3);
+    let moved = h.state().draw_mut_ref().vector_strokes(0)[1].clone();
+    let end = *moved.pts.last().unwrap();
+    assert!((end[1] - last[1]).abs() > 100.0, "the end node moved up: {last:?} -> {end:?}");
+    assert_eq!(moved.pts.len(), s.pts.len(), "no node was added or lost");
+    assert!(labels(&h).last().unwrap().starts_with("Move node"), "{:?}", labels(&h));
+
+    // Delete removes the selected node, then (no node) the line
+    let n_before = h.state().draw_mut_ref().vector_strokes(0)[1].pts.len();
+    h.key_press(Key::Delete);
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().vector_strokes(0)[1].pts.len(), n_before - 1, "the selected node is gone");
+    h.state_mut().draw_mut().test_vec_select(1);
+    h.key_press(Key::Delete);
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().vector_strokes(0).len(), before - 1, "then the whole line");
+    save(&mut h, "vec_04_after_delete");
+}

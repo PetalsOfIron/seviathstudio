@@ -594,6 +594,7 @@ pub fn read(bytes: &[u8]) -> Result<Document, String> {
             blend: r.blend,
             tiles: HashMap::new(),
             fav: false,
+            vector: None,
             rev: 1,
         };
         next_id += 1;
@@ -691,6 +692,7 @@ pub fn read(bytes: &[u8]) -> Result<Document, String> {
             blend: Blend::Normal,
             tiles: HashMap::new(),
             fav: false,
+            vector: None,
             rev: 1,
         };
         next_id += 1;
@@ -714,6 +716,7 @@ pub fn read(bytes: &[u8]) -> Result<Document, String> {
         blend: Blend::Normal,
         tiles: HashMap::new(),
         fav: false,
+        vector: None,
         rev: 1,
     };
     if paper.is_none() {
