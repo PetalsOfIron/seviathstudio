@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::doc::{Blend, Document, Layer, LayerKind, TILE, TileData, TileKey};
 use crate::layerfilter::{LayerFilter, Preset};
+use crate::meta::ProjectMeta;
 
 pub const EXT: &str = "seviath";
 const FORMAT: &str = "seviath";
@@ -31,6 +32,8 @@ struct ProjectJson {
     layers: Vec<LayerJson>,
     #[serde(default)]
     filter_presets: Vec<PresetJson>,
+    #[serde(default)]
+    meta: ProjectMeta,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -131,7 +134,7 @@ fn tile_from_png(bytes: &[u8]) -> Result<Vec<Color32>, String> {
 
 /// Save a project. Writes a temporary file first and swaps it in, so a crash never leaves a
 /// half-written project behind.
-pub fn save(w: u32, h: u32, paper: Color32, layers: &[Layer], presets: &[Preset], path: &Path) -> Result<(), String> {
+pub fn save(w: u32, h: u32, paper: Color32, layers: &[Layer], presets: &[Preset], meta: &ProjectMeta, path: &Path) -> Result<(), String> {
     let json = ProjectJson {
         format: FORMAT.into(),
         version: VERSION,
@@ -166,6 +169,7 @@ pub fn save(w: u32, h: u32, paper: Color32, layers: &[Layer], presets: &[Preset]
             .iter()
             .map(|p| PresetJson { name: p.name.clone(), query: p.filter.query.clone(), label: p.filter.label, chips: p.filter.chip_keys() })
             .collect(),
+        meta: meta.clone(),
     };
     // encode every tile in parallel
     let jobs: Vec<(String, &TileData)> =
@@ -279,6 +283,7 @@ pub fn load(path: &Path) -> Result<Document, String> {
             rev: 1,
         })
         .collect();
+    let meta = json.meta.clone().sanitized();
     let presets: Vec<Preset> = json
         .filter_presets
         .into_iter()
@@ -288,8 +293,39 @@ pub fn load(path: &Path) -> Result<Document, String> {
     let [r, g, b, a] = json.paper;
     let mut doc = Document::from_parts(json.width, json.height, Color32::from_rgba_unmultiplied(r, g, b, a), layers);
     doc.filter_presets = presets;
+    doc.meta = meta;
     ensure_usable(&mut doc);
     Ok(doc)
+}
+
+/// What the project manager shows without opening the whole project.
+#[derive(Clone)]
+pub struct Info {
+    pub w: u32,
+    pub h: u32,
+    pub meta: ProjectMeta,
+}
+
+#[derive(Deserialize)]
+struct InfoJson {
+    width: u32,
+    height: u32,
+    #[serde(default)]
+    meta: ProjectMeta,
+}
+
+/// Size, DPI, notes and tags of a project file (reads only `project.json`).
+pub fn read_info(path: &Path) -> Option<Info> {
+    let f = std::fs::File::open(path).ok()?;
+    let mut zip = zip::ZipArchive::new(std::io::BufReader::new(f)).ok()?;
+    let mut e = zip.by_name("project.json").ok()?;
+    if e.size() > 64 << 20 {
+        return None;
+    }
+    let mut buf = Vec::new();
+    e.by_ref().take(64 << 20).read_to_end(&mut buf).ok()?;
+    let j: InfoJson = serde_json::from_slice(&buf).ok()?;
+    Some(Info { w: j.width, h: j.height, meta: j.meta.sanitized() })
 }
 
 /// Every document needs at least one pixel layer to paint on.
@@ -320,6 +356,7 @@ mod tests {
     #[test]
     fn save_and_load_round_trip() {
         let mut d = testdoc::sample();
+        d.meta = ProjectMeta { dpi: 300, notes: "for the 2 PM stream".into(), tags: vec!["hair".into(), "wip".into()], guides: crate::meta::GuidePreset::Thirds.build(d.w, d.h), autosave_minutes: Some(1.5), recovery_copies: None };
         d.layers[1].fav = true;
         let mut f = LayerFilter { query: "hair".into(), label: 2, chips: Vec::new() };
         f.cycle(crate::layerfilter::ChipKind::Locked);
@@ -328,9 +365,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("seviath_proj_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.seviath");
-        save(d.w, d.h, d.paper, &d.layers, &presets, &path).unwrap();
+        save(d.w, d.h, d.paper, &d.layers, &presets, &d.meta, &path).unwrap();
         let back = load(&path).unwrap();
         assert_eq!(back.filter_presets, presets, "filter presets are part of the project");
+        assert_eq!(back.meta, d.meta, "print size, notes, tags, guides and autosave override are saved");
         assert!(back.layers[1].fav && !back.layers[0].fav, "favorites are saved");
         assert_eq!((back.w, back.h, back.paper), (d.w, d.h, d.paper));
         assert_eq!(testdoc::shape(&back), testdoc::shape(&d));
@@ -342,8 +380,10 @@ mod tests {
             }
         }
         assert!(read_thumbnail(&path).is_some());
+        let info = read_info(&path).unwrap();
+        assert_eq!((info.w, info.h, info.meta.dpi, info.meta.tags.clone()), (d.w, d.h, 300, vec!["hair".to_string(), "wip".to_string()]));
         // saving again over it works and leaves no temporary file
-        save(back.w, back.h, back.paper, &back.layers, &back.filter_presets, &path).unwrap();
+        save(back.w, back.h, back.paper, &back.layers, &back.filter_presets, &back.meta, &path).unwrap();
         assert!(!path.with_extension("seviath.saving").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }

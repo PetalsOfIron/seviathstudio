@@ -2,7 +2,7 @@
 
 Open-source app to **draw, rig, animate and stream a 2D character from one file**, with reliable PSD export — made for VTuber artists, riggers and VTubers. Native Rust, built with [egui](https://github.com/emilk/egui).
 
-This is the Rust version. It is being built tab by tab: **Draw** works today (brush engine with 103 brushes and pen pressure, layers with blend modes, clipping and folders, undo history, selections, quick mask, move & transform, paint bucket with gap closing, live symmetry, layer filters and batch edits, projects with autosave, PSD / OpenRaster / Krita import and PSD / ORA / PNG / JPEG / WebP export); Parts, Rig, Physics, Animate and Stream follow.
+This is the Rust version. It is being built tab by tab: **Draw** works today (brush engine with 103 brushes and pen pressure, layers with blend modes, clipping and folders, undo history, selections, quick mask, move & transform, paint bucket with gap closing, live symmetry, layer filters and batch edits, print size (DPI), guides, project templates, projects with autosave, PSD / OpenRaster / Krita import and PSD / ORA / PNG / JPEG / WebP export); Parts, Rig, Physics, Animate and Stream follow.
 
 ## Build and run
 
@@ -26,6 +26,7 @@ cargo test --release
 Runs the unit tests and a full UI run that paints, undoes and redoes with simulated input. Pictures land in `target/screens/`:
 
 - `01_draw.png` … `10_settings_canvas.png` — the app at each step of the UI run
+- `np_01_dialog.png` … `np_05_manager_search.png` — New project, Project info and the manager (`cargo test --release newproject_screens`)
 - `org_01_picked.png`, `org_02_filters.png`, `org_03_quick_bar.png` — layer organizer (`cargo test --release organizer_screens`)
 - `sel_01_rectangle_clip.png` … `sel_05_wand.png` — selection, transform, quick mask, symmetry and wand (`cargo test --release selection_screens`)
 - `projects_manager.png`, `new_project.png`, `unsaved_changes.png` — the file windows (from `cargo test --release files_screens`)

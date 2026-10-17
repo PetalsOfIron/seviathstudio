@@ -5,6 +5,7 @@ pub mod kra;
 pub mod ora;
 pub mod project;
 pub mod psd;
+pub mod template;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -170,6 +171,9 @@ pub fn export_flat(doc: &Document, path: &Path, kind: Flat, jpeg_quality: u8, cr
             enc.set_color(png::ColorType::Rgba);
             enc.set_depth(png::BitDepth::Eight);
             enc.set_compression(png::Compression::Balanced);
+            // pixels per metre, so other programs know the print size
+            let ppm = (doc.meta.dpi as f64 / 0.0254).round() as u32;
+            enc.set_pixel_dims(Some(png::PixelDimensions { xppu: ppm, yppu: ppm, unit: png::Unit::Meter }));
             if credit {
                 let soft = format!("SeviathStudio {}", env!("CARGO_PKG_VERSION"));
                 enc.add_text_chunk("Software".into(), soft).map_err(|e| e.to_string())?;
@@ -188,7 +192,8 @@ pub fn export_flat(doc: &Document, path: &Path, kind: Flat, jpeg_quality: u8, cr
                 let mix = |c: u8, b: u8| (c as f32 * a + b as f32 * (1.0 - a)).round() as u8;
                 image::Rgb([mix(p[0], bg.r()), mix(p[1], bg.g()), mix(p[2], bg.b())])
             });
-            let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut w, jpeg_quality.clamp(1, 100));
+            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut w, jpeg_quality.clamp(1, 100));
+            enc.set_pixel_density(image::codecs::jpeg::PixelDensity::dpi(doc.meta.dpi.clamp(1, 65535) as u16));
             rgb.write_with_encoder(enc).map_err(|e| e.to_string())
         }
     }
@@ -308,6 +313,32 @@ mod tests {
         export_flat(&d, &p, Flat::Png, 90, false).unwrap();
         assert!(!String::from_utf8_lossy(&std::fs::read(&p).unwrap()).contains("SnakeSeviath"));
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn exports_carry_the_print_size() {
+        let mut d = testdoc::sample();
+        d.meta.dpi = 300;
+        let dir = std::env::temp_dir().join(format!("seviath_dpi_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png_path = dir.join("a.png");
+        export_flat(&d, &png_path, Flat::Png, 90, false).unwrap();
+        let dec = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&png_path).unwrap()));
+        let reader = dec.read_info().unwrap();
+        let dims = reader.info().pixel_dims.expect("pHYs chunk");
+        assert_eq!((dims.xppu, dims.unit), (11811, png::Unit::Meter)); // 300 dpi
+        let jpg_path = dir.join("a.jpg");
+        export_flat(&d, &jpg_path, Flat::Jpeg, 90, false).unwrap();
+        let bytes = std::fs::read(&jpg_path).unwrap();
+        // JFIF header: units = 1 (dots per inch), then x and y density 300
+        let at = bytes.windows(5).position(|w| w == b"JFIF\0").expect("JFIF");
+        assert_eq!(&bytes[at + 7..at + 12], &[1, 0x01, 0x2c, 0x01, 0x2c]);
+        let psd_bytes = super::psd::write(&d);
+        assert_eq!(super::psd::read(&psd_bytes).unwrap().meta.dpi, 300);
+        let ora_path = dir.join("a.ora");
+        super::ora::write(&d, &ora_path).unwrap();
+        assert_eq!(super::ora::read(&ora_path).unwrap().meta.dpi, 300);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

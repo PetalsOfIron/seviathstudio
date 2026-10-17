@@ -215,10 +215,10 @@ fn files_screens() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let sample = testdoc::sample();
-    project::save(sample.w, sample.h, sample.paper, &sample.layers, &[], &dir.join("Hair study.seviath")).unwrap();
+    project::save(sample.w, sample.h, sample.paper, &sample.layers, &[], &Default::default(), &dir.join("Hair study.seviath")).unwrap();
     let mut big = crate::doc::Document::new(400, 600);
     big.paper = Color32::from_rgb(40, 60, 50);
-    project::save(big.w, big.h, big.paper, &big.layers, &[], &dir.join("Night sky.seviath")).unwrap();
+    project::save(big.w, big.h, big.paper, &big.layers, &[], &Default::default(), &dir.join("Night sky.seviath")).unwrap();
 
     let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.state_mut().settings_mut().projects_dir = dir.display().to_string();
@@ -575,4 +575,81 @@ fn organizer_screens() {
     h.key_press(Key::Escape);
     h.run_steps(2);
     assert!(h.state().draw_mut_ref().layer_ui_mut_ref().quick.is_none());
+}
+
+#[test]
+fn newproject_screens() {
+    use crate::files::template::{Background, NewProject};
+    use crate::meta::{GuidePreset, ProjectMeta};
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().files_mut().new_open = true;
+    h.run_steps(10);
+    save(&mut h, "np_01_dialog");
+    h.state_mut().files_mut().new_open = false;
+    h.run_steps(2);
+
+    // Create a rig-ready 300 DPI project with a gradient background, thirds guides and tags.
+    let np = NewProject {
+        name: "Bust sheet".into(),
+        w: 2480,
+        h: 3508,
+        dpi: 300,
+        bg: Background::Gradient { top: [250, 240, 230], bottom: [120, 170, 150] },
+        guides: GuidePreset::Thirds,
+        rig_starter: true,
+        notes: "for the Friday stream".into(),
+        tags: "vtuber, wip".into(),
+        ..Default::default()
+    };
+    h.state_mut().test_create(np);
+    h.run_steps(4);
+    {
+        let d = h.state().draw_mut_ref();
+        let names: Vec<&str> = d.doc.layers.iter().map(|l| l.name.as_str()).collect();
+        assert!(names.contains(&"Eyes") && names.contains(&"Background gradient") && names.last() == Some(&"Paper"), "{names:?}");
+        assert_eq!((d.doc.w, d.doc.h, d.doc.meta.dpi, d.doc.meta.guides.len()), (2480, 3508, 300, 4));
+        assert_eq!(d.doc.meta.tags, ["vtuber", "wip"]);
+        assert!(d.active_name() == "Fringe", "starts on the first pixel layer: {}", d.active_name());
+    }
+    assert_eq!(h.state().file_name(), "Bust sheet");
+    assert!(!h.state().test_dirty(), "a new project starts clean");
+    save(&mut h, "np_02_created");
+
+    // Project info: change DPI, notes and guides as one undoable step; undo brings them back.
+    h.state_mut().test_open_info();
+    h.run_steps(3);
+    save(&mut h, "np_03_info");
+    let mut meta = h.state().draw_mut_ref().doc.meta.clone();
+    meta.dpi = 600;
+    meta.notes = "changed".into();
+    meta.guides = GuidePreset::Center.build(2480, 3508);
+    h.state_mut().test_set_info(meta);
+    h.run_steps(3);
+    assert!(h.state().test_dirty());
+    assert_eq!(h.state().history().entries.last().unwrap().label, "Project info");
+    assert_eq!(h.state().draw_mut_ref().doc.meta.dpi, 600);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().doc.meta.dpi, 300, "undo restores the print size");
+    assert_eq!(h.state().draw_mut_ref().doc.meta.guides.len(), 4);
+
+    // Saved projects show size, DPI and tags in the manager, and can be found by tag.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("test-projects-np");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, tags) in [("Bust sheet", vec!["vtuber", "wip"]), ("Emote set", vec!["emotes"]), ("Poster", vec![])] {
+        let meta = ProjectMeta { dpi: 150, tags: tags.iter().map(|t| t.to_string()).collect(), notes: format!("{name} notes"), ..Default::default() };
+        let doc = crate::files::template::build(&NewProject { w: 400, h: 600, rig_starter: false, ..Default::default() });
+        crate::files::project::save(doc.w, doc.h, doc.paper, &doc.layers, &[], &meta, &dir.join(format!("{name}.seviath"))).unwrap();
+    }
+    h.state_mut().settings_mut().projects_dir = dir.display().to_string();
+    h.state_mut().files_mut().manager_open = true;
+    h.run_steps(8);
+    save(&mut h, "np_04_manager_all");
+    h.state_mut().test_manager_query("emotes");
+    h.run_steps(8);
+    save(&mut h, "np_05_manager_search");
+    let info = crate::files::project::read_info(&dir.join("Emote set.seviath")).unwrap();
+    assert_eq!((info.w, info.h, info.meta.dpi, info.meta.tags), (400, 600, 150, vec!["emotes".to_string()]));
 }

@@ -39,6 +39,7 @@ pub struct Settings {
     pub invert_wheel: bool,
     pub rotate_snap: f32, // degrees for Shift+R-drag and the rotate buttons
     pub pixel_grid: bool,
+    pub show_guides: bool, // the project's guide lines (File, Project info)
     pub pixel_grid_from: f32, // zoom (e.g. 8 = 800%) where the pixel grid appears
     pub smooth_zoomed_in: bool, // false = see crisp pixels when zoomed in
     pub canvas_bg: [u8; 3],
@@ -97,6 +98,7 @@ impl Default for Settings {
             invert_wheel: false,
             rotate_snap: 15.0,
             pixel_grid: true,
+            show_guides: true,
             pixel_grid_from: 10.0,
             smooth_zoomed_in: false,
             canvas_bg: [10, 14, 12],

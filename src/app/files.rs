@@ -13,41 +13,13 @@ use eframe::egui::{
 };
 
 use super::SeviathApp;
-use crate::doc::{Document, LayerKind};
+use crate::doc::Document;
+use crate::files::template::{self, NewProject};
 use crate::files::{self, Flat, kra, ora, project, psd};
 use crate::history::DocState;
 use crate::settings::Settings;
 use crate::theme::*;
-use crate::widgets::{self, section_title};
-
-/// Canvas templates for New project (plan §9).
-pub const TEMPLATES: &[(&str, u32, u32)] = &[
-    ("VTuber — bust", 3000, 4000),
-    ("VTuber — half body", 4000, 6000),
-    ("VTuber — full body", 5000, 8000),
-    ("Chibi / PNGTuber", 2500, 2500),
-    ("Emote (draw big, export 112 px)", 1120, 1120),
-    ("Twitch panel", 640, 320),
-    ("Stream screen / overlay", 1920, 1080),
-    ("YouTube thumbnail", 1280, 720),
-    ("Phone wallpaper", 1080, 1920),
-    ("A4 print, 300 DPI", 2480, 3508),
-];
-
-#[derive(Clone)]
-pub struct NewProject {
-    pub name: String,
-    pub w: u32,
-    pub h: u32,
-    pub paper: Color32,
-    pub transparent: bool,
-}
-
-impl Default for NewProject {
-    fn default() -> Self {
-        Self { name: "Untitled".into(), w: 3000, h: 4000, paper: Color32::WHITE, transparent: false }
-    }
-}
+use crate::widgets;
 
 /// What to do once unsaved changes are dealt with.
 #[derive(Clone)]
@@ -88,7 +60,9 @@ pub struct FileState {
     close_ok: bool,
     title: String,
     pub new_open: bool,
-    new_form: NewProject,
+    pub(super) np: super::newproject::NewState,
+    manager_query: String,
+    infos: HashMap<PathBuf, (SystemTime, Option<project::Info>)>,
     pub manager_open: bool,
     manager_tab: ManagerTab,
     thumbs: HashMap<PathBuf, (SystemTime, Option<TextureHandle>)>,
@@ -108,7 +82,9 @@ impl Default for FileState {
             close_ok: false,
             title: String::new(),
             new_open: false,
-            new_form: NewProject::default(),
+            np: Default::default(),
+            manager_query: String::new(),
+            infos: HashMap::new(),
             manager_open: false,
             manager_tab: ManagerTab::Projects,
             thumbs: HashMap::new(),
@@ -151,6 +127,7 @@ fn load_any(path: &Path) -> Result<(Document, bool), String> {
 fn doc_from_state(w: u32, h: u32, s: DocState) -> Document {
     let mut d = Document::from_parts(w, h, s.paper, s.layers);
     d.filter_presets = s.presets;
+    d.meta = s.meta;
     d
 }
 
@@ -219,13 +196,7 @@ impl SeviathApp {
     fn perform(&mut self, p: Pending) {
         match p {
             Pending::New(np) => {
-                let mut doc = Document::new(np.w, np.h);
-                doc.paper = np.paper;
-                if np.transparent {
-                    if let Some(l) = doc.layers.iter_mut().find(|l| l.kind == LayerKind::Paper) {
-                        l.visible = false;
-                    }
-                }
+                let doc = template::build(&np);
                 self.load_document(doc, None, np.name);
             }
             Pending::Open(path) => {
@@ -301,7 +272,7 @@ impl SeviathApp {
         let generation = self.history.generation;
         let label = format!("Saving {}…", stem(&path));
         self.start(label, move || {
-            project::save(w, h, state.paper, &state.layers, &state.presets, &path)?;
+            project::save(w, h, state.paper, &state.layers, &state.presets, &state.meta, &path)?;
             Ok(Done::Saved { path, generation, then })
         });
     }
@@ -394,7 +365,7 @@ impl SeviathApp {
             self.request(Pending::Open(p));
         }
         // autosave: a recovery copy every few minutes while there are changes
-        let minutes = self.settings.autosave_minutes;
+        let minutes = self.draw.doc.meta.autosave_minutes.unwrap_or(self.settings.autosave_minutes);
         if self.persist
             && minutes > 0.0
             && self.files.job.is_none()
@@ -408,7 +379,7 @@ impl SeviathApp {
             let state = self.draw.doc.snapshot();
             let (w, h) = (self.draw.doc.w, self.draw.doc.h);
             let dir = Settings::recovery_folder();
-            let keep = self.settings.recovery_copies;
+            let keep = self.draw.doc.meta.recovery_copies.unwrap_or(self.settings.recovery_copies);
             let name = self.files.name.clone();
             let also = if self.settings.autosave_project_file { self.files.path.clone() } else { None };
             let generation = self.history.generation;
@@ -416,10 +387,10 @@ impl SeviathApp {
                 std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
                 let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
                 let file = dir.join(format!("{name} {stamp}.seviath"));
-                project::save(w, h, state.paper, &state.layers, &state.presets, &file)?;
+                project::save(w, h, state.paper, &state.layers, &state.presets, &state.meta, &file)?;
                 prune_recovery(&dir, keep);
                 if let Some(p) = also {
-                    project::save(w, h, state.paper, &state.layers, &state.presets, &p)?;
+                    project::save(w, h, state.paper, &state.layers, &state.presets, &state.meta, &p)?;
                     return Ok(Done::Saved { path: p, generation, then: None });
                 }
                 Ok(Done::Autosaved)
@@ -502,80 +473,6 @@ impl SeviathApp {
         }
     }
 
-    // ---------- New project ----------
-
-    pub(super) fn new_project_window(&mut self, ctx: &egui::Context) {
-        if !self.files.new_open {
-            return;
-        }
-        let mut open = true;
-        let mut create = false;
-        egui::Window::new(RichText::new("New project").strong())
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .pivot(Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .show(ctx, |ui| {
-                ui.set_width(520.0);
-                let f = &mut self.files.new_form;
-                ui.horizontal(|ui| {
-                    ui.label("Name");
-                    ui.add(egui::TextEdit::singleline(&mut f.name).desired_width(260.0).char_limit(80));
-                });
-                ui.add_space(4.0);
-                section_title(ui, "Canvas");
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-                    for (name, w, h) in TEMPLATES {
-                        let on = f.w == *w && f.h == *h;
-                        if widgets::chip(ui, name, on).on_hover_text(format!("{w} × {h} px")).clicked() {
-                            f.w = *w;
-                            f.h = *h;
-                        }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Width");
-                    ui.add(egui::DragValue::new(&mut f.w).range(16..=files::MAX_SIDE).suffix(" px"));
-                    ui.label("Height");
-                    ui.add(egui::DragValue::new(&mut f.h).range(16..=files::MAX_SIDE).suffix(" px"));
-                    if ui.small_button("Swap").on_hover_text("Switch portrait and landscape").clicked() {
-                        std::mem::swap(&mut f.w, &mut f.h);
-                    }
-                });
-                let mb = f.w as f64 * f.h as f64 * 4.0 / (1 << 20) as f64;
-                ui.label(
-                    RichText::new(format!("A fully painted layer at this size takes about {mb:.0} MB; empty areas take nothing."))
-                        .size(11.5)
-                        .color(TEXT_DIM),
-                );
-                ui.add_space(4.0);
-                section_title(ui, "Background");
-                ui.horizontal(|ui| {
-                    if widgets::chip(ui, "Paper", !f.transparent).clicked() {
-                        f.transparent = false;
-                    }
-                    if widgets::chip(ui, "Transparent", f.transparent).clicked() {
-                        f.transparent = true;
-                    }
-                    if !f.transparent {
-                        egui::color_picker::color_edit_button_srgba(ui, &mut f.paper, egui::color_picker::Alpha::Opaque);
-                    }
-                });
-                ui.add_space(10.0);
-                if ui.button(RichText::new("Create").strong()).clicked() {
-                    create = true;
-                }
-            });
-        if create {
-            open = false;
-            let np = self.files.new_form.clone();
-            self.request(Pending::New(np));
-        }
-        self.files.new_open = open;
-    }
-
     // ---------- Project manager ----------
 
     fn thumb(&mut self, ctx: &egui::Context, path: &Path, modified: SystemTime, budget: &mut u32) -> Option<egui::TextureId> {
@@ -598,6 +495,23 @@ impl SeviathApp {
         id
     }
 
+    #[cfg(test)]
+    pub fn test_manager_query(&mut self, q: &str) {
+        self.files.manager_query = q.into();
+    }
+
+    /// Size, DPI, tags and notes of a project, read once and remembered until the file changes.
+    fn project_info(&mut self, path: &Path, modified: SystemTime) -> Option<project::Info> {
+        if let Some((m, i)) = self.files.infos.get(path) {
+            if *m == modified {
+                return i.clone();
+            }
+        }
+        let info = project::read_info(path);
+        self.files.infos.insert(path.to_path_buf(), (modified, info.clone()));
+        info
+    }
+
     pub(super) fn project_manager(&mut self, ctx: &egui::Context) {
         if !self.files.manager_open {
             return;
@@ -613,7 +527,7 @@ impl SeviathApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if ui.button(RichText::new("+ New project").strong()).clicked() {
-                        self.files.new_open = true;
+                        self.open_new_project();
                     }
                     if ui.button("Open a file…").clicked() {
                         self.open_dialog();
@@ -625,6 +539,11 @@ impl SeviathApp {
                         }
                     }
                 });
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.files.manager_query)
+                        .hint_text("Search by name, tags or notes…")
+                        .desired_width(f32::INFINITY),
+                );
                 let list: Vec<(PathBuf, SystemTime, u64)> = match self.files.manager_tab {
                     ManagerTab::Projects => {
                         let dir = self.settings.projects_folder();
@@ -651,9 +570,25 @@ impl SeviathApp {
                         .collect(),
                 };
                 ui.separator();
+                let query = self.files.manager_query.trim().to_lowercase();
+                let list: Vec<(PathBuf, SystemTime, u64)> = if query.is_empty() {
+                    list
+                } else {
+                    list.into_iter()
+                        .filter(|(p, m, _)| {
+                            if stem(p).to_lowercase().contains(&query) {
+                                return true;
+                            }
+                            self.project_info(p, *m).is_some_and(|i| {
+                                i.meta.tags.iter().any(|t| t.to_lowercase().contains(&query)) || i.meta.notes.to_lowercase().contains(&query)
+                            })
+                        })
+                        .collect()
+                };
                 if list.is_empty() {
                     ui.add_space(30.0);
-                    ui.vertical_centered(|ui| ui.label(RichText::new("Nothing here yet.").color(TEXT_DIM)));
+                    let msg = if query.is_empty() { "Nothing here yet." } else { "No project matches your search." };
+                    ui.vertical_centered(|ui| ui.label(RichText::new(msg).color(TEXT_DIM)));
                     return;
                 }
                 let mut budget = 2;
@@ -680,7 +615,16 @@ impl SeviathApp {
                                 p.rect_stroke(cell, CornerRadius::same(10), Stroke::new(2.0, VENOM), StrokeKind::Inside);
                             }
                             let name = stem(&path);
-                            p.with_clip_rect(cell.shrink(6.0)).text(cell.left_bottom() + vec2(10.0, -32.0), Align2::LEFT_CENTER, &name, FontId::proportional(13.0), TEXT);
+                            let info = if kind_of(&path) == "seviath" { self.project_info(&path, modified) } else { None };
+                            let p = ui.painter();
+                            p.with_clip_rect(cell.shrink(6.0)).text(cell.left_bottom() + vec2(10.0, -44.0), Align2::LEFT_CENTER, &name, FontId::proportional(13.0), TEXT);
+                            if let Some(i) = &info {
+                                let mut line = format!("{}×{} · {} dpi", i.w, i.h, i.meta.dpi);
+                                if !i.meta.tags.is_empty() {
+                                    line += &format!(" · {}", i.meta.tags.join(", "));
+                                }
+                                p.with_clip_rect(cell.shrink(6.0)).text(cell.left_bottom() + vec2(10.0, -29.0), Align2::LEFT_CENTER, line, FontId::proportional(10.5), VENOM);
+                            }
                             p.text(
                                 cell.left_bottom() + vec2(10.0, -14.0),
                                 Align2::LEFT_CENTER,
@@ -812,7 +756,7 @@ impl SeviathApp {
                 ui.add(egui::Button::new(label).shortcut_text(keys)).clicked()
             };
             if item(ui, "New project…", "Ctrl+N") {
-                self.files.new_open = true;
+                self.open_new_project();
                 ui.close();
             }
             if item(ui, "Open…", "Ctrl+O") {
@@ -845,6 +789,10 @@ impl SeviathApp {
                 ui.close();
                 self.save_as(None);
             }
+            if item(ui, "Project info…", "") {
+                ui.close();
+                self.open_project_info();
+            }
             ui.separator();
             if item(ui, "Export…  (PNG, JPEG, WebP, PSD, ORA)", "Ctrl+Shift+E") {
                 ui.close();
@@ -875,7 +823,7 @@ impl SeviathApp {
             }
         });
         if new {
-            self.files.new_open = true;
+            self.open_new_project();
         }
         if manager {
             self.files.manager_open = true;

@@ -188,6 +188,8 @@ pub struct Document {
     pub selection: Option<crate::select::Selection>,
     /// Saved layer-panel filters of this project.
     pub filter_presets: Vec<crate::layerfilter::Preset>,
+    /// DPI, notes, tags, guide lines, autosave override.
+    pub meta: crate::meta::ProjectMeta,
 }
 
 impl Document {
@@ -203,6 +205,7 @@ impl Document {
             live: None,
             selection: None,
             filter_presets: Vec::new(),
+            meta: crate::meta::ProjectMeta::default(),
             checker: 16,
         };
         let l1 = d.new_layer("Layer 1", LayerKind::Raster);
@@ -215,7 +218,7 @@ impl Document {
     /// A document from loaded parts (files). Layer ids are kept; new ids continue after them.
     pub fn from_parts(w: u32, h: u32, paper: Color32, layers: Vec<Layer>) -> Self {
         let next_id = layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
-        let mut d = Self { w, h, paper, layers, dirty: HashSet::new(), revision: 0, next_id, live: None, checker: 16, selection: None, filter_presets: Vec::new() };
+        let mut d = Self { w, h, paper, layers, dirty: HashSet::new(), revision: 0, next_id, live: None, checker: 16, selection: None, filter_presets: Vec::new(), meta: crate::meta::ProjectMeta::default() };
         d.mark_all_dirty();
         d
     }

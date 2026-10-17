@@ -251,7 +251,20 @@ pub fn write(doc: &Document) -> Vec<u8> {
     out.extend_from_slice(&8u16.to_be_bytes());
     out.extend_from_slice(&3u16.to_be_bytes()); // RGB mode
     out.extend_from_slice(&0u32.to_be_bytes()); // color mode data
-    out.extend_from_slice(&0u32.to_be_bytes()); // image resources
+    // image resources: only the resolution (0x03ED), so the print size survives
+    let dpi = (doc.meta.dpi.clamp(1, 65535) as u32) << 16; // 16.16 fixed point
+    let mut res = Vec::new();
+    res.extend_from_slice(b"8BIM");
+    res.extend_from_slice(&0x03EDu16.to_be_bytes());
+    res.extend_from_slice(&[0, 0]); // empty pascal name, padded
+    res.extend_from_slice(&16u32.to_be_bytes());
+    for _ in 0..2 {
+        res.extend_from_slice(&dpi.to_be_bytes());
+        res.extend_from_slice(&1u16.to_be_bytes()); // pixels per inch
+        res.extend_from_slice(&1u16.to_be_bytes()); // shown in inches
+    }
+    out.extend_from_slice(&(res.len() as u32).to_be_bytes());
+    out.extend_from_slice(&res);
 
     // layer and mask information
     let mut recs = Vec::new();
@@ -337,6 +350,32 @@ impl<'a> Cur<'a> {
     fn skip(&mut self, n: usize) -> Result<(), String> {
         self.take(n).map(|_| ())
     }
+}
+
+/// The DPI from a PSD's image-resource block (resource 0x03ED), if there is one.
+fn read_dpi(res: &[u8]) -> Option<u32> {
+    let mut i = 0;
+    while i + 12 <= res.len() {
+        if &res[i..i + 4] != b"8BIM" {
+            return None;
+        }
+        let id = u16::from_be_bytes([res[i + 4], res[i + 5]]);
+        let name_len = res[i + 6] as usize;
+        let name_total = (1 + name_len + 1) & !1; // pascal string padded to an even size
+        let len_at = i + 6 + name_total;
+        if len_at + 4 > res.len() {
+            return None;
+        }
+        let len = u32::from_be_bytes([res[len_at], res[len_at + 1], res[len_at + 2], res[len_at + 3]]) as usize;
+        let data = len_at + 4;
+        if id == 0x03ED && len >= 4 && data + 4 <= res.len() {
+            let fixed = u32::from_be_bytes([res[data], res[data + 1], res[data + 2], res[data + 3]]);
+            let dpi = (fixed as f64 / 65536.0).round() as u32;
+            return (1..=2400).contains(&dpi).then_some(dpi);
+        }
+        i = data + len + (len & 1);
+    }
+    None
 }
 
 fn unpackbits(src: &[u8], want: usize) -> Result<Vec<u8>, String> {
@@ -436,7 +475,7 @@ pub fn read(bytes: &[u8]) -> Result<Document, String> {
     let n = c.u32()? as usize;
     c.skip(n)?; // color mode data
     let n = c.u32()? as usize;
-    c.skip(n)?; // image resources
+    let dpi = read_dpi(c.take(n)?); // image resources
 
     let lm_len = c.u32()? as usize;
     let lm_end = c.p + lm_len;
@@ -682,6 +721,9 @@ pub fn read(bytes: &[u8]) -> Result<Document, String> {
     }
     doc_layers.push(paper_layer);
     let mut doc = Document::from_parts(w, h, paper.unwrap_or(Color32::WHITE), doc_layers);
+    if let Some(d) = dpi {
+        doc.meta.dpi = d;
+    }
     super::project::ensure_usable(&mut doc);
     Ok(doc)
 }

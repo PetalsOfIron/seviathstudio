@@ -104,8 +104,8 @@ pub fn write(doc: &Document, path: &std::path::Path) -> Result<(), String> {
     let mut body = String::new();
     stack_xml(doc, None, &mut files, &mut body)?;
     let xml = format!(
-        "<?xml version='1.0' encoding='UTF-8'?>\n<image version=\"0.0.5\" w=\"{}\" h=\"{}\" xmlns:seviath=\"https://github.com/santamadaraneilande-ctrl/seviathstudio\"><stack>{body}</stack></image>\n",
-        doc.w, doc.h
+        "<?xml version='1.0' encoding='UTF-8'?>\n<image version=\"0.0.5\" w=\"{}\" h=\"{}\" xres=\"{}\" yres=\"{}\" xmlns:seviath=\"https://github.com/santamadaraneilande-ctrl/seviathstudio\"><stack>{body}</stack></image>\n",
+        doc.w, doc.h, doc.meta.dpi, doc.meta.dpi
     );
     let merged = super::flatten(doc);
     let thumb = super::thumbnail(doc, 256);
@@ -149,6 +149,7 @@ pub fn read(path: &std::path::Path) -> Result<Document, String> {
     let xml = String::from_utf8(read_entry("stack.xml", 16 << 20)?).map_err(|_| "stack.xml is not text".to_string())?;
     let mut reader = quick_xml::Reader::from_str(&xml);
     let (mut w, mut h) = (0u32, 0u32);
+    let mut dpi: Option<u32> = None;
     let mut layers: Vec<Layer> = Vec::new();
     let mut stack: Vec<Option<LayerId>> = Vec::new(); // the folders we are inside
     let mut next: LayerId = 1;
@@ -184,6 +185,7 @@ pub fn read(path: &std::path::Path) -> Result<Document, String> {
                 if w == 0 || h == 0 || w > MAX_SIDE || h > MAX_SIDE {
                     return Err("The canvas size in this file is not valid or too big.".into());
                 }
+                dpi = get("xres").parse::<f32>().ok().filter(|d| (1.0..=2400.0).contains(d)).map(|d| d.round() as u32);
             }
             "stack" => {
                 if stack.is_empty() {
@@ -289,6 +291,9 @@ pub fn read(path: &std::path::Path) -> Result<Document, String> {
         rev: 1,
     });
     let mut doc = Document::from_parts(w, h, pc, layers);
+    if let Some(d) = dpi {
+        doc.meta.dpi = d;
+    }
     super::project::ensure_usable(&mut doc);
     Ok(doc)
 }
