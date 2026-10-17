@@ -1135,3 +1135,33 @@ fn filter_screens() {
     h.state_mut().draw_mut().open_filter("blur");
     assert!(!h.state().draw_mut_ref().filter_open_now());
 }
+
+#[test]
+fn shape_filter_screens() {
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    let (w, hh) = (3000u32, 4000u32);
+    {
+        let d = h.state_mut().draw_mut();
+        let img = image::RgbaImage::from_fn(w, hh, |x, y| {
+            let disc = (x as f32 - 1500.0).hypot(y as f32 - 1800.0) < 900.0;
+            if disc { image::Rgba([(x * 255 / w) as u8, 80, (y * 255 / hh) as u8, 255]) } else { image::Rgba([240, 220, 180, 255]) }
+        });
+        d.doc.layers[0].tiles = crate::files::tiles_from_rgba(&img, 0, 0, w, hh);
+        d.doc.layers[0].rev += 1;
+        d.doc.mark_all_dirty();
+    }
+    h.run_steps(3);
+    for (i, id) in ["cubes", "spheres", "triangles", "blocks", "illustrate"].iter().enumerate() {
+        h.state_mut().draw_mut().open_filter(id);
+        h.run_steps(2);
+        wait_until(&mut h, "the shape preview", |h| h.state().draw_mut_ref().filter_ready());
+        for _ in 0..8 {
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        save(&mut h, &format!("flt_shape_{}_{id}", i + 1));
+        h.state_mut().draw_mut().filter_ui_mut().open = false;
+        h.run_steps(2);
+    }
+}
