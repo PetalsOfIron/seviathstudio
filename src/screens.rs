@@ -1041,3 +1041,97 @@ fn trace_screens() {
     assert_eq!(d.doc.layers[0].kind, LayerKind::Raster);
     assert!(d.doc.layers[0].visible);
 }
+
+#[test]
+fn filter_screens() {
+    use crate::check::CheckView;
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    // a drawing: a red disc and a black bar on transparent
+    let (w, hh) = (3000u32, 4000u32);
+    {
+        let d = h.state_mut().draw_mut();
+        let img = image::RgbaImage::from_fn(w, hh, |x, y| {
+            let disc = (x as f32 - 1300.0).hypot(y as f32 - 1500.0) < 500.0;
+            let bar = (1900..2600).contains(&x) && (1400..1500).contains(&y);
+            if disc { image::Rgba([220, 40, 40, 255]) } else if bar { image::Rgba([10, 10, 10, 255]) } else { image::Rgba([0, 0, 0, 0]) }
+        });
+        d.doc.layers[0].tiles = crate::files::tiles_from_rgba(&img, 0, 0, w, hh);
+        d.doc.layers[0].rev += 1;
+        d.doc.mark_all_dirty();
+    }
+    h.run_steps(3);
+    let at = |h: &Harness<'_, SeviathApp>, x: i32, y: i32| crate::files::layer_rgba(&h.state().draw_mut_ref().doc.layers[0], x, y, 1, 1).get_pixel(0, 0).0;
+    assert_eq!(at(&h, 1300, 1000)[3], 0, "outside the disc (just above it)");
+
+    // Gaussian blur: the paint spreads past the old edge
+    h.state_mut().draw_mut().open_filter("blur");
+    h.run_steps(2);
+    h.state_mut().draw_mut().filter_ui_mut().set_param("radius", 40.0);
+    wait_until(&mut h, "the blur preview", |h| h.state().draw_mut_ref().filter_ready());
+    for _ in 0..12 {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    save(&mut h, "flt_01_blur_preview");
+    h.state_mut().draw_mut().test_apply_filter();
+    wait_until(&mut h, "the blur", |h| !h.state().draw_mut_ref().filter_open_now());
+    let edge = at(&h, 1300, 1000 - 5);
+    assert!(edge[3] > 30 && edge[3] < 255, "the blur reaches past the old edge of the disc: {edge:?}");
+    assert!(at(&h, 1300, 1500)[3] > 250, "the middle is still solid");
+    assert!(h.state().history().entries.last().unwrap().label.starts_with("Gaussian blur"), "{:?}", h.state().history().entries.last().map(|e| e.label.clone()));
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(3);
+    assert_eq!(at(&h, 1300, 995)[3], 0, "undo takes the blur away");
+
+    // a color adjustment: hue 120 degrees turns red into green
+    h.state_mut().draw_mut().open_filter("hsl");
+    h.run_steps(2);
+    h.state_mut().draw_mut().filter_ui_mut().set_param("hue", 120.0);
+    wait_until(&mut h, "the hue preview", |h| h.state().draw_mut_ref().filter_ready());
+    h.state_mut().draw_mut().test_apply_filter();
+    wait_until(&mut h, "the hue shift", |h| !h.state().draw_mut_ref().filter_open_now());
+    let c = at(&h, 1300, 1500);
+    assert!(c[1] > 180 && c[0] < 80, "the disc is green now: {c:?}");
+    assert_eq!(at(&h, 2200, 1450)[..3], [10, 10, 10], "the black bar stays black");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(3);
+
+    // the filter only touches the selection
+    h.key_press(Key::M);
+    stroke(&mut h, &[pos2(540.0, 300.0), pos2(640.0, 400.0), pos2(740.0, 480.0)]);
+    h.state_mut().draw_mut().open_filter("invert");
+    h.run_steps(2);
+    wait_until(&mut h, "the invert preview", |h| h.state().draw_mut_ref().filter_ready());
+    h.state_mut().draw_mut().test_apply_filter();
+    wait_until(&mut h, "invert", |h| !h.state().draw_mut_ref().filter_open_now());
+    let sel_b = h.state().draw_mut_ref().doc.selection.as_ref().and_then(|s| s.bounds()).unwrap();
+    assert!(sel_b.0 < 1300 && sel_b.2 > 1300 && sel_b.2 < 2540, "the selection holds the disc but not the end of the bar: {sel_b:?}");
+    let inside = at(&h, 1300, 1500);
+    assert!(inside[0] < 60 && inside[1] > 180 && inside[2] > 180, "inside the selection the red disc is inverted: {inside:?}");
+    assert_eq!(at(&h, 2570, 1450), [10, 10, 10, 255], "outside the selection nothing changed");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::D);
+    h.run_steps(3);
+
+    // curves editor, and the check views
+    h.state_mut().draw_mut().open_filter("curves");
+    h.run_steps(6);
+    save(&mut h, "flt_02_curves");
+    h.key_press(Key::Escape);
+    h.state_mut().draw_mut().filter_ui_mut().open = false;
+    h.run_steps(2);
+    h.state_mut().draw_mut().check = CheckView::Gray;
+    h.run_steps(4);
+    assert_eq!(h.state().draw_mut_ref().check_view(), CheckView::Gray);
+    save(&mut h, "flt_03_check_gray");
+    h.state_mut().draw_mut().check = CheckView::Deuteranopia;
+    h.run_steps(4);
+    save(&mut h, "flt_04_check_colorblind");
+    h.state_mut().draw_mut().check = CheckView::Normal;
+    h.run_steps(2);
+    // locked layers and pixel-less layers say why they can't be filtered
+    h.state_mut().draw_mut().doc.layers[0].locked = true;
+    h.state_mut().draw_mut().open_filter("blur");
+    assert!(!h.state().draw_mut_ref().filter_open_now());
+}

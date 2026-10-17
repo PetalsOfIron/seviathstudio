@@ -274,6 +274,7 @@ impl SeviathApp {
             ui.label(RichText::new("Studio").size(17.0).color(EMERALD));
             ui.add_space(10.0);
             self.file_menu(ui);
+            self.filter_menu(ui);
             ui.add_space(10.0);
 
             segmented(ui, &mut self.workspace, &[(Workspace::Character, "Character"), (Workspace::Design, "Design")]);
@@ -315,6 +316,25 @@ impl SeviathApp {
             });
         });
         snake::divider(ui.painter(), bar);
+    }
+
+    /// The Filter menu: every filter and color adjustment, opened in its window.
+    fn filter_menu(&mut self, ui: &mut Ui) {
+        ui.menu_button(RichText::new("Filter").color(TEXT), |ui| {
+            ui.set_min_width(220.0);
+            for (group, label) in crate::filters::Group::ALL {
+                ui.menu_button(label, |ui| {
+                    for def in crate::filters::FILTERS.iter().filter(|d| d.group == group) {
+                        if ui.button(def.label).on_hover_text(def.about).clicked() {
+                            self.tab = Tab::Draw;
+                            self.workspace = Workspace::Character;
+                            self.draw.open_filter(def.id);
+                            ui.close();
+                        }
+                    }
+                });
+            }
+        });
     }
 
     fn status_bar(&mut self, ui: &mut Ui) {

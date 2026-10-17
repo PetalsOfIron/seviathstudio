@@ -22,6 +22,7 @@ use crate::view::View;
 use crate::widgets::{self, icon_button, section_title, segmented};
 
 mod brushes;
+pub mod filters_ui;
 pub mod gradient_ui;
 mod layers;
 pub mod organizer;
@@ -150,6 +151,8 @@ pub struct DrawState {
     rand: random_ui::RandState,
     vec: vector_ui::VecState,
     trace: trace_ui::TraceUi,
+    filter: filters_ui::FilterUi,
+    pub check: crate::check::CheckView,
     color_open: bool,
     layer_rows: Vec<(LayerId, Rect)>, // where each layer row was drawn last frame
     view: View,
@@ -218,6 +221,8 @@ impl Default for DrawState {
             rand: random_ui::RandState::default(),
             vec: vector_ui::VecState::default(),
             trace: trace_ui::TraceUi::default(),
+            filter: filters_ui::FilterUi::default(),
+            check: crate::check::CheckView::Normal,
             color_open: true,
             layer_rows: Vec::new(),
             view: View::default(),
@@ -339,6 +344,7 @@ impl DrawState {
         self.layer_quick_bar(ui.ctx());
         self.randomizer_window(ui.ctx());
         self.trace_window(ui.ctx());
+        self.filter_window(ui.ctx());
         self.track_history(ui.ctx(), frame_before);
     }
 
@@ -423,6 +429,7 @@ impl DrawState {
         self.grad.edit = None;
         self.vec.reset();
         self.trace.open = false;
+        self.filter.open = false;
         self.stroke = None;
         self.pen_stroke = false;
         self.pending = None;
@@ -962,6 +969,9 @@ impl DrawState {
         }
 
         // ---- Draw.
+        if self.renderer.set_check(self.check) {
+            self.doc.mark_all_dirty();
+        }
         self.renderer.sync(&ctx, &mut self.doc);
         let p = ui.painter_at(rect);
         if self.set.show_scales {
@@ -1057,7 +1067,7 @@ impl DrawState {
 
     /// Floating bar at the bottom of the canvas: zoom, fit, rotation and mirror.
     fn view_bar(&mut self, ui: &mut Ui, rect: Rect) {
-        let bar = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 30.0), vec2(404.0, 38.0));
+        let bar = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 30.0), vec2(436.0, 38.0));
         let c = rect.center();
         ui.scope_builder(UiBuilder::new().max_rect(bar), |ui| {
             egui::Frame::new()
@@ -1106,6 +1116,7 @@ impl DrawState {
                             self.view.flip = !self.view.flip;
                         }
                         self.symmetry_button(ui);
+                        self.check_button(ui);
                     });
                 });
         });
