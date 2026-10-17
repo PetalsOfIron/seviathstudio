@@ -33,6 +33,7 @@ mod random_ui;
 mod references;
 mod tools;
 pub mod actions_ui;
+pub mod panels_ui;
 pub mod sign_ui;
 pub mod text_ui;
 pub mod trace_ui;
@@ -163,6 +164,11 @@ pub struct DrawState {
     mixchart: mixchart_ui::MixChart,
     text_ui: text_ui::TextUi,
     sign_replay: Option<sign_ui::SignReplay>,
+    /// Where the panels are, and the workspaces (layout.rs).
+    pub layouts: crate::layout::Layouts,
+    layouts_saved: crate::layout::Layouts,
+    /// Keep layouts in their file (off in tests).
+    pub persist_layouts: bool,
     /// Where the reference pop-out window was last drawn.
     ref_rect: Rect,
     ref_view_rect: Option<Rect>, // where the docked reference picture was drawn last frame
@@ -236,6 +242,9 @@ impl Default for DrawState {
             mixchart: Default::default(),
             text_ui: Default::default(),
             sign_replay: None,
+            layouts: Default::default(),
+            layouts_saved: Default::default(),
+            persist_layouts: false,
             ref_rect: Rect::NOTHING,
             ref_view_rect: None,
             open_requests: Vec::new(),
@@ -305,7 +314,6 @@ impl DrawState {
         // left-handed: tools and brushes on the right, color and layers on the left
         let lefty = self.set.left_handed;
         let near = |id: &str| if lefty { Panel::right(id.to_owned()) } else { Panel::left(id.to_owned()) };
-        let far = |id: &str| if lefty { Panel::left(id.to_owned()) } else { Panel::right(id.to_owned()) };
 
         near("draw_tools")
             .exact_size(56.0)
@@ -313,25 +321,7 @@ impl DrawState {
             .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(8, 10)))
             .show(ui, |ui| self.tool_strip(ui));
 
-        near("draw_brush")
-            .resizable(true)
-            .default_size(270.0)
-            .size_range(230.0..=440.0)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::same(10)))
-            .show(ui, |ui| {
-                if matches!(self.tool, Tool::Select | Tool::Lasso | Tool::Fill | Tool::Move | Tool::Gradient | Tool::Pen) {
-                    egui::ScrollArea::vertical().id_salt("tool_options").show(ui, |ui| self.tool_options(ui));
-                } else {
-                    self.brush_panel(ui);
-                }
-            });
-
-        far("draw_right")
-            .resizable(true)
-            .default_size(290.0)
-            .size_range(250.0..=480.0)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::same(10)))
-            .show(ui, |ui| self.right_panel(ui));
+        self.dock_panels(ui);
 
         let [r, g, b] = self.set.canvas_bg;
         egui::CentralPanel::default()
@@ -344,7 +334,9 @@ impl DrawState {
         self.randomizer_window(ui.ctx());
         self.trace_window(ui.ctx());
         self.filter_window(ui.ctx());
+        self.loose_panels(ui.ctx());
         self.sign_replay_step(ui.ctx());
+        self.save_layouts(ui.ctx());
         self.track_history(ui.ctx(), frame_before);
     }
 
@@ -545,25 +537,6 @@ impl DrawState {
                 std::mem::swap(&mut self.primary, &mut self.secondary);
                 self.hex = hex_of(self.primary);
             }
-        });
-    }
-
-    fn right_panel(&mut self, ui: &mut Ui) {
-        egui::ScrollArea::vertical().id_salt("right_col").show(ui, |ui| {
-            card().show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                self.color_section(ui);
-            });
-            ui.add_space(8.0);
-            card().show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                self.subview_section(ui);
-            });
-            ui.add_space(8.0);
-            card().show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                self.layers_section(ui);
-            });
         });
     }
 

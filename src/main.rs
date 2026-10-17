@@ -26,6 +26,7 @@ mod refs;
 mod select;
 mod icons;
 mod layerfilter;
+mod layout;
 mod light;
 mod lightfx;
 mod material;

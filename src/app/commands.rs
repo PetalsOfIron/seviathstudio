@@ -107,6 +107,11 @@ impl SeviathApp {
     }
 
     #[cfg(test)]
+    pub fn test_run_action_now(&mut self, id: &str) {
+        self.run_action(id, &eframe::egui::Context::default());
+    }
+
+    #[cfg(test)]
     pub fn test_run_action(&mut self, id: &str, ctx: &egui::Context) {
         self.run_action(id, ctx);
     }

@@ -495,6 +495,7 @@ fn organizer_screens() {
 
     // make room for the layer rows
     h.state_mut().draw_mut().set_color_open(false);
+    h.state_mut().draw_mut().layouts.working.set_mode(crate::layout::PanelId::SubView, crate::layout::Mode::Hidden);
     h.run_steps(3);
     // Ctrl + click on rows picks several layers; a batch edit hits all of them and is one history step.
     let rows: Vec<Pos2> = ["Hair front", "Skin"]
@@ -1511,6 +1512,9 @@ fn text_screens() {
         (d.doc.index_of(d.active_id()).unwrap(), d.doc.layers.len())
     };
     assert_eq!(n, before + 1, "a text layer was made");
+    // the words box has the keyboard now (typing is one undo step); Escape lets go of it
+    h.key_press(Key::Escape);
+    h.run_steps(3);
     assert!(h.state().draw_mut_ref().doc.layers[i].text.is_some() && h.state().draw_mut_ref().doc.layers[i].kind == LayerKind::Vector);
     assert!(h.state().history().entries.last().unwrap().label.contains("text"), "{:?}", h.state().history().entries.last().map(|e| e.label.clone()));
     // the words, in Latvian too, bent along an arch
@@ -1794,4 +1798,57 @@ fn palette_and_shortcut_screens() {
     h.state_mut().test_open_shortcuts_page();
     h.run_steps(4);
     save(&mut h, "keys_02_shortcuts_page");
+}
+
+#[test]
+fn panel_and_workspace_screens() {
+    use crate::layout::{Mode, PanelId, Side};
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 1300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    let width_with_panels = h.state().draw_mut_ref().test_canvas_width();
+    assert_eq!(h.state().draw_mut_ref().layouts.working.column(Side::Right), [PanelId::Color, PanelId::SubView, PanelId::Layers]);
+    // the little buttons above a panel: Float turns a docked panel into a window over the canvas
+    let n = h.get_all_by_label("Float").count();
+    assert!(n >= 3, "every docked panel has a Float button: {n}");
+    h.get_all_by_label("Float").nth(2).unwrap().click();
+    h.run_steps(4);
+    let floating: Vec<PanelId> = PanelId::ALL.iter().copied().filter(|p| h.state().draw_mut_ref().layouts.working.get(*p).mode == Mode::Floating).collect();
+    assert_eq!(floating.len(), 1, "{floating:?}");
+    // "Dock" in that window puts it back
+    h.get_by_label("Dock").click();
+    h.run_steps(4);
+    assert!(PanelId::ALL.iter().all(|p| h.state().draw_mut_ref().layouts.working.get(*p).mode == Mode::Docked));
+    // its own window (shown inside this window when the computer can't make a second one)
+    h.state_mut().draw_mut().layouts.working.set_mode(PanelId::SubView, Mode::Window);
+    h.run_steps(4);
+    assert_eq!(h.state().draw_mut_ref().layouts.working.column(Side::Right), [PanelId::Color, PanelId::Layers]);
+    save(&mut h, "panels_01_window_mode");
+    h.state_mut().draw_mut().layouts.working.dock(PanelId::SubView, Side::Right);
+    // Layers on the left of the brush
+    h.state_mut().draw_mut().layouts.working.dock(PanelId::Layers, Side::Left);
+    h.run_steps(4);
+    assert_eq!(h.state().draw_mut_ref().layouts.working.column(Side::Left), [PanelId::Brush, PanelId::Layers]);
+    save(&mut h, "panels_02_layers_left");
+    // workspaces: Focus hides everything and the canvas grows
+    assert!(h.state().draw_mut_ref().layouts.changed());
+    h.state_mut().draw_mut().layouts.switch("Focus");
+    h.run_steps(4);
+    let focus_w = h.state().draw_mut_ref().test_canvas_width();
+    assert!(focus_w > width_with_panels + 300.0, "{focus_w} vs {width_with_panels}");
+    save(&mut h, "panels_03_focus");
+    // the palette brings a panel back
+    h.state_mut().test_run_action_now("panel.layers");
+    h.run_steps(4);
+    assert_eq!(h.state().draw_mut_ref().layouts.working.get(PanelId::Layers).mode, Mode::Docked);
+    // keep my own layout, switch away and back
+    h.state_mut().draw_mut().layouts.save_as("My layout").unwrap();
+    h.state_mut().test_run_action_now("ws.next");
+    h.run_steps(2);
+    assert_ne!(h.state().draw_mut_ref().layouts.active, "My layout");
+    h.state_mut().draw_mut().layouts.switch("My layout");
+    h.run_steps(2);
+    assert_eq!(h.state().draw_mut_ref().layouts.working.get(PanelId::Layers).mode, Mode::Docked);
+    assert_eq!(h.state().draw_mut_ref().layouts.working.get(PanelId::Color).mode, Mode::Hidden);
 }

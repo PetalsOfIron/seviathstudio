@@ -31,7 +31,7 @@ impl Tool {
 
 /// Does this action belong to the Draw tab?
 pub fn is_draw_action(id: &str) -> bool {
-    ["tool.", "color.", "brush.", "view.", "sel.", "layer."].iter().any(|p| id.starts_with(p))
+    ["tool.", "color.", "brush.", "view.", "sel.", "layer.", "panel.", "ws."].iter().any(|p| id.starts_with(p))
 }
 
 impl DrawState {
@@ -49,6 +49,9 @@ impl DrawState {
 
     /// Run one action of the Draw tab. False when it isn't one of ours.
     pub fn run_draw_action(&mut self, id: &str, ctx: &egui::Context) -> bool {
+        if self.run_layout_action(id) {
+            return true;
+        }
         if let Some(t) = TOOL_GROUPS.iter().flat_map(|g| g.iter().copied()).find(|t| t.action_id() == id) {
             self.tool = t;
             return true;
@@ -113,5 +116,10 @@ impl DrawState {
     #[cfg(test)]
     pub fn tool_name(&self) -> &'static str {
         self.tool.name()
+    }
+
+    #[cfg(test)]
+    pub fn test_canvas_width(&self) -> f32 {
+        self.canvas_rect.width()
     }
 }
