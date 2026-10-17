@@ -15,6 +15,7 @@ use crate::widgets::{self, icon_button, segmented, tab_button};
 
 mod files;
 mod newproject;
+mod signs;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -42,6 +43,7 @@ pub struct SeviathApp {
     pen: PenMonitor,
     notice: Option<(String, f64)>,
     files: files::FileState,
+    signs: signs::SignState,
 }
 
 impl SeviathApp {
@@ -78,6 +80,7 @@ impl SeviathApp {
             pen: PenMonitor::default(),
             notice: None,
             files: files::FileState::starting(persist && start_projects),
+            signs: Default::default(),
         }
     }
 
@@ -640,6 +643,7 @@ impl eframe::App for SeviathApp {
         self.account_window(&ctx);
         self.new_project_window(&ctx);
         self.project_info_window(&ctx);
+        self.signatures_window(&ctx);
         self.project_manager(&ctx);
         self.files_tick(&ctx);
         self.unsaved_dialog(&ctx);

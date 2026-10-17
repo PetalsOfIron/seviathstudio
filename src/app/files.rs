@@ -295,9 +295,14 @@ impl SeviathApp {
         let (w, h) = (self.draw.doc.w, self.draw.doc.h);
         let q = self.settings.jpeg_quality;
         let credit = self.settings.export_credit;
+        let rule = self.draw.doc.meta.auto_sign;
+        let sign = if rule.on { crate::signature::load_in(&crate::signature::dir(), rule.slot) } else { None };
         let label = format!("Exporting {}…", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
         self.start(label, move || {
-            let doc = doc_from_state(w, h, state);
+            let mut doc = doc_from_state(w, h, state);
+            if let Some(s) = &sign {
+                s.add_layer(&mut doc, &rule, "Signature");
+            }
             match kind_of(&path).as_str() {
                 "jpg" | "jpeg" => files::export_flat(&doc, &path, Flat::Jpeg, q, credit)?,
                 "webp" => files::export_flat(&doc, &path, Flat::Webp, q, credit)?,
@@ -788,6 +793,10 @@ impl SeviathApp {
             if item(ui, "Save as…", "Ctrl+Shift+S") {
                 ui.close();
                 self.save_as(None);
+            }
+            if item(ui, "Signatures…", "") {
+                ui.close();
+                self.open_signatures();
             }
             if item(ui, "Project info…", "") {
                 ui.close();

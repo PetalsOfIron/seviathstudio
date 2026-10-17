@@ -30,6 +30,7 @@ mod meta;
 mod oklab;
 mod pigment;
 mod settings;
+mod signature;
 mod shapes;
 mod settings_ui;
 mod snake;

@@ -32,6 +32,7 @@ pub mod organizer;
 mod random_ui;
 mod references;
 mod tools;
+pub mod sign_ui;
 pub mod text_ui;
 pub mod trace_ui;
 pub mod vector_ui;
@@ -179,6 +180,7 @@ pub struct DrawState {
     ref_popout: bool,
     mixchart: mixchart_ui::MixChart,
     text_ui: text_ui::TextUi,
+    sign_replay: Option<sign_ui::SignReplay>,
     /// Where the reference pop-out window was last drawn.
     ref_rect: Rect,
     ref_view_rect: Option<Rect>, // where the docked reference picture was drawn last frame
@@ -251,6 +253,7 @@ impl Default for DrawState {
             ref_popout: false,
             mixchart: Default::default(),
             text_ui: Default::default(),
+            sign_replay: None,
             ref_rect: Rect::NOTHING,
             ref_view_rect: None,
             open_requests: Vec::new(),
@@ -360,6 +363,7 @@ impl DrawState {
         self.randomizer_window(ui.ctx());
         self.trace_window(ui.ctx());
         self.filter_window(ui.ctx());
+        self.sign_replay_step(ui.ctx());
         self.track_history(ui.ctx(), frame_before);
     }
 
@@ -374,6 +378,7 @@ impl DrawState {
             || self.drag_layer.is_some()
             || self.renaming.is_some()
             || self.text_ui.typing
+            || self.sign_replay.is_some()
             || self.transforming()
             || self.vec.drawing();
         if busy {
