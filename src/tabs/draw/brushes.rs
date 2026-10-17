@@ -301,6 +301,8 @@ impl DrawState {
             }
         });
 
+        section(ui, "Gradient color", false, |ui| DrawState::gradient_brush_section(&mut self.grad, ui));
+
         section(ui, "Tip & shape", false, |ui| {
             row(ui, "Tip", "", |ui| {
                 let mut changed = false;

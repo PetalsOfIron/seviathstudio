@@ -75,6 +75,8 @@ pub struct Stroke {
     before: HashMap<TileKey, Option<TileData>>,
     /// Symmetry: every dab is also drawn at these mirror images.
     mirrors: Vec<Mirror>,
+    /// Colors along the stroke from a gradient (instead of one color).
+    gradient: Option<crate::gradient::StrokeGradient>,
 }
 
 fn rgb01(c: Color32) -> [f32; 3] {
@@ -162,9 +164,15 @@ impl Stroke {
             recent: Vec::new(),
             before: HashMap::new(),
             mirrors,
+            gradient: None,
         };
         st.stamp(doc, at, sample_all);
         st
+    }
+
+    /// Color the stroke with a gradient along its length (not for mixing brushes).
+    pub fn set_gradient(&mut self, g: Option<crate::gradient::StrokeGradient>) {
+        self.gradient = g;
     }
 
     /// New pen samples (document coordinates).
@@ -389,8 +397,12 @@ impl Stroke {
             self.mix_dab(doc, x, y, size.max(0.5), ang, press * dens, pt.p, sa);
             return;
         }
-        let color = self.jitter_color(self.color, d);
-        let alpha = self.s.flow * press * dens;
+        let (base, grad_alpha) = match &self.gradient {
+            Some(g) => g.at(d),
+            None => (self.color, 1.0),
+        };
+        let color = self.jitter_color(base, d);
+        let alpha = self.s.flow * press * dens * grad_alpha;
         if self.s.particles > 0 {
             let gap = self.s.particle_gap.clamp(0.0, 1.0);
             for _ in 0..self.s.particles {

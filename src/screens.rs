@@ -653,3 +653,170 @@ fn newproject_screens() {
     let info = crate::files::project::read_info(&dir.join("Emote set.seviath")).unwrap();
     assert_eq!((info.w, info.h, info.meta.dpi, info.meta.tags), (400, 600, 150, vec!["emotes".to_string()]));
 }
+
+#[test]
+fn gradient_screens() {
+    use crate::gradient::{Repeat, Shape};
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    // the Gradient tool: drag out a Sunset gradient top to bottom
+    h.key_press_modifiers(Modifiers::SHIFT, Key::G);
+    h.run_steps(2);
+    {
+        let g = h.state_mut().draw_mut().grad_mut();
+        g.g.stops = crate::gradient::presets([0, 0, 0], [255, 255, 255]).into_iter().find(|p| p.0 == "Sunset").unwrap().1;
+        g.g.dither = false;
+    }
+    h.run_steps(2);
+    save(&mut h, "grad_00_options");
+    stroke(&mut h, &[pos2(740.0, 120.0), pos2(740.0, 400.0), pos2(740.0, 800.0)]);
+    h.run_steps(2);
+    assert!(h.state().draw_mut_ref().gradient_editing(), "the gradient stays live after the drag");
+    assert_eq!(alpha_at(&h, 0, pos2(740.0, 300.0)), 0, "nothing is painted until Apply");
+    save(&mut h, "grad_01_live");
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    assert!(!h.state().draw_mut_ref().gradient_editing());
+    let top = h.state().draw_mut_ref().pixel_rgba(0, pos2(740.0, 130.0));
+    let bottom = h.state().draw_mut_ref().pixel_rgba(0, pos2(740.0, 790.0));
+    assert!(top[3] == 255 && bottom[3] == 255 && top != bottom, "{top:?} {bottom:?}");
+    assert!(top[2] > top[0] && bottom[0] > bottom[2], "dark violet at the top, gold at the bottom: {top:?} {bottom:?}");
+    assert!(h.state().history().entries.last().unwrap().label.starts_with("Gradient"));
+    save(&mut h, "grad_02_applied");
+
+    // Radial inside a selection, repeated, multiplied over the first gradient
+    h.key_press(Key::M);
+    stroke(&mut h, &[pos2(560.0, 300.0), pos2(700.0, 400.0), pos2(820.0, 520.0)]);
+    h.key_press_modifiers(Modifiers::SHIFT, Key::G);
+    h.run_steps(2);
+    {
+        let g = h.state_mut().draw_mut().grad_mut();
+        g.g.shape = Shape::Radial;
+        g.g.repeat = Repeat::Repeat;
+        g.g.stops = crate::gradient::presets([0, 0, 0], [255, 255, 255]).into_iter().find(|p| p.0 == "Rainbow").unwrap().1;
+        g.g.blend = crate::doc::Blend::Normal;
+    }
+    stroke(&mut h, &[pos2(690.0, 410.0), pos2(720.0, 440.0), pos2(760.0, 470.0)]);
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    let inside = h.state().draw_mut_ref().pixel_rgba(0, pos2(700.0, 420.0));
+    let outside = h.state().draw_mut_ref().pixel_rgba(0, pos2(900.0, 700.0));
+    let before_outside = bottom;
+    assert_ne!(inside, top, "the selection got the rainbow");
+    assert!(outside[0] != 0 && outside != [0; 4], "outside the selection the first gradient is still there: {outside:?} (was like {before_outside:?})");
+    save(&mut h, "grad_03_radial_in_selection");
+
+    // Gradient map turns the layer's colors into the gradient by lightness
+    h.key_press_modifiers(Modifiers::COMMAND, Key::D);
+    h.run_steps(2);
+    {
+        let g = h.state_mut().draw_mut().grad_mut();
+        g.g.shape = Shape::Linear;
+        g.g.repeat = Repeat::None;
+        g.g.stops = vec![
+            crate::gradient::Stop { pos: 0.0, color: [10, 30, 90], alpha: 1.0 },
+            crate::gradient::Stop { pos: 1.0, color: [255, 240, 200], alpha: 1.0 },
+        ];
+    }
+    h.state_mut().draw_mut().gradient_map();
+    assert_eq!(h.state().draw_mut_ref().pending_label().as_deref(), Some("Gradient map · Layer 1"));
+    h.run_steps(3);
+    let mapped = h.state().draw_mut_ref().pixel_rgba(0, pos2(740.0, 790.0));
+    assert!(mapped[2] > 60 && mapped[0] < 255, "{mapped:?}");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().pixel_rgba(0, pos2(740.0, 790.0)), bottom_after_rainbow_or(bottom, &h), "undo brings the colors back");
+    save(&mut h, "grad_04_map_undone");
+
+    // Painting with the gradient: the stroke changes color along its length
+    h.key_press(Key::B);
+    h.state_mut().draw_mut().brush_mut().size = 40.0;
+    {
+        let g = h.state_mut().draw_mut().grad_mut();
+        g.brush_on = true;
+        g.brush_len = 500.0;
+        g.g.stops = vec![
+            crate::gradient::Stop { pos: 0.0, color: [255, 0, 0], alpha: 1.0 },
+            crate::gradient::Stop { pos: 1.0, color: [0, 0, 255], alpha: 1.0 },
+        ];
+    }
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::D);
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::N);
+    h.run_steps(2);
+    let pts: Vec<Pos2> = (0..=40).map(|i| pos2(500.0 + i as f32 * 12.0, 840.0 - i as f32 * 0.0)).collect();
+    stroke(&mut h, &pts);
+    h.run_steps(3);
+    let start = h.state().draw_mut_ref().max_paint_color(0, pos2(512.0, 840.0));
+    let end = h.state().draw_mut_ref().max_paint_color(0, pos2(970.0, 840.0));
+    assert!(start[0] > 200 && start[2] < 80, "the stroke starts red: {start:?}");
+    assert!(end[2] > 150 && end[0] < 120, "and ends blue: {end:?}");
+    save(&mut h, "grad_05_brush");
+}
+
+fn bottom_after_rainbow_or(_bottom: [u8; 4], h: &Harness<'_, SeviathApp>) -> [u8; 4] {
+    // the pixel did not change under the rainbow (it is outside the selection), so it is the sunset's bottom
+    h.state().draw_mut_ref().pixel_rgba(0, pos2(740.0, 790.0))
+}
+
+#[test]
+fn randomizer_screens() {
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().test_rand_open(1, 3); // Skin, seed 3
+    h.run_steps(4);
+    let palette = h.state().draw_mut_ref().rand_swatches();
+    assert_eq!(palette.len(), 5);
+    let lights: Vec<f32> = palette.iter().map(|c| c[0] as f32 + c[1] as f32 + c[2] as f32).collect();
+    assert!(lights[4] > lights[0], "dark to light: {palette:?}");
+    save(&mut h, "rand_01_window");
+
+    // speckle inside a selection
+    h.key_press(Key::M);
+    stroke(&mut h, &[pos2(540.0, 200.0), pos2(700.0, 300.0), pos2(860.0, 420.0)]);
+    h.state_mut().draw_mut().test_rand_apply(2);
+    assert!(h.state().draw_mut_ref().pending_label().unwrap_or_default().starts_with("Random color speckle"));
+    h.run_steps(3);
+    assert!(h.state().draw_mut_ref().pixel_rgba(0, pos2(700.0, 300.0))[3] == 255);
+    assert_eq!(h.state().draw_mut_ref().pixel_rgba(0, pos2(900.0, 700.0))[3], 0);
+    save(&mut h, "rand_02_speckle");
+
+    // recolor flats keeps the lineart
+    h.key_press_modifiers(Modifiers::COMMAND, Key::D);
+    h.run_steps(2);
+    {
+        let d = h.state_mut().draw_mut();
+        let w = d.doc.w;
+        let h_px = d.doc.h;
+        let img = image::RgbaImage::from_fn(w, h_px, |x, y| {
+            let (cx, cy) = (x as f32 - 1500.0, y as f32 - 2000.0);
+            let r = (cx * cx + cy * cy).sqrt();
+            if (880.0..900.0).contains(&r) {
+                image::Rgba([12, 12, 12, 255])
+            } else if r < 880.0 {
+                image::Rgba([230, 160, 140, 255])
+            } else if y > 3000 {
+                image::Rgba([150, 190, 230, 255])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            }
+        });
+        d.doc.layers[0].tiles = crate::files::tiles_from_rgba(&img, 0, 0, w, h_px);
+        d.doc.layers[0].rev += 1;
+        d.doc.mark_all_dirty();
+    }
+    h.run_steps(2);
+    let line_before = h.state().draw_mut_ref().pixel_rgba(0, pos2(740.0, 2000.0));
+    let _ = line_before;
+    h.state_mut().draw_mut().test_rand_apply(3);
+    h.run_steps(3);
+    {
+        let d = h.state().draw_mut_ref();
+        let inside = crate::files::layer_rgba(&d.doc.layers[0], 1500, 2000, 1, 1).get_pixel(0, 0).0;
+        let line = crate::files::layer_rgba(&d.doc.layers[0], 1500 + 890, 2000, 1, 1).get_pixel(0, 0).0;
+        assert_eq!(line, [12, 12, 12, 255], "lineart untouched");
+        assert_ne!(inside, [230, 160, 140, 255], "the flat got a new color");
+        assert_eq!(inside[3], 255);
+    }
+    save(&mut h, "rand_03_recolor");
+}

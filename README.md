@@ -2,7 +2,7 @@
 
 Open-source app to **draw, rig, animate and stream a 2D character from one file**, with reliable PSD export — made for VTuber artists, riggers and VTubers. Native Rust, built with [egui](https://github.com/emilk/egui).
 
-This is the Rust version. It is being built tab by tab: **Draw** works today (brush engine with 103 brushes and pen pressure, layers with blend modes, clipping and folders, undo history, selections, quick mask, move & transform, paint bucket with gap closing, live symmetry, layer filters and batch edits, print size (DPI), guides, project templates, projects with autosave, PSD / OpenRaster / Krita import and PSD / ORA / PNG / JPEG / WebP export); Parts, Rig, Physics, Animate and Stream follow.
+This is the Rust version. It is being built tab by tab: **Draw** works today (brush engine with 103 brushes and pen pressure, layers with blend modes, clipping and folders, undo history, selections, quick mask, move & transform, paint bucket with gap closing, live symmetry, layer filters and batch edits, print size (DPI), guides, project templates, gradients and a color randomizer, projects with autosave, PSD / OpenRaster / Krita import and PSD / ORA / PNG / JPEG / WebP export); Parts, Rig, Physics, Animate and Stream follow.
 
 ## Build and run
 
@@ -26,6 +26,7 @@ cargo test --release
 Runs the unit tests and a full UI run that paints, undoes and redoes with simulated input. Pictures land in `target/screens/`:
 
 - `01_draw.png` … `10_settings_canvas.png` — the app at each step of the UI run
+- `grad_00_options.png` … `grad_05_brush.png`, `rand_01_window.png` … `rand_03_recolor.png` — gradients and the color randomizer (`cargo test --release gradient_screens randomizer_screens`)
 - `np_01_dialog.png` … `np_05_manager_search.png` — New project, Project info and the manager (`cargo test --release newproject_screens`)
 - `org_01_picked.png`, `org_02_filters.png`, `org_03_quick_bar.png` — layer organizer (`cargo test --release organizer_screens`)
 - `sel_01_rectangle_clip.png` … `sel_05_wand.png` — selection, transform, quick mask, symmetry and wand (`cargo test --release selection_screens`)
@@ -47,6 +48,7 @@ Performance check: `cargo test --release bench_full_redraw -- --ignored --nocapt
 - `src/view.rs`, `src/canvas.rs` — zoom/pan/rotate/mirror and GPU tile display
 - `src/brush/` — brush engine: settings + presets, tips, textures, stroke engine (stabilizer, pressure, taper, mixing, whole-stroke edges)
 - `src/stroke.rs` — the live stroke buffer shown on top of its layer until the pen lifts
+- `src/gradient.rs`, `src/oklab.rs`, `src/randomizer.rs` + `tabs/draw/gradient_ui.rs`, `random_ui.rs` — gradients (shapes, stops, OKLab, gradient map, colors along a stroke) and the color randomizer
 - `src/layerfilter.rs` + `src/tabs/draw/organizer.rs` — layer filters (chips with NOT, sorting, saved filters), picking many layers, favorites, Oops restore, quick bar
 - `src/select.rs`, `src/fill.rs`, `src/transform.rs`, `src/symmetry.rs` — selections (masks, magic wand, grow/shrink/feather, outlines), paint bucket, move & transform, live symmetry; their panels are in `src/tabs/draw/tools.rs`
 - `src/theme.rs`, `src/snake.rs`, `src/icons.rs`, `src/widgets.rs`, `src/colorpick.rs` — the look: colors, snake art, icons and widgets, all drawn in code
