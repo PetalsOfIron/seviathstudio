@@ -22,6 +22,7 @@ mod refs;
 mod select;
 mod icons;
 mod layerfilter;
+mod light;
 mod meta;
 mod oklab;
 mod settings;

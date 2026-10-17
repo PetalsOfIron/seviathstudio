@@ -70,6 +70,8 @@ fn meta_same(a: &Layer, b: &Layer) -> bool {
         && a.blend == b.blend
         && a.fx == b.fx
         && a.adjust == b.adjust
+        && a.light == b.light
+        && a.depth == b.depth
 }
 
 fn tiles_same(a: &Layer, b: &Layer) -> bool {
@@ -98,6 +100,10 @@ pub fn describe(before: &DocState, after: &DocState) -> String {
             "New vector layer".into()
         } else if l.kind == LayerKind::Adjust {
             "New adjustment layer".into()
+        } else if l.kind == LayerKind::Light {
+            "New light layer".into()
+        } else if l.depth {
+            "New depth layer".into()
         } else {
             "New layer".into()
         };
@@ -136,6 +142,8 @@ pub fn describe(before: &DocState, after: &DocState) -> String {
             "Layer effects"
         } else if a.adjust != b.adjust {
             "Adjustment"
+        } else if a.light != b.light {
+            "Light"
         } else if a.blend != b.blend {
             "Blend mode"
         } else if a.clip != b.clip {

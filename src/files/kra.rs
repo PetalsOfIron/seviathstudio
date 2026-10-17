@@ -167,6 +167,8 @@ fn layer(id: LayerId, parent: Option<LayerId>, name: String, kind: LayerKind) ->
         vector: None,
         fx: Vec::new(),
         adjust: None,
+        light: None,
+        depth: false,
         rev: 1,
     }
 }

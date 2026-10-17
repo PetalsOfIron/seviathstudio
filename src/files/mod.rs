@@ -171,6 +171,21 @@ pub fn bake(mut doc: Document) -> Document {
         l.fx.clear();
         l.rev += 1;
     }
+    // light layers become plain layers with the shading drawn in; depth layers stay as hidden layers
+    let lights: Vec<usize> = (0..doc.layers.len()).filter(|&i| doc.layers[i].kind == LayerKind::Light).collect();
+    for i in lights {
+        let keys: Vec<TileKey> = (0..ty).flat_map(|y| (0..tx).map(move |x| (x, y))).collect();
+        let baked: Vec<(TileKey, Vec<Color32>)> =
+            keys.into_par_iter().filter_map(|k| doc.light_pixels(&doc.layers[i], k).map(|px| (k, px.into_iter().map(blend::from_px).collect()))).collect();
+        let l = &mut doc.layers[i];
+        l.kind = LayerKind::Raster;
+        l.light = None;
+        l.tiles = baked.into_iter().filter(|(_, px)| px.iter().any(|c| c.a() != 0)).map(|(k, px)| (k, Arc::new(px))).collect();
+        l.rev += 1;
+    }
+    for l in doc.layers.iter_mut().filter(|l| l.depth) {
+        l.visible = false;
+    }
     let len = doc.layers.len();
     let adjusts: Vec<usize> = (0..len).rev().filter(|&i| doc.layers[i].kind == LayerKind::Adjust).collect();
     for ia in adjusts {

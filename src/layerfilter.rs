@@ -85,7 +85,7 @@ impl ChipKind {
             ChipKind::Empty => match l.kind {
                 LayerKind::Raster | LayerKind::Vector => l.tiles.is_empty(),
                 LayerKind::Group => !has_children,
-                LayerKind::Paper | LayerKind::Adjust => false,
+                LayerKind::Paper | LayerKind::Adjust | LayerKind::Light => false,
             },
             ChipKind::Favorite => l.fav,
             ChipKind::Blend(b) => l.blend == b,
