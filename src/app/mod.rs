@@ -15,6 +15,7 @@ use crate::widgets::{self, icon_button, segmented, tab_button};
 
 mod commands;
 mod files;
+mod layoutmenu;
 mod fontmaker;
 mod newproject;
 mod recording;
@@ -52,6 +53,7 @@ pub struct SeviathApp {
     rec: recording::RecUi,
     work: worklog::WorkClock,
     palette: commands::Palette,
+    layout_name: String,
 }
 
 impl SeviathApp {
@@ -68,6 +70,8 @@ impl SeviathApp {
         let start_projects = settings.start_with_projects;
         let mut draw = DrawState::default();
         if persist {
+            draw.layouts = crate::layout::load();
+            draw.persist_layouts = true;
             draw.refs = crate::refs::RefStore::load_saved();
         }
         Self {
@@ -93,6 +97,7 @@ impl SeviathApp {
             rec: Default::default(),
             work: Default::default(),
             palette: Default::default(),
+            layout_name: String::new(),
         }
     }
 
@@ -253,6 +258,7 @@ impl SeviathApp {
             ui.add_space(10.0);
             self.file_menu(ui);
             self.filter_menu(ui);
+            self.layout_menu(ui);
             ui.add_space(10.0);
 
             segmented(ui, &mut self.workspace, &[(Workspace::Character, "Character"), (Workspace::Design, "Design")]);

@@ -85,6 +85,14 @@ pub const ACTIONS: &[ActionDef] = &[
     a("win.signatures", "Signatures", "Windows", ""),
     a("win.fonts", "Font from my drawings", "Windows", ""),
     a("win.work", "Work history", "Windows", ""),
+    // panels and workspaces
+    a("panel.brush", "Show or hide the brush panel", "Panels", ""),
+    a("panel.color", "Show or hide the color panel", "Panels", ""),
+    a("panel.subview", "Show or hide the sub view", "Panels", ""),
+    a("panel.layers", "Show or hide the layers panel", "Panels", ""),
+    a("ws.next", "Next workspace", "Panels", ""),
+    a("ws.prev", "Previous workspace", "Panels", ""),
+    a("ws.reset", "Put the panels back as in this workspace", "Panels", ""),
     // tabs
     t("tab.1", "Go to the first tab", "Tabs", "Ctrl+1"),
     t("tab.2", "Go to the second tab", "Tabs", "Ctrl+2"),
