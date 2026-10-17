@@ -290,7 +290,7 @@ pub fn page(ui: &mut Ui, page: Page, s: &mut Settings, pen: &mut PenMonitor) {
                 s.navigator_fps = d.navigator_fps;
             }
         }
-        Page::Shortcuts => shortcuts(ui),
+        Page::Shortcuts => shortcuts(ui, s),
         Page::Info => info(ui),
     }
 }
@@ -480,60 +480,101 @@ pub fn open_folder(dir: &std::path::Path) {
     let _ = std::process::Command::new(cmd).arg(dir).spawn();
 }
 
-fn shortcuts(ui: &mut Ui) {
-    section_title(ui, "Keyboard");
-    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-        egui::Grid::new("keys").striped(true).spacing(vec2(24.0, 4.0)).show(ui, |ui| {
-            for (k, what) in [
-                ("Ctrl+Z", "Undo in this tab"),
-                ("Ctrl+Alt+Z", "Undo everything (newest first, any tab)"),
-                ("Ctrl+Y / Ctrl+Shift+Z", "Redo"),
-                ("Ctrl+H", "History"),
-                ("Ctrl+1 … Ctrl+6", "Switch tab"),
-                ("Ctrl+,", "Settings"),
-                ("Ctrl+N  ·  Ctrl+O", "New project  ·  Open"),
-                ("Ctrl+S  ·  Ctrl+Shift+S", "Save  ·  Save as"),
-                ("Ctrl+Shift+O", "Project manager"),
-                ("Ctrl+Shift+E", "Export (PNG, JPEG, WebP, PSD, ORA)"),
-                ("B / E / S", "Brush / Eraser / Smudge"),
-                ("G / Shift+G", "Fill / Gradient"),
-                ("I  ·  Alt + click", "Color picker"),
-                ("M / L / V", "Selection / Lasso / Move & transform"),
-                ("P / U / T", "Vector pen / Shapes / Text"),
-                ("H / Z", "Hand / Zoom"),
-                ("[ / ]", "Smaller / bigger brush"),
-                ("X", "Swap main and second color"),
-                ("Ctrl+Shift+N", "New layer"),
-                ("Ctrl+J", "Duplicate layer"),
-                ("Ctrl+E", "Merge down"),
-                ("Ctrl+G", "Put layer into a new folder"),
-                ("Ctrl+Alt+G", "Clipping mask on / off"),
-                ("Ctrl+L", "Quick layer bar at the pointer"),
-                ("Alt+L", "Search layers (type, arrows, Esc clears)"),
-                ("Ctrl + click  ·  Shift + click on layers", "Pick several layers  ·  pick a range"),
-                ("Ctrl+A  ·  Ctrl+D  ·  Ctrl+Shift+I", "Select all  ·  Deselect  ·  Invert selection"),
-                ("Shift / Alt while selecting", "Add to / take away from the selection"),
-                ("Q", "Quick mask (paint the selection)"),
-                ("Ctrl+T", "Move & transform (Enter applies, Esc cancels)"),
-                ("Delete  ·  Alt+Backspace", "Clear  ·  fill the selection"),
-                ("Shift + click", "Straight line from the last stroke"),
-                ("Shift+G, drag  ·  Enter  ·  Esc", "Gradient: lay out  ·  apply  ·  cancel"),
-                ("P, hold the pen still", "Vector pen: straighten a drawn shape"),
-                ("Delete  ·  Esc (Edit lines)", "Remove the node or line  ·  deselect"),
-                ("Space + drag  ·  middle drag", "Move the view"),
-                ("R + drag (Shift snaps)", "Rotate the view"),
-                ("Wheel  ·  Ctrl+= / Ctrl+-", "Zoom"),
-                ("Alt + wheel", "Rotate"),
-                ("Ctrl+0  ·  Ctrl+Alt+0", "Fit page  ·  100%"),
-                ("F", "Mirror the view"),
-            ] {
-                ui.label(RichText::new(k).monospace().color(VENOM));
-                ui.label(what);
-                ui.end_row();
-            }
+/// The keyboard page: every action of the action table with its key. Click a key, press the new one.
+fn shortcuts(ui: &mut Ui, s: &mut Settings) {
+    use crate::actions::{self, ACTIONS, Shortcut};
+    type Capture = (String, Option<Shortcut>);
+    let cap_id = egui::Id::new("shortcut_capture");
+    let mut cap: Option<Capture> = ui.data(|d| d.get_temp::<Option<Capture>>(cap_id)).flatten();
+    let mut note = String::new();
+    // the key that was pressed while listening
+    if let Some((id, pending)) = cap.clone() {
+        let pressed = ui.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),
+                _ => None,
+            })
         });
+        if let Some((key, mods)) = pressed {
+            ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Key { .. })));
+            if key == egui::Key::Escape {
+                cap = None;
+            } else if (key == egui::Key::Backspace || key == egui::Key::Delete) && mods.is_none() {
+                actions::assign(&mut s.shortcuts, &id, None);
+                cap = None;
+            } else {
+                let sc = Shortcut { mods, key };
+                let others = actions::conflicts(&s.shortcuts, &id, sc);
+                if !others.is_empty() && pending != Some(sc) {
+                    note = format!("{} is used by {}. Press it again to move it here, Esc to cancel.", sc.text(), others.iter().map(|d| d.name).collect::<Vec<_>>().join(", "));
+                    cap = Some((id, Some(sc)));
+                } else {
+                    actions::assign(&mut s.shortcuts, &id, Some(sc));
+                    cap = None;
+                }
+            }
+        }
+    }
+    section_title(ui, "Keyboard");
+    ui.horizontal(|ui| {
+        hint(ui, "Click a key, then press the new one. Backspace takes the key away. Ctrl+K opens the command palette.");
     });
-    hint(ui, "Changing keys comes with the command palette (Ctrl+K).");
+    if !note.is_empty() {
+        ui.label(RichText::new(&note).color(Color32::from_rgb(235, 170, 80)).size(12.0));
+    } else if let Some((_, Some(sc))) = &cap {
+        ui.label(RichText::new(format!("{} is taken. Press it again to move it here, Esc to cancel.", sc.text())).color(Color32::from_rgb(235, 170, 80)).size(12.0));
+    }
+    egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
+        let mut group = "";
+        for d in ACTIONS {
+            if d.group != group {
+                group = d.group;
+                ui.add_space(4.0);
+                ui.label(RichText::new(group).strong().color(TEXT_DIM));
+            }
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(vec2(230.0, 20.0), Sense::hover());
+                ui.painter().text(r.left_center(), Align2::LEFT_CENTER, d.name, FontId::proportional(13.0), TEXT);
+                let listening = cap.as_ref().is_some_and(|c| c.0 == d.id);
+                let key = actions::effective_text(&s.shortcuts, d.id);
+                let label = if listening { "Press keys…".to_owned() } else if key.is_empty() { "none".to_owned() } else { key };
+                if ui.add(egui::Button::new(RichText::new(label).monospace().color(if listening { Color32::from_rgb(235, 170, 80) } else { VENOM })).min_size(vec2(130.0, 20.0))).clicked() {
+                    cap = if listening { None } else { Some((d.id.to_owned(), None)) };
+                }
+                if s.shortcuts.contains_key(d.id) && ui.small_button("Reset").clicked() {
+                    s.shortcuts.remove(d.id);
+                }
+            });
+        }
+    });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if ui.add_enabled(!s.shortcuts.is_empty(), egui::Button::new("Reset all keys")).clicked() {
+            s.shortcuts.clear();
+            cap = None;
+        }
+    });
+    ui.add_space(4.0);
+    section_title(ui, "Mouse and pen");
+    egui::Grid::new("keys_mouse").striped(true).spacing(vec2(24.0, 4.0)).show(ui, |ui| {
+        for (k, what) in [
+            ("Ctrl + click  ·  Shift + click on layers", "Pick several layers  ·  pick a range"),
+            ("Shift / Alt while selecting", "Add to / take away from the selection"),
+            ("Shift + click", "Straight line from the last stroke"),
+            ("Shift+G, drag  ·  Enter  ·  Esc", "Gradient: lay out  ·  apply  ·  cancel"),
+            ("P, hold the pen still", "Vector pen: straighten a drawn shape"),
+            ("Delete  ·  Esc (Edit lines)", "Remove the node or line  ·  deselect"),
+            ("Enter  ·  Esc  ·  arrows", "Apply  ·  cancel  ·  nudge a floating picture"),
+            ("Space + drag  ·  middle drag", "Move the view"),
+            ("R + drag (Shift snaps)", "Rotate the view"),
+            ("Wheel  ·  Alt + wheel", "Zoom  ·  rotate"),
+        ] {
+            ui.label(RichText::new(k).monospace().color(VENOM));
+            ui.label(what);
+            ui.end_row();
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(cap_id, cap));
 }
 
 /// Graphics adapter name and backend, set once at startup (shown on the Info page for support).

@@ -70,45 +70,6 @@ impl DrawState {
         }
     }
 
-    /// Layer shortcuts: Ctrl+Shift+N new, Ctrl+J duplicate, Ctrl+E merge down, Ctrl+G folder, Ctrl+Alt+G clip.
-    pub(super) fn layer_shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() {
-            return;
-        }
-        let (quick, search) = ctx.input_mut(|i| (i.consume_key(Modifiers::COMMAND, Key::L), i.consume_key(Modifiers::ALT, Key::L)));
-        if quick {
-            self.lui.quick = Some(ctx.pointer_latest_pos().unwrap_or(pos2(400.0, 300.0)) + vec2(8.0, 8.0));
-            self.lui.quick_age = 0;
-        }
-        if search {
-            self.lui.focus_search = true;
-        }
-        let (new, dup, merge, clip, group) = ctx.input_mut(|i| {
-            (
-                i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::N),
-                i.consume_key(Modifiers::COMMAND, Key::J),
-                i.consume_key(Modifiers::COMMAND, Key::E),
-                i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::G),
-                i.consume_key(Modifiers::COMMAND, Key::G),
-            )
-        });
-        if new {
-            self.add_layer(LayerKind::Raster);
-        }
-        if dup {
-            self.duplicate_active();
-        }
-        if merge {
-            self.merge_down_active();
-        }
-        if clip {
-            self.toggle_clip_active();
-        }
-        if group {
-            self.group_active();
-        }
-    }
-
     /// What affects the composited picture; when it changes the canvas is redrawn.
     fn layer_sig(&self) -> (Vec<(LayerId, bool, u32, Blend, bool)>, Color32) {
         let v = self.doc.layers.iter().map(|l| (l.id, l.visible, l.opacity.to_bits(), l.blend, l.clip)).collect();

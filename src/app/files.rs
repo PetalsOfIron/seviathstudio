@@ -828,40 +828,4 @@ impl SeviathApp {
             }
         });
     }
-
-    pub(super) fn file_shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() {
-            return;
-        }
-        use egui::{Key, Modifiers};
-        let (mut new, mut open, mut manager, mut save, mut save_as, mut export) = (false, false, false, false, false, false);
-        ctx.input_mut(|i| {
-            manager = i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::O);
-            save_as = i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::S);
-            export = i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::E);
-            if !i.modifiers.shift {
-                // plain Ctrl+N must not eat Ctrl+Shift+N (new layer)
-                new = i.consume_key(Modifiers::COMMAND, Key::N);
-                open = i.consume_key(Modifiers::COMMAND, Key::O);
-                save = i.consume_key(Modifiers::COMMAND, Key::S);
-            }
-        });
-        if new {
-            self.open_new_project();
-        }
-        if manager {
-            self.files.manager_open = true;
-        }
-        if open {
-            self.open_dialog();
-        }
-        if save_as {
-            self.save_as(None);
-        } else if save {
-            self.save(None);
-        }
-        if export {
-            self.export_dialog();
-        }
-    }
 }

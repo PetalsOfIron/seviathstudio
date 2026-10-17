@@ -707,12 +707,6 @@ impl DrawState {
                     act.push(name);
                 }
             };
-            k(Modifiers::COMMAND | Modifiers::SHIFT, Key::I, "invert");
-            k(Modifiers::COMMAND, Key::A, "all");
-            k(Modifiers::COMMAND, Key::D, "deselect");
-            k(Modifiers::COMMAND, Key::T, "transform");
-            k(Modifiers::ALT, Key::Backspace, "fill");
-            k(Modifiers::NONE, Key::Q, "quickmask");
             if grading {
                 k(Modifiers::NONE, Key::Enter, "gapply");
                 k(Modifiers::NONE, Key::Escape, "gcancel");
@@ -740,14 +734,6 @@ impl DrawState {
         });
         for a in act {
             match a {
-                "invert" => self.invert_selection(),
-                "all" => self.select_all(),
-                "deselect" => self.deselect(),
-                "transform" => {
-                    self.start_transform();
-                }
-                "fill" => self.fill_selected(),
-                "quickmask" => self.toggle_quick_mask(),
                 "clear" => self.clear_selected(),
                 "vdelete" => self.vec_delete(),
                 "vdeselect" => self.vec_deselect(),

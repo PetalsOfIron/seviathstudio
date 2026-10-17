@@ -2,7 +2,7 @@
 // App shell: top bar with the logo, workspace switch and tabs; status bar; undo history;
 // settings (saved to disk); account window.
 
-use eframe::egui::{self, Align, Align2, CornerRadius, FontId, Key, Layout, Margin, Modifiers, Panel, RichText, Sense, Ui, vec2};
+use eframe::egui::{self, Align, Align2, CornerRadius, FontId, Layout, Margin, Panel, RichText, Sense, Ui, vec2};
 
 use crate::history::{History, TabUndo};
 use crate::icons::Icon;
@@ -13,6 +13,7 @@ use crate::tabs::{self, Tab, draw::DrawState};
 use crate::theme::{self, *};
 use crate::widgets::{self, icon_button, segmented, tab_button};
 
+mod commands;
 mod files;
 mod fontmaker;
 mod newproject;
@@ -50,6 +51,7 @@ pub struct SeviathApp {
     maker: fontmaker::FontMaker,
     rec: recording::RecUi,
     work: worklog::WorkClock,
+    palette: commands::Palette,
 }
 
 impl SeviathApp {
@@ -90,6 +92,7 @@ impl SeviathApp {
             maker: Default::default(),
             rec: Default::default(),
             work: Default::default(),
+            palette: Default::default(),
         }
     }
 
@@ -232,43 +235,6 @@ impl SeviathApp {
         self.history.jump_to(&mut self.draw.doc, n);
         self.draw.after_restore();
         self.say("Moved through history", now);
-    }
-
-    fn shortcuts(&mut self, ctx: &egui::Context) {
-        let now = ctx.input(|i| i.time);
-        let typing = ctx.egui_wants_keyboard_input();
-        let keys = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6];
-        let (mut undo_all, mut undo_tab, mut redo) = (false, false, false);
-        ctx.input_mut(|i| {
-            for (k, tab) in keys.iter().zip(Tab::ALL) {
-                if i.consume_key(Modifiers::COMMAND, *k) {
-                    self.tab = tab;
-                    self.workspace = Workspace::Character;
-                }
-            }
-            if i.consume_key(Modifiers::COMMAND, Key::Comma) {
-                self.settings_open = !self.settings_open;
-            }
-            if i.consume_key(Modifiers::COMMAND, Key::H) {
-                self.history_open = !self.history_open;
-            }
-            if typing {
-                return; // Ctrl+Z inside a text box undoes the text
-            }
-            // longest combinations first
-            undo_all = i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::Z);
-            redo = i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) || i.consume_key(Modifiers::COMMAND, Key::Y);
-            undo_tab = i.consume_key(Modifiers::COMMAND, Key::Z);
-        });
-        if undo_all {
-            self.undo_all(now);
-        }
-        if redo {
-            self.redo(now);
-        }
-        if undo_tab {
-            self.undo_tab(now);
-        }
     }
 
     // ---------- Bars ----------
@@ -619,8 +585,7 @@ impl eframe::App for SeviathApp {
         let ctx = ui.ctx().clone();
         self.apply_settings(&ctx);
         self.pen.update(&ctx);
-        self.shortcuts(&ctx);
-        self.file_shortcuts(&ctx);
+        self.command_keys(&ctx);
 
         Panel::top("top_bar")
             .exact_size(54.0)
@@ -658,6 +623,7 @@ impl eframe::App for SeviathApp {
         self.signatures_window(&ctx);
         self.font_maker_window(&ctx);
         self.recorder_window(&ctx);
+        self.palette_window(&ctx);
         self.recorder_tick(&ctx);
         self.work_history_window(&ctx);
         self.reference_clock(&ctx);

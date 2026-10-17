@@ -76,6 +76,7 @@ Performance check: `cargo test --release bench_full_redraw -- --ignored --nocapt
 - `src/filters.rs`, `src/check.rs` + `tabs/draw/filters_ui.rs` — filters (blurs, stylize, line art, levels, curves, HSL…) with live preview, and the check views
 - `src/trace.rs` + `tabs/draw/trace_ui.rs` — Auto-trace: pixel drawing to vector lines (center line, width as pressure) and color shapes
 - `src/fonts.rs`, `src/text.rs` + `tabs/draw/text_ui.rs` — text layers: fonts (app, installed, in-project), glyph outlines to vector shapes, bend on a curve
+- `src/actions.rs` + `app/commands.rs` + `tabs/draw/actions_ui.rs` — action table, command palette (Ctrl+K), remappable keys
 - `src/processlog.rs` + `app/worklog.rs` — process log (hash chain in the project file) and the Work history window
 - `src/recorder.rs` + `app/recording.rs` — recorder: films only the picture, H.264 to .mp4 on a background thread
 - `src/handfont.rs` + `app/fontmaker.rs` — font from your drawings (guided letters, tracing to outlines, .ttf writer)

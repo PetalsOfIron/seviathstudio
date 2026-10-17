@@ -8,10 +8,29 @@ use egui_kittest::Harness;
 use crate::app::SeviathApp;
 use crate::doc::Blend;
 
+/// Only one test at a time uses the graphics card (each one opens its own device, and the computer
+/// may have little video memory). The lock is held until the test ends.
+fn lock_gpu() -> std::sync::MutexGuard<'static, ()> {
+    static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    GPU.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn save(h: &mut Harness<'_, SeviathApp>, name: &str) {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("screens");
     std::fs::create_dir_all(&dir).unwrap();
-    let img = h.render().expect("render");
+    // many tests share the GPU, so a render can time out: try again a few times
+    let mut tries = 0;
+    let img = loop {
+        match h.render() {
+            Ok(img) => break img,
+            Err(e) if tries < 6 => {
+                tries += 1;
+                eprintln!("render retry {tries}: {e}");
+                std::thread::sleep(std::time::Duration::from_millis(250 * tries));
+            }
+            Err(e) => panic!("render: {e:?}"),
+        }
+    };
     let path = dir.join(format!("{name}.png"));
     img.save(&path).unwrap();
     println!("wrote {}", path.display());
@@ -51,6 +70,7 @@ fn wheel(h: &Harness<'_, SeviathApp>, at: Pos2, lines: f32, modifiers: Modifiers
 
 #[test]
 fn screens() {
+    let _gpu = lock_gpu();
     let mut h = Harness::builder()
         .with_size([1440.0, 900.0])
         .wgpu()
@@ -220,6 +240,7 @@ fn files_screens() {
     big.paper = Color32::from_rgb(40, 60, 50);
     project::save(big.w, big.h, big.paper, &big.layers, &[], &Default::default(), &dir.join("Night sky.seviath")).unwrap();
 
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.state_mut().settings_mut().projects_dir = dir.display().to_string();
     h.state_mut().files_mut().manager_open = true;
@@ -267,6 +288,7 @@ fn alpha_at(h: &Harness<'_, SeviathApp>, li: usize, at: Pos2) -> u8 {
 #[test]
 fn selection_screens() {
     use crate::symmetry::SymMode;
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     let labels = |h: &Harness<'_, SeviathApp>| h.state().history().entries.iter().map(|e| e.label.clone()).collect::<Vec<_>>();
@@ -392,6 +414,7 @@ fn selection_screens() {
 
 #[test]
 fn info_screen() {
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     h.state_mut().open_window(false, Some(crate::settings_ui::Page::Info));
@@ -411,6 +434,7 @@ fn organizer_screens() {
     use crate::doc::Blend;
     use crate::layerfilter::{ChipKind, SortBy};
     use crate::tabs::draw::organizer::SortBySafe;
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     let (hair_front, skin, eyes, folder);
@@ -581,6 +605,7 @@ fn organizer_screens() {
 fn newproject_screens() {
     use crate::files::template::{Background, NewProject};
     use crate::meta::{GuidePreset, ProjectMeta};
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     h.state_mut().files_mut().new_open = true;
@@ -657,6 +682,7 @@ fn newproject_screens() {
 #[test]
 fn gradient_screens() {
     use crate::gradient::{Repeat, Shape};
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     // the Gradient tool: drag out a Sunset gradient top to bottom
@@ -761,6 +787,7 @@ fn bottom_after_rainbow_or(_bottom: [u8; 4], h: &Harness<'_, SeviathApp>) -> [u8
 
 #[test]
 fn randomizer_screens() {
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     h.state_mut().draw_mut().test_rand_open(1, 3); // Skin, seed 3
@@ -825,6 +852,7 @@ fn randomizer_screens() {
 fn vector_screens() {
     use crate::doc::LayerKind;
     use crate::vector::{EraseMode, LineEnds};
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     let labels = |h: &Harness<'_, SeviathApp>| h.state().history().entries.iter().map(|e| e.label.clone()).collect::<Vec<_>>();
@@ -973,6 +1001,7 @@ fn wait_until(h: &mut Harness<'_, SeviathApp>, what: &str, ok: impl Fn(&Harness<
 fn trace_screens() {
     use crate::doc::LayerKind;
     use crate::trace::TraceMode;
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     // a pixel drawing: a thick ring, a bar and a red blob
@@ -1045,6 +1074,7 @@ fn trace_screens() {
 #[test]
 fn filter_screens() {
     use crate::check::CheckView;
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     // a drawing: a red disc and a black bar on transparent
@@ -1138,6 +1168,7 @@ fn filter_screens() {
 
 #[test]
 fn shape_filter_screens() {
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     let (w, hh) = (3000u32, 4000u32);
@@ -1170,6 +1201,7 @@ fn shape_filter_screens() {
 fn effects_screens() {
     use crate::doc::LayerKind;
     use crate::effects::{Effect, FxKind, Place};
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     let (w, hh) = (3000u32, 4000u32);
@@ -1223,6 +1255,7 @@ fn effects_screens() {
 #[test]
 fn effects_panel_screens() {
     use crate::effects::Effect;
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 1500.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     h.state_mut().draw_mut().doc.layers[0].fx = vec![Effect::presets().remove(0), Effect::presets().remove(2)];
@@ -1235,6 +1268,7 @@ fn effects_panel_screens() {
 
 #[test]
 fn reference_window_resizes_from_every_side() {
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     {
@@ -1267,6 +1301,7 @@ fn reference_window_resizes_from_every_side() {
 #[test]
 fn color_profile_screens() {
     use crate::colorprofiles::Proof;
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     {
@@ -1306,6 +1341,7 @@ fn color_profile_screens() {
 #[test]
 fn light_and_depth_screens() {
     use crate::doc::LayerKind;
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 1500.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     {
@@ -1361,6 +1397,7 @@ fn light_and_depth_screens() {
 
 #[test]
 fn mixing_chart_screens() {
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     let cols = [
@@ -1381,6 +1418,7 @@ fn mixing_chart_screens() {
 
 #[test]
 fn material_screens() {
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 1500.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     {
@@ -1407,6 +1445,7 @@ fn material_screens() {
 
 #[test]
 fn my_brushes_save_import_and_stamp() {
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     let dir = std::env::temp_dir().join(format!("seviath_mybrush_{}", std::process::id()));
@@ -1447,6 +1486,7 @@ fn my_brushes_save_import_and_stamp() {
 #[test]
 fn my_brush_panel_screens() {
     use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 1300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     h.get_by_label("My brush").click();
@@ -1457,6 +1497,7 @@ fn my_brush_panel_screens() {
 #[test]
 fn text_screens() {
     use crate::doc::LayerKind;
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 1300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     h.key_press(Key::T);
@@ -1518,6 +1559,7 @@ fn text_screens() {
 #[test]
 fn signature_screens() {
     use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 1300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     h.state_mut().test_open_signatures();
@@ -1575,6 +1617,7 @@ fn signature_screens() {
 #[test]
 fn font_maker_screens() {
     use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 1300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     h.state_mut().test_open_font_maker();
@@ -1623,6 +1666,7 @@ fn font_maker_screens() {
 #[test]
 fn recorder_screens() {
     use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 1300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     h.state_mut().test_open_recorder();
@@ -1662,6 +1706,7 @@ fn recorder_screens() {
 
 #[test]
 fn work_history_screens() {
+    let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1440.0, 1300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     stroke(&mut h, &[pos2(560.0, 300.0), pos2(700.0, 330.0), pos2(820.0, 300.0)]);
@@ -1703,3 +1748,50 @@ fn work_history_screens() {
     assert_eq!(log.verify(), Ok(()));
 }
 
+
+#[test]
+fn palette_and_shortcut_screens() {
+    use crate::doc::LayerKind;
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 1300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    // Ctrl+K opens the palette, typing narrows it, Enter runs the first match
+    h.key_press_modifiers(Modifiers::COMMAND, Key::K);
+    h.run_steps(3);
+    let before = h.state().draw_mut_ref().doc.layers.len();
+    h.event(Event::Text("new lay".into()));
+    h.run_steps(3);
+    save(&mut h, "keys_01_palette");
+    h.key_press(Key::Enter);
+    h.run_steps(4);
+    assert_eq!(h.state().draw_mut_ref().doc.layers.len(), before + 1, "the palette made a layer");
+    // keys still work: B / E pick tools, Ctrl+Shift+N makes a layer
+    h.key_press(Key::E);
+    h.run_steps(2);
+    assert_eq!(h.state().draw_mut_ref().tool_name(), "Eraser");
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::N);
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().doc.layers.len(), before + 2);
+    assert_eq!(h.state().draw_mut_ref().doc.layers[0].kind, LayerKind::Raster);
+    // change the Brush key to Shift+B: the old key stops, the new one works
+    h.state_mut().test_set_shortcut("tool.brush", "Shift+B");
+    h.run_steps(2);
+    h.key_press(Key::B);
+    h.run_steps(2);
+    assert_eq!(h.state().draw_mut_ref().tool_name(), "Eraser", "plain B no longer picks the brush");
+    h.key_press_modifiers(Modifiers::SHIFT, Key::B);
+    h.run_steps(2);
+    assert_eq!(h.state().draw_mut_ref().tool_name(), "Brush");
+    // moving a key to an action that has it takes it away from the other one
+    h.state_mut().test_set_shortcut("tool.eraser", "Shift+B");
+    assert_eq!(h.state().test_shortcut("tool.brush"), "");
+    assert_eq!(h.state().test_shortcut("tool.eraser"), "Shift+B");
+    // Alt+L is the layer search, not the Lasso tool (it takes the keyboard, so it goes last)
+    h.key_press_modifiers(Modifiers::ALT, Key::L);
+    h.run_steps(2);
+    assert_ne!(h.state().draw_mut_ref().tool_name(), "Lasso");
+    // the Shortcuts page
+    h.state_mut().test_open_shortcuts_page();
+    h.run_steps(4);
+    save(&mut h, "keys_02_shortcuts_page");
+}
