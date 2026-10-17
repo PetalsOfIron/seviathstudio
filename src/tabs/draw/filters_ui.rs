@@ -9,6 +9,7 @@ use eframe::egui::{self, Align2, Color32, ColorImage, CornerRadius, RichText, Se
 
 use super::{DrawState, checker};
 use crate::check::CheckView;
+use crate::colorprofiles::{self, Proof};
 use crate::doc::{LayerId, LayerKind};
 use crate::filters::{self, FILTERS, FilterDef, Group, Kind, Params};
 use crate::icons::Icon;
@@ -44,6 +45,8 @@ pub struct FilterUi {
     redraw: bool,
     applying: Option<Receiver<image::RgbaImage>>,
     pub check_open: bool,
+    /// Share of the drawing's colors that can't be printed (after "Count").
+    pub share: Option<f32>,
 }
 
 impl Default for FilterUi {
@@ -68,6 +71,7 @@ impl Default for FilterUi {
             redraw: false,
             applying: None,
             check_open: false,
+            share: None,
         }
     }
 }
@@ -316,7 +320,7 @@ impl DrawState {
 
     /// The eye button in the view bar: black & white, inverted and color-blindness views.
     pub(super) fn check_button(&mut self, ui: &mut Ui) {
-        let on = self.check != CheckView::Normal;
+        let on = self.check != CheckView::Normal || self.proof != Proof::Off || self.doc.meta.rgb_profile != "srgb";
         let tip = format!("Check view: {}", CheckView::ALL.iter().find(|c| c.0 == self.check).map(|c| c.1).unwrap_or(""));
         let r = icon_button(ui, Icon::Eye, on || self.filter.check_open, 28.0, &tip);
         if r.clicked() {
@@ -343,6 +347,33 @@ impl DrawState {
                         }
                     }
                 });
+                ui.add_space(6.0);
+                section_title(ui, "Print proof");
+                let press = colorprofiles::press(&self.doc.meta.cmyk_profile);
+                ui.label(RichText::new(format!("{} · {}", press.name, colorprofiles::Intent::from_id(&self.doc.meta.intent).id())).size(11.5).color(TEXT_DIM));
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                    for (p, label, about) in Proof::ALL {
+                        if widgets::chip(ui, label, self.proof == p).on_hover_text(about).clicked() {
+                            self.proof = p;
+                        }
+                    }
+                });
+                let c = self.primary;
+                let pr = colorprofiles::Printer::new(&self.doc.meta.cmyk_profile, colorprofiles::Intent::from_id(&self.doc.meta.intent));
+                let [cy, ma, ye, k] = pr.cmyk([c.r(), c.g(), c.b()]);
+                ui.label(RichText::new(format!("Your color prints as C {cy:.0}  M {ma:.0}  Y {ye:.0}  K {k:.0}  (ink {:.0}%)", cy + ma + ye + k)).size(11.5).color(TEXT_DIM));
+                ui.horizontal(|ui| {
+                    if widgets::chip(ui, "Count colors that can't print", false).on_hover_text("Looks at the whole drawing").clicked() {
+                        let img = crate::files::thumbnail(&self.doc, 512);
+                        self.filter.share = Some(colorprofiles::unprintable_share(&img, &self.doc.meta.cmyk_profile, colorprofiles::Intent::from_id(&self.doc.meta.intent)));
+                    }
+                    if let Some(sh) = self.filter.share {
+                        ui.label(RichText::new(format!("{:.0}% of the drawing", sh * 100.0)).size(12.0).color(if sh > 0.05 { GOLD } else { VENOM }));
+                    }
+                });
+                let prof = colorprofiles::rgb_profile(&self.doc.meta.rgb_profile);
+                ui.label(RichText::new(format!("Colors are read as {}. Change the profile or the press in File, Project info.", prof.name)).size(11.0).color(TEXT_DIM));
             });
         self.filter.check_open = open;
     }

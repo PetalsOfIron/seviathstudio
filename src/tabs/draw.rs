@@ -154,6 +154,8 @@ pub struct DrawState {
     trace: trace_ui::TraceUi,
     filter: filters_ui::FilterUi,
     pub check: crate::check::CheckView,
+    /// Print proof on the canvas (display only).
+    pub proof: crate::colorprofiles::Proof,
     color_open: bool,
     layer_rows: Vec<(LayerId, Rect)>, // where each layer row was drawn last frame
     view: View,
@@ -226,6 +228,7 @@ impl Default for DrawState {
             trace: trace_ui::TraceUi::default(),
             filter: filters_ui::FilterUi::default(),
             check: crate::check::CheckView::Normal,
+            proof: crate::colorprofiles::Proof::Off,
             color_open: true,
             layer_rows: Vec::new(),
             view: View::default(),
@@ -449,10 +452,12 @@ impl DrawState {
     }
 
     #[cfg(test)]
+    #[cfg(test)]
     pub fn set_popout(&mut self, on: bool) {
         self.ref_popout = on;
     }
 
+    #[cfg(test)]
     pub fn show_references(&mut self) {
         self.subview_open = true;
         self.subview_tab = SubTab::References;
@@ -977,7 +982,14 @@ impl DrawState {
         }
 
         // ---- Draw.
-        if self.renderer.set_check(self.check) {
+        let look = crate::colorprofiles::Look {
+            check: self.check,
+            profile: self.doc.meta.rgb_profile.clone(),
+            proof: self.proof,
+            press: self.doc.meta.cmyk_profile.clone(),
+            intent: crate::colorprofiles::Intent::from_id(&self.doc.meta.intent),
+        };
+        if self.renderer.set_look(&look) {
             self.doc.mark_all_dirty();
         }
         self.renderer.sync(&ctx, &mut self.doc);

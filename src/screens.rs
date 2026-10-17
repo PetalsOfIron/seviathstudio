@@ -1263,3 +1263,42 @@ fn reference_window_resizes_from_every_side() {
     assert!(r2.height() > r1.height() + 50.0, "top edge: {r1:?} -> {r2:?}");
     save(&mut h, "ref_popout_bigger");
 }
+
+#[test]
+fn color_profile_screens() {
+    use crate::colorprofiles::Proof;
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    {
+        let d = h.state_mut().draw_mut();
+        let (w, hh) = (d.doc.w, d.doc.h);
+        let img = image::RgbaImage::from_fn(w, hh, |x, _| if x < w / 2 { image::Rgba([0, 255, 60, 255]) } else { image::Rgba([225, 170, 150, 255]) });
+        d.doc.layers[0].tiles = crate::files::tiles_from_rgba(&img, 0, 0, w, hh);
+        d.doc.layers[0].rev += 1;
+        d.doc.mark_all_dirty();
+    }
+    h.run_steps(4);
+    let shown = |h: &mut Harness<'_, SeviathApp>, x: u32| h.render().expect("render").get_pixel(x, 450).0;
+    let (left, right) = (620, 880);
+    let plain = [shown(&mut h, left), shown(&mut h, right)];
+    assert!(plain[0][1] > 240 && plain[0][0] < 15, "neon green as painted: {plain:?}");
+    save(&mut h, "cp_01_plain");
+    h.state_mut().draw_mut().proof = Proof::Print;
+    h.run_steps(4);
+    let printed = [shown(&mut h, left), shown(&mut h, right)];
+    assert!(printed[0][1] < plain[0][1] - 10 || printed[0][0] > 20, "neon green is dulled in the print preview: {printed:?}");
+    assert!((printed[1][0] as i32 - plain[1][0] as i32).abs() < 30, "a skin tone prints about as it looks: {printed:?}");
+    h.state_mut().draw_mut().proof = Proof::Warn;
+    h.state_mut().draw_mut().filter_ui_mut().check_open = true;
+    h.run_steps(4);
+    let warn = shown(&mut h, left);
+    assert!((warn[0] as i32 - 128).abs() < 6 && (warn[1] as i32 - 128).abs() < 6, "unprintable colors turn gray: {warn:?}");
+    save(&mut h, "cp_02_print_proof_warning");
+    h.state_mut().draw_mut().proof = Proof::Off;
+    h.state_mut().draw_mut().filter_ui_mut().check_open = false;
+    h.state_mut().draw_mut().doc.meta.rgb_profile = "p3".into();
+    h.run_steps(4);
+    let p3 = shown(&mut h, left);
+    assert_ne!(p3, plain[0], "the same numbers read as P3 look different on an sRGB screen");
+    save(&mut h, "cp_03_display_p3");
+}

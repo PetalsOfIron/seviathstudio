@@ -68,6 +68,8 @@ pub struct NewProject {
     pub bg: Background,
     pub guides: GuidePreset,
     pub rig_starter: bool,
+    /// Color profile id (see colorprofiles.rs).
+    pub rgb_profile: String,
     pub notes: String,
     /// Typed as "hair, commission".
     pub tags: String,
@@ -85,6 +87,7 @@ impl Default for NewProject {
             bg: Background::Paper([255, 255, 255]),
             guides: b.guides,
             rig_starter: b.rig,
+            rgb_profile: "srgb".into(),
             notes: String::new(),
             tags: String::new(),
         }
@@ -281,7 +284,7 @@ pub fn build(np: &NewProject) -> Document {
     }
     layers.push(paper);
     doc.layers = layers;
-    doc.meta = ProjectMeta { dpi: np.dpi, notes: np.notes.clone(), tags: parse_tags(&np.tags), guides: np.guides.build(w, h), ..Default::default() }.sanitized();
+    doc.meta = ProjectMeta { dpi: np.dpi, notes: np.notes.clone(), tags: parse_tags(&np.tags), guides: np.guides.build(w, h), rgb_profile: np.rgb_profile.clone(), ..Default::default() }.sanitized();
     doc.mark_all_dirty();
     doc
 }

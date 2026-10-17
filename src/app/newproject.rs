@@ -6,6 +6,7 @@ use eframe::egui::{self, Align2, RichText, vec2};
 
 use super::SeviathApp;
 use super::files::Pending;
+use crate::colorprofiles;
 use crate::files::{self, template};
 use crate::files::template::{BUILTIN, Background, DPI_CHOICES, NewProject, Template};
 use crate::meta::{Guide, GuidePreset, ProjectMeta, Unit, parse_tags, real_size};
@@ -167,6 +168,18 @@ impl SeviathApp {
                     ui.label(RichText::new("Changing DPI keeps the pixels and changes the print size. The DPI is written into PNG, JPEG, PSD and OpenRaster exports.").size(11.5).color(TEXT_DIM));
                     ui.add_space(4.0);
 
+                    section_title(ui, "Color profile");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                        for p in &colorprofiles::RGB_PROFILES {
+                            if widgets::chip(ui, p.name, f.rgb_profile == p.id).on_hover_text(p.about).clicked() {
+                                f.rgb_profile = p.id.into();
+                            }
+                        }
+                    });
+                    ui.label(RichText::new(colorprofiles::rgb_profile(&f.rgb_profile).about).size(11.5).color(TEXT_DIM));
+                    ui.add_space(4.0);
+
                     section_title(ui, "Background");
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
@@ -312,6 +325,41 @@ impl SeviathApp {
                 section_title(ui, "Print size");
                 dpi_row(ui, &mut d.meta.dpi);
                 ui.label(RichText::new(real_size(w, h, d.meta.dpi)).color(VENOM));
+                ui.add_space(4.0);
+
+                section_title(ui, "Color");
+                ui.label(RichText::new("How the colors of this drawing are meant to look.").size(11.5).color(TEXT_DIM));
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                    for p in &colorprofiles::RGB_PROFILES {
+                        if widgets::chip(ui, p.name, d.meta.rgb_profile == p.id).on_hover_text(p.about).clicked() {
+                            d.meta.rgb_profile = p.id.into();
+                        }
+                    }
+                });
+                ui.label(RichText::new(colorprofiles::rgb_profile(&d.meta.rgb_profile).about).size(11.5).color(TEXT_DIM));
+                if d.meta.rgb_profile != "srgb" {
+                    ui.checkbox(&mut d.meta.export_bake, "Turn into plain sRGB when exporting").on_hover_text("For apps and websites that ignore profiles. Off: the profile travels inside the PNG / JPEG file.");
+                }
+                ui.add_space(2.0);
+                ui.label(RichText::new("Print press (for the print proof in the eye menu)").size(12.0).color(TEXT_DIM));
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                    for p in &colorprofiles::PRESSES {
+                        if widgets::chip(ui, p.name, d.meta.cmyk_profile == p.id).on_hover_text(p.about).clicked() {
+                            d.meta.cmyk_profile = p.id.into();
+                        }
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                    for (i, id, label, about) in colorprofiles::Intent::ALL {
+                        if widgets::chip(ui, label, d.meta.intent == id).on_hover_text(about).clicked() {
+                            d.meta.intent = id.into();
+                            let _ = i;
+                        }
+                    }
+                });
                 ui.add_space(4.0);
 
                 section_title(ui, "Notes and tags");
