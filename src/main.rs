@@ -17,6 +17,7 @@ mod fonts;
 mod filters;
 mod gradient;
 mod files;
+mod handfont;
 mod history;
 mod randomizer;
 mod refs;
