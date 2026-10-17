@@ -255,6 +255,8 @@ pub fn page(ui: &mut Ui, page: Page, s: &mut Settings, pen: &mut PenMonitor) {
                 ui.add(egui::Slider::new(&mut s.jpeg_quality, 40..=100));
             });
             hint(ui, "Higher = sharper and bigger files. PNG and WebP are saved without any loss.");
+            ui.checkbox(&mut s.export_credit, "Note \"made with SeviathStudio\" in exported PNG files");
+            hint(ui, "Written as the software used, never as the author — the art is yours.");
             ui.checkbox(&mut s.start_with_projects, "Show the project manager when the app starts");
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("{} recent files remembered", s.recent.len())).color(TEXT_DIM));
@@ -269,6 +271,7 @@ pub fn page(ui: &mut Ui, page: Page, s: &mut Settings, pen: &mut PenMonitor) {
                 s.autosave_project_file = d.autosave_project_file;
                 s.jpeg_quality = d.jpeg_quality;
                 s.start_with_projects = d.start_with_projects;
+                s.export_credit = d.export_credit;
             }
         }
         Page::Performance => {

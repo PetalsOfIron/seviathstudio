@@ -3044,6 +3044,7 @@ dependencies = [
  "eframe",
  "egui_kittest",
  "image",
+ "png",
  "quick-xml 0.42.0",
  "rayon",
  "rfd",

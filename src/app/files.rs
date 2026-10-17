@@ -321,17 +321,18 @@ impl SeviathApp {
         let state = self.draw.doc.snapshot();
         let (w, h) = (self.draw.doc.w, self.draw.doc.h);
         let q = self.settings.jpeg_quality;
+        let credit = self.settings.export_credit;
         let label = format!("Exporting {}…", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
         self.start(label, move || {
             let doc = doc_from_state(w, h, state);
             match kind_of(&path).as_str() {
-                "jpg" | "jpeg" => files::export_flat(&doc, &path, Flat::Jpeg, q)?,
-                "webp" => files::export_flat(&doc, &path, Flat::Webp, q)?,
+                "jpg" | "jpeg" => files::export_flat(&doc, &path, Flat::Jpeg, q, credit)?,
+                "webp" => files::export_flat(&doc, &path, Flat::Webp, q, credit)?,
                 "psd" => std::fs::write(&path, psd::write(&doc)).map_err(|e| e.to_string())?,
                 "ora" => ora::write(&doc, &path)?,
                 _ => {
                     let p = if kind_of(&path) == "png" { path.clone() } else { path.with_extension("png") };
-                    files::export_flat(&doc, &p, Flat::Png, q)?;
+                    files::export_flat(&doc, &p, Flat::Png, q, credit)?;
                     return Ok(Done::Exported(p));
                 }
             }
