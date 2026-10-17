@@ -75,6 +75,7 @@ fn meta_same(a: &Layer, b: &Layer) -> bool {
         && a.material == b.material
         && a.lightfx == b.lightfx
         && a.solid == b.solid
+        && a.text == b.text
 }
 
 fn tiles_same(a: &Layer, b: &Layer) -> bool {
@@ -111,6 +112,8 @@ pub fn describe(before: &DocState, after: &DocState) -> String {
             "New material layer".into()
         } else if l.lightfx.is_some() {
             "New light effect layer".into()
+        } else if l.text.is_some() {
+            "New text layer".into()
         } else {
             "New layer".into()
         };
@@ -157,6 +160,8 @@ pub fn describe(before: &DocState, after: &DocState) -> String {
             "Light effect"
         } else if a.solid != b.solid {
             "Blocks light"
+        } else if a.text != b.text {
+            "Text"
         } else if a.blend != b.blend {
             "Blend mode"
         } else if a.clip != b.clip {

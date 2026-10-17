@@ -32,6 +32,7 @@ pub mod organizer;
 mod random_ui;
 mod references;
 mod tools;
+pub mod text_ui;
 pub mod trace_ui;
 pub mod vector_ui;
 
@@ -177,6 +178,7 @@ pub struct DrawState {
     pub refs: RefStore,
     ref_popout: bool,
     mixchart: mixchart_ui::MixChart,
+    text_ui: text_ui::TextUi,
     /// Where the reference pop-out window was last drawn.
     ref_rect: Rect,
     ref_view_rect: Option<Rect>, // where the docked reference picture was drawn last frame
@@ -248,6 +250,7 @@ impl Default for DrawState {
             refs: RefStore::in_memory(),
             ref_popout: false,
             mixchart: Default::default(),
+            text_ui: Default::default(),
             ref_rect: Rect::NOTHING,
             ref_view_rect: None,
             open_requests: Vec::new(),
@@ -370,6 +373,7 @@ impl DrawState {
             || self.stroke.is_some()
             || self.drag_layer.is_some()
             || self.renaming.is_some()
+            || self.text_ui.typing
             || self.transforming()
             || self.vec.drawing();
         if busy {
@@ -1034,6 +1038,7 @@ impl DrawState {
         }
         self.renderer.paint(&p, &self.view, &self.doc);
         self.reference_overlay(&p);
+        self.text_overlay(&p);
         if self.set.pixel_grid && self.view.zoom >= self.set.pixel_grid_from {
             self.pixel_grid(&p, rect);
         }

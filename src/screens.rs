@@ -1453,3 +1453,64 @@ fn my_brush_panel_screens() {
     h.run_steps(6);
     save(&mut h, "mb_01_my_brush_panel");
 }
+
+#[test]
+fn text_screens() {
+    use crate::doc::LayerKind;
+    let mut h = Harness::builder().with_size([1440.0, 1300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.key_press(Key::T);
+    h.run_steps(2);
+    let before = h.state().draw_mut_ref().doc.layers.len();
+    // a click on the canvas starts a text
+    stroke(&mut h, &[pos2(560.0, 520.0)]);
+    h.run_steps(4);
+    let (i, n) = {
+        let d = h.state().draw_mut_ref();
+        (d.doc.index_of(d.active_id()).unwrap(), d.doc.layers.len())
+    };
+    assert_eq!(n, before + 1, "a text layer was made");
+    assert!(h.state().draw_mut_ref().doc.layers[i].text.is_some() && h.state().draw_mut_ref().doc.layers[i].kind == LayerKind::Vector);
+    assert!(h.state().history().entries.last().unwrap().label.contains("text"), "{:?}", h.state().history().entries.last().map(|e| e.label.clone()));
+    // the words, in Latvian too, bent along an arch
+    {
+        let d = h.state_mut().draw_mut();
+        let t = d.doc.layers[i].text.as_mut().unwrap();
+        t.text = "Sveiki, Latvija!\nāčēģīķļņšūž".into();
+        t.size = 150.0;
+        t.color = [200, 60, 90];
+        t.bend = 0.35;
+        d.rebuild_text(i);
+    }
+    h.run_steps(4);
+    let painted = |h: &Harness<'_, SeviathApp>| h.state().draw_mut_ref().doc.layers[i].tiles.values().flat_map(|t| t.iter()).filter(|c| c.a() > 200).count();
+    assert!(painted(&h) > 5000, "the letters are painted: {}", painted(&h));
+    let sample = h.state().draw_mut_ref().doc.layers[i].tiles.values().flat_map(|t| t.iter()).find(|c| c.a() == 255).copied().unwrap();
+    assert!(sample.r() > 150 && sample.g() < 100, "in the chosen color: {sample:?}");
+    save(&mut h, "text_01_bent_latvian");
+    // dragging the text with the Text tool moves it
+    let x0 = h.state().draw_mut_ref().doc.layers[i].text.as_ref().unwrap().x;
+    stroke(&mut h, &[pos2(600.0, 570.0), pos2(640.0, 590.0), pos2(680.0, 610.0)]);
+    h.run_steps(3);
+    let x1 = h.state().draw_mut_ref().doc.layers[i].text.as_ref().unwrap().x;
+    assert!(x1 > x0 + 50.0, "dragged to the right: {x0} -> {x1}");
+    // a font kept in the project survives saving and opening
+    {
+        let d = h.state_mut().draw_mut();
+        let bytes = crate::fonts::load(crate::fonts::MONO, &[]).unwrap();
+        d.doc.meta.fonts.push(crate::fonts::ProjectFont { name: "My mono".into(), data: crate::brush::tipimage::base64_encode(&bytes) });
+        d.doc.layers[i].text.as_mut().unwrap().font = "My mono".into();
+        d.rebuild_text(i);
+        let path = std::env::temp_dir().join(format!("seviath_text_{}.seviath", std::process::id()));
+        crate::files::project::save(d.doc.w, d.doc.h, d.doc.paper, &d.doc.layers, &[], &d.doc.meta, &path).unwrap();
+        let back = crate::files::project::load(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        let bi = back.layers.iter().position(|l| l.text.is_some()).unwrap();
+        assert_eq!(back.layers[bi].text, d.doc.layers[i].text);
+        assert_eq!(back.meta.fonts.len(), 1, "the font file is inside the project");
+        assert!(back.layers[bi].tiles.values().flat_map(|t| t.iter()).any(|c| c.a() == 255), "and the text is painted after opening");
+    }
+    // undo takes the last change away
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(3);
+}

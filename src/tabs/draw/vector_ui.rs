@@ -108,7 +108,7 @@ impl DrawState {
     /// Index of the active layer when it is a vector layer.
     pub(super) fn vec_active_layer(&self) -> Option<usize> {
         let i = self.active_idx();
-        (self.doc.layers[i].kind == LayerKind::Vector).then_some(i)
+        (self.doc.layers[i].kind == LayerKind::Vector && self.doc.layers[i].text.is_none()).then_some(i)
     }
 
     pub(super) fn vec_tool_active(&self) -> bool {
@@ -125,6 +125,8 @@ impl DrawState {
             None
         } else if l.locked {
             Some("This layer is locked.")
+        } else if l.text.is_some() {
+            Some("This is a text layer: change it with the Text tool (T).")
         } else if l.kind == LayerKind::Vector {
             Some("This is a vector layer: draw with the vector pen (P), cut with the eraser.")
         } else {
@@ -139,6 +141,9 @@ impl DrawState {
     /// Can a vector stroke start on the active layer? Err gives the reason.
     pub(super) fn vec_can_start(&self) -> Result<(), &'static str> {
         let l = &self.doc.layers[self.active_idx()];
+        if l.text.is_some() {
+            return Err("This is a text layer: change it with the Text tool.");
+        }
         match self.tool {
             Tool::Pen if l.kind != LayerKind::Vector => Ok(()), // a vector layer is made for it
             _ if l.locked => Err("This layer is locked."),
