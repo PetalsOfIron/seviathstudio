@@ -21,10 +21,12 @@ pub enum Group {
     Dashes,
     Mixing,
     Wet,
+    Hair,
+    Skin,
 }
 
 impl Group {
-    pub const ALL: [(Group, &'static str, &'static str); 12] = [
+    pub const ALL: [(Group, &'static str, &'static str); 14] = [
         (Group::Shape, "Shape", "The tip: its form, roundness, angle and spacing"),
         (Group::Edges, "Edges", "Edge type, wet rim and grain"),
         (Group::Texture, "Texture", "Paper texture and how strongly it shows"),
@@ -37,11 +39,9 @@ impl Group {
         (Group::Dashes, "Dashes", "Dashed lines"),
         (Group::Mixing, "Mixing", "Color mixing and real paint"),
         (Group::Wet, "Wet", "Water, bleed, pooling and granulation"),
+        (Group::Hair, "Hair", "Strands, clumps, curl, flyaways and combing"),
+        (Group::Skin, "Skin", "Shade edge, warmth, dot patches and texture-keeping blends"),
     ];
-
-    pub fn label(self) -> &'static str {
-        Self::ALL.iter().find(|g| g.0 == self).map(|g| g.1).unwrap_or("")
-    }
 }
 
 fn pick<T: Copy>(r: &mut Rng, items: &[T]) -> T {
@@ -170,6 +170,33 @@ pub fn randomize(s: &mut BrushSettings, groups: &[Group], seed: u32) {
                 s.dip = pick(&mut r, &[Dip::Gradual, Dip::Once, Dip::Every]);
                 s.dip_every = between(&mut r, 100.0, 700.0);
             }
+            Group::Hair => {
+                if chance(&mut r, 0.3) {
+                    s.strands = 4 + (r.next() * 28.0) as u32;
+                    s.strand_width = between(&mut r, 0.03, 0.08);
+                    s.strand_fill = if chance(&mut r, 0.3) { between(&mut r, 0.1, 0.5) } else { 0.0 };
+                    s.clump = between(&mut r, 0.0, 0.9);
+                    s.clump_count = 1 + (r.next() * 6.0) as u32;
+                    s.curl = if chance(&mut r, 0.5) { between(&mut r, 0.1, 0.9) } else { 0.0 };
+                    s.curl_len = between(&mut r, 50.0, 220.0);
+                    s.strand_wobble = between(&mut r, 0.0, 0.6);
+                    s.flyaways = if chance(&mut r, 0.5) { between(&mut r, 0.1, 1.0) } else { 0.0 };
+                    s.sheen = if chance(&mut r, 0.5) { between(&mut r, 0.2, 1.0) } else { 0.0 };
+                } else {
+                    s.strands = 0;
+                }
+                s.comb = if s.mix > 0.3 && chance(&mut r, 0.4) { between(&mut r, 0.3, 1.0) } else { 0.0 };
+                s.gloss = if chance(&mut r, 0.2) { between(&mut r, 0.2, 1.0) } else { 0.0 };
+            }
+            Group::Skin => {
+                s.terminator = if chance(&mut r, 0.3) { between(&mut r, 0.2, 1.0) } else { 0.0 };
+                s.tint = if chance(&mut r, 0.4) { between(&mut r, -0.8, 0.8) } else { 0.0 };
+                s.dot_cluster = if chance(&mut r, 0.4) { between(&mut r, 0.3, 1.0) } else { 0.0 };
+                let blends = s.mix > 0.3;
+                s.keep_detail = if blends && chance(&mut r, 0.5) { between(&mut r, 0.3, 1.0) } else { 0.0 };
+                s.sss = if chance(&mut r, 0.3) { between(&mut r, 0.2, 1.0) } else { 0.0 };
+                s.temp_blend = blends && chance(&mut r, 0.2);
+            }
             Group::Wet => {
                 if chance(&mut r, 0.4) {
                     s.water = between(&mut r, 0.2, 0.9);
@@ -187,6 +214,50 @@ pub fn randomize(s: &mut BrushSettings, groups: &[Group], seed: u32) {
     }
     s.seed = 1 + (r.next() * 99_000.0) as u32;
     keep_visible(s);
+    // the last word: really paint a short stroke, and if it is faint, simplify until it is not
+    let steps: [&dyn Fn(&mut BrushSettings); 4] = [
+        &|s| {
+            s.terminator = 0.0;
+            s.gap_len = 0.0;
+        },
+        &|s| {
+            s.tip = Tip::Round;
+            s.edge = Edge::Smooth;
+            s.texture = 0.0;
+            s.fray = Fray::Off;
+        },
+        &|s| {
+            s.water = 0.0;
+            s.bleed = 0.0;
+            s.comb = 0.0;
+            s.keep_detail = 0.0;
+        },
+        &|s| {
+            s.mix = 0.0;
+            s.dots = 0.0;
+        },
+    ];
+    for step in steps {
+        if test_stroke(s) >= 200 {
+            break;
+        }
+        step(s);
+    }
+}
+
+/// How many pixels a short test stroke of this brush paints on an empty canvas.
+fn test_stroke(s: &BrushSettings) -> usize {
+    use super::engine::{Sample, Stroke};
+    let mut d = crate::doc::Document::new(420, 200);
+    let none = |_: i32, _: i32| None;
+    let start = Sample { x: 50.0, y: 100.0, p: 0.4 };
+    let mut st = Stroke::begin(&mut d, 0, s, eframe::egui::Color32::from_rgb(190, 60, 60), false, 1.0, true, start, &none);
+    let pts: Vec<Sample> = (1..=50).map(|i| Sample { x: 50.0 + i as f32 * 6.0, y: 100.0 + (i as f32 * 0.15).sin() * 25.0, p: 0.4 + 0.6 * (i as f32 / 50.0) }).collect();
+    for c in pts.chunks(5) {
+        st.add(&mut d, c, &none);
+    }
+    st.finish(&mut d, &none);
+    d.layers[0].tiles.values().flat_map(|t| t.iter()).filter(|c| c.a() > 12).count()
 }
 
 /// Share of the tip's square that is covered (the worst of its variants).
@@ -195,7 +266,15 @@ fn tip_cover(s: &BrushSettings) -> f32 {
         .map(|v| {
             let t = super::tips::tip_mask(s, v);
             let m = &t.mips[0];
-            m.a.iter().sum::<f32>() / m.a.len().max(1) as f32
+            let remap = |a: f32| {
+                if s.terminator > 0.0 {
+                    let half = 0.5 * (1.0 - s.terminator.clamp(0.0, 1.0) * 0.92);
+                    super::noise::smoothstep(0.5 - half, 0.5 + half, a)
+                } else {
+                    a
+                }
+            };
+            m.a.iter().map(|a| remap(*a)).sum::<f32>() / m.a.len().max(1) as f32
         })
         .fold(f32::MAX, f32::min)
 }
@@ -203,6 +282,9 @@ fn tip_cover(s: &BrushSettings) -> f32 {
 /// Whatever came out, it must paint: no invisible or empty brush.
 fn keep_visible(s: &mut BrushSettings) {
     // some tip and edge pairs eat each other (thin strands with bristly edges leave nothing)
+    if tip_cover(s) < 0.02 {
+        s.terminator = 0.0;
+    }
     if tip_cover(s) < 0.02 {
         s.edge = Edge::Smooth;
         s.streaks = 0.0;
@@ -233,6 +315,14 @@ fn keep_visible(s: &mut BrushSettings) {
     if s.ends == Ends::Taper {
         s.tip_start = s.tip_start.max(0.04);
         s.tip_end = s.tip_end.max(0.04);
+    }
+    if s.strands > 0 && s.strand_fill < 0.1 {
+        s.strand_fill = 0.12; // a few thin strands alone can be hard to see
+    }
+    if s.mix > 0.0 {
+        // brushes that carry paint thin out quickly on bare canvas: keep them solid enough to see
+        s.water = s.water.min(0.4);
+        s.opacity_jitter = s.opacity_jitter.min(0.3);
     }
     s.pinch = s.pinch.min(0.9);
     s.size_jitter = s.size_jitter.min(0.7);
