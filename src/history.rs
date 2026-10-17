@@ -72,6 +72,7 @@ fn meta_same(a: &Layer, b: &Layer) -> bool {
         && a.adjust == b.adjust
         && a.light == b.light
         && a.depth == b.depth
+        && a.material == b.material
 }
 
 fn tiles_same(a: &Layer, b: &Layer) -> bool {
@@ -104,6 +105,8 @@ pub fn describe(before: &DocState, after: &DocState) -> String {
             "New light layer".into()
         } else if l.depth {
             "New depth layer".into()
+        } else if l.material.is_some() {
+            "New material layer".into()
         } else {
             "New layer".into()
         };
@@ -144,6 +147,8 @@ pub fn describe(before: &DocState, after: &DocState) -> String {
             "Adjustment"
         } else if a.light != b.light {
             "Light"
+        } else if a.material != b.material {
+            "Material"
         } else if a.blend != b.blend {
             "Blend mode"
         } else if a.clip != b.clip {

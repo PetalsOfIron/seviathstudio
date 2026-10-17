@@ -138,7 +138,7 @@ fn edt_line(f: &[f32], d: &mut [f32], v: &mut [usize], z: &mut [f32]) {
 }
 
 /// Distance (pixels) from every pixel to the nearest pixel where `feature` is true.
-fn distance_to(feature: &[bool], n: usize) -> Vec<f32> {
+pub(crate) fn distance_to(feature: &[bool], n: usize) -> Vec<f32> {
     const INF: f32 = 1e9;
     let mut g: Vec<f32> = feature.iter().map(|&b| if b { 0.0 } else { INF }).collect();
     let (mut d, mut v, mut z) = (vec![0f32; n], vec![0usize; n], vec![0f32; n + 1]);
