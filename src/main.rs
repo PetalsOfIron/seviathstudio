@@ -15,6 +15,7 @@ mod history;
 mod refs;
 mod select;
 mod icons;
+mod layerfilter;
 mod settings;
 mod settings_ui;
 mod snake;

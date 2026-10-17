@@ -23,6 +23,7 @@ use crate::widgets::{self, icon_button, section_title, segmented};
 
 mod brushes;
 mod layers;
+pub mod organizer;
 mod references;
 mod tools;
 
@@ -140,8 +141,7 @@ pub struct DrawState {
     layer_counter: usize,
     renaming: Option<(LayerId, String)>,
     drag_layer: Option<LayerId>,
-    layer_query: String,
-    tag_filter: u8,
+    lui: organizer::LayerUi,
     color_open: bool,
     layer_rows: Vec<(LayerId, Rect)>, // where each layer row was drawn last frame
     view: View,
@@ -205,8 +205,7 @@ impl Default for DrawState {
             layer_counter: 1,
             renaming: None,
             drag_layer: None,
-            layer_query: String::new(),
-            tag_filter: 0,
+            lui: organizer::LayerUi::default(),
             color_open: true,
             layer_rows: Vec::new(),
             view: View::default(),
@@ -275,9 +274,10 @@ impl DrawState {
 
         let frame_before = self.doc.snapshot();
         self.handle_dropped_files(ui.ctx());
+        // keys with Alt / Ctrl first: a plain tool key (like L) would also swallow Alt+L
+        self.layer_shortcuts(ui.ctx());
         self.tool_shortcuts(ui.ctx());
         self.shortcuts(ui.ctx());
-        self.layer_shortcuts(ui.ctx());
         // switching away from Move puts a floating picture down; a half-drawn polygon is dropped
         if self.tool != Tool::Move && self.transforming() {
             self.apply_transform();
@@ -320,6 +320,7 @@ impl DrawState {
             .show(ui, |ui| self.canvas(ui));
 
         self.reference_window(ui.ctx());
+        self.layer_quick_bar(ui.ctx());
         self.track_history(ui.ctx(), frame_before);
     }
 
@@ -351,6 +352,7 @@ impl DrawState {
     pub fn replace_document(&mut self, doc: Document) {
         self.doc = doc;
         self.tools.new_document(self.doc.w, self.doc.h);
+        self.lui = organizer::LayerUi::default();
         self.renderer.reset();
         self.view_ready = false;
         self.layer_counter = self.doc.layers.len();

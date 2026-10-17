@@ -149,7 +149,9 @@ fn load_any(path: &Path) -> Result<(Document, bool), String> {
 }
 
 fn doc_from_state(w: u32, h: u32, s: DocState) -> Document {
-    Document::from_parts(w, h, s.paper, s.layers)
+    let mut d = Document::from_parts(w, h, s.paper, s.layers);
+    d.filter_presets = s.presets;
+    d
 }
 
 /// Keep only the newest `keep` recovery copies.
@@ -299,7 +301,7 @@ impl SeviathApp {
         let generation = self.history.generation;
         let label = format!("Saving {}…", stem(&path));
         self.start(label, move || {
-            project::save(w, h, state.paper, &state.layers, &path)?;
+            project::save(w, h, state.paper, &state.layers, &state.presets, &path)?;
             Ok(Done::Saved { path, generation, then })
         });
     }
@@ -414,10 +416,10 @@ impl SeviathApp {
                 std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
                 let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
                 let file = dir.join(format!("{name} {stamp}.seviath"));
-                project::save(w, h, state.paper, &state.layers, &file)?;
+                project::save(w, h, state.paper, &state.layers, &state.presets, &file)?;
                 prune_recovery(&dir, keep);
                 if let Some(p) = also {
-                    project::save(w, h, state.paper, &state.layers, &p)?;
+                    project::save(w, h, state.paper, &state.layers, &state.presets, &p)?;
                     return Ok(Done::Saved { path: p, generation, then: None });
                 }
                 Ok(Done::Autosaved)

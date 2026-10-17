@@ -146,6 +146,7 @@ pub struct Layer {
     pub clip: bool,
     pub expanded: bool, // folders: open in the panel
     pub tag: u8,        // color label, 0 = none (see TAG_COLORS)
+    pub fav: bool,      // starred: shows in the favorites row
     pub opacity: f32,   // 0..100
     pub blend: Blend,
     pub tiles: HashMap<TileKey, TileData>,
@@ -185,6 +186,8 @@ pub struct Document {
     pub checker: usize,
     /// What is selected (None = nothing: tools work everywhere).
     pub selection: Option<crate::select::Selection>,
+    /// Saved layer-panel filters of this project.
+    pub filter_presets: Vec<crate::layerfilter::Preset>,
 }
 
 impl Document {
@@ -199,6 +202,7 @@ impl Document {
             next_id: 1,
             live: None,
             selection: None,
+            filter_presets: Vec::new(),
             checker: 16,
         };
         let l1 = d.new_layer("Layer 1", LayerKind::Raster);
@@ -211,7 +215,7 @@ impl Document {
     /// A document from loaded parts (files). Layer ids are kept; new ids continue after them.
     pub fn from_parts(w: u32, h: u32, paper: Color32, layers: Vec<Layer>) -> Self {
         let next_id = layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
-        let mut d = Self { w, h, paper, layers, dirty: HashSet::new(), revision: 0, next_id, live: None, checker: 16, selection: None };
+        let mut d = Self { w, h, paper, layers, dirty: HashSet::new(), revision: 0, next_id, live: None, checker: 16, selection: None, filter_presets: Vec::new() };
         d.mark_all_dirty();
         d
     }
@@ -233,6 +237,7 @@ impl Document {
             opacity: 100.0,
             blend: if kind == LayerKind::Group { Blend::PassThrough } else { Blend::Normal },
             tiles: HashMap::new(),
+            fav: false,
             rev: 0,
         }
     }
@@ -355,6 +360,20 @@ impl Document {
         id
     }
 
+    /// Insert a layer just below another one (same folder). The paper has nothing below it.
+    pub fn insert_below(&mut self, mut layer: Layer, target: LayerId) -> Option<LayerId> {
+        let i = self.index_of(target)?;
+        if self.layers[i].kind == LayerKind::Paper {
+            return None;
+        }
+        let at = i + self.block_len(i);
+        layer.parent = self.layers[i].parent;
+        let id = layer.id;
+        self.layers.insert(at, layer);
+        self.mark_all_dirty();
+        Some(id)
+    }
+
     /// Delete a layer (a folder goes with everything in it). The paper can't be deleted.
     pub fn delete(&mut self, id: LayerId) -> bool {
         let Some(i) = self.index_of(id) else { return false };
@@ -422,6 +441,7 @@ impl Document {
             self.next_id += 1;
             map.insert(c.id, new_id);
             c.id = new_id;
+            c.fav = false;
             if k == 0 {
                 c.name = format!("{} copy", c.name);
             } else {

@@ -205,6 +205,7 @@ pub fn read(path: &std::path::Path) -> Result<Document, String> {
                         opacity: (opacity * 100.0).clamp(0.0, 100.0),
                         blend: if attrs.get("isolation").map(|v| v == "isolate").unwrap_or(false) { op_from_name(&get("composite-op")) } else { Blend::PassThrough },
                         tiles: HashMap::new(),
+                        fav: false,
                         rev: 1,
                     });
                     if is_empty {
@@ -236,6 +237,7 @@ pub fn read(path: &std::path::Path) -> Result<Document, String> {
                     opacity: (opacity * 100.0).clamp(0.0, 100.0),
                     blend: op_from_name(&get("composite-op")),
                     tiles: HashMap::new(),
+                    fav: false,
                     rev: 1,
                 });
                 pending_png.push((id, src, get("x").parse().unwrap_or(0), get("y").parse().unwrap_or(0)));
@@ -283,6 +285,7 @@ pub fn read(path: &std::path::Path) -> Result<Document, String> {
         opacity: 100.0,
         blend: Blend::Normal,
         tiles: HashMap::new(),
+        fav: false,
         rev: 1,
     });
     let mut doc = Document::from_parts(w, h, pc, layers);

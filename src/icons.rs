@@ -54,6 +54,7 @@ pub enum Icon {
     RotateLeft,
     RotateRight,
     Symmetry,
+    Star,
 }
 
 pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
@@ -283,6 +284,17 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             line(&[(8.0, 1.5), (8.0, 14.5)], Stroke::new(w * 0.8, color.gamma_multiply(0.6)));
             closed(&[(6.0, 3.5), (6.0, 12.5), (1.5, 12.5)], st);
             p.add(Shape::convex_polygon(vec![at(10.0, 3.5), at(14.5, 12.5), at(10.0, 12.5)], color, Stroke::NONE));
+        }
+        Icon::Star => {
+            // five-point star: outline, with a filled middle
+            let pt = |i: usize, r: f32| {
+                let a = -PI / 2.0 + i as f32 * PI / 5.0;
+                (8.0 + r * a.cos(), 8.5 + r * a.sin())
+            };
+            let outline: Vec<(f32, f32)> = (0..10).map(|i| pt(i, if i % 2 == 0 { 7.0 } else { 3.0 })).collect();
+            closed(&outline, st);
+            let core: Vec<Pos2> = (0..5).map(|k| { let (x, y) = pt(k * 2 + 1, 3.0); at(x, y) }).collect();
+            p.add(Shape::convex_polygon(core, color, Stroke::NONE));
         }
         Icon::Symmetry => {
             // a dashed axis with two mirrored wings
