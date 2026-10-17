@@ -42,6 +42,10 @@ pub struct StrokeLook {
     pub lock_alpha: bool,
     /// Real paint: how this stroke meets the paint already on the layer.
     pub paint: Paint,
+    /// 0..1: water thins the paint
+    pub water: f32,
+    /// 0..1: pigment settles into the paper tooth
+    pub granulation: f32,
 }
 
 pub struct LiveStroke {
@@ -72,7 +76,7 @@ impl LiveStroke {
 /// Put the stroke's paint onto layer pixels.
 /// `mask`: selection coverage for this tile (None = everything).
 pub fn apply(dst: &mut [Color32], st: &StrokeTile, look: &StrokeLook, key: TileKey, mask: Option<&[u8]>) {
-    let tex = (look.texture > 0.0 || look.tex_color > 0.0).then(|| textures::get(look.tex_kind));
+    let tex = (look.texture > 0.0 || look.tex_color > 0.0 || look.granulation > 0.0).then(|| textures::get(look.tex_kind));
     let (ox, oy) = (key.0 as f32 * TILE as f32, key.1 as f32 * TILE as f32);
     let real = look.paint != Paint::Normal && !look.erase;
     let (mut mixer, base) = (Mixer::default(), real.then(|| Pigment::new(look.color)));
@@ -82,7 +86,7 @@ pub fn apply(dst: &mut [Color32], st: &StrokeTile, look: &StrokeLook, key: TileK
             continue;
         }
         let (x, y) = (ox + (i % TILE) as f32 + 0.5, oy + (i / TILE) as f32 + 0.5);
-        let mut a = s[3] * look.opacity;
+        let mut a = s[3] * look.opacity * (1.0 - 0.55 * look.water);
         if let Some(m) = mask {
             if m[i] == 0 {
                 continue;
@@ -103,6 +107,15 @@ pub fn apply(dst: &mut [Color32], st: &StrokeTile, look: &StrokeLook, key: TileK
                 };
                 let k = look.tex_color.min(1.0);
                 c = [0, 1, 2].map(|j| c[j] + (tc[j] - c[j]) * k);
+            }
+        }
+        if look.granulation > 0.0 && !look.erase {
+            // pigment settles into the valleys of the paper: denser and darker there, thin on the peaks
+            if let Some(t) = tex {
+                let v = 0.5 - textures::sample_a(t, x, y, look.tex_scale);
+                a = (a * (1.0 + look.granulation * 0.6 * v)).clamp(0.0, 1.0);
+                let k = 1.0 + look.granulation * 0.45 * v;
+                c = [(c[0] * k).clamp(0.0, 1.0), (c[1] * k).clamp(0.0, 1.0), (c[2] * k).clamp(0.0, 1.0)];
             }
         }
         if a <= 0.0 {
@@ -158,6 +171,8 @@ mod tests {
             erase: false,
             lock_alpha: false,
             paint: Paint::Normal,
+            water: 0.0,
+            granulation: 0.0,
         }
     }
 

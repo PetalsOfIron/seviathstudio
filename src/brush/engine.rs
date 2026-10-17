@@ -137,6 +137,8 @@ impl Stroke {
                     erase,
                     lock_alpha: doc.layers[li].lock_alpha,
                     paint: s.paint,
+                    water: s.water,
+                    granulation: s.granulation,
                 },
                 sel: doc.selection.clone(),
             });
@@ -226,6 +228,7 @@ impl Stroke {
         if self.direct {
             if let Some(i) = doc.index_of(self.layer) {
                 doc.layers[i].rev += 1;
+                crate::wet::finish_stroke(doc, i, &self.before, self.bbox, &self.s);
             }
             return StrokeResult { layer: self.layer, before: std::mem::take(&mut self.before) };
         }
@@ -240,6 +243,13 @@ impl Stroke {
             }
         }
         doc.commit_live();
+        if let Some(i) = doc.index_of(self.layer) {
+            if self.erase && self.s.blot {
+                crate::wet::blot(doc, i, &before, self.bbox, self.s.size);
+            } else if !self.erase {
+                crate::wet::finish_stroke(doc, i, &before, self.bbox, &self.s);
+            }
+        }
         StrokeResult { layer: self.layer, before }
     }
 
@@ -624,9 +634,10 @@ impl Stroke {
         let a = self.mix_p[3].clamp(0.0, 1.0);
         let mut rgb = if a > 0.001 { [self.mix_p[0] / a, self.mix_p[1] / a, self.mix_p[2] / a] } else { [0.0; 3] };
         rgb = self.jitter_color(rgb.map(|v| v.clamp(0.0, 1.0)), self.cur_d);
-        let f = self.s.opacity * self.s.flow * amount;
+        let f = self.s.opacity * self.s.flow * amount * (1.0 - 0.55 * self.s.water);
+        let gran = self.s.granulation;
         let lock_alpha = doc.layers[self.li].lock_alpha;
-        let tex = (self.s.texture > 0.0 && !self.s.dir_texture()).then(|| textures::get(self.s.tex_kind));
+        let tex = ((self.s.texture > 0.0 || gran > 0.0) && !self.s.dir_texture()).then(|| textures::get(self.s.tex_kind));
         let (texture, tex_scale) = (self.s.texture, self.s.tex_scale);
         let v = self.pick_variant();
         let (w, h) = (doc.w, doc.h);
@@ -650,13 +661,20 @@ impl Stroke {
                 if lock_alpha && !layer.tiles.contains_key(&key) {
                     return;
                 }
+                let mut dens = 1.0;
                 if let Some(t) = tex {
-                    m *= 1.0 - texture.min(1.0) * textures::sample_a(t, px as f32 + 0.5, py as f32 + 0.5, tex_scale);
+                    let sa = textures::sample_a(t, px as f32 + 0.5, py as f32 + 0.5, tex_scale);
+                    m *= 1.0 - texture.min(1.0) * sa;
+                    if gran > 0.0 {
+                        let v = 0.5 - sa;
+                        m = (m * (1.0 + gran * 0.6 * v)).clamp(0.0, 1.0);
+                        dens = 1.0 + gran * 0.45 * v;
+                    }
                 }
                 let tile = layer.tile_mut(key);
                 let o = blend::to_px(tile[i]);
                 let k = 1.0 - m;
-                let paint: Px = [rgb[0] * a, rgb[1] * a, rgb[2] * a, a];
+                let paint: Px = [(rgb[0] * dens).clamp(0.0, 1.0) * a, (rgb[1] * dens).clamp(0.0, 1.0) * a, (rgb[2] * dens).clamp(0.0, 1.0) * a, a];
                 let mut out = match &paint_pg {
                     Some(pg) if o[3] > 0.0 => mixer.mix_premult(o, paint, pg, m),
                     _ => [o[0] * k + paint[0] * m, o[1] * k + paint[1] * m, o[2] * k + paint[2] * m, o[3] * k + paint[3] * m],
@@ -1165,6 +1183,6 @@ mod tests {
             line_at(&mut d, &pr.s, false, 200.0);
             assert!(painted(&d) > 100, "{name} paints");
         }
-        assert!(presets().iter().filter(|p| !matches!(p.name, "Real oil" | "Real gouache" | "Glaze")).all(|p| p.s.paint == Paint::Normal), "nothing else changed");
+        assert!(presets().iter().filter(|p| !matches!(p.name, "Real oil" | "Real gouache" | "Glaze" | "Wet watercolor" | "Wet ink wash" | "Granulating wash")).all(|p| p.s.paint == Paint::Normal), "nothing else changed");
     }
 }

@@ -1002,6 +1002,10 @@ impl DrawState {
         }
 
         // ---- Draw.
+        self.doc.clock = ctx.input(|i| i.time);
+        if !self.doc.wet.is_empty() {
+            self.doc.wet.prune(self.doc.clock as f32);
+        }
         let viewing = self.doc.index_of(self.active).filter(|&i| self.doc.layers[i].depth).map(|i| self.doc.layers[i].id);
         if self.doc.depth_view != viewing {
             self.doc.depth_view = viewing;
