@@ -366,6 +366,7 @@ mod tests {
         d.layers[0].vector = Some(std::sync::Arc::new(VecData {
             strokes: vec![crate::vector::VecStroke { pts: vec![[10.0, 10.0, 0.5], [50.0, 40.0, 1.0], [90.0, 12.5, 0.25]], style: Default::default() }],
             width: 1.5,
+            fills: vec![crate::vector::VecFill { rings: vec![vec![[1.0, 1.0], [30.5, 2.0], [20.0, 25.0]]], color: [9, 80, 200] }],
         }));
         let mut f = LayerFilter { query: "hair".into(), label: 2, chips: Vec::new() };
         f.cycle(crate::layerfilter::ChipKind::Locked);

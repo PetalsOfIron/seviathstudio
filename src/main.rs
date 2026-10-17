@@ -28,6 +28,7 @@ mod stroke;
 mod symmetry;
 mod tabs;
 mod theme;
+mod trace;
 mod transform;
 mod vector;
 mod view;

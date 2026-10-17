@@ -955,3 +955,89 @@ fn vector_screens() {
     assert_eq!(h.state().draw_mut_ref().vector_strokes(0).len(), before - 1, "then the whole line");
     save(&mut h, "vec_04_after_delete");
 }
+
+/// Step until `ok` holds (a background job finished).
+fn wait_until(h: &mut Harness<'_, SeviathApp>, what: &str, ok: impl Fn(&Harness<'_, SeviathApp>) -> bool) {
+    for _ in 0..400 {
+        h.step();
+        if ok(h) {
+            h.step();
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    panic!("timed out waiting for: {what}");
+}
+
+#[test]
+fn trace_screens() {
+    use crate::doc::LayerKind;
+    use crate::trace::TraceMode;
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    // a pixel drawing: a thick ring, a bar and a red blob
+    let id = {
+        let d = h.state_mut().draw_mut();
+        let (w, hh) = (d.doc.w, d.doc.h);
+        let img = image::RgbaImage::from_fn(w, hh, |x, y| {
+            let (cx, cy) = (x as f32 - 1200.0, y as f32 - 1300.0);
+            let r = cx.hypot(cy);
+            let bar = (1800..2800).contains(&x) && (1280..1330).contains(&y);
+            let blob = (x as f32 - 2000.0).hypot(y as f32 - 2200.0) < 260.0;
+            if (500.0..540.0).contains(&r) || bar {
+                image::Rgba([20, 20, 30, 255])
+            } else if blob {
+                image::Rgba([220, 50, 50, 255])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            }
+        });
+        d.doc.layers[0].tiles = crate::files::tiles_from_rgba(&img, 0, 0, w, hh);
+        d.doc.layers[0].rev += 1;
+        d.doc.mark_all_dirty();
+        d.doc.layers[0].id
+    };
+    h.run_steps(2);
+    h.state_mut().draw_mut().test_open_trace(id);
+    wait_until(&mut h, "the preview", |h| h.state().draw_mut_ref().trace_ready());
+    save(&mut h, "trace_01_lines_preview");
+    h.state_mut().draw_mut().trace_mut().set_mode(TraceMode::Both);
+    wait_until(&mut h, "the preview of both", |h| h.state().draw_mut_ref().trace_ready());
+    for _ in 0..30 {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    save(&mut h, "trace_02_both_preview");
+
+    // trace for real: a new vector layer above, the original hidden
+    h.state_mut().draw_mut().trace_mut().set_mode(TraceMode::Both);
+    h.state_mut().draw_mut().test_trace_now();
+    wait_until(&mut h, "the trace", |h| !h.state().draw_mut_ref().trace_mut_ref().open);
+    {
+        let d = h.state().draw_mut_ref();
+        assert_eq!(d.doc.layers[0].kind, LayerKind::Vector, "the traced layer is on top");
+        assert!(d.doc.layers[0].name.ends_with("(traced)"));
+        let v = d.doc.layers[0].vector.as_ref().unwrap();
+        assert!(v.strokes.len() >= 2, "the ring and the bar: {}", v.strokes.len());
+        assert!(!v.fills.is_empty(), "the red blob");
+        assert!(!d.doc.layers[1].visible, "the original is hidden");
+        // the traced drawing lies where the original was
+        let on_ring = crate::files::layer_rgba(&d.doc.layers[0], 1200 + 520, 1300, 1, 1).get_pixel(0, 0).0;
+        assert!(on_ring[3] > 128, "the ring is traced: {on_ring:?}");
+        let in_blob = crate::files::layer_rgba(&d.doc.layers[0], 2000, 2200, 1, 1).get_pixel(0, 0).0;
+        assert!(in_blob[0] > 150 && in_blob[1] < 120 && in_blob[3] > 200, "the blob is a red shape: {in_blob:?}");
+        // the line keeps its thickness
+        let width = v.strokes.iter().map(|s| s.style.size).fold(0.0f32, f32::max);
+        assert!((width - 40.0).abs() < 8.0 || (width - 50.0).abs() < 8.0, "thickness kept: {width}");
+    }
+    assert!(h.state().history().entries.last().unwrap().label.starts_with("Auto-trace"), "{:?}", h.state().history().entries.last().map(|e| e.label.clone()));
+    h.run_steps(3);
+    save(&mut h, "trace_03_result");
+
+    // one undo brings the original back and removes the traced layer
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(3);
+    let d = h.state().draw_mut_ref();
+    assert_eq!(d.doc.layers[0].kind, LayerKind::Raster);
+    assert!(d.doc.layers[0].visible);
+}

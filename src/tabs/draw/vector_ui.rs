@@ -185,8 +185,27 @@ impl DrawState {
         let Some(li) = self.doc.index_of(layer) else { return };
         let layer = &mut self.doc.layers[li];
         let Some(data) = layer.vector.as_deref() else { return };
-        let Some((strokes, area)) = vector::erase(&data.strokes, path, self.vec.erase, data.width) else { return };
-        vector::data_mut(layer).strokes = strokes;
+        let mut area: Option<vector::Bounds> = None;
+        let mut new_strokes = None;
+        let mut new_fills = None;
+        if let Some((strokes, a)) = vector::erase(&data.strokes, path, self.vec.erase, data.width) {
+            new_strokes = Some(strokes);
+            area = Some(vector::union(area, a));
+        }
+        if self.vec.erase == EraseMode::Whole {
+            if let Some((fills, a)) = vector::erase_fills(&data.fills, path) {
+                new_fills = Some(fills);
+                area = Some(vector::union(area, a));
+            }
+        }
+        let Some(area) = area else { return };
+        let data = vector::data_mut(layer);
+        if let Some(s) = new_strokes {
+            data.strokes = s;
+        }
+        if let Some(f) = new_fills {
+            data.fills = f;
+        }
         vector::render_region(layer, area);
         self.mark_bounds(area);
     }
@@ -476,6 +495,15 @@ impl DrawState {
             }
         }
         ui.add_space(6.0);
+        if li.is_none() && self.doc.layers[self.active_idx()].kind == LayerKind::Raster {
+            section_title(ui, "Trace");
+            hint(ui, "Turn a pixel drawing into editable lines and color shapes.");
+            if ui.button("Auto-trace this layer…").clicked() {
+                let id = self.active;
+                self.open_trace(id);
+            }
+            ui.add_space(6.0);
+        }
         if let Some(li) = li {
             section_title(ui, "This layer");
             let w = self.doc.layers[li].vector.as_ref().map(|v| v.width).unwrap_or(1.0);

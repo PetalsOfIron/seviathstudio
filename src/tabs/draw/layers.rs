@@ -406,6 +406,10 @@ impl DrawState {
                         self.select_layer_pixels(id);
                         ui.close();
                     }
+                    if kind == LayerKind::Raster && ui.button("Trace to vector lines…").on_hover_text("Auto-trace: turn this drawing into editable lines and color shapes").clicked() {
+                        self.open_trace(id);
+                        ui.close();
+                    }
                     let fav = self.doc.layers[i].fav;
                     if ui.button(if fav { "Remove from favorites" } else { "Add to favorites" }).clicked() {
                         self.toggle_favorite(id);
