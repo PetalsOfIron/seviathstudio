@@ -147,6 +147,8 @@ pub struct Layer {
     pub expanded: bool, // folders: open in the panel
     pub tag: u8,        // color label, 0 = none (see TAG_COLORS)
     pub fav: bool,      // starred: shows in the favorites row
+    /// The lines of a vector layer (its tiles are drawn from them).
+    pub vector: Option<Arc<crate::vector::VecData>>,
     pub opacity: f32,   // 0..100
     pub blend: Blend,
     pub tiles: HashMap<TileKey, TileData>,
@@ -241,6 +243,7 @@ impl Document {
             blend: if kind == LayerKind::Group { Blend::PassThrough } else { Blend::Normal },
             tiles: HashMap::new(),
             fav: false,
+            vector: None,
             rev: 0,
         }
     }
@@ -478,8 +481,9 @@ impl Document {
         let i = self.index_of(id).ok_or("No layer.")?;
         let below = self.sibling_below(i).ok_or("Nothing below to merge into.")?;
         let (top, bot) = (&self.layers[i], &self.layers[below]);
-        if top.kind != LayerKind::Raster || bot.kind != LayerKind::Raster {
-            return Err("Merge down works between two pixel layers.");
+        let pixels = |k: LayerKind| matches!(k, LayerKind::Raster | LayerKind::Vector);
+        if !pixels(top.kind) || !pixels(bot.kind) {
+            return Err("Merge down works between two pixel or vector layers.");
         }
         if bot.locked {
             return Err("The layer below is locked.");
@@ -583,7 +587,7 @@ impl Document {
             // Fast paths (no clip group): blend straight from the stored pixels, no temporary copy.
             if !any_clip {
                 match base.kind {
-                    LayerKind::Raster => {
+                    LayerKind::Raster | LayerKind::Vector => {
                         if let Some(t) = self.raster_tile(base, key) {
                             for (b, c) in backdrop.iter_mut().zip(t.iter()) {
                                 if c.a() != 0 {
@@ -617,7 +621,7 @@ impl Document {
                 }
                 let cop = c.opacity / 100.0;
                 let cmode = if c.blend == Blend::PassThrough { Blend::Normal } else { c.blend };
-                if c.kind == LayerKind::Raster {
+                if matches!(c.kind, LayerKind::Raster | LayerKind::Vector) {
                     if let Some(t) = self.raster_tile(c, key) {
                         for (s, p) in src.iter_mut().zip(t.iter()) {
                             if p.a() != 0 {
@@ -683,14 +687,13 @@ impl Document {
     /// A layer's own pixels for one tile (a folder: its contents flattened on their own).
     fn layer_pixels(&self, l: &Layer, key: TileKey) -> Option<Vec<Px>> {
         match l.kind {
-            LayerKind::Raster => self.raster_tile(l, key).map(|t| t.iter().map(|c| blend::to_px(*c)).collect()),
+            LayerKind::Raster | LayerKind::Vector => self.raster_tile(l, key).map(|t| t.iter().map(|c| blend::to_px(*c)).collect()),
             LayerKind::Paper => Some(vec![blend::to_px(self.paper); TILE * TILE]),
             LayerKind::Group => {
                 let mut buf = vec![CLEAR; TILE * TILE];
                 self.composite_into(Some(l.id), key, &mut buf);
                 Some(buf)
             }
-            LayerKind::Vector => None,
         }
     }
 }

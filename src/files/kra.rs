@@ -164,6 +164,7 @@ fn layer(id: LayerId, parent: Option<LayerId>, name: String, kind: LayerKind) ->
         blend: Blend::Normal,
         tiles: HashMap::new(),
         fav: false,
+        vector: None,
         rev: 1,
     }
 }

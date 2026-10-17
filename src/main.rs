@@ -21,6 +21,7 @@ mod layerfilter;
 mod meta;
 mod oklab;
 mod settings;
+mod shapes;
 mod settings_ui;
 mod snake;
 mod stroke;
@@ -28,6 +29,7 @@ mod symmetry;
 mod tabs;
 mod theme;
 mod transform;
+mod vector;
 mod view;
 mod widgets;
 

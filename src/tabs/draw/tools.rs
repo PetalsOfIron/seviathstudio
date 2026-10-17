@@ -609,6 +609,7 @@ impl DrawState {
                 true
             }
             Tool::Gradient => self.grad_input(resp, ctx),
+            Tool::Pen => self.vec_edit_input(resp, ctx),
             _ => false,
         }
     }
@@ -698,6 +699,7 @@ impl DrawState {
         let floating = self.tools.floating.is_some();
         let polygon = !self.tools.poly.is_empty();
         let grading = self.gradient_editing();
+        let vedit = self.vec_editing_selection();
         ctx.input_mut(|i| {
             let mut k = |m: Modifiers, key: Key, name: &'static str| {
                 if i.consume_key(m, key) {
@@ -726,6 +728,10 @@ impl DrawState {
                     k(Modifiers::SHIFT, key, if name == "left" { "left10" } else if name == "right" { "right10" } else if name == "up" { "up10" } else { "down10" });
                     k(Modifiers::NONE, key, name);
                 }
+            } else if vedit {
+                k(Modifiers::NONE, Key::Delete, "vdelete");
+                k(Modifiers::NONE, Key::Backspace, "vdelete");
+                k(Modifiers::NONE, Key::Escape, "vdeselect");
             } else {
                 k(Modifiers::NONE, Key::Delete, "clear");
                 k(Modifiers::NONE, Key::Backspace, "clear");
@@ -742,6 +748,8 @@ impl DrawState {
                 "fill" => self.fill_selected(),
                 "quickmask" => self.toggle_quick_mask(),
                 "clear" => self.clear_selected(),
+                "vdelete" => self.vec_delete(),
+                "vdeselect" => self.vec_deselect(),
                 "gapply" => self.apply_gradient(),
                 "gcancel" => self.cancel_gradient(),
                 "enter" if floating => self.apply_transform(),
@@ -780,6 +788,7 @@ impl DrawState {
     pub(super) fn tool_overlay(&mut self, ui: &Ui, p: &egui::Painter, rect: Rect) {
         let ctx = ui.ctx().clone();
         self.grad_overlay(&ctx, p);
+        self.vec_overlay(p);
         let now = ctx.input(|i| i.time);
         let to_s = |d: Pos2| self.view.doc_to_screen(d);
         let dark = Stroke::new(1.0, Color32::from_black_alpha(200));
@@ -1010,6 +1019,7 @@ impl DrawState {
                 }
             }
             Tool::Gradient => self.gradient_options(ui),
+            Tool::Pen => self.vector_options(ui),
             Tool::Move => {
                 if self.tools.floating.is_none() {
                     hint(ui, "Drag on the canvas to move the layer, or just the selected part of it. Arrow keys nudge after Ctrl+T.");

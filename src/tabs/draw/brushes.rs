@@ -177,6 +177,11 @@ impl DrawState {
         });
         ui.add_space(2.0);
 
+        if sl == 1 && self.vec_active_layer().is_some() {
+            ui.label(RichText::new("This is a vector layer: the eraser works on its lines.").size(11.5).color(TEXT_DIM));
+            widgets::segmented(ui, &mut self.vec.erase, &[(crate::vector::EraseMode::Cut, "Cut the touched part"), (crate::vector::EraseMode::Whole, "Remove whole lines")]);
+            ui.add_space(4.0);
+        }
         if sl != 1 {
             ui.add(egui::TextEdit::singleline(&mut self.lib.query).hint_text("Search brushes…").desired_width(f32::INFINITY));
             ui.add_space(2.0);

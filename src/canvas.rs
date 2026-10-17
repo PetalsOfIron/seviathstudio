@@ -144,7 +144,7 @@ impl CanvasRenderer {
 
     /// Small picture of one layer's own pixels for the layer panel, refreshed at most 4× a second.
     pub fn layer_thumb(&mut self, ctx: &egui::Context, layer: &Layer, doc_w: u32, doc_h: u32) -> Option<egui::TextureId> {
-        if layer.kind != LayerKind::Raster {
+        if !matches!(layer.kind, LayerKind::Raster | LayerKind::Vector) {
             return None;
         }
         let now = ctx.input(|i| i.time);

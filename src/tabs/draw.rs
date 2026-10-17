@@ -28,6 +28,7 @@ pub mod organizer;
 mod random_ui;
 mod references;
 mod tools;
+pub mod vector_ui;
 
 use brushes::BrushLib;
 #[cfg(test)]
@@ -146,6 +147,7 @@ pub struct DrawState {
     lui: organizer::LayerUi,
     grad: gradient_ui::GradState,
     rand: random_ui::RandState,
+    vec: vector_ui::VecState,
     color_open: bool,
     layer_rows: Vec<(LayerId, Rect)>, // where each layer row was drawn last frame
     view: View,
@@ -212,6 +214,7 @@ impl Default for DrawState {
             lui: organizer::LayerUi::default(),
             grad: gradient_ui::GradState::default(),
             rand: random_ui::RandState::default(),
+            vec: vector_ui::VecState::default(),
             color_open: true,
             layer_rows: Vec::new(),
             view: View::default(),
@@ -310,7 +313,7 @@ impl DrawState {
             .size_range(230.0..=440.0)
             .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::same(10)))
             .show(ui, |ui| {
-                if matches!(self.tool, Tool::Select | Tool::Lasso | Tool::Fill | Tool::Move | Tool::Gradient) {
+                if matches!(self.tool, Tool::Select | Tool::Lasso | Tool::Fill | Tool::Move | Tool::Gradient | Tool::Pen) {
                     egui::ScrollArea::vertical().id_salt("tool_options").show(ui, |ui| self.tool_options(ui));
                 } else {
                     self.brush_panel(ui);
@@ -345,7 +348,8 @@ impl DrawState {
             || self.stroke.is_some()
             || self.drag_layer.is_some()
             || self.renaming.is_some()
-            || self.transforming();
+            || self.transforming()
+            || self.vec.drawing();
         if busy {
             return;
         }
@@ -363,6 +367,7 @@ impl DrawState {
     pub fn replace_document(&mut self, doc: Document) {
         self.doc = doc;
         self.tools.new_document(self.doc.w, self.doc.h);
+        self.vec.reset();
         self.lui = organizer::LayerUi::default();
         self.grad.edit = None;
         self.renderer.reset();
@@ -411,6 +416,7 @@ impl DrawState {
         // undo while transforming: the document is already back to before the lift
         self.tools.floating = None;
         self.grad.edit = None;
+        self.vec.reset();
         self.stroke = None;
         self.pen_stroke = false;
         self.pending = None;
@@ -471,6 +477,7 @@ impl DrawState {
             return;
         }
         let (step, max) = (self.set.size_step, self.set.brush_size_max);
+        let pen_tool = self.tool == Tool::Pen;
         ctx.input_mut(|i| {
             // Shift+G before G, so the plain G doesn't steal it.
             let mut tools: Vec<Tool> = TOOL_GROUPS.iter().flat_map(|g| g.iter().copied()).collect();
@@ -486,12 +493,20 @@ impl DrawState {
                 self.hex = hex_of(self.primary);
             }
             if i.consume_key(Modifiers::NONE, Key::OpenBracket) {
-                let s = self.brush_mut();
-                s.size = (s.size / step).max(0.5);
+                if pen_tool {
+                    self.vec.style.size = (self.vec.style.size / step).max(0.5);
+                } else {
+                    let s = self.brush_mut();
+                    s.size = (s.size / step).max(0.5);
+                }
             }
             if i.consume_key(Modifiers::NONE, Key::CloseBracket) {
-                let s = self.brush_mut();
-                s.size = (s.size * step).min(max);
+                if pen_tool {
+                    self.vec.style.size = (self.vec.style.size * step).min(max);
+                } else {
+                    let s = self.brush_mut();
+                    s.size = (s.size * step).min(max);
+                }
             }
             // View: Ctrl+0 fit, Ctrl+Alt+0 100%, Ctrl+= / Ctrl+- zoom, F mirror.
             let c = self.view.screen_center;
@@ -813,12 +828,11 @@ impl DrawState {
         let tool_used = !nav_key && self.tool_input(&resp, &ctx);
 
         // ---- Painting and color picking.
-        let painting_tool = matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Smudge) && !tool_used;
+        let painting_tool = matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Smudge | Tool::Pen) && !tool_used;
         let pressed_here = resp.is_pointer_button_down_on() && primary_down;
         let picking = self.tool == Tool::Picker || (painting_tool && alt && self.stroke.is_none());
-        let renderer = &self.renderer;
-        let sample_all = move |x: i32, y: i32| if x < 0 || y < 0 { None } else { renderer.pixel(x as usize, y as usize) };
         if picking && pressed_here && !nav_key {
+            let sample_all = sampler(&self.renderer);
             if let Some(p) = resp.interact_pointer_pos() {
                 let d = self.view.screen_to_doc(p);
                 let half = (self.set.picker_samples as i32 - 1) / 2;
@@ -837,7 +851,7 @@ impl DrawState {
                     self.hex = hex_of(self.primary);
                 }
             }
-        } else if painting_tool && !nav_key && (pressed_here || self.stroke.is_some()) && primary_down {
+        } else if painting_tool && !nav_key && (pressed_here || self.stroke.is_some() || self.vec_live()) && primary_down {
             // Pen samples carry pressure (Windows Ink arrives as touch events with force);
             // otherwise it's a mouse: every pointer sample of this frame at full pressure.
             let view = self.view;
@@ -847,7 +861,7 @@ impl DrawState {
             };
             // pen pressure: your range and curve from Settings, then optional smoothing
             let smooth = self.set.pressure_smoothing;
-            if self.stroke.is_none() {
+            if self.stroke.is_none() && !self.vec_live() {
                 self.p_smooth = -1.0;
             }
             let mut pen: Vec<Sample> = Vec::new();
@@ -867,14 +881,10 @@ impl DrawState {
             } else {
                 events.iter().filter_map(|e| if let Event::PointerMoved(p) = e { Some(to_doc(*p, mouse_p)) } else { None }).collect()
             };
-            if self.stroke.is_none() {
+            if self.stroke.is_none() && !self.vec_live() {
                 let ai = self.active_idx();
-                if !self.doc.layers[ai].paintable() {
-                    self.notice = Some(match self.doc.layers[ai].kind {
-                        _ if self.doc.layers[ai].locked => "This layer is locked.",
-                        LayerKind::Vector => "Vector layers are drawn with the vector pen (coming soon). Pick a pixel layer to paint.",
-                        _ => "Pick a pixel layer to paint on.",
-                    });
+                if let Some(msg) = self.block_reason() {
+                    self.notice = Some(msg);
                 } else if self.set.min_stroke_move > 0.0
                     && ctx.input(|i| i.pointer.press_origin().zip(i.pointer.latest_pos()).map(|(o, l)| (l - o).length()).unwrap_or(0.0))
                         < self.set.min_stroke_move
@@ -892,7 +902,11 @@ impl DrawState {
                         samples.insert(0, click);
                         start = Some(Sample { x: from.x, y: from.y, p: click.p });
                     }
-                    if let Some(start) = start {
+                    if let (Some(start), true) = (start, self.vec_tool_active()) {
+                        let now = ctx.input(|i| i.time);
+                        self.pen_stroke = is_pen;
+                        self.vec_begin(start, now);
+                    } else if let Some(start) = start {
                         let mut settings = self.lib.mem[brushes::slot(self.tool)].s.clone();
                         // tremor help adds steadiness on top of every brush's own stabilizer
                         let t = self.set.tremor_help;
@@ -909,6 +923,7 @@ impl DrawState {
                         let mirrors = if self.tools.sym.on() { self.tools.sym.mirrors() } else { Vec::new() };
                         // painting the quick mask: always in its red, only the coverage counts
                         let color = if self.doc.layers[ai].name == tools::QUICK_MASK { Color32::from_rgb(230, 40, 70) } else { self.primary };
+                        let sample_all = sampler(&self.renderer);
                         let mut st = BrushStroke::begin_mirrored(&mut self.doc, ai, &settings, color, erase, view.zoom, is_pen, start, &sample_all, mirrors);
                         if self.grad.brush_on && !erase && self.tool == Tool::Brush {
                             st.set_gradient(Some(self.grad.g.along_stroke(self.grad.brush_len)));
@@ -917,7 +932,12 @@ impl DrawState {
                     }
                 }
             }
+            if self.vec_live() {
+                let now = ctx.input(|i| i.time);
+                self.vec_add(&samples, now, &ctx);
+            }
             if let Some(st) = self.stroke.as_mut() {
+                let sample_all = sampler(&self.renderer);
                 st.add(&mut self.doc, &samples, &sample_all);
                 if let Some(l) = samples.last() {
                     self.tools.last_end = Some(pos2(l.x, l.y));
@@ -925,7 +945,11 @@ impl DrawState {
             }
         }
         if !primary_down {
+            if self.vec_live() {
+                self.vec_finish();
+            }
             if let Some(st) = self.stroke.take() {
+                let sample_all = sampler(&self.renderer);
                 self.last_stroke = Some(st.finish(&mut self.doc, &sample_all));
             }
             self.pen_stroke = false;
@@ -1080,6 +1104,11 @@ impl DrawState {
                 });
         });
     }
+}
+
+/// The picture as it is shown (all layers), read by pixel: for mixing brushes and the color picker.
+fn sampler(r: &CanvasRenderer) -> impl Fn(i32, i32) -> Option<Color32> + '_ {
+    move |x, y| if x < 0 || y < 0 { None } else { r.pixel(x as usize, y as usize) }
 }
 
 fn checker(p: &egui::Painter, r: Rect) {

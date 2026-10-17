@@ -271,11 +271,7 @@ impl DrawState {
                         p.rect_filled(thumb, CornerRadius::same(4), CARD);
                         icons::paint(p, thumb.shrink(7.0), Icon::Folder, GOLD);
                     }
-                    LayerKind::Vector => {
-                        checker(p, thumb);
-                        icons::paint(p, thumb.shrink(9.0), Icon::Pen, EMERALD);
-                    }
-                    LayerKind::Raster => {
+                    LayerKind::Raster | LayerKind::Vector => {
                         checker(p, thumb);
                         if let Some(t) = tex {
                             let a = self.doc.w as f32 / self.doc.h as f32;
