@@ -1619,3 +1619,43 @@ fn font_maker_screens() {
     save(&mut h, "font_01_maker");
     crate::handfont::save_draft(&crate::handfont::HandFont::default());
 }
+
+#[test]
+fn recorder_screens() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = Harness::builder().with_size([1440.0, 1300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().test_open_recorder();
+    h.run_steps(3);
+    h.get_by_label("Start recording").click();
+    h.run_steps(3);
+    assert!(h.state().test_recording().is_some(), "recording started");
+    // draw on the canvas behind the window: every finished stroke is a frame
+    stroke(&mut h, &[pos2(560.0, 300.0), pos2(700.0, 330.0), pos2(820.0, 300.0)]);
+    h.run_steps(3);
+    stroke(&mut h, &[pos2(560.0, 900.0), pos2(700.0, 930.0), pos2(820.0, 900.0)]);
+    wait_until(&mut h, "frames are encoded", |h| h.state().test_recording().is_some_and(|r| r.0 >= 3));
+    save(&mut h, "rec_01_recording");
+    // pause: new strokes are not filmed
+    h.get_by_label("Pause").click();
+    h.run_steps(3);
+    let frozen = h.state().test_recording().unwrap().0;
+    stroke(&mut h, &[pos2(560.0, 500.0), pos2(820.0, 520.0)]);
+    h.run_steps(4);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    h.run_steps(2);
+    assert_eq!(h.state().test_recording().unwrap().0, frozen, "nothing filmed while paused");
+    let out = std::env::temp_dir().join(format!("seviath_rec_screen_{}.mp4", std::process::id()));
+    h.state_mut().test_stop_recording(out.clone());
+    h.run_steps(3);
+    let msg = h.state().test_recorder_message().unwrap();
+    assert!(msg.starts_with("Saved"), "{msg}");
+    let bytes = std::fs::read(&out).unwrap();
+    assert_eq!(&bytes[4..8], b"ftyp");
+    assert!(bytes.windows(4).any(|w| w == b"avc1"));
+    // 3000 x 4000 picture, 1080p: portrait 810 x 1080
+    let a = bytes.windows(4).position(|w| w == b"avc1").unwrap();
+    assert_eq!((u16::from_be_bytes([bytes[a + 28], bytes[a + 29]]), u16::from_be_bytes([bytes[a + 30], bytes[a + 31]])), (810, 1080), "the video is the picture");
+    assert!(h.state().test_recording().is_none());
+    std::fs::remove_file(out).ok();
+}

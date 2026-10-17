@@ -16,6 +16,7 @@ use crate::widgets::{self, icon_button, segmented, tab_button};
 mod files;
 mod fontmaker;
 mod newproject;
+mod recording;
 mod signs;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -46,6 +47,7 @@ pub struct SeviathApp {
     files: files::FileState,
     signs: signs::SignState,
     maker: fontmaker::FontMaker,
+    rec: recording::RecUi,
 }
 
 impl SeviathApp {
@@ -84,6 +86,7 @@ impl SeviathApp {
             files: files::FileState::starting(persist && start_projects),
             signs: Default::default(),
             maker: Default::default(),
+            rec: Default::default(),
         }
     }
 
@@ -298,6 +301,7 @@ impl SeviathApp {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(8.0);
                 ui.spacing_mut().item_spacing.x = 4.0;
+                self.rec_light(ui);
                 if ui.add(egui::Button::new(RichText::new("Sign in").color(TEXT)).corner_radius(14)).on_hover_text("Account").clicked() {
                     self.account_open = true;
                 }
@@ -637,6 +641,7 @@ impl eframe::App for SeviathApp {
         // finished Draw-tab changes become history steps
         let now = ctx.input(|i| i.time);
         for (label, before, after) in std::mem::take(&mut self.draw.changes) {
+            self.recorder_step(&after);
             self.history.push(label, Tab::Draw, before, after, now);
         }
 
@@ -648,6 +653,8 @@ impl eframe::App for SeviathApp {
         self.project_info_window(&ctx);
         self.signatures_window(&ctx);
         self.font_maker_window(&ctx);
+        self.recorder_window(&ctx);
+        self.recorder_tick(&ctx);
         self.project_manager(&ctx);
         self.files_tick(&ctx);
         self.unsaved_dialog(&ctx);

@@ -22,6 +22,22 @@ pub struct DocState {
 }
 
 impl Document {
+    /// The document as it looks right now, with the stroke being painted included.
+    pub fn snapshot_live(&self) -> DocState {
+        let mut s = self.snapshot();
+        if let Some(live) = &self.live {
+            if let Some(l) = s.layers.iter_mut().find(|l| l.id == live.layer) {
+                let keys: Vec<_> = live.tiles.keys().copied().collect();
+                for key in keys {
+                    if let Some(t) = live.merged(l.tiles.get(&key).map(|t| &**t), key) {
+                        l.tiles.insert(key, std::sync::Arc::new(t));
+                    }
+                }
+            }
+        }
+        s
+    }
+
     pub fn snapshot(&self) -> DocState {
         DocState { layers: self.layers.clone(), paper: self.paper, selection: self.selection.clone(), presets: self.filter_presets.clone(), meta: self.meta.clone() }
     }
