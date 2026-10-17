@@ -610,6 +610,7 @@ impl DrawState {
             }
             Tool::Gradient => self.grad_input(resp, ctx),
             Tool::Pen => self.vec_edit_input(resp, ctx),
+            Tool::Text => self.text_input(resp, ctx),
             _ => false,
         }
     }
@@ -1020,6 +1021,7 @@ impl DrawState {
             }
             Tool::Gradient => self.gradient_options(ui),
             Tool::Pen => self.vector_options(ui),
+            Tool::Text => self.text_options(ui),
             Tool::Move => {
                 if self.tools.floating.is_none() {
                     hint(ui, "Drag on the canvas to move the layer, or just the selected part of it. Arrow keys nudge after Ctrl+T.");

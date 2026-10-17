@@ -3051,6 +3051,7 @@ dependencies = [
  "serde",
  "serde_json",
  "trash",
+ "ttf-parser",
  "winresource",
  "zip",
 ]

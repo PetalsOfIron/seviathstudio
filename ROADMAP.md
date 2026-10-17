@@ -45,12 +45,14 @@ How every part of the project plan (`SeviathStudio_Project_Plan_EN.md`, Parts A�
 | | *Not in 17a:* see 17b | |
 | 17b | **Brush formats and the materials library**: open Photoshop `.abr` (old and new layouts, packed rows, round and picture brushes; Clip Studio Paint opens these too), GIMP `.gbr` and `.gih`, Krita `.kpp` presets and `.bundle` files (with the tip inside); save as `.abr`, Krita `.kpp` (tip embedded) and a tip PNG; **materials library** kept in its own folder apart from brushes: your **textures** (from a picture, or from the painted pixels in your selection, with *Make it seamless* so they repeat without a seam) and your **stamps**; a brush can use *My texture*; right-click removes a material | Part D2, E3, Y2 |
 | | *Not in 17b:* Clip Studio `.sut` import and `.abr` patterns; the online library (see 53) | |
+| 18a | **Text layers**: Text tool (T), click to start, click a text to move it; any font (two come with the app, installed fonts, font files kept inside the project), size, color, alignment, letter gap, line height, up-and-down writing, **text on a curve (bend)**, turn; Latvian letters work; text stays editable and is saved in the project | Part AD |
+| | *Not in 18a:* kerning and ligatures, speech bubbles, animated text and subtitles | |
 
 ## Drawing — finish the Draw tab (first app + Parts D2, W, X, Y, AE, AL–AO)
 
 | # | Milestone | How |
 |---|---|---|
-| 18 | **Text, fonts & signatures** — text layers, text on curve, own fonts (.ttf/.otf), font from handwriting → .otf (§24); **signatures**: draw with any brush, saved as vector strokes with your pressure and timing, slots (full / short / initials / collab), stamp, live replay as a stroke, auto-sign on export by corner/size/opacity (AE1, AE2) | `ab_glyph`/`ttf-parser` for reading; own glyph builder + OTF writer; signatures reuse the vector stroke format from 11 |
+| 18b | **Fonts from handwriting & signatures** — (18a text layers done) font from handwriting → .otf (§24); **signatures**: draw with any brush, saved as vector strokes with your pressure and timing, slots (full / short / initials / collab), stamp, live replay as a stroke, auto-sign on export by corner/size/opacity (AE1, AE2) | `ab_glyph`/`ttf-parser` for reading; own glyph builder + OTF writer; signatures reuse the vector stroke format from 11 |
 | 19 | **Recorder & process log** — timelapse + real-time to MP4 (§E9), "Drawn in SeviathStudio" work history; the project file starts keeping a **process log**: stroke count and timing per layer, imports, references shown in Sub view (which, when, how long), AI tools used (AG1, AH1, AI2) | `openh264` (BSD) encoder + MP4 muxer on a background thread. The log is a hash chain (each entry hashes the previous one) inside `.seviath`, so later edits to history are visible |
 | 20 | **Panels & workspaces** — every panel dockable/floating, second-monitor windows, saved workspaces, command palette (Ctrl+K), remappable shortcuts with conflict check (C2, B1, F3) | egui viewports for extra OS windows; one action table drives menu, palette and keys |
 

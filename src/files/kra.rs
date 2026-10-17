@@ -172,6 +172,7 @@ fn layer(id: LayerId, parent: Option<LayerId>, name: String, kind: LayerKind) ->
         material: None,
         lightfx: None,
         solid: false,
+        text: None,
         rev: 1,
     }
 }

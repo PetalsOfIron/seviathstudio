@@ -167,6 +167,8 @@ pub struct Layer {
     pub lightfx: Option<crate::lightfx::LightFx>,
     /// Blocks light: casts shadows and stops rays of the light-effect layers.
     pub solid: bool,
+    /// A text layer: the words and how they look (its shapes are in `vector`).
+    pub text: Option<crate::text::TextData>,
     pub opacity: f32,   // 0..100
     pub blend: Blend,
     pub tiles: HashMap<TileKey, TileData>,
@@ -285,6 +287,7 @@ impl Document {
             material: None,
             lightfx: None,
             solid: false,
+            text: None,
             rev: 0,
         }
     }

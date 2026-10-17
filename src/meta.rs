@@ -30,11 +30,13 @@ pub struct ProjectMeta {
     pub intent: String,
     /// Turn the profile into plain sRGB pixels on export instead of embedding it.
     pub export_bake: bool,
+    /// Font files kept inside the project (for text layers).
+    pub fonts: Vec<crate::fonts::ProjectFont>,
 }
 
 impl Default for ProjectMeta {
     fn default() -> Self {
-        Self { dpi: 72, notes: String::new(), tags: Vec::new(), autosave_minutes: None, recovery_copies: None, guides: Vec::new(), rgb_profile: "srgb".into(), cmyk_profile: "japan2001".into(), intent: "perceptual".into(), export_bake: false }
+        Self { dpi: 72, notes: String::new(), tags: Vec::new(), autosave_minutes: None, recovery_copies: None, guides: Vec::new(), rgb_profile: "srgb".into(), cmyk_profile: "japan2001".into(), intent: "perceptual".into(), export_bake: false, fonts: Vec::new() }
     }
 }
 
@@ -48,6 +50,8 @@ impl ProjectMeta {
         self.recovery_copies = self.recovery_copies.map(|c| c.clamp(1, 100));
         self.guides.retain(|g| g.pos.is_finite());
         self.guides.truncate(200);
+        self.fonts.truncate(crate::fonts::MAX_PROJECT_FONTS);
+        self.fonts.retain(|f| f.data.len() <= crate::fonts::MAX_FONT_BYTES * 4 / 3 + 8 && !f.name.is_empty());
         if !crate::colorprofiles::known_rgb(&self.rgb_profile) {
             self.rgb_profile = "srgb".into();
         }

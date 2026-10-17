@@ -345,7 +345,9 @@ impl DrawState {
                     LayerKind::Raster => layer.blend.name().to_owned(),
                     LayerKind::Adjust => format!("Adjustment · {}", layer.adjust.as_ref().map(|a| a.label()).unwrap_or("none")),
                 };
-                if let Some(f) = &layer.lightfx {
+                if layer.text.is_some() {
+                    sub = "Text".to_owned();
+                } else if let Some(f) = &layer.lightfx {
                     sub = format!("{} · light effect", f.kind.name());
                 } else if let Some(m) = &layer.material {
                     sub = format!("Material · {}", m.name);
