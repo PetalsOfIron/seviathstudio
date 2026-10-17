@@ -12,7 +12,7 @@ use eframe::egui::{
 use super::{DrawState, Tool};
 use crate::brush::engine::{Sample, Stroke};
 use crate::brush::{
-    BrushSettings, CATEGORIES, Edge, Ends, MixRefer, Preset, ShapeBase, SubMode, SubTip, TexKind, TexPalette, Tip, eraser_presets,
+    BrushSettings, CATEGORIES, Dip, Edge, Ends, MixRefer, Paint, Preset, ShapeBase, SubMode, SubTip, TexKind, TexPalette, Tip, eraser_presets,
     presets,
 };
 use crate::doc::{Document, TILE};
@@ -456,6 +456,34 @@ impl DrawState {
                 widgets::segmented(ui, &mut s.mix_refer, &[(MixRefer::All, "All layers"), (MixRefer::Layer, "This layer")]);
             }
         });
+
+        let mut open_chart = false;
+        section(ui, "Real paint", s.paint != Paint::Normal, |ui| {
+            let opts: Vec<(Paint, &str)> = Paint::ALL.iter().map(|(p, l, _)| (*p, *l)).collect();
+            widgets::segmented(ui, &mut s.paint, &opts);
+            if let Some((_, _, about)) = Paint::ALL.iter().find(|(p, _, _)| *p == s.paint) {
+                ui.label(RichText::new(*about).size(11.5).color(TEXT_DIM));
+            }
+            if s.paint != Paint::Normal && s.mix > 0.0 {
+                ui.label(RichText::new("How the brush is loaded").size(11.5).color(TEXT_DIM));
+                let opts: Vec<(Dip, &str)> = Dip::ALL.iter().map(|(p, l, _)| (*p, *l)).collect();
+                widgets::segmented(ui, &mut s.dip, &opts);
+                if let Some((_, _, about)) = Dip::ALL.iter().find(|(p, _, _)| *p == s.dip) {
+                    ui.label(RichText::new(*about).size(11.5).color(TEXT_DIM));
+                }
+                if s.dip == Dip::Every {
+                    num(ui, "Dip every", &mut s.dip_every, 20.0..=2000.0, "Pixels of stroke between dips in fresh paint");
+                }
+            } else if s.paint != Paint::Normal {
+                ui.label(RichText::new("Turn Mix up in Color mixing above to make the brush carry paint along.").size(11.0).color(TEXT_DIM));
+            }
+            if widgets::chip(ui, "Mixing chart", false).on_hover_text("See how your swatches mix, as paint and as plain RGB").clicked() {
+                open_chart = true;
+            }
+        });
+        if open_chart {
+            self.mixchart.open = true;
+        }
 
         section(ui, "Pattern seed", false, |ui| {
             ui.horizontal(|ui| {

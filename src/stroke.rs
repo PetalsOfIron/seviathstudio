@@ -9,7 +9,8 @@ use eframe::egui::Color32;
 
 use crate::blend::{self, Px};
 use crate::brush::textures;
-use crate::brush::{TexKind, TexPalette};
+use crate::brush::{Paint, TexKind, TexPalette};
+use crate::pigment::{Mixer, Pigment};
 use crate::doc::{LayerId, TILE, TileKey};
 
 /// Accumulated paint of the live stroke for one tile.
@@ -39,6 +40,8 @@ pub struct StrokeLook {
     pub color: [f32; 3],
     pub erase: bool,
     pub lock_alpha: bool,
+    /// Real paint: how this stroke meets the paint already on the layer.
+    pub paint: Paint,
 }
 
 pub struct LiveStroke {
@@ -71,6 +74,8 @@ impl LiveStroke {
 pub fn apply(dst: &mut [Color32], st: &StrokeTile, look: &StrokeLook, key: TileKey, mask: Option<&[u8]>) {
     let tex = (look.texture > 0.0 || look.tex_color > 0.0).then(|| textures::get(look.tex_kind));
     let (ox, oy) = (key.0 as f32 * TILE as f32, key.1 as f32 * TILE as f32);
+    let real = look.paint != Paint::Normal && !look.erase;
+    let (mut mixer, base) = (Mixer::default(), real.then(|| Pigment::new(look.color)));
     for i in 0..TILE * TILE {
         let s = st.px[i];
         if s[3] <= 0.0005 {
@@ -107,6 +112,24 @@ pub fn apply(dst: &mut [Color32], st: &StrokeTile, look: &StrokeLook, key: TileK
         let out = if look.erase {
             let k = 1.0 - a.min(1.0);
             [d[0] * k, d[1] * k, d[2] * k, d[3] * k]
+        } else if real && d[3] > 0.0 {
+            // real paint: the new color meets the old one as pigment, not as light
+            let a = a.min(1.0);
+            let o = if look.paint == Paint::Glaze {
+                mixer.glaze_over(d, c, a)
+            } else {
+                let pg = match &base {
+                    Some(b) if c == look.color => *b,
+                    _ => Pigment::new(c),
+                };
+                mixer.mix_premult(d, [c[0], c[1], c[2], 1.0], &pg, a)
+            };
+            if look.lock_alpha {
+                let s = if o[3] > 0.0 { d[3] / o[3] } else { 0.0 };
+                [o[0] * s, o[1] * s, o[2] * s, d[3]]
+            } else {
+                o
+            }
         } else if look.lock_alpha {
             [d[0] + (c[0] * d[3] - d[0]) * a, d[1] + (c[1] * d[3] - d[1]) * a, d[2] + (c[2] * d[3] - d[2]) * a, d[3]]
         } else {
@@ -134,6 +157,7 @@ mod tests {
             color: [1.0, 0.0, 0.0],
             erase: false,
             lock_alpha: false,
+            paint: Paint::Normal,
         }
     }
 

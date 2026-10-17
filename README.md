@@ -26,6 +26,7 @@ cargo test --release
 Runs the unit tests and a full UI run that paints, undoes and redoes with simulated input. Pictures land in `target/screens/`:
 
 - `01_draw.png` … `10_settings_canvas.png` — the app at each step of the UI run
+- `mix_01_chart.png` — the mixing chart (`cargo test --release mixing_chart_screens`)
 - `light_01_from_the_left.png` … `light_04_light_panel.png` — light and depth layers (`cargo test --release light_and_depth_screens`)
 - `cp_01_plain.png` … `cp_03_display_p3.png` — color profile and print proof (`cargo test --release color_profile_screens`)
 - `fx_01_effects_on_canvas.png` … `fx_04_adjustment_panel.png` — effects and adjustment layers (`cargo test --release effects_screens effects_panel_screens`)
@@ -55,6 +56,7 @@ Performance check: `cargo test --release bench_full_redraw -- --ignored --nocapt
 - `src/view.rs`, `src/canvas.rs` — zoom/pan/rotate/mirror and GPU tile display
 - `src/brush/` — brush engine: settings + presets, tips, textures, stroke engine (stabilizer, pressure, taper, mixing, whole-stroke edges)
 - `src/stroke.rs` — the live stroke buffer shown on top of its layer until the pen lifts
+- `src/pigment.rs` + `tabs/draw/mixchart_ui.rs` — pigment (Kubelka-Munk) mixing, and the mixing chart
 - `src/light.rs` — depth layers and light layers (the shading)
 - `src/colorprofiles.rs` — RGB profiles (display, ICC files, baking) and the print press models
 - `src/effects.rs` + `tabs/draw/effects_ui.rs` — layer effects (shadow, glow, outline, overlays) and adjustment layers

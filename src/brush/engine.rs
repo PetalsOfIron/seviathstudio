@@ -13,7 +13,8 @@ use super::noise::{Rng, fbm, noise, smoothstep};
 use super::raster::blur;
 use super::textures;
 use super::tips::{self, sample};
-use super::{BrushSettings, Edge, Ends, MixRefer};
+use super::{BrushSettings, Dip, Edge, Ends, MixRefer, Paint};
+use crate::pigment::{Mixer, Pigment};
 use crate::blend::{self, Px};
 use crate::doc::{Document, LayerId, TILE, TileData, TileKey};
 use crate::stroke::{LiveStroke, StrokeLook, StrokeTile};
@@ -71,6 +72,9 @@ pub struct Stroke {
     // color mixing
     mix_p: [f32; 4],
     last_sample: (f32, f32),
+    /// Real paint: remembers colors while pigments are mixed, and where the brush was last dipped.
+    mixer: Mixer,
+    last_dip: f32,
     recent: Vec<(f32, f32, f32)>, // last particles (x, y, r), for "keep particles apart"
     before: HashMap<TileKey, Option<TileData>>,
     /// Symmetry: every dab is also drawn at these mirror images.
@@ -132,6 +136,7 @@ impl Stroke {
                     color: col,
                     erase,
                     lock_alpha: doc.layers[li].lock_alpha,
+                    paint: s.paint,
                 },
                 sel: doc.selection.clone(),
             });
@@ -161,6 +166,8 @@ impl Stroke {
             bbox: [f32::MAX, f32::MAX, f32::MIN, f32::MIN],
             mix_p: [col[0], col[1], col[2], 1.0],
             last_sample: (f32::MAX, f32::MAX),
+            mixer: Mixer::default(),
+            last_dip: 0.0,
             recent: Vec::new(),
             before: HashMap::new(),
             mirrors,
@@ -573,8 +580,14 @@ impl Stroke {
             }
         }
         if n > 0.0 {
-            for j in 0..4 {
-                self.mix_p[j] += (acc[j] / n - self.mix_p[j]) * amount;
+            let avg = [acc[0] / n, acc[1] / n, acc[2] / n, acc[3] / n];
+            if self.s.paint != Paint::Normal && avg[3] > 0.001 {
+                let rgb = [(avg[0] / avg[3]).clamp(0.0, 1.0), (avg[1] / avg[3]).clamp(0.0, 1.0), (avg[2] / avg[3]).clamp(0.0, 1.0)];
+                self.mix_p = self.mixer.mix_premult(self.mix_p, avg, &Pigment::new(rgb), amount);
+            } else {
+                for j in 0..4 {
+                    self.mix_p[j] += (avg[j] - self.mix_p[j]) * amount;
+                }
             }
         }
     }
@@ -583,11 +596,27 @@ impl Stroke {
     fn mix_dab(&mut self, doc: &mut Document, x: f32, y: f32, r: f32, ang: f32, amount: f32, _p: f32, sa: SampleAll) {
         let s_mix = self.s.mix;
         if ((x - self.last_sample.0).powi(2) + (y - self.last_sample.1).powi(2)).sqrt() >= (r * 0.4).max(1.0) {
-            // fresh paint from the brush slowly comes back, unless mix is 100%
-            let reload = (1.0 - s_mix) * 0.3;
+            // how much fresh paint comes back: slowly (unless mix is 100%), never, or all of it when dipped
+            let reload = match self.s.dip {
+                Dip::Gradual => (1.0 - s_mix) * 0.3,
+                Dip::Once => 0.0,
+                Dip::Every => {
+                    if self.cur_d - self.last_dip >= self.s.dip_every.max(10.0) {
+                        self.last_dip = self.cur_d;
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+            };
             let fresh = [self.color[0], self.color[1], self.color[2], 1.0];
-            for j in 0..4 {
-                self.mix_p[j] += (fresh[j] - self.mix_p[j]) * reload;
+            if self.s.paint != Paint::Normal && reload > 0.0 {
+                let fp = Pigment::new(self.color);
+                self.mix_p = self.mixer.mix_premult(self.mix_p, fresh, &fp, reload);
+            } else {
+                for j in 0..4 {
+                    self.mix_p[j] += (fresh[j] - self.mix_p[j]) * reload;
+                }
             }
             self.pick_up(doc, x, y, r, s_mix * 0.3, s_mix < 0.9, sa);
             self.last_sample = (x, y);
@@ -603,8 +632,11 @@ impl Stroke {
         let (w, h) = (doc.w, doc.h);
         let li = self.li;
         let sel = doc.selection.clone();
+        let real = self.s.paint != Paint::Normal;
+        let paint_pg = real.then(|| Pigment::new(rgb));
         for (x, y, ang) in self.copies(x, y, r, ang) {
             let before = &mut self.before;
+            let mixer = &mut self.mixer;
             let layer = &mut doc.layers[li];
             let rect = Self::for_dab_pixels(&self.s, w, h, x, y, r, ang, v, |key, i, px, py, mv| {
                 let mut m = (mv * f).min(1.0);
@@ -625,7 +657,10 @@ impl Stroke {
                 let o = blend::to_px(tile[i]);
                 let k = 1.0 - m;
                 let paint: Px = [rgb[0] * a, rgb[1] * a, rgb[2] * a, a];
-                let mut out = [o[0] * k + paint[0] * m, o[1] * k + paint[1] * m, o[2] * k + paint[2] * m, o[3] * k + paint[3] * m];
+                let mut out = match &paint_pg {
+                    Some(pg) if o[3] > 0.0 => mixer.mix_premult(o, paint, pg, m),
+                    _ => [o[0] * k + paint[0] * m, o[1] * k + paint[1] * m, o[2] * k + paint[2] * m, o[3] * k + paint[3] * m],
+                };
                 if lock_alpha {
                     let s = if out[3] > 0.0 { o[3] / out[3] } else { 0.0 };
                     out = [out[0] * s, out[1] * s, out[2] * s, o[3]];
@@ -653,6 +688,7 @@ impl Stroke {
                 self.rng = Rng::new(self.seed);
                 self.dir_last = None;
                 self.mix_p = [self.color[0], self.color[1], self.color[2], 1.0];
+                self.last_dip = 0.0;
                 self.last_sample = (f32::MAX, f32::MAX);
                 self.recent.clear();
                 self.dabs = vec![dabs[0]];
@@ -1040,5 +1076,95 @@ mod tests {
                 .count()
         };
         assert!(col(104) < col(300), "start {} vs middle {}", col(104), col(300));
+    }
+
+    // ---------- real paint ----------
+
+    fn color_line(doc: &mut Document, s: &BrushSettings, color: Color32, y: f32) {
+        let mut st = Stroke::begin(doc, 0, s, color, false, 1.0, false, Sample { x: 100.0, y, p: 1.0 }, &none);
+        let pts: Vec<Sample> = (1..=80).map(|i| Sample { x: 100.0 + i as f32 * 5.0, y, p: 1.0 }).collect();
+        for c in pts.chunks(5) {
+            st.add(doc, c, &none);
+        }
+        st.finish(doc, &none);
+    }
+
+    fn solid() -> BrushSettings {
+        BrushSettings { size: 50.0, hardness: 1.0, spacing: 0.1, size_pressure: false, stabilize: 0.0, ..BrushSettings::default() }
+    }
+
+    fn at(doc: &Document, x: i32, y: i32) -> [f32; 3] {
+        let p = crate::files::layer_rgba(&doc.layers[0], x, y, 1, 1).get_pixel(0, 0).0;
+        [p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0]
+    }
+
+    fn chroma(c: [f32; 3]) -> f32 {
+        let l = crate::oklab::rgb_to_oklab(c);
+        l[1].hypot(l[2])
+    }
+
+    const YELLOW: Color32 = Color32::from_rgb(250, 224, 25);
+    const BLUE: Color32 = Color32::from_rgb(25, 50, 217);
+
+    #[test]
+    fn real_paint_makes_green_where_plain_paint_makes_gray() {
+        let result = |paint: Paint| {
+            let mut d = Document::new(600, 400);
+            color_line(&mut d, &solid(), YELLOW, 200.0);
+            color_line(&mut d, &BrushSettings { opacity: 0.5, paint, ..solid() }, BLUE, 200.0);
+            at(&d, 300, 200)
+        };
+        let (plain, real) = (result(Paint::Normal), result(Paint::Mix));
+        assert!(real[1] > real[0] + 0.2 && real[1] > real[2] - 0.03, "real paint is green (teal): {real:?}");
+        assert!(chroma(real) > chroma(plain) * 1.4, "livelier than plain RGB: {real:?} vs {plain:?}");
+        // where there is nothing below, both give exactly the brush color
+        let mut d = Document::new(600, 400);
+        color_line(&mut d, &BrushSettings { paint: Paint::Mix, ..solid() }, BLUE, 100.0);
+        let c = at(&d, 300, 100);
+        assert!((c[2] - 217.0 / 255.0).abs() < 0.02, "plain blue on empty canvas: {c:?}");
+    }
+
+    #[test]
+    fn a_glaze_over_dry_paint_makes_it_deeper() {
+        let mut d = Document::new(600, 400);
+        color_line(&mut d, &solid(), YELLOW, 200.0);
+        let before = at(&d, 300, 200);
+        color_line(&mut d, &BrushSettings { opacity: 0.6, paint: Paint::Glaze, ..solid() }, BLUE, 200.0);
+        let after = at(&d, 300, 200);
+        let l = |c: [f32; 3]| crate::oklab::rgb_to_oklab(c)[0];
+        assert!(l(after) < l(before) - 0.1, "deeper: {before:?} -> {after:?}");
+        assert!(after[1] > after[2], "a greenish glaze rather than blue paint: {after:?}");
+    }
+
+    #[test]
+    fn a_mixing_brush_carries_paint_along_as_pigment() {
+        let result = |paint: Paint, dip: Dip| {
+            let mut d = Document::new(600, 400);
+            // a band of yellow, then a blue mixing brush dragged through it
+            color_line(&mut d, &BrushSettings { size: 120.0, ..solid() }, YELLOW, 200.0);
+            let s = BrushSettings { mix: 0.6, paint, dip, dip_every: 150.0, ..solid() };
+            color_line(&mut d, &s, BLUE, 200.0);
+            (at(&d, 220, 200), at(&d, 420, 200))
+        };
+        let (plain_early, _) = result(Paint::Normal, Dip::Once);
+        let (real_early, real_late) = result(Paint::Mix, Dip::Once);
+        let greenness = |c: [f32; 3]| c[1] - c[0].max(c[2]);
+        assert!(greenness(real_early) > greenness(plain_early) + 0.03, "pigment pickup is greener: {real_early:?} vs {plain_early:?}");
+        // loaded once, the brush runs out of blue and turns into what it picked up: yellower than a re-dipped brush
+        let (_, redipped) = result(Paint::Mix, Dip::Every);
+        assert!(redipped[2] > real_late[2] + 0.02, "re-dipping brings the blue back: {redipped:?} vs {real_late:?}");
+    }
+
+    #[test]
+    fn real_paint_presets_paint_and_old_brushes_are_unchanged() {
+        for name in ["Real oil", "Real gouache", "Glaze"] {
+            let pr = presets().into_iter().find(|p| p.name == name).unwrap_or_else(|| panic!("{name} exists"));
+            assert_ne!(pr.s.paint, Paint::Normal);
+            let mut d = Document::new(700, 400);
+            color_line(&mut d, &solid(), YELLOW, 200.0);
+            line_at(&mut d, &pr.s, false, 200.0);
+            assert!(painted(&d) > 100, "{name} paints");
+        }
+        assert!(presets().iter().filter(|p| !matches!(p.name, "Real oil" | "Real gouache" | "Glaze")).all(|p| p.s.paint == Paint::Normal), "nothing else changed");
     }
 }

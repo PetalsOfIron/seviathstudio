@@ -156,6 +156,44 @@ pub enum Ends {
     Flat,
 }
 
+/// How paint behaves where it meets other paint.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Paint {
+    /// The old way: colors lie over each other (and mix as plain RGB when the brush mixes).
+    Normal,
+    /// Real paint: colors mix like pigments (blue and yellow make green, not gray).
+    Mix,
+    /// A thin transparent layer: colors multiply and deepen what is below.
+    Glaze,
+}
+
+impl Paint {
+    pub const ALL: [(Paint, &'static str, &'static str); 3] = [
+        (Paint::Normal, "Plain", "Colors lie over each other, as in most drawing programs."),
+        (Paint::Mix, "Mix like paint", "Blue and yellow make green with life in it, red and yellow make orange: never muddy gray."),
+        (Paint::Glaze, "Glaze", "A transparent layer over dry paint: yellow under blue turns deep green, the paint below shines through."),
+    ];
+}
+
+/// How often a mixing brush is dipped in fresh paint.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Dip {
+    /// Fresh paint slowly comes back as you go (the default).
+    Gradual,
+    /// Loaded once at the start; it runs out and keeps picking up what it paints over.
+    Once,
+    /// Dipped again every so many pixels.
+    Every,
+}
+
+impl Dip {
+    pub const ALL: [(Dip, &'static str, &'static str); 3] = [
+        (Dip::Gradual, "Gradual", "Fresh paint slowly comes back as you paint."),
+        (Dip::Once, "Once", "Loaded at the start of the stroke only: the brush runs out of its own color and carries what it picks up."),
+        (Dip::Every, "Every so far", "Dipped again after a set length of stroke."),
+    ];
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MixRefer {
     All,
@@ -324,6 +362,11 @@ pub struct BrushSettings {
     pub taper: f32,
     pub mix: f32,
     pub mix_refer: MixRefer,
+    // real paint
+    pub paint: Paint,
+    pub dip: Dip,
+    /// Pixels of stroke between dips (Dip::Every).
+    pub dip_every: f32,
     // tip and shape
     pub tip: Tip,
     pub roundness: f32,
@@ -380,6 +423,9 @@ impl Default for BrushSettings {
             taper: 0.3,
             mix: 0.0,
             mix_refer: MixRefer::All,
+            paint: Paint::Normal,
+            dip: Dip::Gradual,
+            dip_every: 300.0,
             tip: Tip::Round,
             roundness: 1.0,
             angle: 0.0,
@@ -531,6 +577,9 @@ pub fn presets() -> Vec<Preset> {
         p("Gouache flat", "Paint", "Flat, matte gouache strokes with a chalky dry edge.", BrushSettings { size: 40.0, tip: T::Shape, shape_base: SB::Rounded, roundness: 0.35, angle: 90.0, follow_direction: true, hardness: 0.8, edge: Dry, edge_amount: 0.3, edge_detail: 0.7, variants: 3, mix: 0.15, mix_refer: layer, flow: 0.95, spacing: 0.04, min_size: 0.7, texture: 0.2, ..d() }),
         p("Dry gouache", "Paint", "Scratchy, broken gouache from a nearly dry brush.", BrushSettings { size: 40.0, hardness: 0.85, edge: Dry, edge_amount: 0.6, edge_detail: 0.8, grain: 0.3, roundness: 0.6, follow_direction: true, variants: 4, mix: 0.1, mix_refer: layer, flow: 0.95, spacing: 0.04, min_size: 0.7, texture: 0.35, ..d() }),
         p("Outlined gouache", "Paint", "Opaque paint with an empty middle: a thick outlined stroke.", BrushSettings { size: 40.0, tip: T::Chalk, roundness: 0.8, hardness: 0.85, hollow: 0.85, outline_width: 0.22, edge: Ragged, edge_amount: 0.35, edge_detail: 0.7, variants: 4, flow: 0.9, spacing: 0.05, min_size: 0.6, texture: 0.15, ..d() }),
+        p("Real oil", "Paint", "Oil that mixes like real pigment: blue into yellow makes a living green, and the brush carries the paint along.", BrushSettings { size: 40.0, tip: T::Shape, shape_base: SB::Rounded, roundness: 0.35, angle: 90.0, streaks: 0.5, follow_direction: true, edge: Bristly, edge_amount: 0.35, edge_detail: 0.6, variants: 3, spacing: 0.05, flow: 0.9, mix: 0.5, paint: Paint::Mix, dip: Dip::Once, min_size: 0.5, opacity_pressure: true, stabilize: 0.1, ..d() }),
+        p("Real gouache", "Paint", "Opaque gouache that blends like pigment where strokes overlap; dipped fresh every so often.", BrushSettings { size: 32.0, hardness: 0.8, edge: Ragged, edge_amount: 0.2, edge_detail: 0.5, variants: 4, angle_jitter: 1.0, mix: 0.3, paint: Paint::Mix, dip: Dip::Every, dip_every: 260.0, min_size: 0.5, texture: 0.15, ..d() }),
+        p("Glaze", "Paint", "A transparent glaze: lay it over dry paint and the colors deepen, as with thin oil or watercolor washes.", BrushSettings { size: 50.0, hardness: 0.6, opacity: 0.55, flow: 0.7, paint: Paint::Glaze, min_size: 0.6, opacity_pressure: true, ..d() }),
         p("Fuzzy bristle", "Paint", "Dense, hairy bristle strokes with fibrous, fuzzy edges.", BrushSettings { size: 60.0, tip: T::Bristle, roundness: 0.7, follow_direction: true, hardness: 0.9, edge: Bristly, edge_amount: 0.85, edge_detail: 0.8, deform: 0.25, streaks: 0.4, variants: 6, flow: 0.85, spacing: 0.04, mix: 0.15, mix_refer: layer, min_size: 0.5, ..d() }),
         p("Dry brush", "Paint", "Streaky paint with gaps, like a brush running out of paint.", BrushSettings { size: 44.0, hardness: 0.85, roundness: 0.55, follow_direction: true, edge: Dry, edge_amount: 0.55, edge_detail: 0.6, variants: 4, spacing: 0.04, mix: 0.15, min_size: 0.6, texture: 0.2, ..d() }),
         p("Paint mix", "Paint", "Wet paint: your color mixes with the colors already on the canvas.", BrushSettings { size: 40.0, hardness: 0.5, spacing: 0.08, flow: 0.8, min_size: 0.4, opacity_pressure: true, mix: 0.5, stabilize: 0.1, ..d() }),
