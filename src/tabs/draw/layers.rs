@@ -75,6 +75,14 @@ impl DrawState {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
+        let (quick, search) = ctx.input_mut(|i| (i.consume_key(Modifiers::COMMAND, Key::L), i.consume_key(Modifiers::ALT, Key::L)));
+        if quick {
+            self.lui.quick = Some(ctx.pointer_latest_pos().unwrap_or(pos2(400.0, 300.0)) + vec2(8.0, 8.0));
+            self.lui.quick_age = 0;
+        }
+        if search {
+            self.lui.focus_search = true;
+        }
         let (new, dup, merge, clip, group) = ctx.input_mut(|i| {
             (
                 i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::N),
@@ -108,6 +116,7 @@ impl DrawState {
     }
 
     pub(super) fn layers_section(&mut self, ui: &mut Ui) {
+        self.track_layer_use();
         let before = self.layer_sig();
         self.layers_section_inner(ui);
         self.fix_active();
@@ -123,10 +132,12 @@ impl DrawState {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let is_paper = self.doc.layers[self.active_idx()].kind == LayerKind::Paper;
                 if icon_button(ui, Icon::Trash, false, 26.0, "Delete layer (a folder goes with its contents)").clicked() {
-                    if is_paper {
+                    if self.is_multi() {
+                        self.batch_delete();
+                    } else if is_paper {
                         self.notice = Some("The paper can't be deleted — hide it with the eye instead.");
                     } else {
-                        self.doc.delete(self.active);
+                        self.delete_layer(self.active);
                     }
                 }
                 if icon_button(ui, Icon::Folder, false, 26.0, "New folder").clicked() {
@@ -141,35 +152,36 @@ impl DrawState {
             });
         });
 
-        // Search and color-label filter, for big files with many layers.
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 3.0;
-            ui.add(
-                egui::TextEdit::singleline(&mut self.layer_query)
-                    .hint_text("Search layers…")
-                    .desired_width(ui.available_width() - 8.0 * 15.0),
-            );
-            for (t, (c, name)) in TAG_COLORS.iter().enumerate() {
-                let (r, resp) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::click());
-                let on = self.tag_filter as usize == t;
-                if t == 0 {
-                    ui.painter().circle_stroke(r.center(), 4.5, Stroke::new(1.2, if on { VENOM } else { TEXT_DIM }));
-                } else {
-                    ui.painter().circle_filled(r.center(), if on { 6.0 } else { 4.5 }, *c);
-                    if on {
-                        ui.painter().circle_stroke(r.center(), 6.0, Stroke::new(1.5, TEXT));
-                    }
-                }
-                let tip = if t == 0 { "Show all labels".to_owned() } else { format!("Show only {name} layers") };
-                if resp.on_hover_text(tip).clicked() {
-                    self.tag_filter = t as u8;
-                }
-            }
-        });
-        let query = self.layer_query.trim().to_lowercase();
-        let filtering = !query.is_empty() || self.tag_filter != 0;
-        if filtering && self.drag_layer.is_some() {
+        // Search, color labels, filter chips and sorting, for big files with many layers.
+        let search = self.filter_bar(ui);
+        self.favorites_row(ui);
+        self.batch_bar(ui);
+        let flat = self.layer_filtering();
+        if flat && self.drag_layer.is_some() {
             self.drag_layer = None;
+        }
+        let order = self.layer_order();
+        let order_ids: Vec<LayerId> = order.iter().map(|&i| self.doc.layers[i].id).collect();
+        // typing in the search box jumps to the first match; arrows walk the matches; Esc clears
+        if search.changed() && !order_ids.contains(&self.active) {
+            if let Some(first) = order_ids.first() {
+                self.active = *first;
+            }
+        }
+        if search.has_focus() {
+            let (up, down) = ui.ctx().input_mut(|i| (i.consume_key(Modifiers::NONE, Key::ArrowUp), i.consume_key(Modifiers::NONE, Key::ArrowDown)));
+            let pos = order_ids.iter().position(|id| *id == self.active);
+            if down {
+                self.active = order_ids.get(pos.map(|p| p + 1).unwrap_or(0)).copied().unwrap_or(self.active);
+            }
+            if up {
+                self.active = pos.and_then(|p| p.checked_sub(1)).and_then(|p| order_ids.get(p)).copied().unwrap_or(self.active);
+            }
+        }
+        // Esc (the text box itself already lets go of focus on Esc): clear the search
+        if (search.has_focus() || search.lost_focus()) && ui.ctx().input(|i| i.key_pressed(Key::Escape)) {
+            self.lui.filter.query.clear();
+            search.surrender_focus();
         }
 
         let w = ui.available_width();
@@ -177,23 +189,14 @@ impl DrawState {
         let mut drag_released = false;
         let ctx = ui.ctx().clone();
 
-        for i in 0..self.doc.layers.len() {
-            if filtering {
-                let l = &self.doc.layers[i];
-                let name_ok = query.is_empty() || l.name.to_lowercase().contains(&query);
-                let tag_ok = self.tag_filter == 0 || l.tag == self.tag_filter;
-                if !(name_ok && tag_ok) {
-                    continue;
-                }
-            } else if self.doc.collapsed_away(i) {
-                continue;
-            }
-            let depth = self.doc.depth(i) as f32;
+        for i in order {
+            let depth = if flat { 0.0 } else { self.doc.depth(i) as f32 };
             let (row, resp) = ui.allocate_exact_size(vec2(w, ROW_H), Sense::click_and_drag());
             let id = self.doc.layers[i].id;
             let kind = self.doc.layers[i].kind;
             rows.push((id, row, kind));
             let selected = id == self.active;
+            let picked = self.lui.multi.contains(&id);
             let dragging_this = self.drag_layer == Some(id);
 
             // Background and selection.
@@ -201,14 +204,16 @@ impl DrawState {
                 let p = ui.painter();
                 let bg = if selected {
                     EMERALD_DEEP.gamma_multiply(0.55)
+                } else if picked {
+                    EMERALD_DEEP.gamma_multiply(0.3)
                 } else if resp.hovered() {
                     HOVER
                 } else {
                     RAISED
                 };
                 p.rect_filled(row, CornerRadius::same(8), if dragging_this { bg.gamma_multiply(0.4) } else { bg });
-                if selected {
-                    p.rect_stroke(row, CornerRadius::same(8), Stroke::new(1.0, EMERALD), StrokeKind::Inside);
+                if selected || picked {
+                    p.rect_stroke(row, CornerRadius::same(8), Stroke::new(1.0, if selected { EMERALD } else { EMERALD_DEEP }), StrokeKind::Inside);
                 }
                 let tag = self.doc.layers[i].tag as usize;
                 if tag > 0 {
@@ -338,8 +343,12 @@ impl DrawState {
                 let p = ui.painter().with_clip_rect(Rect::from_min_max(pos2(tx, row.top()), pos2(row.right() - 24.0, row.bottom())));
                 p.text(pos2(tx, row.top() + 32.0), Align2::LEFT_CENTER, sub, FontId::proportional(11.0), TEXT_DIM);
                 if layer.locked {
-                    let lr = Rect::from_center_size(pos2(row.right() - 14.0, row.center().y), Vec2::splat(14.0));
+                    let lr = Rect::from_center_size(pos2(row.right() - 14.0, row.top() + 14.0), Vec2::splat(14.0));
                     icons::paint(ui.painter(), lr, Icon::Lock, GOLD);
+                }
+                if layer.fav {
+                    let sr = Rect::from_center_size(pos2(row.right() - 14.0, row.bottom() - 13.0), Vec2::splat(14.0));
+                    icons::paint(ui.painter(), sr, Icon::Star, GOLD);
                 }
             }
 
@@ -354,13 +363,59 @@ impl DrawState {
             } else if resp.double_clicked() && kind != LayerKind::Paper {
                 self.renaming = Some((id, self.doc.layers[i].name.clone()));
             } else if resp.clicked() {
-                self.active = id;
+                let mods = ctx.input(|i| i.modifiers);
+                if mods.command {
+                    // Ctrl + click: add or remove this layer from the picked ones
+                    if self.lui.multi.is_empty() {
+                        self.lui.multi.insert(self.active);
+                    }
+                    if !self.lui.multi.remove(&id) {
+                        self.lui.multi.insert(id);
+                    }
+                    self.active = id;
+                } else if mods.shift {
+                    // Shift + click: everything from the active layer to this one
+                    let a = order_ids.iter().position(|x| *x == self.active).unwrap_or(0);
+                    let b = order_ids.iter().position(|x| *x == id).unwrap_or(0);
+                    let (lo, hi) = (a.min(b), a.max(b));
+                    let doc = &self.doc;
+                    self.lui.multi =
+                        order_ids[lo..=hi].iter().copied().filter(|x| doc.index_of(*x).is_some_and(|k| doc.layers[k].kind != LayerKind::Paper)).collect();
+                } else {
+                    self.lui.multi.clear();
+                    self.active = id;
+                }
             }
 
             // Right-click menu.
             resp.context_menu(|ui| {
+                if !self.lui.multi.contains(&id) {
+                    self.lui.multi.clear();
+                }
                 self.active = id;
+                if ui.button("New layer above").clicked() {
+                    self.new_layer_beside(id, true, false);
+                    ui.close();
+                }
                 if kind != LayerKind::Paper {
+                    if ui.button("New layer below").clicked() {
+                        self.new_layer_beside(id, false, false);
+                        ui.close();
+                    }
+                    if ui.button("New layer clipped to this").on_hover_text("A shading layer that only shows where this layer has paint").clicked() {
+                        self.new_layer_beside(id, true, true);
+                        ui.close();
+                    }
+                    if kind == LayerKind::Raster && ui.button("Select pixels of this layer").clicked() {
+                        self.select_layer_pixels(id);
+                        ui.close();
+                    }
+                    let fav = self.doc.layers[i].fav;
+                    if ui.button(if fav { "Remove from favorites" } else { "Add to favorites" }).clicked() {
+                        self.toggle_favorite(id);
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui.button("Rename").clicked() {
                         self.renaming = Some((id, self.doc.layers[i].name.clone()));
                         ui.close();
@@ -412,7 +467,7 @@ impl DrawState {
                 if kind != LayerKind::Paper {
                     ui.separator();
                     if ui.button(RichText::new("Delete").color(Color32::from_rgb(232, 110, 110))).clicked() {
-                        self.doc.delete(id);
+                        self.delete_layer(id);
                         ui.close();
                     }
                 }
@@ -422,8 +477,8 @@ impl DrawState {
                 break;
             }
 
-            // Drag & drop (not while the list is filtered).
-            if resp.drag_started() && kind != LayerKind::Paper && !filtering {
+            // Drag & drop (not while the list is filtered or sorted).
+            if resp.drag_started() && kind != LayerKind::Paper && !flat {
                 self.drag_layer = Some(id);
                 self.active = id;
             }

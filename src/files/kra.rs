@@ -163,6 +163,7 @@ fn layer(id: LayerId, parent: Option<LayerId>, name: String, kind: LayerKind) ->
         opacity: 100.0,
         blend: Blend::Normal,
         tiles: HashMap::new(),
+        fav: false,
         rev: 1,
     }
 }

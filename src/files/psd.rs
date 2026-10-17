@@ -554,6 +554,7 @@ pub fn read(bytes: &[u8]) -> Result<Document, String> {
             opacity: (r.opacity as f32 / 255.0 * 100.0).round(),
             blend: r.blend,
             tiles: HashMap::new(),
+            fav: false,
             rev: 1,
         };
         next_id += 1;
@@ -650,6 +651,7 @@ pub fn read(bytes: &[u8]) -> Result<Document, String> {
             opacity: 100.0,
             blend: Blend::Normal,
             tiles: HashMap::new(),
+            fav: false,
             rev: 1,
         };
         next_id += 1;
@@ -672,6 +674,7 @@ pub fn read(bytes: &[u8]) -> Result<Document, String> {
         opacity: 100.0,
         blend: Blend::Normal,
         tiles: HashMap::new(),
+        fav: false,
         rev: 1,
     };
     if paper.is_none() {

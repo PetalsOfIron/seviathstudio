@@ -13,6 +13,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::doc::{Blend, Document, Layer, LayerKind, TILE, TileData, TileKey};
+use crate::layerfilter::{LayerFilter, Preset};
 
 pub const EXT: &str = "seviath";
 const FORMAT: &str = "seviath";
@@ -28,6 +29,8 @@ struct ProjectJson {
     height: u32,
     paper: [u8; 4],
     layers: Vec<LayerJson>,
+    #[serde(default)]
+    filter_presets: Vec<PresetJson>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -42,9 +45,19 @@ struct LayerJson {
     clip: bool,
     expanded: bool,
     tag: u8,
+    #[serde(default)]
+    fav: bool,
     opacity: f32,
     blend: String,
     tiles: Vec<[i32; 2]>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PresetJson {
+    name: String,
+    query: String,
+    label: u8,
+    chips: Vec<String>,
 }
 
 pub fn blend_name(b: Blend) -> &'static str {
@@ -118,7 +131,7 @@ fn tile_from_png(bytes: &[u8]) -> Result<Vec<Color32>, String> {
 
 /// Save a project. Writes a temporary file first and swaps it in, so a crash never leaves a
 /// half-written project behind.
-pub fn save(w: u32, h: u32, paper: Color32, layers: &[Layer], path: &Path) -> Result<(), String> {
+pub fn save(w: u32, h: u32, paper: Color32, layers: &[Layer], presets: &[Preset], path: &Path) -> Result<(), String> {
     let json = ProjectJson {
         format: FORMAT.into(),
         version: VERSION,
@@ -142,11 +155,16 @@ pub fn save(w: u32, h: u32, paper: Color32, layers: &[Layer], path: &Path) -> Re
                     clip: l.clip,
                     expanded: l.expanded,
                     tag: l.tag,
+                    fav: l.fav,
                     opacity: l.opacity,
                     blend: blend_name(l.blend).into(),
                     tiles,
                 }
             })
+            .collect(),
+        filter_presets: presets
+            .iter()
+            .map(|p| PresetJson { name: p.name.clone(), query: p.filter.query.clone(), label: p.filter.label, chips: p.filter.chip_keys() })
             .collect(),
     };
     // encode every tile in parallel
@@ -254,14 +272,22 @@ pub fn load(path: &Path) -> Result<Document, String> {
             clip: l.clip,
             expanded: l.expanded,
             tag: l.tag.min(7),
+            fav: l.fav,
             opacity: l.opacity.clamp(0.0, 100.0),
             blend: blend_from_name(&l.blend),
             tiles: tiles.remove(&l.id).unwrap_or_default(),
             rev: 1,
         })
         .collect();
+    let presets: Vec<Preset> = json
+        .filter_presets
+        .into_iter()
+        .take(50)
+        .map(|p| Preset { name: p.name.chars().take(40).collect(), filter: LayerFilter::from_parts(p.query, p.label, &p.chips) })
+        .collect();
     let [r, g, b, a] = json.paper;
     let mut doc = Document::from_parts(json.width, json.height, Color32::from_rgba_unmultiplied(r, g, b, a), layers);
+    doc.filter_presets = presets;
     ensure_usable(&mut doc);
     Ok(doc)
 }
@@ -293,12 +319,19 @@ mod tests {
 
     #[test]
     fn save_and_load_round_trip() {
-        let d = testdoc::sample();
+        let mut d = testdoc::sample();
+        d.layers[1].fav = true;
+        let mut f = LayerFilter { query: "hair".into(), label: 2, chips: Vec::new() };
+        f.cycle(crate::layerfilter::ChipKind::Locked);
+        f.cycle(crate::layerfilter::ChipKind::Locked);
+        let presets = vec![Preset { name: "Hair, unlocked".into(), filter: f }];
         let dir = std::env::temp_dir().join(format!("seviath_proj_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.seviath");
-        save(d.w, d.h, d.paper, &d.layers, &path).unwrap();
+        save(d.w, d.h, d.paper, &d.layers, &presets, &path).unwrap();
         let back = load(&path).unwrap();
+        assert_eq!(back.filter_presets, presets, "filter presets are part of the project");
+        assert!(back.layers[1].fav && !back.layers[0].fav, "favorites are saved");
         assert_eq!((back.w, back.h, back.paper), (d.w, d.h, d.paper));
         assert_eq!(testdoc::shape(&back), testdoc::shape(&d));
         // pixels identical after a save/load cycle (premultiplied → PNG → premultiplied is exact)
@@ -310,7 +343,7 @@ mod tests {
         }
         assert!(read_thumbnail(&path).is_some());
         // saving again over it works and leaves no temporary file
-        save(back.w, back.h, back.paper, &back.layers, &path).unwrap();
+        save(back.w, back.h, back.paper, &back.layers, &back.filter_presets, &path).unwrap();
         assert!(!path.with_extension("seviath.saving").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }

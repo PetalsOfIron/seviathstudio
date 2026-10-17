@@ -17,11 +17,12 @@ pub struct DocState {
     pub layers: Vec<Layer>,
     pub paper: Color32,
     pub selection: Option<crate::select::Selection>,
+    pub presets: Vec<crate::layerfilter::Preset>,
 }
 
 impl Document {
     pub fn snapshot(&self) -> DocState {
-        DocState { layers: self.layers.clone(), paper: self.paper, selection: self.selection.clone() }
+        DocState { layers: self.layers.clone(), paper: self.paper, selection: self.selection.clone(), presets: self.filter_presets.clone() }
     }
 
     pub fn restore(&mut self, s: &DocState) {
@@ -29,6 +30,7 @@ impl Document {
         self.layers = s.layers.clone();
         self.paper = s.paper;
         self.selection = s.selection.clone();
+        self.filter_presets = s.presets.clone();
         // fresh revisions so cached thumbnails never show an old picture
         for l in &mut self.layers {
             l.rev = l.rev.wrapping_add(1_000_003);
@@ -39,6 +41,7 @@ impl Document {
     /// Same picture and layers as `s` (folder open/closed doesn't count).
     pub fn same_as(&self, s: &DocState) -> bool {
         sel_id(&self.selection) == sel_id(&s.selection)
+            && self.filter_presets == s.presets
             && self.paper == s.paper
             && self.layers.len() == s.layers.len() && self.layers.iter().zip(&s.layers).all(|(a, b)| layer_same(a, b))
     }
@@ -58,6 +61,7 @@ fn meta_same(a: &Layer, b: &Layer) -> bool {
         && a.lock_alpha == b.lock_alpha
         && a.clip == b.clip
         && a.tag == b.tag
+        && a.fav == b.fav
         && a.opacity == b.opacity
         && a.blend == b.blend
 }
@@ -97,6 +101,9 @@ pub fn describe(before: &DocState, after: &DocState) -> String {
     if before.paper != after.paper {
         return "Paper color".into();
     }
+    if before.presets != after.presets && before.layers.iter().zip(&after.layers).all(|(a, b)| layer_same(a, b)) {
+        return "Layer filter preset".into();
+    }
     if sel_id(&before.selection) != sel_id(&after.selection) && before.layers.iter().zip(&after.layers).all(|(a, b)| layer_same(a, b)) {
         return if after.selection.is_none() { "Deselect".into() } else { "Selection".into() };
     }
@@ -122,6 +129,8 @@ pub fn describe(before: &DocState, after: &DocState) -> String {
             "Lock"
         } else if a.tag != b.tag {
             "Color label"
+        } else if a.fav != b.fav {
+            "Favorite"
         } else {
             continue;
         };

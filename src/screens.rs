@@ -215,10 +215,10 @@ fn files_screens() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let sample = testdoc::sample();
-    project::save(sample.w, sample.h, sample.paper, &sample.layers, &dir.join("Hair study.seviath")).unwrap();
+    project::save(sample.w, sample.h, sample.paper, &sample.layers, &[], &dir.join("Hair study.seviath")).unwrap();
     let mut big = crate::doc::Document::new(400, 600);
     big.paper = Color32::from_rgb(40, 60, 50);
-    project::save(big.w, big.h, big.paper, &big.layers, &dir.join("Night sky.seviath")).unwrap();
+    project::save(big.w, big.h, big.paper, &big.layers, &[], &dir.join("Night sky.seviath")).unwrap();
 
     let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.state_mut().settings_mut().projects_dir = dir.display().to_string();
@@ -397,4 +397,182 @@ fn info_screen() {
     h.state_mut().open_window(false, Some(crate::settings_ui::Page::Info));
     h.run_steps(4);
     save(&mut h, "info_screen");
+}
+
+fn add_layer_named(d: &mut crate::tabs::draw::DrawState, name: &str, f: impl FnOnce(&mut crate::doc::Layer)) -> crate::doc::LayerId {
+    let mut l = d.doc.new_layer(name, crate::doc::LayerKind::Raster);
+    f(&mut l);
+    let top = d.doc.layers[0].id;
+    d.doc.insert_layer(l, top)
+}
+
+#[test]
+fn organizer_screens() {
+    use crate::doc::Blend;
+    use crate::layerfilter::{ChipKind, SortBy};
+    use crate::tabs::draw::organizer::SortBySafe;
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    let (hair_front, skin, eyes, folder);
+    {
+        let d = h.state_mut().draw_mut();
+        hair_front = add_layer_named(d, "Hair front", |l| l.tag = 3);
+        add_layer_named(d, "Hair back", |l| {
+            l.tag = 3;
+            l.locked = true;
+        });
+        skin = add_layer_named(d, "Skin", |l| {
+            l.blend = Blend::Multiply;
+            l.fav = true;
+        });
+        eyes = add_layer_named(d, "Eyes", |l| l.tag = 5);
+        folder = d.doc.group(eyes, "Face").unwrap();
+    }
+    h.run_steps(3);
+    let names = |h: &Harness<'_, SeviathApp>| {
+        let mut v = h.state().draw_mut_ref().shown_layer_names();
+        v.sort();
+        v
+    };
+
+    // Filters stack, NOT flips one, saved presets live in the project.
+    h.state_mut().draw_mut().layer_ui_mut().filter.query = "hair".into();
+    assert_eq!(names(&h), ["Hair back", "Hair front"]);
+    h.state_mut().draw_mut().layer_ui_mut().filter.cycle(ChipKind::Locked);
+    assert_eq!(names(&h), ["Hair back"]);
+    h.state_mut().draw_mut().layer_ui_mut().filter.cycle(ChipKind::Locked);
+    assert_eq!(names(&h), ["Hair front"], "NOT locked");
+    h.state_mut().draw_mut().layer_ui_mut().filter.clear();
+    h.state_mut().draw_mut().layer_ui_mut().filter.cycle(ChipKind::Blend(Blend::Multiply));
+    assert_eq!(names(&h), ["Skin"]);
+    h.state_mut().draw_mut().layer_ui_mut().filter.clear();
+    h.state_mut().draw_mut().layer_ui_mut().filter.cycle(ChipKind::Favorite);
+    assert_eq!(names(&h), ["Skin"]);
+    h.state_mut().draw_mut().layer_ui_mut().filter.clear();
+
+    // Sorting by name gives a flat, alphabetical list.
+    h.state_mut().draw_mut().layer_ui_mut().sort = SortBySafe(SortBy::Name);
+    let sorted = h.state().draw_mut_ref().shown_layer_names();
+    let mut alpha = sorted.clone();
+    alpha.sort_by_key(|n| n.to_lowercase());
+    assert_eq!(sorted, alpha);
+    h.state_mut().draw_mut().layer_ui_mut().sort = SortBySafe(SortBy::Z);
+
+    // Keyboard flow: Alt+L focuses the search box, typing jumps to the match.
+    h.key_press_modifiers(Modifiers::ALT, Key::L);
+    h.run_steps(3);
+    h.event(Event::Text("ski".into()));
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().active_name(), "Skin");
+    assert_eq!(h.state().draw_mut_ref().shown_layer_names(), ["Skin"]);
+    h.key_press(Key::Escape);
+    h.run_steps(3);
+    assert!(h.state().draw_mut_ref().shown_layer_names().len() > 3, "Escape clears the search");
+
+    // make room for the layer rows
+    h.state_mut().draw_mut().set_color_open(false);
+    h.run_steps(3);
+    // Ctrl + click on rows picks several layers; a batch edit hits all of them and is one history step.
+    let rows: Vec<Pos2> = ["Hair front", "Skin"]
+        .iter()
+        .map(|n| {
+            let d = h.state().draw_mut_ref();
+            let idx = d.doc.layers.iter().position(|l| l.name == *n).unwrap();
+            d.layer_row(idx).expect("row is shown").center()
+        })
+        .collect();
+    h.hover_at(rows[0]);
+    h.step();
+    button(&h, rows[0], true);
+    h.step();
+    button(&h, rows[0], false);
+    h.run_steps(2);
+    h.hover_at(rows[1]);
+    h.step();
+    h.event(Event::ModifiersChanged(Modifiers::COMMAND));
+    h.step();
+    h.event(Event::PointerButton { pos: rows[1], button: PointerButton::Primary, pressed: true, modifiers: Modifiers::COMMAND });
+    h.step();
+    h.event(Event::PointerButton { pos: rows[1], button: PointerButton::Primary, pressed: false, modifiers: Modifiers::COMMAND });
+    h.step();
+    h.event(Event::ModifiersChanged(Modifiers::NONE));
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().layer_ui_count(), 2);
+    save(&mut h, "org_01_picked");
+    h.state_mut().draw_mut().test_batch_hide();
+    assert_eq!(h.state().draw_mut_ref().pending_label().as_deref(), Some("Hide · 2 layers"), "named as one step");
+    h.run_steps(2);
+    {
+        let d = h.state().draw_mut_ref();
+        let hidden = d.doc.layers.iter().filter(|l| !l.visible).map(|l| l.name.clone()).collect::<Vec<_>>();
+        assert_eq!(hidden.len(), 2, "{hidden:?}");
+    }
+    h.state_mut().draw_mut().layer_ui_mut().multi.clear();
+
+    // Delete a folder and put it back with "Oops".
+    let before: Vec<String> = h.state().draw_mut_ref().doc.layers.iter().map(|l| l.name.clone()).collect();
+    h.state_mut().draw_mut().test_delete_layer(folder);
+    h.run_steps(2);
+    assert_eq!(h.state().draw_mut_ref().doc.layers.len(), before.len() - 2, "the folder and the layer inside it");
+    h.state_mut().draw_mut().test_restore_deleted();
+    h.run_steps(2);
+    let after: Vec<String> = h.state().draw_mut_ref().doc.layers.iter().map(|l| l.name.clone()).collect();
+    assert_eq!(after, before);
+    {
+        let d = h.state().draw_mut_ref();
+        let f = d.doc.layers.iter().find(|l| l.name == "Face").unwrap().id;
+        assert_eq!(d.doc.layers.iter().find(|l| l.name == "Eyes").unwrap().parent, Some(f), "folder contents came back inside it");
+    }
+
+    // New layers beside one, clipped to it; select the pixels of a layer.
+    h.state_mut().draw_mut().test_layer_beside(skin, true, true);
+    {
+        let d = h.state().draw_mut_ref();
+        let i = d.doc.layers.iter().position(|l| l.name == "Skin").unwrap();
+        assert!(d.doc.layers[i - 1].clip, "the new layer sits right above Skin and is clipped");
+    }
+    h.state_mut().draw_mut().test_layer_beside(skin, false, false);
+    {
+        let d = h.state().draw_mut_ref();
+        let i = d.doc.layers.iter().position(|l| l.name == "Skin").unwrap();
+        assert!(d.doc.layers[i + 1].name.starts_with("Layer"), "{}", d.doc.layers[i + 1].name);
+    }
+    {
+        let d = h.state_mut().draw_mut();
+        let img = image::RgbaImage::from_pixel(120, 80, image::Rgba([10, 200, 90, 255]));
+        let i = d.doc.layers.iter().position(|l| l.id == hair_front).unwrap();
+        d.doc.layers[i].tiles = crate::files::tiles_from_rgba(&img, 300, 400, d.doc.w, d.doc.h);
+        d.doc.layers[i].rev += 1;
+    }
+    h.state_mut().draw_mut().test_select_pixels(hair_front);
+    {
+        let d = h.state().draw_mut_ref();
+        assert_eq!(d.doc.selection.as_ref().and_then(|s| s.bounds()), Some((300, 400, 420, 480)));
+    }
+
+    // Save a filter, look at the drawer, and the quick bar.
+    {
+        let d = h.state_mut().draw_mut();
+        let ui = d.layer_ui_mut();
+        ui.filter.query = "hair".into();
+        ui.filter.cycle(ChipKind::Locked);
+        ui.filter.cycle(ChipKind::Locked);
+        ui.filters_open = true;
+        let preset = crate::layerfilter::Preset { name: "Hair, free".into(), filter: ui.filter.clone() };
+        d.doc.filter_presets.push(preset);
+    }
+    h.run_steps(3);
+    save(&mut h, "org_02_filters");
+    h.state_mut().draw_mut().layer_ui_mut().filter.clear();
+    h.state_mut().draw_mut().layer_ui_mut().filters_open = false;
+    h.state_mut().draw_mut().test_delete_layer(eyes);
+    h.hover_at(pos2(700.0, 400.0));
+    h.step();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::L);
+    h.run_steps(3);
+    assert!(h.state().draw_mut_ref().layer_ui_mut_ref().quick.is_some());
+    save(&mut h, "org_03_quick_bar");
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    assert!(h.state().draw_mut_ref().layer_ui_mut_ref().quick.is_none());
 }
