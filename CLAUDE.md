@@ -41,12 +41,8 @@
 - `src/settings.rs` (serde JSON in `%APPDATA%\SeviathStudio\settings.json`, `#[serde(default)]`, `persist=false` in tests) + `src/settings_ui.rs` pages.
 - Look: `theme.rs` (colors EMERALD, VENOM, GOLD, PANEL, TEXT, TEXT_DIM…), `snake.rs` (logo, scales, divider), `icons.rs` (line icons drawn in code), `widgets.rs` (chip, segmented, icon_button, section_title).
 
-## Where the work stands (2026-10-17)
+## Where the work stands
 - Milestones **1–8 done** (see ROADMAP "Done"). 72 tests pass.
-- **In progress — plan Part AT (creator credit & Info screen):** done so far: PNG export credit (`files::CREDIT`, setting `export_credit` on the Files page), build date available as `env!("SEVIATH_BUILD_DATE")` (from `build.rs`). Still to do:
-  - Settings → Info page (`fn info` in `settings_ui.rs`) as blocks: App (name, version, build date, changes link = GitHub commits), **Creator: "Created by Seviath" + button to https://x.com/SnakeSeviath** + snake logo, License (GPL summary), Credits (all libraries incl. zip, quick-xml, image, png, rfd, trash, chrono), Links (repo, issues), Privacy (plain statement: projects stay on this computer, nothing is sent), Debug (GPU name + backend, copy-to-clipboard). GPU info: in `SeviathApp::new` read `cc.wgpu_render_state.as_ref().map(|rs| rs.adapter.get_info())` and keep it (e.g. a `OnceLock<String>` in `settings_ui`).
-  - README: credit line "Created by Seviath — https://x.com/SnakeSeviath".
-  - Add a settings screenshot test of the Info page.
-- **ROADMAP still needs the newest plan parts:** AS (New project dialog v2: DPI on all templates + mm/inch sizes, color profile picker §E6, My templates, smart memory estimate, rig-ready starter folders, project notes/tags, per-project autosave policy; later artboards/multi-page/guides), AT (rest: credits from repo, privacy actions, update channel, debug panel), AV (tracking source picker: any mix of sources with priority, fallback, confidence blending, per-source calibration; VR trackers/SlimeVR/mocopi via VMC/OSC, RealSense depth, Leap Motion via the user-installed Ultraleap SDK) — fold into the right sections.
-- **Next milestone after that: 9 — Layer organizer v2** (ROADMAP).
+- Plan Part AT core is done (Info screen, PNG credit, README credit). ROADMAP now includes Parts AS (milestone **9a**) and AV (**37a**).
+- **Next milestone: 9 — Layer organizer v2** (ROADMAP). Then 9a, 10, ...
 - Decisions already made (don't re-ask): no Mixbox (license) → own Kubelka–Munk mixing; project-file verification can only be tamper-evident (open-source app); game runtimes in separate MIT repos; payments only via hand-off (PayPal), the app never touches money.

@@ -528,29 +528,74 @@ fn shortcuts(ui: &mut Ui) {
     hint(ui, "Changing keys comes with the command palette (Ctrl+K).");
 }
 
-fn info(ui: &mut Ui) {
-    let (r, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
-    snake::logo(ui.painter(), r.center(), 64.0);
-    ui.label(RichText::new("SeviathStudio").size(20.0).strong());
-    ui.label(RichText::new(format!("Version {} — native Rust build", crate::app::VERSION)).color(TEXT_DIM));
-    ui.add_space(8.0);
-    ui.label("Draw, rig, animate and stream a 2D character from one file, with reliable PSD export.");
-    ui.add_space(8.0);
+/// Graphics adapter name and backend, set once at startup (shown on the Info page for support).
+pub static GPU_INFO: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+const REPO: &str = "https://github.com/santamadaraneilande-ctrl/seviathstudio";
+
+fn link_row(ui: &mut Ui, label: &str, text: &str, url: &str) {
     ui.horizontal(|ui| {
-        ui.label("Made by");
-        ui.hyperlink_to("@SnakeSeviath on X", "https://x.com/SnakeSeviath");
+        ui.label(RichText::new(label).color(TEXT_DIM));
+        ui.hyperlink_to(text, url);
     });
-    ui.add_space(8.0);
-    section_title(ui, "Open source");
-    ui.label("SeviathStudio is free software under the GNU GPL v3 or later: anyone may run, study, change and share it,");
+}
+
+fn info(ui: &mut Ui) {
+    // App
+    ui.horizontal(|ui| {
+        let (r, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
+        snake::logo(ui.painter(), r.center(), 64.0);
+        ui.vertical(|ui| {
+            ui.label(RichText::new("SeviathStudio").size(22.0).strong());
+            ui.label(RichText::new(format!("Version {} · built {} · native Rust", crate::app::VERSION, env!("SEVIATH_BUILD_DATE"))).color(TEXT_DIM));
+            ui.label("Draw, rig, animate and stream a 2D character from one file, with reliable PSD export.");
+        });
+    });
+    ui.add_space(6.0);
+
+    // Creator
+    section_title(ui, "Creator");
+    ui.label(RichText::new("Created by Seviath").size(16.0).strong().color(VENOM));
+    ui.horizontal(|ui| {
+        if ui.button("Seviath on X").on_hover_text("https://x.com/SnakeSeviath").clicked() {
+            ui.ctx().open_url(egui::OpenUrl::new_tab("https://x.com/SnakeSeviath"));
+        }
+        ui.hyperlink_to("https://x.com/SnakeSeviath", "https://x.com/SnakeSeviath");
+    });
+    ui.add_space(6.0);
+
+    // License
+    section_title(ui, "License");
+    ui.label("Free software under the GNU GPL v3 or later: anyone may run, study, change and share it,");
     ui.label("and shared changes must stay open under the same license. Brushes and art keep their own licenses.");
-    ui.add_space(4.0);
-    ui.label(RichText::new("Built with:").strong());
+    link_row(ui, "Full text:", "gnu.org/licenses/gpl-3.0", "https://www.gnu.org/licenses/gpl-3.0.html");
+    ui.add_space(6.0);
+
+    // Links
+    section_title(ui, "Links");
+    link_row(ui, "Source code:", "GitHub", REPO);
+    link_row(ui, "Report a problem:", "Issues", &format!("{REPO}/issues"));
+    link_row(ui, "What changed:", "Commits", &format!("{REPO}/commits/main"));
+    ui.add_space(6.0);
+
+    // Privacy
+    section_title(ui, "Privacy");
+    ui.label("Your projects, brushes and settings stay on this computer. SeviathStudio sends nothing anywhere:");
+    ui.label("no tracking, no account needed. Accounts, the library and the shop come later and will be optional.");
+    ui.add_space(6.0);
+
+    // Credits
+    section_title(ui, "Built with");
     for (name, lic) in [
         ("egui / eframe — user interface", "MIT or Apache-2.0"),
         ("wgpu — graphics", "MIT or Apache-2.0"),
         ("winit — windows and pen input", "Apache-2.0"),
         ("rayon — using all CPU cores", "MIT or Apache-2.0"),
+        ("image, png — pictures", "MIT or Apache-2.0"),
+        ("zip, quick-xml — project, OpenRaster and Krita files", "MIT / Apache-2.0"),
+        ("rfd — open and save dialogs", "MIT"),
+        ("trash — Recycle Bin", "MIT"),
+        ("chrono — dates", "MIT or Apache-2.0"),
         ("serde, serde_json, dirs — settings", "MIT or Apache-2.0"),
         ("Ubuntu font", "Ubuntu Font Licence 1.0"),
         ("Noto Emoji font", "SIL Open Font License 1.1"),
@@ -560,6 +605,22 @@ fn info(ui: &mut Ui) {
             ui.label(name);
             ui.label(RichText::new(lic).color(TEXT_DIM).size(12.0));
         });
+    }
+    ui.add_space(6.0);
+
+    // Debug
+    section_title(ui, "For support");
+    let gpu = GPU_INFO.get().map(String::as_str).unwrap_or("unknown");
+    let report = format!(
+        "SeviathStudio {} (built {}) · {} {} · graphics: {gpu}",
+        crate::app::VERSION,
+        env!("SEVIATH_BUILD_DATE"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    ui.label(RichText::new(&report).monospace().size(12.0).color(TEXT_DIM));
+    if ui.button("Copy to clipboard").on_hover_text("Paste this when you report a problem").clicked() {
+        ui.ctx().copy_text(report);
     }
 }
 
