@@ -46,7 +46,7 @@
 ## Where the work stands
 - Milestones **1–20b done** (see ROADMAP "Done"). 304 tests pass.
 - Plan Part AT core is done (Info screen, PNG credit, README credit). ROADMAP now includes Parts AS (milestone **9a**) and AV (**37a**).
-- Milestones 9 (layer organizer), 9a (new project dialog), 10 (gradients, color randomizer), 11 (vector layers) 11b (auto-trace) and 12a (filters, adjustments, check views) are done. **Next: 25 — Parts tab** (21 to 24 are dropped, the app is offline)**, then 19 (recorder and process log), 20 (panels and workspaces), then platform / rigging / animation / streaming / games / AI (21–51), 
+- Everything up to milestone 20b is done (see ROADMAP "Done"). **Next: 25 — Parts tab** (21 to 24 are dropped, the app is offline), then rigging, animation, streaming, games and AI (26–51).
 - Gotcha: egui `consume_key(Modifiers::NONE, key)` also matches when Alt is held, so check keys with Alt/Ctrl **before** plain tool keys (see the order in `DrawState::ui`). In kittest, hold modifiers for clicks with `Event::ModifiersChanged`.
 - Gotcha: inside `DrawState::ui` a change made by code is picked up by `track_history` by itself: set `label_hint` instead of using `apply_external` (that is for code that runs outside the draw frame, e.g. menus), or the step is recorded twice.
 - Gotcha: very long bash heredocs sometimes fail to parse — write the Python patch script with the Write tool into the scratchpad and run it.
