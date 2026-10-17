@@ -20,7 +20,39 @@ pub struct Texture {
 static CACHE: [OnceLock<Texture>; 24] = [const { OnceLock::new() }; 24];
 
 pub fn get(kind: TexKind) -> &'static Texture {
+    // "My texture" needs its picture: without it the brush uses plain paper
+    let kind = if kind == TexKind::Custom { TexKind::Paper } else { kind };
     CACHE[kind as usize].get_or_init(|| make(kind))
+}
+
+/// The texture a brush uses: one of the built-in ones, or the picture of its own.
+pub fn for_brush(kind: TexKind, image: &Option<super::tipimage::TipImage>) -> &'static Texture {
+    match (kind, image) {
+        (TexKind::Custom, Some(img)) => custom(img),
+        _ => get(kind),
+    }
+}
+
+/// A texture made from a picture (dark = paint stays, light = paint is taken away), repeating.
+/// Made once per picture and kept: a few can exist at the same time.
+fn custom(img: &super::tipimage::TipImage) -> &'static Texture {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static MADE: OnceLock<Mutex<HashMap<u64, &'static Texture>>> = OnceLock::new();
+    let made = MADE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut m = made.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(t) = m.get(&img.id) {
+        return t;
+    }
+    if m.len() >= 48 {
+        return get(TexKind::Paper); // more than this at once is not a thing: do not grow without end
+    }
+    let k = img.n as f32 / TEX as f32;
+    let a: Vec<f32> = (0..TEX * TEX).map(|i| 1.0 - img.at(((i % TEX) as f32 + 0.5) * k, ((i / TEX) as f32 + 0.5) * k)).collect();
+    let col = a.iter().map(|&t| [1.0 - t; 3]).collect();
+    let tex: &'static Texture = Box::leak(Box::new(Texture { a, col }));
+    m.insert(img.id, tex);
+    tex
 }
 
 /// Bilinear, wrapping sample of the "paint taken away" value at document position (x, y).
@@ -88,6 +120,7 @@ fn palette(kind: TexKind) -> [[f32; 3]; 3] {
         TexKind::Feathers => p(0x8a8f99, 0xd9dde4, 0xffffff),
         TexKind::SnakeSkin => p(0x0c2a1c, 0x2ebf71, 0xd6a84c),
         TexKind::Foliage => p(0x0f2e14, 0x2f7a2a, 0x8fd14f),
+        TexKind::Custom => p(0x333333, 0x999999, 0xeeeeee),
     }
 }
 
@@ -189,7 +222,7 @@ fn make(kind: TexKind) -> Texture {
 
 fn texel(kind: TexKind, u: f32, v: f32) -> f32 {
     match kind {
-        TexKind::Paper => 0.0,
+        TexKind::Paper | TexKind::Custom => 0.0,
         TexKind::Watercolor => smoothstep(0.42, 0.75, pfbm(u, v, 8, 3, 4)) * 0.9,
         TexKind::Canvas => {
             let t1 = 0.5 + 0.5 * (u * TAU * 32.0).sin();

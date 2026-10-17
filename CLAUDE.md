@@ -44,10 +44,13 @@
 - Effects/adjustments: `Layer.fx` + `Layer.adjust` (LayerKind::Adjust); drawn in `Document::composite_into`; effect reach is capped at 200 px so a tile only needs its 8 neighbours (`take_dirty` widens by one ring when effects exist); `files::bake` for PSD/ORA.
 
 ## Where the work stands
-- Milestones **1–17a done** (see ROADMAP "Done"). 143 tests pass.
+- Milestones **1–17b done** (see ROADMAP "Done"). 143 tests pass.
 - Plan Part AT core is done (Info screen, PNG credit, README credit). ROADMAP now includes Parts AS (milestone **9a**) and AV (**37a**).
-- Milestones 9 (layer organizer), 9a (new project dialog), 10 (gradients, color randomizer), 11 (vector layers) 11b (auto-trace) and 12a (filters, adjustments, check views) are done. **Next: 17b — brush formats (.abr / .gbr / .kpp), materials library, online brush library**, or 18 — text, fonts, signatures (the user picks; "next" means 17b first)
+- Milestones 9 (layer organizer), 9a (new project dialog), 10 (gradients, color randomizer), 11 (vector layers) 11b (auto-trace) and 12a (filters, adjustments, check views) are done. **Next: 18 — Text, fonts and signatures**, then 19 (recorder and process log), 20 (panels and workspaces), then platform / rigging / animation / streaming / games / AI (21–51), and the serverless accounts and libraries (52–56)
 - Gotcha: egui `consume_key(Modifiers::NONE, key)` also matches when Alt is held, so check keys with Alt/Ctrl **before** plain tool keys (see the order in `DrawState::ui`). In kittest, hold modifiers for clicks with `Event::ModifiersChanged`.
 - Gotcha: inside `DrawState::ui` a change made by code is picked up by `track_history` by itself: set `label_hint` instead of using `apply_external` (that is for code that runs outside the draw frame, e.g. menus), or the step is recorded twice.
 - Gotcha: very long bash heredocs sometimes fail to parse — write the Python patch script with the Write tool into the scratchpad and run it.
 - Decisions already made (don't re-ask): no Mixbox (license) → own Kubelka–Munk mixing; project-file verification can only be tamper-evident (open-source app); game runtimes in separate MIT repos; payments only via hand-off (PayPal), the app never touches money.
+
+## Online scope (user decision 2026-10-17)
+Only accounts and libraries are online. No chat, no rigger/asset search, no servers of our own: free services or free intermediaries only (GitHub, free Supabase tier). Skip or drop roadmap items that need more than that.

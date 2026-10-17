@@ -150,6 +150,7 @@ impl Stroke {
                     opacity: s.opacity,
                     texture: s.texture,
                     tex_kind: s.tex_kind,
+                    tex_image: s.tex_image.clone(),
                     tex_scale: s.tex_scale,
                     tex_color: s.tex_color,
                     tex_palette: s.tex_palette,
@@ -930,7 +931,7 @@ impl Stroke {
         let f = self.s.opacity * self.s.flow * amount * (1.0 - 0.55 * self.s.water);
         let gran = self.s.granulation;
         let lock_alpha = doc.layers[self.li].lock_alpha;
-        let tex = ((self.s.texture > 0.0 || gran > 0.0) && !self.s.dir_texture()).then(|| textures::get(self.s.tex_kind));
+        let tex = ((self.s.texture > 0.0 || gran > 0.0) && !self.s.dir_texture()).then(|| textures::for_brush(self.s.tex_kind, &self.s.tex_image));
         let (texture, tex_scale) = (self.s.texture, self.s.tex_scale);
         let v = self.pick_variant();
         let (w, h) = (doc.w, doc.h);
@@ -1996,5 +1997,23 @@ mod tests {
         let back = crate::brush::userlib::from_json(&json).unwrap().remove(0).settings;
         assert_eq!(back.tip_image, s.tip_image);
         assert!(crate::brush::tips::tip_mask(&back, 0).mips[0].a.iter().sum::<f32>() > 100.0);
+    }
+
+    #[test]
+    fn a_texture_of_your_own_shapes_the_paint_and_old_brushes_are_unchanged() {
+        // stripes: dark bars (paint stays) between white gaps (paint is held back), 8 pixels each
+        let img = image::RgbaImage::from_fn(64, 64, |x, _| if (x / 8) % 2 == 0 { image::Rgba([0, 0, 0, 255]) } else { image::Rgba([255, 255, 255, 255]) });
+        let tex = crate::brush::tipimage::TipImage::from_picture(&img).unwrap();
+        let s = BrushSettings { tex_kind: crate::brush::TexKind::Custom, tex_image: Some(tex), texture: 1.0, tex_scale: 0.25, ..designer() };
+        let mut d = Document::new(500, 300);
+        line_p(&mut d, &s, BLUE, 150.0, 1.0, 400.0);
+        let a = |x: i32| crate::files::layer_rgba(&d.layers[0], x, 150, 1, 1).get_pixel(0, 0).0[3];
+        let row: Vec<u8> = (200..232).map(|x| a(x)).collect();
+        let (hi, lo) = (row.iter().max().unwrap(), row.iter().min().unwrap());
+        assert!(*hi > 200 && *hi as i32 - *lo as i32 > 100, "stripes in the paint: {row:?}");
+        // without the picture the brush falls back to plain paper
+        let mut bad = s.clone();
+        bad.tex_image = None;
+        assert_eq!(bad.sanitized().tex_kind, crate::brush::TexKind::Paper);
     }
 }

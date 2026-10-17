@@ -65,6 +65,7 @@ Performance check: `cargo test --release bench_full_redraw -- --ignored --nocapt
 - `src/lightfx.rs` — shadow, glow and ray layers
 - `src/material.rs` — material layers (metal, glass, velvet, neon, gems) shaded live
 - `src/brush/local.rs` — the paint under a dab (low-pass copy, combed copy) for the blender brushes
+- `src/brush/formats.rs` — Photoshop / GIMP / Krita brush import and export
 - `src/brush/userlib.rs`, `src/brush/tipimage.rs` + `tabs/draw/mybrushes_ui.rs` — My brushes, brush cards, picture tips
 - `src/brush/random.rs` — the brush randomizer (groups, locks)
 - `src/wet.rs` — wet paint: bleed, edge pooling, the wet memory

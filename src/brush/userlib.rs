@@ -74,6 +74,49 @@ pub fn dir() -> PathBuf {
     dirs::config_dir().unwrap_or_else(std::env::temp_dir).join("SeviathStudio").join("brushes")
 }
 
+/// Where your materials live: pictures you made or imported, kept apart from brushes.
+/// `textures` repeat and shade a brush; `tips` are stamps.
+pub fn materials_dir() -> PathBuf {
+    if cfg!(test) {
+        return std::env::temp_dir().join("SeviathStudio-tests").join("materials");
+    }
+    dirs::config_dir().unwrap_or_else(std::env::temp_dir).join("SeviathStudio").join("materials")
+}
+
+pub const MATERIAL_KINDS: [&str; 2] = ["textures", "tips"];
+
+pub fn save_material_in(dir: &Path, kind: &str, name: &str, img: &TipImage) -> Result<PathBuf, String> {
+    if !MATERIAL_KINDS.contains(&kind) {
+        return Err("Unknown kind of material.".into());
+    }
+    let folder = dir.join(kind);
+    std::fs::create_dir_all(&folder).map_err(|e| format!("Can't make the materials folder: {e}"))?;
+    let path = folder.join(format!("{}.png", slug(name)));
+    std::fs::write(&path, img.to_png()).map_err(|e| format!("Can't save the material: {e}"))?;
+    Ok(path)
+}
+
+pub fn list_materials_in(dir: &Path, kind: &str) -> Vec<(String, TipImage)> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir.join(kind)) else { return out };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.extension().is_some_and(|x| x == "png") && e.metadata().map(|m| m.len() <= 4 << 20).unwrap_or(false) {
+            if let (Some(stem), Ok(bytes)) = (p.file_stem(), std::fs::read(&p)) {
+                if let Some(t) = TipImage::from_png(bytes) {
+                    out.push((stem.to_string_lossy().replace('-', " "), t));
+                }
+            }
+        }
+    }
+    out.sort_by_key(|m| m.0.to_lowercase());
+    out
+}
+
+pub fn delete_material_in(dir: &Path, kind: &str, name: &str) {
+    let _ = std::fs::remove_file(dir.join(kind).join(format!("{}.png", slug(name))));
+}
+
 pub fn to_json(brushes: &[UserBrush]) -> String {
     let f = BrushFile { format: FORMAT.into(), version: 1, brushes: brushes.to_vec() };
     serde_json::to_string_pretty(&f).unwrap_or_default()
@@ -170,6 +213,10 @@ pub fn import_file(path: &Path) -> Result<Vec<UserBrush>, String> {
         return from_json(&text);
     }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if let Some(found) = super::formats::import(&bytes, &file_name) {
+        return if found.brushes.is_empty() { Err(found.notes.join(" ")) } else { Ok(found.brushes) };
+    }
     if ext == "png" {
         if let Some(v) = from_card(&bytes) {
             return Ok(v);
@@ -179,7 +226,7 @@ pub fn import_file(path: &Path) -> Result<Vec<UserBrush>, String> {
         let img = crate::files::decode_limited(bytes).map_err(|e| e.to_string())?;
         return from_picture(&stem, &img).map(|b| vec![b]).ok_or_else(|| "That picture is empty, so there is no brush in it.".to_string());
     }
-    Err("I can open brush files (.seviathbrush), brush cards (PNG) and pictures.".into())
+    Err("I can open brush files (.seviathbrush), brush cards (PNG), Photoshop (.abr), GIMP (.gbr, .gih) and Krita (.kpp, .bundle) brushes, and pictures.".into())
 }
 
 #[cfg(test)]
@@ -284,5 +331,21 @@ mod tests {
         let bare = serde_json::json!({"name": "Bare", "settings": {"size": 12.0}}).to_string();
         assert_eq!(from_json(&bare).unwrap()[0].settings.size, 12.0);
         assert!(from_json("[1,2]").is_err());
+    }
+
+    #[test]
+    fn materials_are_kept_apart_from_brushes_and_listed_by_kind() {
+        let d = tmp("mat");
+        let leaf = TipImage::from_picture(&image::RgbaImage::from_fn(30, 30, |x, y| if (x as i32 - 15).abs() + (y as i32 - 15).abs() < 10 { image::Rgba([0, 0, 0, 255]) } else { image::Rgba([255, 255, 255, 255]) })).unwrap();
+        save_material_in(&d, "tips", "Maple leaf", &leaf).unwrap();
+        save_material_in(&d, "textures", "Rough plaster", &leaf).unwrap();
+        assert!(save_material_in(&d, "brushes", "x", &leaf).is_err(), "only textures and tips");
+        assert_eq!(list_materials_in(&d, "tips").iter().map(|m| m.0.as_str()).collect::<Vec<_>>(), vec!["maple leaf"]);
+        assert_eq!(list_materials_in(&d, "textures")[0].1, leaf, "the picture comes back as it went in");
+        std::fs::write(d.join("tips").join("junk.png"), b"not a png").unwrap();
+        assert_eq!(list_materials_in(&d, "tips").len(), 1, "damaged files are skipped");
+        delete_material_in(&d, "tips", "Maple leaf");
+        assert!(list_materials_in(&d, "tips").is_empty());
+        std::fs::remove_dir_all(&d).ok();
     }
 }

@@ -92,29 +92,77 @@ impl DrawState {
         };
     }
 
-    /// A stamp from the pixels of the selection on the selected layer (what is painted there, or its darkness).
-    pub fn tip_from_selection(&mut self) {
-        let sl = slot(self.tool);
+    /// The painted pixels of the selection on the selected layer, as a picture (only what is inside the selection).
+    fn selection_picture(&mut self, what: &str) -> Option<image::RgbaImage> {
         let Some(sel) = self.doc.selection.as_ref() else {
-            self.lib.status = "Select something first (with the selection tools) and I will make a stamp from it.".into();
-            return;
+            self.lib.status = format!("Select something first (with the selection tools) and I will make {what} from it.");
+            return None;
         };
         let Some((x0, y0, x1, y1)) = sel.bounds() else {
             self.lib.status = "The selection is empty.".into();
-            return;
+            return None;
         };
-        let Some(i) = self.doc.index_of(self.active) else { return };
+        let i = self.doc.index_of(self.active)?;
         let (w, h) = ((x1 - x0).max(1) as u32, (y1 - y0).max(1) as u32);
         if w * h > 16_000_000 {
-            self.lib.status = "That selection is too big for a stamp. Try a smaller one.".into();
-            return;
+            self.lib.status = format!("That selection is too big for {what}. Try a smaller one.");
+            return None;
         }
         let mut img = crate::files::layer_rgba(&self.doc.layers[i], x0, y0, w, h);
         for (x, y, p) in img.enumerate_pixels_mut() {
-            // only what is inside the selection (its soft edge too)
             let k = sel.at(x0 + x as i32, y0 + y as i32) as u32;
             p.0[3] = (p.0[3] as u32 * k / 255) as u8;
         }
+        Some(img)
+    }
+
+    /// Reload the materials library from disk.
+    pub fn reload_materials(&mut self) {
+        let dir = userlib::materials_dir();
+        self.lib.textures = userlib::list_materials_in(&dir, "textures");
+        self.lib.stamps = userlib::list_materials_in(&dir, "tips");
+    }
+
+    /// Make the picture the texture of the brush in hand (repeating), and keep it in the library.
+    pub fn use_texture(&mut self, img: &image::RgbaImage) {
+        let sl = slot(self.tool);
+        let Some(mut t) = TipImage::from_picture(img) else {
+            self.lib.status = "There is nothing in that picture to make a texture from.".into();
+            return;
+        };
+        if self.lib.seamless {
+            t = t.seamless();
+        }
+        let name = if self.lib.mat_name.trim().is_empty() { format!("Texture {}", self.lib.textures.len() + 1) } else { self.lib.mat_name.trim().to_string() };
+        let saved = userlib::save_material_in(&userlib::materials_dir(), "textures", &name, &t);
+        let b = &mut self.lib.mem[sl].s;
+        b.tex_kind = crate::brush::TexKind::Custom;
+        b.texture = b.texture.max(0.55);
+        b.tex_image = Some(t);
+        self.reload_materials();
+        self.lib.status = match saved {
+            Ok(_) => format!("\"{name}\" is the texture of this brush, and is kept in your materials."),
+            Err(e) => e,
+        };
+    }
+
+    pub fn texture_from_selection(&mut self) {
+        if let Some(img) = self.selection_picture("a texture") {
+            self.use_texture(&img);
+        }
+    }
+
+    pub fn texture_from_file(&mut self, path: &std::path::Path) {
+        match crate::files::read_picture(path) {
+            Ok(img) => self.use_texture(&img),
+            Err(e) => self.lib.status = e,
+        }
+    }
+
+    /// A stamp from the pixels of the selection on the selected layer (what is painted there, or its darkness).
+    pub fn tip_from_selection(&mut self) {
+        let sl = slot(self.tool);
+        let Some(img) = self.selection_picture("a stamp") else { return };
         match TipImage::from_picture(&img) {
             Some(t) => {
                 let s = &mut self.lib.mem[sl].s;
@@ -208,8 +256,35 @@ impl DrawState {
                         };
                     }
                 }
+                if widgets::chip(ui, "For Photoshop (.abr)…", false).on_hover_text("A Photoshop brush file; Clip Studio Paint opens these too. Tip, size, spacing and pressure go across.").clicked() {
+                    let b = self.current_user_brush();
+                    if let Some(p) = rfd::FileDialog::new().set_title("Save a Photoshop brush").set_file_name(format!("{}.abr", userlib::slug(&b.name))).add_filter("Photoshop brushes", &["abr"]).save_file() {
+                        self.lib.status = match std::fs::write(&p, crate::brush::formats::to_abr(&[b])) {
+                            Ok(()) => "Saved the .abr file.".into(),
+                            Err(e) => format!("Can't save: {e}"),
+                        };
+                    }
+                }
+                if widgets::chip(ui, "For Krita (.kpp)…", false).on_hover_text("A Krita brush preset with the tip inside").clicked() {
+                    let b = self.current_user_brush();
+                    if let Some(p) = rfd::FileDialog::new().set_title("Save a Krita brush").set_file_name(format!("{}.kpp", userlib::slug(&b.name))).add_filter("Krita presets", &["kpp"]).save_file() {
+                        self.lib.status = match crate::brush::formats::to_kpp(&b, &card_picture(&b)).and_then(|bytes| std::fs::write(&p, bytes).map_err(|e| e.to_string())) {
+                            Ok(()) => "Saved the .kpp preset.".into(),
+                            Err(e) => e,
+                        };
+                    }
+                }
+                if widgets::chip(ui, "Tip picture…", false).on_hover_text("Just the tip as a PNG: black on white").clicked() {
+                    let b = self.current_user_brush();
+                    if let Some(p) = rfd::FileDialog::new().set_title("Save the tip as a picture").set_file_name(format!("{}-tip.png", userlib::slug(&b.name))).add_filter("PNG picture", &["png"]).save_file() {
+                        self.lib.status = match std::fs::write(&p, crate::brush::formats::tip_png(&b.settings, 512)) {
+                            Ok(()) => "Saved the tip picture.".into(),
+                            Err(e) => format!("Can't save: {e}"),
+                        };
+                    }
+                }
                 if widgets::chip(ui, "Open brushes…", false).on_hover_text("Brush files, brush cards and pictures (a picture becomes a stamp brush)").clicked() {
-                    if let Some(paths) = rfd::FileDialog::new().set_title("Open brushes").add_filter("Brushes and pictures", &[userlib::EXT, "json", "png", "jpg", "jpeg", "webp", "bmp", "gif"]).pick_files() {
+                    if let Some(paths) = rfd::FileDialog::new().set_title("Open brushes").add_filter("Brushes and pictures", &[userlib::EXT, "json", "png", "jpg", "jpeg", "webp", "bmp", "gif", "abr", "gbr", "gih", "kpp", "bundle"]).pick_files() {
                         self.import_brushes(&paths);
                     }
                 }
@@ -224,10 +299,85 @@ impl DrawState {
                     }
                 }
             });
+            ui.add_space(4.0);
+            ui.label(RichText::new("Materials: textures and stamps you keep").size(12.0).color(TEXT));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Name").size(11.5).color(TEXT_DIM));
+                ui.add(egui::TextEdit::singleline(&mut self.lib.mat_name).hint_text("for the next material").desired_width(f32::INFINITY).char_limit(60));
+            });
+            ui.horizontal_wrapped(|ui| {
+                if widgets::chip(ui, "Texture from selection", false).on_hover_text("The painted pixels in your selection become a repeating texture for this brush (dark paints, light holds paint back)").clicked() {
+                    self.texture_from_selection();
+                }
+                if widgets::chip(ui, "Texture from picture…", false).clicked() {
+                    if let Some(p) = rfd::FileDialog::new().set_title("Picture for the texture").add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "bmp", "gif"]).pick_file() {
+                        self.texture_from_file(&p);
+                    }
+                }
+                ui.checkbox(&mut self.lib.seamless, "Make it seamless").on_hover_text("Blends the edges so the texture repeats without a visible seam");
+            });
+            if self.lib.mem[sl].s.tip_image.is_some() && widgets::chip(ui, "Keep this stamp as a material", false).clicked() {
+                let name = if self.lib.mat_name.trim().is_empty() { format!("Stamp {}", self.lib.stamps.len() + 1) } else { self.lib.mat_name.trim().to_string() };
+                let t = self.lib.mem[sl].s.tip_image.clone();
+                if let Some(t) = t {
+                    self.lib.status = match userlib::save_material_in(&userlib::materials_dir(), "tips", &name, &t) {
+                        Ok(_) => format!("Kept \"{name}\" in your materials."),
+                        Err(e) => e,
+                    };
+                    self.reload_materials();
+                }
+            }
+            let mut use_texture = None;
+            let mut use_stamp = None;
+            let mut drop_material: Option<(&str, String)> = None;
+            if !self.lib.textures.is_empty() {
+                ui.label(RichText::new("Your textures (click to use, right-click to remove)").size(11.0).color(TEXT_DIM));
+                ui.horizontal_wrapped(|ui| {
+                    for (n, t) in &self.lib.textures {
+                        let r = widgets::chip(ui, n, false);
+                        if r.clicked() {
+                            use_texture = Some(t.clone());
+                        }
+                        if r.secondary_clicked() {
+                            drop_material = Some(("textures", n.clone()));
+                        }
+                    }
+                });
+            }
+            if !self.lib.stamps.is_empty() {
+                ui.label(RichText::new("Your stamps").size(11.0).color(TEXT_DIM));
+                ui.horizontal_wrapped(|ui| {
+                    for (n, t) in &self.lib.stamps {
+                        let r = widgets::chip(ui, n, false);
+                        if r.clicked() {
+                            use_stamp = Some(t.clone());
+                        }
+                        if r.secondary_clicked() {
+                            drop_material = Some(("tips", n.clone()));
+                        }
+                    }
+                });
+            }
+            if let Some(t) = use_texture {
+                let b = &mut self.lib.mem[sl].s;
+                b.tex_kind = crate::brush::TexKind::Custom;
+                b.texture = b.texture.max(0.55);
+                b.tex_image = Some(t);
+            }
+            if let Some(t) = use_stamp {
+                let b = &mut self.lib.mem[sl].s;
+                b.tip = Tip::Image;
+                b.tip_image = Some(t);
+                b.spacing = b.spacing.max(0.15);
+            }
+            if let Some((kind, name)) = drop_material {
+                userlib::delete_material_in(&userlib::materials_dir(), kind, &name);
+                self.reload_materials();
+            }
             if !self.lib.status.is_empty() {
                 ui.label(RichText::new(self.lib.status.clone()).size(11.5).color(VENOM));
             }
-            ui.label(RichText::new(format!("Your brushes live in {}", userlib::dir().display())).size(10.5).color(TEXT_DIM));
+            ui.label(RichText::new(format!("Brushes: {}\nMaterials: {}", userlib::dir().display(), userlib::materials_dir().display())).size(10.5).color(TEXT_DIM));
         });
         let _ = section_title;
     }
