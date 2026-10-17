@@ -517,6 +517,7 @@ fn shortcuts(ui: &mut Ui) {
                 ("Ctrl+T", "Move & transform (Enter applies, Esc cancels)"),
                 ("Delete  ·  Alt+Backspace", "Clear  ·  fill the selection"),
                 ("Shift + click", "Straight line from the last stroke"),
+                ("Shift+G, drag  ·  Enter  ·  Esc", "Gradient: lay out  ·  apply  ·  cancel"),
                 ("Space + drag  ·  middle drag", "Move the view"),
                 ("R + drag (Shift snaps)", "Rotate the view"),
                 ("Wheel  ·  Ctrl+= / Ctrl+-", "Zoom"),

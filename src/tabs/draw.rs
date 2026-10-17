@@ -22,8 +22,10 @@ use crate::view::View;
 use crate::widgets::{self, icon_button, section_title, segmented};
 
 mod brushes;
+pub mod gradient_ui;
 mod layers;
 pub mod organizer;
+mod random_ui;
 mod references;
 mod tools;
 
@@ -142,6 +144,8 @@ pub struct DrawState {
     renaming: Option<(LayerId, String)>,
     drag_layer: Option<LayerId>,
     lui: organizer::LayerUi,
+    grad: gradient_ui::GradState,
+    rand: random_ui::RandState,
     color_open: bool,
     layer_rows: Vec<(LayerId, Rect)>, // where each layer row was drawn last frame
     view: View,
@@ -206,6 +210,8 @@ impl Default for DrawState {
             renaming: None,
             drag_layer: None,
             lui: organizer::LayerUi::default(),
+            grad: gradient_ui::GradState::default(),
+            rand: random_ui::RandState::default(),
             color_open: true,
             layer_rows: Vec::new(),
             view: View::default(),
@@ -274,6 +280,10 @@ impl DrawState {
 
         let frame_before = self.doc.snapshot();
         self.handle_dropped_files(ui.ctx());
+        // switching to another tool puts a gradient that is being laid out down
+        if self.tool != Tool::Gradient && self.gradient_editing() {
+            self.apply_gradient();
+        }
         // keys with Alt / Ctrl first: a plain tool key (like L) would also swallow Alt+L
         self.layer_shortcuts(ui.ctx());
         self.tool_shortcuts(ui.ctx());
@@ -300,7 +310,7 @@ impl DrawState {
             .size_range(230.0..=440.0)
             .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::same(10)))
             .show(ui, |ui| {
-                if matches!(self.tool, Tool::Select | Tool::Lasso | Tool::Fill | Tool::Move) {
+                if matches!(self.tool, Tool::Select | Tool::Lasso | Tool::Fill | Tool::Move | Tool::Gradient) {
                     egui::ScrollArea::vertical().id_salt("tool_options").show(ui, |ui| self.tool_options(ui));
                 } else {
                     self.brush_panel(ui);
@@ -321,6 +331,7 @@ impl DrawState {
 
         self.reference_window(ui.ctx());
         self.layer_quick_bar(ui.ctx());
+        self.randomizer_window(ui.ctx());
         self.track_history(ui.ctx(), frame_before);
     }
 
@@ -353,6 +364,7 @@ impl DrawState {
         self.doc = doc;
         self.tools.new_document(self.doc.w, self.doc.h);
         self.lui = organizer::LayerUi::default();
+        self.grad.edit = None;
         self.renderer.reset();
         self.view_ready = false;
         self.layer_counter = self.doc.layers.len();
@@ -398,6 +410,7 @@ impl DrawState {
     pub fn after_restore(&mut self) {
         // undo while transforming: the document is already back to before the lift
         self.tools.floating = None;
+        self.grad.edit = None;
         self.stroke = None;
         self.pen_stroke = false;
         self.pending = None;
@@ -558,6 +571,9 @@ impl DrawState {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if widgets::chip(ui, if self.color_open { "Hide" } else { "Show" }, false).clicked() {
                     self.color_open = !self.color_open;
+                }
+                if widgets::chip(ui, "Randomize", self.rand.open).on_hover_text("Believable random colors for skin, foliage, sky and more").clicked() {
+                    self.rand.open = !self.rand.open;
                 }
                 let (r, _) = ui.allocate_exact_size(vec2(22.0, 16.0), Sense::hover());
                 ui.painter().rect_filled(r, CornerRadius::same(4), self.primary);
@@ -893,8 +909,11 @@ impl DrawState {
                         let mirrors = if self.tools.sym.on() { self.tools.sym.mirrors() } else { Vec::new() };
                         // painting the quick mask: always in its red, only the coverage counts
                         let color = if self.doc.layers[ai].name == tools::QUICK_MASK { Color32::from_rgb(230, 40, 70) } else { self.primary };
-                        self.stroke =
-                            Some(BrushStroke::begin_mirrored(&mut self.doc, ai, &settings, color, erase, view.zoom, is_pen, start, &sample_all, mirrors));
+                        let mut st = BrushStroke::begin_mirrored(&mut self.doc, ai, &settings, color, erase, view.zoom, is_pen, start, &sample_all, mirrors);
+                        if self.grad.brush_on && !erase && self.tool == Tool::Brush {
+                            st.set_gradient(Some(self.grad.g.along_stroke(self.grad.brush_len)));
+                        }
+                        self.stroke = Some(st);
                     }
                 }
             }
