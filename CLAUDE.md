@@ -1,0 +1,52 @@
+# Working on SeviathStudio (notes for Claude)
+
+## The project
+- Native Rust desktop app: **draw, rig, animate and stream a 2D (VTuber) character from one file**. egui/eframe **0.36**, wgpu, edition 2024. GPL-3.0-or-later (every `.rs` starts with `// SPDX-License-Identifier: GPL-3.0-or-later`).
+- This folder: `C:\Users\SaphiresSilver\Projects\seviathstudio-rs` (git, branch `main`, remote https://github.com/santamadaraneilande-ctrl/seviathstudio).
+- The **plan**: `C:\Users\SaphiresSilver\Downloads\SeviathStudio_Project_Plan_EN.md` (Parts A–AV, ~3400 lines; the user keeps adding parts — reread the new ones when asked). Part AU records what the Rust build already is.
+- **`ROADMAP.md`** = build order of the whole plan (milestones 1–56, each with the technique). When the user says "continue" / "next task": build the next roadmap milestone.
+- The old Svelte web app is at `C:\Users\SaphiresSilver\Projects\seviathstudio` (reference only, e.g. `src/lib/*.ts` to port). **Never commit or push there** (its push URL is disabled on purpose). Claude Code sessions may start with that folder as cwd — always work with absolute paths into `seviathstudio-rs`.
+
+## The user
+- An artist (Seviath, @SnakeSeviath), not a programmer. Has a **Huion tablet** (pressure via Windows Ink → `Event::Touch { force }`).
+- Writes English or **Latvian** — answer in the language of their message. Keep replies plain and short; explain what they can now do in the app.
+- Wants *everything in the plan*, working. "Decide settings yourself" — add every setting that's useful, but **every setting must actually work**.
+- Desktop shortcut runs `target\release\seviathstudio.exe` → always `cargo build --release` at the end of a milestone.
+
+## Rules for every milestone
+- Ships working: **no placeholder buttons**, no fake features. Tests + screenshot checks. Never needs a paid service. Keep secrets/personal paths out of the repo.
+- Be honest in the final message: what works, what was not tested, what differs from the plan.
+- Finish with: `cargo test --release` (all green) → `cargo build --release` → update `README.md` + `ROADMAP.md` (move the milestone to "Done") → commit → `git push` (pushing from this folder is allowed and wanted).
+- Commit messages end with `Co-Authored-By: <model name> <noreply@anthropic.com>`.
+
+## Toolchain & commands
+- Cargo is at `%USERPROFILE%\.cargo\bin` — in Bash prepend: `export PATH="$USERPROFILE/.cargo/bin:$PATH"`.
+- `cargo test --release` (~25 s for tests, longer when compiling). Screenshot tests write `target/screens/*.png` — **look at them** with the Read tool after UI changes.
+- UI tests use `egui_kittest` (`src/screens.rs`): `Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc))`, helpers `stroke`, `wave`, `button`, `save`, `alpha_at`. Probe painted pixels with a tolerance window (stabilizer moves lines off the raw path).
+- Editing on Windows: Bash heredocs with quotes are fragile — for multi-line edits write a small Python script (`python - <<'EOF' … EOF` with `s.replace(old, new)`) or use the Edit tool.
+
+## Code style
+- Not rustfmt-formatted: long lines (~140–160), match the surrounding code. Comments short and plain, like the existing ones.
+- UI text: short, plain words; **no arrow glyphs (→ ↔ ↕)** in UI strings (the font lacks them, they render as boxes).
+- egui 0.36 API: `App::ui(&mut self, ui, frame)`, `Panel::left/right/top/bottom(id).show(ui, ..)`, `CentralPanel::show(ui, ..)`, `egui::Modal`, `ui.close()`, `DroppedFile` path via trait, `ctx.content_rect()`, `request_repaint_after_secs`.
+
+## Architecture (where things are)
+- `src/app/mod.rs` shell (top bar, tabs, status bar, history/settings/account windows); `src/app/files.rs` File menu, background save/open/export jobs, autosave, close guard, New project dialog, project manager.
+- `src/doc.rs` document: layers (folders, clipping, blend), **256×256 tiles of premultiplied `Color32` in `Arc` (copy-on-write)**, compositing (rayon), `selection: Option<Selection>`.
+- `src/history.rs` undo (`DocState` snapshots incl. selection; per-tab undo, undo-only-this-step; `generation` counter = dirty tracking).
+- `src/brush/` engine (settings, 103 presets, tips, textures, stroke engine with stabilizer, mirrors for symmetry); `src/stroke.rs` live stroke buffer (masked by selection on apply).
+- `src/select.rs` selection masks (polygon raster, combine, grow/shrink via distance transform, feather, outline, flood, wand); `src/fill.rs` bucket + gap closing; `src/transform.rs` floating pixels + homography; `src/symmetry.rs`.
+- `src/tabs/draw.rs` Draw tab (+ `draw/layers.rs`, `draw/brushes.rs`, `draw/references.rs`, `draw/tools.rs` for selection/fill/move/symmetry UI). History steps come from `track_history` (a change finishes when the pointer is up; `label_hint` names it).
+- `src/files/` formats: `project.rs` (`.seviath` ZIP: `project.json` + tile PNGs + thumbnail), `psd.rs`, `ora.rs`, `kra.rs` (import), flat export in `mod.rs` (PNG carries an optional credit text chunk).
+- `src/settings.rs` (serde JSON in `%APPDATA%\SeviathStudio\settings.json`, `#[serde(default)]`, `persist=false` in tests) + `src/settings_ui.rs` pages.
+- Look: `theme.rs` (colors EMERALD, VENOM, GOLD, PANEL, TEXT, TEXT_DIM…), `snake.rs` (logo, scales, divider), `icons.rs` (line icons drawn in code), `widgets.rs` (chip, segmented, icon_button, section_title).
+
+## Where the work stands (2026-10-17)
+- Milestones **1–8 done** (see ROADMAP "Done"). 72 tests pass.
+- **In progress — plan Part AT (creator credit & Info screen):** done so far: PNG export credit (`files::CREDIT`, setting `export_credit` on the Files page), build date available as `env!("SEVIATH_BUILD_DATE")` (from `build.rs`). Still to do:
+  - Settings → Info page (`fn info` in `settings_ui.rs`) as blocks: App (name, version, build date, changes link = GitHub commits), **Creator: "Created by Seviath" + button to https://x.com/SnakeSeviath** + snake logo, License (GPL summary), Credits (all libraries incl. zip, quick-xml, image, png, rfd, trash, chrono), Links (repo, issues), Privacy (plain statement: projects stay on this computer, nothing is sent), Debug (GPU name + backend, copy-to-clipboard). GPU info: in `SeviathApp::new` read `cc.wgpu_render_state.as_ref().map(|rs| rs.adapter.get_info())` and keep it (e.g. a `OnceLock<String>` in `settings_ui`).
+  - README: credit line "Created by Seviath — https://x.com/SnakeSeviath".
+  - Add a settings screenshot test of the Info page.
+- **ROADMAP still needs the newest plan parts:** AS (New project dialog v2: DPI on all templates + mm/inch sizes, color profile picker §E6, My templates, smart memory estimate, rig-ready starter folders, project notes/tags, per-project autosave policy; later artboards/multi-page/guides), AT (rest: credits from repo, privacy actions, update channel, debug panel), AV (tracking source picker: any mix of sources with priority, fallback, confidence blending, per-source calibration; VR trackers/SlimeVR/mocopi via VMC/OSC, RealSense depth, Leap Motion via the user-installed Ultraleap SDK) — fold into the right sections.
+- **Next milestone after that: 9 — Layer organizer v2** (ROADMAP).
+- Decisions already made (don't re-ask): no Mixbox (license) → own Kubelka–Munk mixing; project-file verification can only be tamper-evident (open-source app); game runtimes in separate MIT repos; payments only via hand-off (PayPal), the app never touches money.

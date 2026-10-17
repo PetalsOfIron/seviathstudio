@@ -156,12 +156,28 @@ pub enum Flat {
     Webp,
 }
 
-pub fn export_flat(doc: &Document, path: &Path, kind: Flat, jpeg_quality: u8) -> Result<(), String> {
+/// The app credit written into exported PNGs (as the *software* used — the art stays yours).
+pub const CREDIT: &str = "Made with SeviathStudio — created by Seviath, https://x.com/SnakeSeviath";
+
+/// `credit`: put "Software: SeviathStudio" and the app credit into the PNG's text fields.
+pub fn export_flat(doc: &Document, path: &Path, kind: Flat, jpeg_quality: u8, credit: bool) -> Result<(), String> {
     let img = flatten(doc);
     let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
     let mut w = std::io::BufWriter::new(file);
     match kind {
-        Flat::Png => img.write_to(&mut w, image::ImageFormat::Png).map_err(|e| e.to_string()),
+        Flat::Png => {
+            let mut enc = png::Encoder::new(&mut w, img.width(), img.height());
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.set_compression(png::Compression::Balanced);
+            if credit {
+                let soft = format!("SeviathStudio {}", env!("CARGO_PKG_VERSION"));
+                enc.add_text_chunk("Software".into(), soft).map_err(|e| e.to_string())?;
+                enc.add_itxt_chunk("Comment".into(), CREDIT.into()).map_err(|e| e.to_string())?;
+            }
+            let mut wr = enc.write_header().map_err(|e| e.to_string())?;
+            wr.write_image_data(img.as_raw()).map_err(|e| e.to_string())
+        }
         Flat::Webp => img.write_to(&mut w, image::ImageFormat::WebP).map_err(|e| e.to_string()),
         Flat::Jpeg => {
             // JPEG has no transparency: put it on the paper color (white when the paper is hidden)
@@ -278,6 +294,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn png_export_carries_the_credit() {
+        let d = testdoc::sample();
+        let p = std::env::temp_dir().join(format!("seviath_credit_{}.png", std::process::id()));
+        export_flat(&d, &p, Flat::Png, 90, true).unwrap();
+        let bytes = std::fs::read(&p).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("SeviathStudio") && text.contains("x.com/SnakeSeviath"));
+        assert_eq!(image::open(&p).unwrap().to_rgba8(), flatten(&d), "pixels unchanged");
+        export_flat(&d, &p, Flat::Png, 90, false).unwrap();
+        assert!(!String::from_utf8_lossy(&std::fs::read(&p).unwrap()).contains("SnakeSeviath"));
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]

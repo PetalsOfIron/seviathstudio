@@ -79,6 +79,8 @@ pub struct Settings {
     pub autosave_project_file: bool, // also save the project file itself automatically
     pub jpeg_quality: u8,
     pub start_with_projects: bool,
+    /// Write "made with SeviathStudio" into exported PNGs (software field, not author).
+    pub export_credit: bool,
     pub recent: Vec<String>,
 }
 
@@ -127,6 +129,7 @@ impl Default for Settings {
             autosave_project_file: false,
             jpeg_quality: 92,
             start_with_projects: true,
+            export_credit: true,
             recent: Vec::new(),
         }
     }
