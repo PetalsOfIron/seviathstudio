@@ -64,6 +64,7 @@ impl FontMaker {
         self.at = cur.and_then(|c| self.order.iter().position(|x| *x == c)).unwrap_or(0).min(self.order.len().saturating_sub(1));
     }
 
+    #[cfg(test)]
     pub fn current_char(&self) -> Option<char> {
         self.current()
     }

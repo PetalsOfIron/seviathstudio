@@ -20,6 +20,7 @@ mod files;
 mod handfont;
 mod history;
 mod randomizer;
+mod recorder;
 mod refs;
 mod select;
 mod icons;
