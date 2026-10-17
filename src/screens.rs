@@ -1514,3 +1514,60 @@ fn text_screens() {
     h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
     h.run_steps(3);
 }
+
+#[test]
+fn signature_screens() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = Harness::builder().with_size([1440.0, 1300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().test_open_signatures();
+    h.run_steps(4);
+    let (rect, _) = h.state().test_sign_pad();
+    assert!(rect.width() > 400.0, "the pad is there: {rect:?}");
+    // two lines: a wavy name and an underline
+    let a = rect.min + vec2(40.0, 100.0);
+    let name: Vec<Pos2> = (0..24).map(|i| a + vec2(i as f32 * 14.0, (i as f32 * 0.9).sin() * 40.0)).collect();
+    stroke(&mut h, &name);
+    stroke(&mut h, &[a + vec2(0.0, 80.0), a + vec2(200.0, 70.0), a + vec2(380.0, 82.0)]);
+    h.run_steps(2);
+    let (_, sig) = h.state().test_sign_pad();
+    assert_eq!(sig.strokes.len(), 2, "two lines");
+    assert!(sig.strokes[0].pts.len() >= 15, "{} points", sig.strokes[0].pts.len());
+    assert!(sig.strokes[1].pts[0][3] >= sig.strokes[0].pts.last().unwrap()[3], "times go forward");
+    // keep it in the Full slot
+    h.get_by_label("Save in this slot").click();
+    h.run_steps(3);
+    let kept = crate::signature::load_in(&crate::signature::dir(), crate::signature::Slot::Full).expect("saved");
+    assert_eq!(kept.strokes.len(), 2);
+    // stamp it
+    let n = h.state().draw_mut_ref().doc.layers.len();
+    h.get_by_label("Stamp it").click();
+    h.run_steps(4);
+    {
+        let d = h.state().draw_mut_ref();
+        assert_eq!(d.doc.layers.len(), n + 1);
+        assert_eq!(d.doc.layers[0].name, "Signature");
+        assert!(!d.doc.layers[0].tiles.is_empty(), "the stamp is painted");
+    }
+    assert!(h.state().history().entries.last().unwrap().label.contains("Stamp"));
+    // the export rule
+    h.get_by_label_contains("Add my signature to exports").click();
+    h.run_steps(3);
+    let r = h.state().draw_mut_ref().doc.meta.auto_sign;
+    assert!(r.on && r.slot == crate::signature::Slot::Full);
+    // write it live
+    let n = h.state().draw_mut_ref().doc.layers.len();
+    h.get_by_label("Write it live").click();
+    h.run_steps(2);
+    assert_eq!(h.state().draw_mut_ref().doc.layers.len(), n + 1);
+    assert!(h.state().draw_mut_ref().signing_live());
+    wait_until(&mut h, "the signature is written", |h| !h.state().draw_mut_ref().signing_live());
+    {
+        let d = h.state().draw_mut_ref();
+        assert!(!d.doc.layers[0].tiles.is_empty(), "the live signature is on the layer");
+        assert_eq!(d.doc.layers[0].vector.as_ref().unwrap().strokes.len(), 2, "all lines written");
+    }
+    h.run_steps(4);
+    save(&mut h, "sign_01_window");
+    crate::signature::delete_in(&crate::signature::dir(), crate::signature::Slot::Full);
+}

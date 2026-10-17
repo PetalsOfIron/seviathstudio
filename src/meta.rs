@@ -32,11 +32,13 @@ pub struct ProjectMeta {
     pub export_bake: bool,
     /// Font files kept inside the project (for text layers).
     pub fonts: Vec<crate::fonts::ProjectFont>,
+    /// Sign every export (see signature.rs).
+    pub auto_sign: crate::signature::AutoSign,
 }
 
 impl Default for ProjectMeta {
     fn default() -> Self {
-        Self { dpi: 72, notes: String::new(), tags: Vec::new(), autosave_minutes: None, recovery_copies: None, guides: Vec::new(), rgb_profile: "srgb".into(), cmyk_profile: "japan2001".into(), intent: "perceptual".into(), export_bake: false, fonts: Vec::new() }
+        Self { dpi: 72, notes: String::new(), tags: Vec::new(), autosave_minutes: None, recovery_copies: None, guides: Vec::new(), rgb_profile: "srgb".into(), cmyk_profile: "japan2001".into(), intent: "perceptual".into(), export_bake: false, fonts: Vec::new(), auto_sign: Default::default() }
     }
 }
 
@@ -52,6 +54,7 @@ impl ProjectMeta {
         self.guides.truncate(200);
         self.fonts.truncate(crate::fonts::MAX_PROJECT_FONTS);
         self.fonts.retain(|f| f.data.len() <= crate::fonts::MAX_FONT_BYTES * 4 / 3 + 8 && !f.name.is_empty());
+        self.auto_sign = self.auto_sign.sanitized();
         if !crate::colorprofiles::known_rgb(&self.rgb_profile) {
             self.rgb_profile = "srgb".into();
         }

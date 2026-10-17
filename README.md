@@ -76,6 +76,7 @@ Performance check: `cargo test --release bench_full_redraw -- --ignored --nocapt
 - `src/filters.rs`, `src/check.rs` + `tabs/draw/filters_ui.rs` — filters (blurs, stylize, line art, levels, curves, HSL…) with live preview, and the check views
 - `src/trace.rs` + `tabs/draw/trace_ui.rs` — Auto-trace: pixel drawing to vector lines (center line, width as pressure) and color shapes
 - `src/fonts.rs`, `src/text.rs` + `tabs/draw/text_ui.rs` — text layers: fonts (app, installed, in-project), glyph outlines to vector shapes, bend on a curve
+- `src/signature.rs` + `app/signs.rs` + `tabs/draw/sign_ui.rs` — signatures: pad, four slots, stamp, live replay, auto-sign on export
 - `src/vector.rs`, `src/shapes.rs` + `tabs/draw/vector_ui.rs` — vector layers: lines with pressure, rasterizer, eraser, node editing, hold-to-straighten
 - `src/gradient.rs`, `src/oklab.rs`, `src/randomizer.rs` + `tabs/draw/gradient_ui.rs`, `random_ui.rs` — gradients (shapes, stops, OKLab, gradient map, colors along a stroke) and the color randomizer
 - `src/layerfilter.rs` + `src/tabs/draw/organizer.rs` — layer filters (chips with NOT, sorting, saved filters), picking many layers, favorites, Oops restore, quick bar
