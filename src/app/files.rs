@@ -270,9 +270,11 @@ impl SeviathApp {
         let state = self.draw.doc.snapshot();
         let (w, h) = (self.draw.doc.w, self.draw.doc.h);
         let generation = self.history.generation;
+        self.flush_reference_time();
+        let log = self.draw.doc.log.clone();
         let label = format!("Saving {}…", stem(&path));
         self.start(label, move || {
-            project::save(w, h, state.paper, &state.layers, &state.presets, &state.meta, &path)?;
+            project::save_full(w, h, state.paper, &state.layers, &state.presets, &state.meta, &log, &path)?;
             Ok(Done::Saved { path, generation, then })
         });
     }
@@ -388,14 +390,15 @@ impl SeviathApp {
             let name = self.files.name.clone();
             let also = if self.settings.autosave_project_file { self.files.path.clone() } else { None };
             let generation = self.history.generation;
+            let log = self.draw.doc.log.clone();
             self.start("Autosaving…", move || {
                 std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
                 let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
                 let file = dir.join(format!("{name} {stamp}.seviath"));
-                project::save(w, h, state.paper, &state.layers, &state.presets, &state.meta, &file)?;
+                project::save_full(w, h, state.paper, &state.layers, &state.presets, &state.meta, &log, &file)?;
                 prune_recovery(&dir, keep);
                 if let Some(p) = also {
-                    project::save(w, h, state.paper, &state.layers, &state.presets, &state.meta, &p)?;
+                    project::save_full(w, h, state.paper, &state.layers, &state.presets, &state.meta, &log, &p)?;
                     return Ok(Done::Saved { path: p, generation, then: None });
                 }
                 Ok(Done::Autosaved)
@@ -793,6 +796,10 @@ impl SeviathApp {
             if item(ui, "Save as…", "Ctrl+Shift+S") {
                 ui.close();
                 self.save_as(None);
+            }
+            if item(ui, "Work history…", "") {
+                ui.close();
+                self.open_work_history();
             }
             if item(ui, "Recorder…", "") {
                 ui.close();

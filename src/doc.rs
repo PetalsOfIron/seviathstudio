@@ -209,6 +209,8 @@ pub struct Document {
     next_id: LayerId,
     /// The stroke being drawn right now (shown on top of its layer until the pen lifts).
     pub live: Option<LiveStroke>,
+    /// What happened while this picture was made (kept in the project file).
+    pub log: crate::processlog::ProcessLog,
     /// The depth layer being looked at (depth layers are hidden otherwise).
     pub depth_view: Option<LayerId>,
     /// Which paint is still wet (for bleeding), and the clock it is measured on (seconds).
@@ -237,6 +239,7 @@ impl Document {
             revision: 0,
             next_id: 1,
             live: None,
+            log: Default::default(),
             depth_view: None,
             wet: Default::default(),
             height_cache: Default::default(),
@@ -256,7 +259,7 @@ impl Document {
     /// A document from loaded parts (files). Layer ids are kept; new ids continue after them.
     pub fn from_parts(w: u32, h: u32, paper: Color32, layers: Vec<Layer>) -> Self {
         let next_id = layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
-        let mut d = Self { w, h, paper, layers, dirty: HashSet::new(), revision: 0, next_id, live: None, depth_view: None, wet: Default::default(), height_cache: Default::default(), clock: 0.0, checker: 16, selection: None, filter_presets: Vec::new(), meta: crate::meta::ProjectMeta::default() };
+        let mut d = Self { w, h, paper, layers, dirty: HashSet::new(), revision: 0, next_id, live: None, log: Default::default(), depth_view: None, wet: Default::default(), height_cache: Default::default(), clock: 0.0, checker: 16, selection: None, filter_presets: Vec::new(), meta: crate::meta::ProjectMeta::default() };
         d.mark_all_dirty();
         d
     }

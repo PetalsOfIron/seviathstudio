@@ -472,6 +472,12 @@ impl DrawState {
         self.mixchart.open = true;
     }
 
+    /// The reference picture that is on show right now (in the Sub view or over the page), if any.
+    pub fn shown_reference(&self) -> Option<String> {
+        let shown = (self.subview_open && self.subview_tab == SubTab::References) || self.refs.overlay;
+        shown.then(|| self.refs.current().map(|r| r.name.clone())).flatten()
+    }
+
     pub fn active_id(&self) -> LayerId {
         self.active
     }

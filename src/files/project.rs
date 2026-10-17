@@ -157,7 +157,14 @@ fn tile_from_png(bytes: &[u8]) -> Result<Vec<Color32>, String> {
 
 /// Save a project. Writes a temporary file first and swaps it in, so a crash never leaves a
 /// half-written project behind.
+#[cfg(test)]
 pub fn save(w: u32, h: u32, paper: Color32, layers: &[Layer], presets: &[Preset], meta: &ProjectMeta, path: &Path) -> Result<(), String> {
+    save_full(w, h, paper, layers, presets, meta, &crate::processlog::ProcessLog::default(), path)
+}
+
+/// Like `save`, with the process log of the picture.
+#[allow(clippy::too_many_arguments)]
+pub fn save_full(w: u32, h: u32, paper: Color32, layers: &[Layer], presets: &[Preset], meta: &ProjectMeta, log: &crate::processlog::ProcessLog, path: &Path) -> Result<(), String> {
     let json = ProjectJson {
         format: FORMAT.into(),
         version: VERSION,
@@ -228,6 +235,9 @@ pub fn save(w: u32, h: u32, paper: Color32, layers: &[Layer], presets: &[Preset]
         put("mimetype", b"application/x-seviath", stored)?;
         put("project.json", serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?.as_bytes(), deflated)?;
         put("thumbnail.png", &thumb, stored)?;
+        if !log.entries.is_empty() {
+            put("process_log.json", serde_json::to_string(log).map_err(|e| e.to_string())?.as_bytes(), deflated)?;
+        }
         for (name, bytes) in &pngs {
             put(name, bytes, stored)?; // PNGs are already compressed
         }
@@ -335,6 +345,11 @@ pub fn load(path: &Path) -> Result<Document, String> {
     let mut doc = Document::from_parts(json.width, json.height, Color32::from_rgba_unmultiplied(r, g, b, a), layers);
     doc.filter_presets = presets;
     doc.meta = meta;
+    if let Ok(bytes) = read_entry(&mut zip, "process_log.json", 256 << 20) {
+        if let Ok(log) = serde_json::from_slice::<crate::processlog::ProcessLog>(&bytes) {
+            doc.log = log.sanitized();
+        }
+    }
     ensure_usable(&mut doc);
     Ok(doc)
 }
@@ -393,6 +408,32 @@ pub fn read_thumbnail(path: &Path) -> Option<image::RgbaImage> {
 mod tests {
     use super::*;
     use crate::files::testdoc;
+
+    #[test]
+    fn the_process_log_travels_in_the_project_and_changes_show() {
+        let d = testdoc::sample();
+        let mut log = crate::processlog::ProcessLog::default();
+        log.add(100, "stroke", "Lines", "Stroke · Pen · Lines", 10.0);
+        log.add(200, "import", "photo", "Import picture · photo", 3.0);
+        let dir = std::env::temp_dir().join(format!("seviath_log_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("log.seviath");
+        save_full(d.w, d.h, d.paper, &d.layers, &[], &d.meta, &log, &path).unwrap();
+        let back = load(&path).unwrap();
+        assert_eq!(back.log.entries.len(), 2);
+        assert_eq!(back.log.verify(), Ok(()));
+        // a project without a log opens with an empty one
+        let plain = dir.join("plain.seviath");
+        save(d.w, d.h, d.paper, &d.layers, &[], &d.meta, &plain).unwrap();
+        assert!(load(&plain).unwrap().log.entries.is_empty());
+        // someone edits the log inside the file: the check fails
+        let mut edited = log.clone();
+        edited.entries[0].secs = 999.0;
+        let tampered = dir.join("tampered.seviath");
+        save_full(d.w, d.h, d.paper, &d.layers, &[], &d.meta, &edited, &tampered).unwrap();
+        assert_eq!(load(&tampered).unwrap().log.verify(), Err(0));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn save_and_load_round_trip() {

@@ -31,6 +31,7 @@ mod material;
 mod meta;
 mod oklab;
 mod pigment;
+mod processlog;
 mod settings;
 mod signature;
 mod shapes;

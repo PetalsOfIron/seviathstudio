@@ -44,9 +44,9 @@
 - Effects/adjustments: `Layer.fx` + `Layer.adjust` (LayerKind::Adjust); drawn in `Document::composite_into`; effect reach is capped at 200 px so a tile only needs its 8 neighbours (`take_dirty` widens by one ring when effects exist); `files::bake` for PSD/ORA.
 
 ## Where the work stands
-- Milestones **1–19a done** (see ROADMAP "Done"). 286 tests pass.
+- Milestones **1–19b done** (see ROADMAP "Done"). 292 tests pass.
 - Plan Part AT core is done (Info screen, PNG credit, README credit). ROADMAP now includes Parts AS (milestone **9a**) and AV (**37a**).
-- Milestones 9 (layer organizer), 9a (new project dialog), 10 (gradients, color randomizer), 11 (vector layers) 11b (auto-trace) and 12a (filters, adjustments, check views) are done. **Next: 19b — process log**, then 19 (recorder and process log), 20 (panels and workspaces), then platform / rigging / animation / streaming / games / AI (21–51), 
+- Milestones 9 (layer organizer), 9a (new project dialog), 10 (gradients, color randomizer), 11 (vector layers) 11b (auto-trace) and 12a (filters, adjustments, check views) are done. **Next: 20 — panels and workspaces**, then 19 (recorder and process log), 20 (panels and workspaces), then platform / rigging / animation / streaming / games / AI (21–51), 
 - Gotcha: egui `consume_key(Modifiers::NONE, key)` also matches when Alt is held, so check keys with Alt/Ctrl **before** plain tool keys (see the order in `DrawState::ui`). In kittest, hold modifiers for clicks with `Event::ModifiersChanged`.
 - Gotcha: inside `DrawState::ui` a change made by code is picked up by `track_history` by itself: set `label_hint` instead of using `apply_external` (that is for code that runs outside the draw frame, e.g. menus), or the step is recorded twice.
 - Gotcha: very long bash heredocs sometimes fail to parse — write the Python patch script with the Write tool into the scratchpad and run it.
