@@ -126,6 +126,9 @@ impl DrawState {
                     }
                     self.notice = Some(if added > 0 { "Palette added to your swatches." } else { "Those colors are already in your swatches." });
                 }
+                if !big && widgets::chip(ui, "Bigger", false).on_hover_text("Make this view taller (or drag the bar under it)").clicked() {
+                    self.subview_h = [170.0, 320.0, 520.0, 760.0].into_iter().find(|s| *s > self.subview_h + 1.0).unwrap_or(170.0);
+                }
                 if !big && widgets::chip(ui, "Pop out", self.ref_popout).on_hover_text("Bigger reference window you can move anywhere").clicked() {
                     self.ref_popout = !self.ref_popout;
                 }
@@ -284,7 +287,7 @@ impl DrawState {
         let mut open = true;
         egui::Window::new(RichText::new("Reference").strong())
             .open(&mut open)
-            .default_size(vec2(520.0, 620.0))
+            .default_size(ctx.content_rect().size() * 0.7)
             .resizable(true)
             .collapsible(true)
             .show(ctx, |ui| {

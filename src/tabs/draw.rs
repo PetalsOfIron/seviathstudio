@@ -720,7 +720,7 @@ impl DrawState {
         let (grip, gresp) = ui.allocate_exact_size(vec2(w, 10.0), Sense::drag());
         let gresp = gresp.on_hover_cursor(CursorIcon::ResizeVertical);
         if gresp.dragged() {
-            self.subview_h = (self.subview_h + gresp.drag_delta().y).clamp(90.0, 600.0);
+            self.subview_h = (self.subview_h + gresp.drag_delta().y).clamp(90.0, 1000.0);
         }
         let gc = if gresp.hovered() || gresp.dragged() { EMERALD } else { LINE };
         ui.painter().line_segment(
