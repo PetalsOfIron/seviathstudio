@@ -26,6 +26,7 @@ cargo test --release
 Runs the unit tests and a full UI run that paints, undoes and redoes with simulated input. Pictures land in `target/screens/`:
 
 - `01_draw.png` … `10_settings_canvas.png` — the app at each step of the UI run
+- `lightfx_sheet.png` — shadow, glow and rays (`cargo test --release lightfx`)
 - `material_sheet.png`, `mat_01_chrome_ball_and_panel.png` — the materials on spheres (`cargo test --release material`)
 - `hair_skin_sheet.png` — every hair and skin brush (`cargo test --release hair_skin_sheet`)
 - `designer_sheet.png` — the new brushes and rolled ones (`cargo test --release designer_sheet`)
@@ -60,6 +61,7 @@ Performance check: `cargo test --release bench_full_redraw -- --ignored --nocapt
 - `src/view.rs`, `src/canvas.rs` — zoom/pan/rotate/mirror and GPU tile display
 - `src/brush/` — brush engine: settings + presets, tips, textures, stroke engine (stabilizer, pressure, taper, mixing, whole-stroke edges)
 - `src/stroke.rs` — the live stroke buffer shown on top of its layer until the pen lifts
+- `src/lightfx.rs` — shadow, glow and ray layers
 - `src/material.rs` — material layers (metal, glass, velvet, neon, gems) shaded live
 - `src/brush/local.rs` — the paint under a dab (low-pass copy, combed copy) for the blender brushes
 - `src/brush/random.rs` — the brush randomizer (groups, locks)

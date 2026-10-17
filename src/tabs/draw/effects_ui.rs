@@ -109,6 +109,14 @@ impl DrawState {
         self.doc.mark_all_dirty();
     }
 
+    /// New shadow, glow or rays layer above the selected layer.
+    pub fn add_light_effect(&mut self, kind: crate::lightfx::LightKind) {
+        let mut l = self.doc.new_layer(kind.name(), LayerKind::Raster);
+        l.lightfx = Some(crate::lightfx::LightFx::new(kind));
+        self.active = self.doc.insert_layer(l, self.active);
+        self.doc.mark_all_dirty();
+    }
+
     /// New light layer above the selected layer.
     pub fn add_light_layer(&mut self) {
         let mut l = self.doc.new_layer("Light", LayerKind::Light);
@@ -143,6 +151,14 @@ impl DrawState {
     /// Effects of the selected pixel layer, or the settings of the selected adjustment layer.
     pub(super) fn effects_section(&mut self, ui: &mut Ui) {
         let Some(i) = self.doc.index_of(self.active) else { return };
+        if matches!(self.doc.layers[i].kind, LayerKind::Raster | LayerKind::Vector) && self.doc.layers[i].lightfx.is_none() {
+            ui.add_space(4.0);
+            let mut solid = self.doc.layers[i].solid;
+            if ui.checkbox(&mut solid, "Blocks light").on_hover_text("Casts shadows and stops the beams of shadow and ray layers").changed() {
+                self.doc.layers[i].solid = solid;
+                self.doc.mark_all_dirty();
+            }
+        }
         match self.doc.layers[i].kind {
             LayerKind::Adjust => {
                 ui.add_space(6.0);
@@ -202,6 +218,48 @@ impl DrawState {
                 ui.label(RichText::new("Shades the Depth layers below it in the same folder. It is a layer like any other: hide it, fade it or change its blend mode.").size(11.0).color(TEXT_DIM));
                 if l != before {
                     self.doc.layers[i].light = Some(l.sanitized());
+                    self.doc.layers[i].rev += 1;
+                    self.doc.mark_all_dirty();
+                }
+            }
+            LayerKind::Raster if self.doc.layers[i].lightfx.is_some() => {
+                ui.add_space(6.0);
+                section_title(ui, "Light effect");
+                let before = self.doc.layers[i].lightfx.clone().unwrap_or_default();
+                let mut f = before.clone();
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for k in [crate::lightfx::LightKind::Shadow, crate::lightfx::LightKind::Glow, crate::lightfx::LightKind::Rays] {
+                        if widgets::chip(ui, k.name(), f.kind == k).on_hover_text(k.about()).clicked() && f.kind != k {
+                            f = crate::lightfx::LightFx { show_shape: f.show_shape, ..crate::lightfx::LightFx::new(k) };
+                        }
+                    }
+                });
+                ui.label(RichText::new(f.kind.about()).size(11.5).color(TEXT_DIM));
+                percent(ui, "Strength", &mut f.strength);
+                let (len_label, soft_label) = match f.kind {
+                    crate::lightfx::LightKind::Shadow => ("Length", "Soft"),
+                    crate::lightfx::LightKind::Glow => ("Edge width", "Bloom"),
+                    crate::lightfx::LightKind::Rays => ("Beam length", "Soft"),
+                };
+                slider(ui, len_label, &mut f.length, 1.0..=crate::lightfx::MAX_LENGTH, " px");
+                slider(ui, soft_label, &mut f.soft, 0.0..=crate::lightfx::MAX_SOFT, " px");
+                match f.kind {
+                    crate::lightfx::LightKind::Shadow => {
+                        percent(ui, "Depth", &mut f.depth);
+                        ui.checkbox(&mut f.from_solid, "Cast from layers that block light");
+                    }
+                    crate::lightfx::LightKind::Rays => {
+                        percent(ui, "Streaks", &mut f.beams);
+                        percent(ui, "Blocking", &mut f.occlusion);
+                        percent(ui, "Dust", &mut f.dust);
+                    }
+                    crate::lightfx::LightKind::Glow => {}
+                }
+                ui.checkbox(&mut f.show_shape, "Show what I painted");
+                ui.label(RichText::new("Paint the shape in any color. The light is your Light layer (or from the upper left). Mark layers that should stop light with Blocks light.").size(11.0).color(TEXT_DIM));
+                if f != before {
+                    self.doc.layers[i].lightfx = Some(f.sanitized());
                     self.doc.layers[i].rev += 1;
                     self.doc.mark_all_dirty();
                 }

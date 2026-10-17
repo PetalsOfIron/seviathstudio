@@ -600,6 +600,8 @@ pub fn read(bytes: &[u8]) -> Result<Document, String> {
             light: None,
             depth: false,
             material: None,
+            lightfx: None,
+            solid: false,
             rev: 1,
         };
         next_id += 1;
@@ -703,6 +705,8 @@ pub fn read(bytes: &[u8]) -> Result<Document, String> {
             light: None,
             depth: false,
             material: None,
+            lightfx: None,
+            solid: false,
             rev: 1,
         };
         next_id += 1;
@@ -732,6 +736,8 @@ pub fn read(bytes: &[u8]) -> Result<Document, String> {
         light: None,
         depth: false,
         material: None,
+        lightfx: None,
+        solid: false,
         rev: 1,
     };
     if paper.is_none() {

@@ -345,7 +345,9 @@ impl DrawState {
                     LayerKind::Raster => layer.blend.name().to_owned(),
                     LayerKind::Adjust => format!("Adjustment · {}", layer.adjust.as_ref().map(|a| a.label()).unwrap_or("none")),
                 };
-                if let Some(m) = &layer.material {
+                if let Some(f) = &layer.lightfx {
+                    sub = format!("{} · light effect", f.kind.name());
+                } else if let Some(m) = &layer.material {
                     sub = format!("Material · {}", m.name);
                 } else if layer.fx_active() {
                     sub += " · fx";
@@ -575,6 +577,16 @@ impl DrawState {
             if widgets::chip(ui, "Material", false).on_hover_text("New material layer: paint a shape and it shines as metal, glass, velvet, neon or a gem").clicked() {
                 self.add_material_layer();
             }
+            ui.menu_button("Light FX", |ui| {
+                for k in [crate::lightfx::LightKind::Shadow, crate::lightfx::LightKind::Glow, crate::lightfx::LightKind::Rays] {
+                    if ui.button(k.name()).on_hover_text(k.about()).clicked() {
+                        self.add_light_effect(k);
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Shadow, glow or rays: paint a shape and the light works on it, live");
             if widgets::chip(ui, "Light", false).on_hover_text("New light layer: shades the depth layers below it, and you can move the light any time").clicked() {
                 self.add_light_layer();
             }
