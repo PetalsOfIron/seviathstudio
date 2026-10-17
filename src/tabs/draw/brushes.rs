@@ -45,6 +45,11 @@ pub struct BrushLib {
     pub meta: crate::brush::userlib::UserBrush,
     /// The last thing the My brush tools did, in words.
     pub status: String,
+    /// Your saved textures and stamps (the materials library), and the name for the next one.
+    pub textures: Vec<(String, crate::brush::tipimage::TipImage)>,
+    pub stamps: Vec<(String, crate::brush::tipimage::TipImage)>,
+    pub mat_name: String,
+    pub seamless: bool,
 }
 
 impl Default for BrushLib {
@@ -62,7 +67,7 @@ impl Default for BrushLib {
             ToolBrush { s: erasers[0].s.clone(), name: erasers[0].name.into(), category: 0 },
             ToolBrush { s: smudge.s.clone(), name: smudge.name.into(), category: cat(&smudge) },
         ];
-        Self { presets, erasers, mem, previews: HashMap::new(), current_preview: None, query: String::new(), rolled: crate::brush::random::Group::ALL.iter().map(|g| g.0).collect(), roll_count: 0, user, meta: Default::default(), status: String::new() }
+        Self { presets, erasers, mem, previews: HashMap::new(), current_preview: None, query: String::new(), rolled: crate::brush::random::Group::ALL.iter().map(|g| g.0).collect(), roll_count: 0, user, meta: Default::default(), status: String::new(), textures: crate::brush::userlib::list_materials_in(&crate::brush::userlib::materials_dir(), "textures"), stamps: crate::brush::userlib::list_materials_in(&crate::brush::userlib::materials_dir(), "tips"), mat_name: String::new(), seamless: true }
     }
 }
 
@@ -387,6 +392,10 @@ impl DrawState {
             row(ui, "Texture", "", |ui| {
                 let mut changed = false;
                 egui::ComboBox::from_id_salt("texkind").selected_text(s.tex_kind.label()).height(400.0).show_ui(ui, |ui| {
+                    if s.tex_image.is_some() {
+                        ui.label(RichText::new("Mine").size(11.0).color(GOLD));
+                        changed |= ui.selectable_value(&mut s.tex_kind, TexKind::Custom, TexKind::Custom.label()).changed();
+                    }
                     let mut last = "";
                     for k in TexKind::ALL {
                         if k.section() != last {

@@ -32,6 +32,7 @@ pub struct StrokeLook {
     pub opacity: f32,
     pub texture: f32,
     pub tex_kind: TexKind,
+    pub tex_image: Option<crate::brush::tipimage::TipImage>,
     pub tex_scale: f32,
     pub tex_color: f32,
     pub tex_palette: TexPalette,
@@ -76,7 +77,7 @@ impl LiveStroke {
 /// Put the stroke's paint onto layer pixels.
 /// `mask`: selection coverage for this tile (None = everything).
 pub fn apply(dst: &mut [Color32], st: &StrokeTile, look: &StrokeLook, key: TileKey, mask: Option<&[u8]>) {
-    let tex = (look.texture > 0.0 || look.tex_color > 0.0 || look.granulation > 0.0).then(|| textures::get(look.tex_kind));
+    let tex = (look.texture > 0.0 || look.tex_color > 0.0 || look.granulation > 0.0).then(|| textures::for_brush(look.tex_kind, &look.tex_image));
     let (ox, oy) = (key.0 as f32 * TILE as f32, key.1 as f32 * TILE as f32);
     let real = look.paint != Paint::Normal && !look.erase;
     let (mut mixer, base) = (Mixer::default(), real.then(|| Pigment::new(look.color)));
@@ -162,6 +163,7 @@ mod tests {
             opacity: 0.5,
             texture: 0.0,
             tex_kind: TexKind::Paper,
+            tex_image: None,
             tex_scale: 1.0,
             tex_color: 0.0,
             tex_palette: TexPalette::Natural,

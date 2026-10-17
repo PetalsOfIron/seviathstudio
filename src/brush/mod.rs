@@ -3,6 +3,7 @@
 // so imported and saved brushes work exactly like the built-in ones (same as the web version).
 
 pub mod engine;
+pub mod formats;
 pub mod local;
 pub mod noise;
 pub mod random;
@@ -280,6 +281,8 @@ pub enum TexKind {
     Feathers,
     SnakeSkin,
     Foliage,
+    /// A texture of your own (see `tex_image`).
+    Custom,
 }
 
 impl TexKind {
@@ -335,6 +338,7 @@ impl TexKind {
             TexKind::Feathers => "Feathers",
             TexKind::SnakeSkin => "Snake skin",
             TexKind::Foliage => "Foliage",
+            TexKind::Custom => "My texture",
         }
     }
     /// Section in the texture list.
@@ -347,6 +351,7 @@ impl TexKind {
             TexKind::Wood | TexKind::Stone | TexKind::Bark | TexKind::Sand | TexKind::Marble | TexKind::Water | TexKind::Brick | TexKind::Foliage => {
                 "Nature"
             }
+            TexKind::Custom => "Mine",
         }
     }
     /// Hair and fur lie along the stroke (part of the tip); the rest is fixed to the canvas.
@@ -551,6 +556,8 @@ pub struct BrushSettings {
     pub particle_gap: f32, // 0..1, keeps particles apart so they don't overlap or clump
     // texture
     pub tex_kind: TexKind,
+    /// The picture used when the texture is My texture (it repeats).
+    pub tex_image: Option<tipimage::TipImage>,
     pub tex_scale: f32,
     pub tex_color: f32, // 0 = brush color only … 1 = the texture's own colors
     pub tex_palette: TexPalette,
@@ -659,6 +666,7 @@ impl Default for BrushSettings {
             particle_size: 0.25,
             particle_gap: 0.0,
             tex_kind: TexKind::Paper,
+            tex_image: None,
             tex_scale: 1.0,
             tex_color: 0.0,
             tex_palette: TexPalette::Natural,
@@ -726,6 +734,9 @@ impl BrushSettings {
         self.extra_tips.truncate(2);
         if self.tip == Tip::Image && self.tip_image.is_none() {
             self.tip = Tip::Round;
+        }
+        if self.tex_kind == TexKind::Custom && self.tex_image.is_none() {
+            self.tex_kind = TexKind::Paper;
         }
         self
     }

@@ -105,7 +105,8 @@ impl TipImage {
         top + (bot - top) * ty
     }
 
-    fn to_text(&self) -> String {
+    /// The picture as PNG bytes (gray, 8 bit).
+    pub fn to_png(&self) -> Vec<u8> {
         let mut png = Vec::new();
         {
             let mut enc = png::Encoder::new(&mut png, self.n, self.n);
@@ -115,11 +116,15 @@ impl TipImage {
                 let _ = w.write_image_data(&self.a);
             }
         }
-        base64_encode(&png)
+        png
     }
 
-    fn from_text(t: &str) -> Option<TipImage> {
-        let bytes = base64_decode(t)?;
+    fn to_text(&self) -> String {
+        base64_encode(&self.to_png())
+    }
+
+    /// From PNG bytes written by `to_png` (any gray or color square picture up to the size limit).
+    pub fn from_png(bytes: Vec<u8>) -> Option<TipImage> {
         let mut limits = image::Limits::default();
         limits.max_image_width = Some(MAX_SIDE);
         limits.max_image_height = Some(MAX_SIDE);
@@ -130,6 +135,32 @@ impl TipImage {
             return None;
         }
         TipImage::from_square(img.width(), img.into_raw())
+    }
+
+    fn from_text(t: &str) -> Option<TipImage> {
+        TipImage::from_png(base64_decode(t)?)
+    }
+
+    /// A version that repeats without a visible seam: four copies of the picture, each shifted by half,
+    /// are blended so that every seam of one copy lies where another copy has full weight.
+    pub fn seamless(&self) -> TipImage {
+        let n = self.n as usize;
+        let h = n / 2;
+        let at = |x: usize, y: usize| self.a[(y % n) * n + x % n] as f32;
+        let mut out = vec![0u8; n * n];
+        for y in 0..n {
+            let (sy, cy) = {
+                let s = (std::f32::consts::PI * y as f32 / n as f32).sin();
+                (s * s, 1.0 - s * s)
+            };
+            for x in 0..n {
+                let s = (std::f32::consts::PI * x as f32 / n as f32).sin();
+                let (sx, cx) = (s * s, 1.0 - s * s);
+                let v = at(x, y) * sx * sy + at(x + h, y + h) * cx * cy + at(x + h, y) * cx * sy + at(x, y + h) * sx * cy;
+                out[y * n + x] = v.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+        TipImage::from_square(self.n, out).unwrap_or_else(|| self.clone())
     }
 }
 
@@ -224,5 +255,20 @@ mod tests {
         let big = image::RgbaImage::from_pixel(1000, 600, image::Rgba([0, 0, 0, 255]));
         assert!(TipImage::from_picture(&big).unwrap().n <= MAX_SIDE);
         assert!(serde_json::from_str::<TipImage>("\"@@@\"").is_err());
+    }
+
+    #[test]
+    fn a_seamless_texture_has_no_edge() {
+        // a smooth ramp: its left and right edges are very different, so it shows a seam when repeated
+        let n = 64usize;
+        let ramp: Vec<u8> = (0..n * n).map(|i| ((i % n) * 255 / (n - 1)) as u8).collect();
+        let t = TipImage::from_square(n as u32, ramp).unwrap();
+        let edge = |t: &TipImage| (0..n).map(|y| (t.a[y * n + n - 1] as i32 - t.a[y * n] as i32).abs()).sum::<i32>() as f32 / n as f32;
+        let s = t.seamless();
+        assert!(edge(&t) > 200.0 && edge(&s) < 25.0, "the jump across the repeat edge: {} -> {}", edge(&t), edge(&s));
+        // the same going down
+        let vedge = |t: &TipImage| (0..n).map(|x| (t.a[(n - 1) * n + x] as i32 - t.a[x] as i32).abs()).sum::<i32>() as f32 / n as f32;
+        assert!(vedge(&s) < 25.0);
+        assert_eq!(TipImage::from_png(t.to_png()).unwrap(), t, "png bytes round trip");
     }
 }
