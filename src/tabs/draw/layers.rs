@@ -275,6 +275,11 @@ impl DrawState {
                         p.rect_filled(thumb, CornerRadius::same(4), CARD);
                         icons::paint(p, thumb.shrink(7.0), Icon::Gradient, VENOM);
                     }
+                    LayerKind::Light => {
+                        p.rect_filled(thumb, CornerRadius::same(4), CARD);
+                        p.circle_filled(thumb.center(), 8.0, GOLD);
+                        p.circle_stroke(thumb.center(), 11.0, Stroke::new(1.5, GOLD.gamma_multiply(0.6)));
+                    }
                     LayerKind::Raster | LayerKind::Vector => {
                         checker(p, thumb);
                         if let Some(t) = tex {
@@ -335,6 +340,8 @@ impl DrawState {
                         format!("Folder · {} · {n} inside", layer.blend.name())
                     }
                     LayerKind::Vector => format!("Vector · {}", layer.blend.name()),
+                    LayerKind::Raster if layer.depth => "Depth · hidden unless selected".to_owned(),
+                    LayerKind::Light => format!("Light · {}", layer.blend.name()),
                     LayerKind::Raster => layer.blend.name().to_owned(),
                     LayerKind::Adjust => format!("Adjustment · {}", layer.adjust.as_ref().map(|a| a.label()).unwrap_or("none")),
                 };
@@ -560,6 +567,12 @@ impl DrawState {
             })
             .response
             .on_hover_text("New adjustment layer: changes the colors of everything below it, and you can undo it any time");
+            if widgets::chip(ui, "Depth", false).on_hover_text("New depth layer: paint white where things are near and black where they are far").clicked() {
+                self.add_depth_layer();
+            }
+            if widgets::chip(ui, "Light", false).on_hover_text("New light layer: shades the depth layers below it, and you can move the light any time").clicked() {
+                self.add_light_layer();
+            }
             let clipped = self.doc.layers[self.active_idx()].clip;
             if widgets::chip(ui, "Clip", clipped)
                 .on_hover_text("Clipping mask: show only where the layer below has paint (Ctrl+Alt+G)")

@@ -1302,3 +1302,59 @@ fn color_profile_screens() {
     assert_ne!(p3, plain[0], "the same numbers read as P3 look different on an sRGB screen");
     save(&mut h, "cp_03_display_p3");
 }
+
+#[test]
+fn light_and_depth_screens() {
+    use crate::doc::LayerKind;
+    let mut h = Harness::builder().with_size([1440.0, 1500.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    {
+        let d = h.state_mut().draw_mut();
+        // a flat colored picture, so the shading shows on top of something
+        let (w, hh) = (d.doc.w, d.doc.h);
+        let img = image::RgbaImage::from_pixel(w, hh, image::Rgba([210, 140, 120, 255]));
+        d.doc.layers[0].tiles = crate::files::tiles_from_rgba(&img, 0, 0, w, hh);
+        d.doc.layers[0].rev += 1;
+        d.add_depth_layer();
+        let i = d.doc.index_of(d.active_id()).unwrap();
+        assert!(d.doc.layers[i].depth);
+        let dome = image::RgbaImage::from_fn(w, hh, |x, y| {
+            let r = (x as f32 - 1500.0).hypot(y as f32 - 2000.0) / 900.0;
+            if r < 1.0 {
+                let v = ((1.0 - r * r).sqrt() * 255.0) as u8;
+                image::Rgba([v, v, v, 255])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            }
+        });
+        d.doc.layers[i].tiles = crate::files::tiles_from_rgba(&dome, 0, 0, w, hh);
+        d.doc.layers[i].rev += 1;
+        d.add_light_layer();
+        d.doc.mark_all_dirty();
+    }
+    h.run_steps(6);
+    let li = h.state().draw_mut_ref().doc.layers.iter().position(|l| l.kind == LayerKind::Light).unwrap();
+    assert_eq!(li, 0, "the light layer is on top");
+    let shown = |h: &mut Harness<'_, SeviathApp>, x: u32| h.render().expect("render").get_pixel(x, 760).0;
+    // the dome fills the middle of the page on screen; sample its left and right sides
+    let (l1, r1) = (shown(&mut h, 575), shown(&mut h, 925));
+    save(&mut h, "light_01_from_the_left");
+    assert!(l1[0] as i32 - l1[2] as i32 > r1[0] as i32 - r1[2] as i32 + 20, "lit warm on the left, cool shade on the right: {l1:?} {r1:?}");
+    // turn the sun around
+    h.state_mut().draw_mut().doc.layers[li].light.as_mut().unwrap().dir = [0.6, 0.0];
+    h.state_mut().draw_mut().doc.mark_all_dirty();
+    h.run_steps(6);
+    let (l2, r2) = (shown(&mut h, 575), shown(&mut h, 925));
+    save(&mut h, "light_02_from_the_right");
+    assert!(r2[0] as i32 - r2[2] as i32 > l2[0] as i32 - l2[2] as i32 + 20, "now the right side is lit: {l2:?} {r2:?}");
+    // selecting the depth layer shows it as a gray picture
+    let di = h.state().draw_mut_ref().doc.layers.iter().position(|l| l.depth).unwrap();
+    let did = h.state().draw_mut_ref().doc.layers[di].id;
+    h.state_mut().draw_mut().set_active(did);
+    h.run_steps(6);
+    save(&mut h, "light_03_depth_layer_selected");
+    let lid = h.state().draw_mut_ref().doc.layers[li].id;
+    h.state_mut().draw_mut().set_active(lid);
+    h.run_steps(6);
+    save(&mut h, "light_04_light_panel");
+}

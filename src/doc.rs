@@ -134,6 +134,8 @@ pub enum LayerKind {
     Group,
     /// Changes the colors of everything below it (one of the color filters).
     Adjust,
+    /// Live shading from the depth layers below it.
+    Light,
 }
 
 #[derive(Clone, Debug)]
@@ -155,6 +157,10 @@ pub struct Layer {
     pub fx: Vec<crate::effects::Effect>,
     /// Adjustment layers: which color filter and its settings.
     pub adjust: Option<crate::effects::Adjust>,
+    /// Light layers: where the light is and how it looks.
+    pub light: Option<crate::light::Light>,
+    /// A depth layer: paint white where things are near, black where they are far. Only shown while selected.
+    pub depth: bool,
     pub opacity: f32,   // 0..100
     pub blend: Blend,
     pub tiles: HashMap<TileKey, TileData>,
@@ -195,6 +201,8 @@ pub struct Document {
     next_id: LayerId,
     /// The stroke being drawn right now (shown on top of its layer until the pen lifts).
     pub live: Option<LiveStroke>,
+    /// The depth layer being looked at (depth layers are hidden otherwise).
+    pub depth_view: Option<LayerId>,
     /// Size of the checkerboard squares shown where the picture is transparent.
     pub checker: usize,
     /// What is selected (None = nothing: tools work everywhere).
@@ -216,6 +224,7 @@ impl Document {
             revision: 0,
             next_id: 1,
             live: None,
+            depth_view: None,
             selection: None,
             filter_presets: Vec::new(),
             meta: crate::meta::ProjectMeta::default(),
@@ -231,7 +240,7 @@ impl Document {
     /// A document from loaded parts (files). Layer ids are kept; new ids continue after them.
     pub fn from_parts(w: u32, h: u32, paper: Color32, layers: Vec<Layer>) -> Self {
         let next_id = layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
-        let mut d = Self { w, h, paper, layers, dirty: HashSet::new(), revision: 0, next_id, live: None, checker: 16, selection: None, filter_presets: Vec::new(), meta: crate::meta::ProjectMeta::default() };
+        let mut d = Self { w, h, paper, layers, dirty: HashSet::new(), revision: 0, next_id, live: None, depth_view: None, checker: 16, selection: None, filter_presets: Vec::new(), meta: crate::meta::ProjectMeta::default() };
         d.mark_all_dirty();
         d
     }
@@ -257,6 +266,8 @@ impl Document {
             vector: None,
             fx: Vec::new(),
             adjust: None,
+            light: None,
+            depth: false,
             rev: 0,
         }
     }
@@ -297,7 +308,7 @@ impl Document {
 
     pub fn take_dirty(&mut self) -> Vec<TileKey> {
         // effects reach into the neighbouring tiles
-        if self.layers.iter().any(|l| l.visible && l.fx_active()) {
+        if self.layers.iter().any(|l| l.visible && (l.fx_active() || l.kind == LayerKind::Light)) {
             let (tx, ty) = (self.tiles_x(), self.tiles_y());
             let near: Vec<TileKey> = self.dirty.iter().flat_map(|&(x, y)| (-1..=1).flat_map(move |dy| (-1..=1).map(move |dx| (x + dx, y + dy)))).collect();
             self.dirty.extend(near.into_iter().filter(|&(x, y)| x >= 0 && y >= 0 && x < tx && y < ty));
@@ -585,6 +596,12 @@ impl Document {
             }
             let op = base.opacity / 100.0;
 
+            // depth layers are only drawn while you look at them
+            if base.depth && self.depth_view != Some(base.id) {
+                i = next;
+                continue;
+            }
+
             // Adjustment layer: changes what is below it (layers clipped to it paint on their own)
             if base.kind == LayerKind::Adjust {
                 if let Some(a) = &base.adjust {
@@ -754,12 +771,76 @@ impl Document {
         Some(tile)
     }
 
+    /// The shading of a light layer for one tile, from the depth layers below it.
+    /// None when there is no depth paint within reach.
+    pub(crate) fn light_pixels(&self, l: &Layer, key: TileKey) -> Option<Vec<Px>> {
+        let light = l.light.as_ref()?;
+        let at = self.index_of(l.id)?;
+        let depth: Vec<&Layer> = self.layers[at + 1..]
+            .iter()
+            .rev()
+            .filter(|d| d.depth && d.visible && l.parent.is_none_or(|p| self.is_inside(d.id, p)))
+            .collect();
+        if depth.is_empty() {
+            return None;
+        }
+        let m = light.reach();
+        let n = TILE + 2 * m;
+        let (ox, oy) = (key.0 * TILE as i32 - m as i32, key.1 * TILE as i32 - m as i32);
+        let (wmax, hmax) = (self.w as i32 - 1, self.h as i32 - 1);
+        let mut height = vec![0f32; n * n];
+        let mut any = false;
+        for d in depth {
+            let mut near: Vec<Option<Cow<Vec<Color32>>>> = Vec::with_capacity(9);
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    near.push(self.raster_tile(d, (key.0 + dx, key.1 + dy)));
+                }
+            }
+            if near.iter().all(|t| t.is_none()) {
+                continue;
+            }
+            any = true;
+            let op = if d.opacity > 0.0 { d.opacity / 100.0 } else { continue };
+            for y in 0..n {
+                let py = (oy + y as i32).clamp(0, hmax);
+                for x in 0..n {
+                    let px = (ox + x as i32).clamp(0, wmax);
+                    let (ix, iy) = ((px.div_euclid(TILE as i32) - key.0 + 1) as usize, (py.div_euclid(TILE as i32) - key.1 + 1) as usize);
+                    if ix > 2 || iy > 2 {
+                        continue;
+                    }
+                    if let Some(t) = &near[iy * 3 + ix] {
+                        let c = t[py.rem_euclid(TILE as i32) as usize * TILE + px.rem_euclid(TILE as i32) as usize];
+                        if c.a() != 0 {
+                            // brightness of the paint (premultiplied, so this already includes its alpha)
+                            let v = (0.2126 * c.r() as f32 + 0.7152 * c.g() as f32 + 0.0722 * c.b() as f32) / 255.0;
+                            let a = c.a() as f32 / 255.0 * op;
+                            let h = &mut height[y * n + x];
+                            *h = v * op + *h * (1.0 - a);
+                        }
+                    }
+                }
+            }
+        }
+        if !any {
+            return None;
+        }
+        let out = crate::light::shade(light, &height, n);
+        let mut tile = vec![CLEAR; TILE * TILE];
+        for y in 0..TILE {
+            tile[y * TILE..(y + 1) * TILE].copy_from_slice(&out[(y + m) * n + m..(y + m) * n + m + TILE]);
+        }
+        Some(tile)
+    }
+
     /// A layer's own pixels for one tile (a folder: its contents flattened on their own).
     fn layer_pixels(&self, l: &Layer, key: TileKey) -> Option<Vec<Px>> {
         match l.kind {
             LayerKind::Raster | LayerKind::Vector if l.fx_active() => self.fx_pixels(l, key),
             LayerKind::Raster | LayerKind::Vector => self.raster_tile(l, key).map(|t| t.iter().map(|c| blend::to_px(*c)).collect()),
             LayerKind::Adjust => None,
+            LayerKind::Light => self.light_pixels(l, key),
             LayerKind::Paper => Some(vec![blend::to_px(self.paper); TILE * TILE]),
             LayerKind::Group => {
                 let mut buf = vec![CLEAR; TILE * TILE];

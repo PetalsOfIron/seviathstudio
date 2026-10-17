@@ -597,6 +597,8 @@ pub fn read(bytes: &[u8]) -> Result<Document, String> {
             vector: None,
             fx: Vec::new(),
             adjust: None,
+            light: None,
+            depth: false,
             rev: 1,
         };
         next_id += 1;
@@ -697,6 +699,8 @@ pub fn read(bytes: &[u8]) -> Result<Document, String> {
             vector: None,
             fx: Vec::new(),
             adjust: None,
+            light: None,
+            depth: false,
             rev: 1,
         };
         next_id += 1;
@@ -723,6 +727,8 @@ pub fn read(bytes: &[u8]) -> Result<Document, String> {
         vector: None,
         fx: Vec::new(),
         adjust: None,
+        light: None,
+        depth: false,
         rev: 1,
     };
     if paper.is_none() {

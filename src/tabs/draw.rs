@@ -453,6 +453,16 @@ impl DrawState {
 
     #[cfg(test)]
     #[cfg(test)]
+    pub fn active_id(&self) -> LayerId {
+        self.active
+    }
+
+    #[cfg(test)]
+    pub fn set_active(&mut self, id: LayerId) {
+        self.active = id;
+    }
+
+    #[cfg(test)]
     pub fn set_popout(&mut self, on: bool) {
         self.ref_popout = on;
     }
@@ -982,6 +992,11 @@ impl DrawState {
         }
 
         // ---- Draw.
+        let viewing = self.doc.index_of(self.active).filter(|&i| self.doc.layers[i].depth).map(|i| self.doc.layers[i].id);
+        if self.doc.depth_view != viewing {
+            self.doc.depth_view = viewing;
+            self.doc.mark_all_dirty();
+        }
         let look = crate::colorprofiles::Look {
             check: self.check,
             profile: self.doc.meta.rgb_profile.clone(),

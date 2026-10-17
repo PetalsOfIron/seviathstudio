@@ -57,6 +57,10 @@ struct LayerJson {
     fx: Vec<crate::effects::Effect>,
     #[serde(default)]
     adjust: Option<crate::effects::AdjustJson>,
+    #[serde(default)]
+    light: Option<crate::light::Light>,
+    #[serde(default)]
+    depth: bool,
     opacity: f32,
     blend: String,
     tiles: Vec<[i32; 2]>,
@@ -104,6 +108,7 @@ fn kind_name(k: LayerKind) -> &'static str {
         LayerKind::Vector => "vector",
         LayerKind::Group => "group",
         LayerKind::Adjust => "adjust",
+        LayerKind::Light => "light",
     }
 }
 
@@ -113,6 +118,7 @@ fn kind_from_name(s: &str) -> LayerKind {
         "vector" => LayerKind::Vector,
         "group" => LayerKind::Group,
         "adjust" => LayerKind::Adjust,
+        "light" => LayerKind::Light,
         _ => LayerKind::Raster,
     }
 }
@@ -171,6 +177,8 @@ pub fn save(w: u32, h: u32, paper: Color32, layers: &[Layer], presets: &[Preset]
                     vector: l.vector.as_deref().cloned(),
                     fx: l.fx.clone(),
                     adjust: l.adjust.as_ref().map(|a| a.to_json()),
+                    light: l.light.clone(),
+                    depth: l.depth,
                     opacity: l.opacity,
                     blend: blend_name(l.blend).into(),
                     tiles,
@@ -292,6 +300,8 @@ pub fn load(path: &Path) -> Result<Document, String> {
             vector: l.vector.map(|v| Arc::new(v.sanitized())),
             fx: crate::effects::sanitize(l.fx),
             adjust: l.adjust.as_ref().and_then(crate::effects::Adjust::from_json),
+            light: l.light.map(|x| x.sanitized()),
+            depth: l.depth,
             opacity: l.opacity.clamp(0.0, 100.0),
             blend: blend_from_name(&l.blend),
             tiles: tiles.remove(&l.id).unwrap_or_default(),
