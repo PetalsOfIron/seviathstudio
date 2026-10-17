@@ -25,6 +25,7 @@ mod brushes;
 pub mod effects_ui;
 pub mod filters_ui;
 pub mod mixchart_ui;
+pub mod mybrushes_ui;
 pub mod gradient_ui;
 mod layers;
 pub mod organizer;

@@ -39,12 +39,19 @@ pub struct BrushLib {
     query: String,
     /// The groups the randomizer rolls (the others are locked).
     pub rolled: Vec<crate::brush::random::Group>,
-    roll_count: u32,
+    pub(super) roll_count: u32,
+    /// Your saved brushes, and the credit and license typed for the next one.
+    pub user: Vec<crate::brush::userlib::UserBrush>,
+    pub meta: crate::brush::userlib::UserBrush,
+    /// The last thing the My brush tools did, in words.
+    pub status: String,
 }
 
 impl Default for BrushLib {
     fn default() -> Self {
-        let presets = presets();
+        let user = crate::brush::userlib::load_all_in(&crate::brush::userlib::dir());
+        let mut presets = presets();
+        presets.extend(user.iter().map(super::mybrushes_ui::preset_of));
         let erasers = eraser_presets();
         let pick = |name: &str| presets.iter().find(|p| p.name == name).cloned().unwrap_or_else(|| presets[0].clone());
         let cat = |p: &Preset| CATEGORIES.iter().position(|c| *c == p.category).unwrap_or(0);
@@ -55,7 +62,7 @@ impl Default for BrushLib {
             ToolBrush { s: erasers[0].s.clone(), name: erasers[0].name.into(), category: 0 },
             ToolBrush { s: smudge.s.clone(), name: smudge.name.into(), category: cat(&smudge) },
         ];
-        Self { presets, erasers, mem, previews: HashMap::new(), current_preview: None, query: String::new(), rolled: crate::brush::random::Group::ALL.iter().map(|g| g.0).collect(), roll_count: 0 }
+        Self { presets, erasers, mem, previews: HashMap::new(), current_preview: None, query: String::new(), rolled: crate::brush::random::Group::ALL.iter().map(|g| g.0).collect(), roll_count: 0, user, meta: Default::default(), status: String::new() }
     }
 }
 
@@ -241,7 +248,10 @@ impl DrawState {
 
         ui.add_space(6.0);
         ui.separator();
-        egui::ScrollArea::vertical().id_salt("brush_settings").show(ui, |ui| self.brush_settings(ui));
+        egui::ScrollArea::vertical().id_salt("brush_settings").show(ui, |ui| {
+            self.my_brush_section(ui);
+            self.brush_settings(ui)
+        });
     }
 
     fn brush_settings(&mut self, ui: &mut Ui) {

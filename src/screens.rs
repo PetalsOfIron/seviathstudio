@@ -1403,3 +1403,53 @@ fn material_screens() {
     assert!(top[2] as i32 > bottom[2] as i32 + 20, "chrome: sky above, ground below: {top:?} {bottom:?}");
     assert_eq!(h.state().history().entries.len(), 0);
 }
+
+
+#[test]
+fn my_brushes_save_import_and_stamp() {
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    let dir = std::env::temp_dir().join(format!("seviath_mybrush_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    {
+        let d = h.state_mut().draw_mut();
+        // save the brush in hand under a new name, with its credit
+        d.lib_meta_mut().name = format!("Test brush {}", std::process::id());
+        d.lib_meta_mut().author = "Seviath".into();
+        d.lib_meta_mut().license = "CC0".into();
+        d.save_current_brush();
+        assert!(d.brush_list_has(&format!("Test brush {}", std::process::id())), "it shows up in the brush list");
+        // a picture becomes a stamp brush
+        let pic = dir.join("Star dust.png");
+        image::RgbaImage::from_fn(40, 40, |x, y| if (x as i32 - 20).abs() + (y as i32 - 20).abs() < 14 { image::Rgba([255, 200, 0, 255]) } else { image::Rgba([0, 0, 0, 0]) }).save(&pic).unwrap();
+        d.import_brushes(&[pic]);
+        assert!(d.brush_list_has("Star dust"));
+        assert_eq!(d.brush().tip, crate::brush::Tip::Image, "and it is the brush in hand now");
+        // a stamp from what is selected
+        let (w, hh) = (d.doc.w, d.doc.h);
+        let blob = image::RgbaImage::from_fn(w, hh, |x, y| if (x as f32 - 400.0).hypot(y as f32 - 400.0) < 120.0 { image::Rgba([30, 120, 60, 255]) } else { image::Rgba([0, 0, 0, 0]) });
+        d.doc.layers[0].tiles = crate::files::tiles_from_rgba(&blob, 0, 0, w, hh);
+        let pts: Vec<_> = [(250.0, 250.0), (560.0, 250.0), (560.0, 560.0), (250.0, 560.0)].iter().map(|p| pos2(p.0, p.1)).collect();
+        d.doc.selection = crate::select::Selection::polygon(&pts, w, hh, false);
+        d.brush_mut().tip = crate::brush::Tip::Round;
+        d.tip_from_selection();
+        assert_eq!(d.brush().tip, crate::brush::Tip::Image, "the selection is the stamp");
+        // clean up what the test saved
+        for n in [format!("Test brush {}", std::process::id()), "Star dust".to_string()] {
+            crate::brush::userlib::delete_in(&crate::brush::userlib::dir(), &n);
+        }
+        d.reload_user_brushes();
+        assert!(!d.brush_list_has("Star dust"));
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn my_brush_panel_screens() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = Harness::builder().with_size([1440.0, 1300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.get_by_label("My brush").click();
+    h.run_steps(6);
+    save(&mut h, "mb_01_my_brush_panel");
+}
