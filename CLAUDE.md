@@ -42,9 +42,9 @@
 - Look: `theme.rs` (colors EMERALD, VENOM, GOLD, PANEL, TEXT, TEXT_DIM…), `snake.rs` (logo, scales, divider), `icons.rs` (line icons drawn in code), `widgets.rs` (chip, segmented, icon_button, section_title).
 
 ## Where the work stands
-- Milestones **1–10 done** (see ROADMAP "Done"). 105 tests pass.
+- Milestones **1–11 done** (see ROADMAP "Done"). 119 tests pass.
 - Plan Part AT core is done (Info screen, PNG credit, README credit). ROADMAP now includes Parts AS (milestone **9a**) and AV (**37a**).
-- Milestones 9 (layer organizer), 9a (new project dialog) and 10 (gradients, color randomizer) are done. **Next: 11 — Vector layers** (port `vector.ts` / `trace.ts` from the old app; strokes keep time + pressure per point), then 12 (filters, effects, color management), ...
+- Milestones 9 (layer organizer), 9a (new project dialog), 10 (gradients, color randomizer) and 11 (vector layers) are done. **Next: 11b — Auto-trace** (port `trace.ts` + `TraceDialog.svelte` from the old app in `seviathstudio/src/lib`; the result goes into a vector layer; fills need a `fills` list in `VecData`), then 12 (filters, effects, color management), ...
 - Gotcha: egui `consume_key(Modifiers::NONE, key)` also matches when Alt is held, so check keys with Alt/Ctrl **before** plain tool keys (see the order in `DrawState::ui`). In kittest, hold modifiers for clicks with `Event::ModifiersChanged`.
 - Gotcha: very long bash heredocs sometimes fail to parse — write the Python patch script with the Write tool into the scratchpad and run it.
 - Decisions already made (don't re-ask): no Mixbox (license) → own Kubelka–Munk mixing; project-file verification can only be tamper-evident (open-source app); game runtimes in separate MIT repos; payments only via hand-off (PayPal), the app never touches money.

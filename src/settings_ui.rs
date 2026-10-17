@@ -518,6 +518,8 @@ fn shortcuts(ui: &mut Ui) {
                 ("Delete  ·  Alt+Backspace", "Clear  ·  fill the selection"),
                 ("Shift + click", "Straight line from the last stroke"),
                 ("Shift+G, drag  ·  Enter  ·  Esc", "Gradient: lay out  ·  apply  ·  cancel"),
+                ("P, hold the pen still", "Vector pen: straighten a drawn shape"),
+                ("Delete  ·  Esc (Edit lines)", "Remove the node or line  ·  deselect"),
                 ("Space + drag  ·  middle drag", "Move the view"),
                 ("R + drag (Shift snaps)", "Rotate the view"),
                 ("Wheel  ·  Ctrl+= / Ctrl+-", "Zoom"),
