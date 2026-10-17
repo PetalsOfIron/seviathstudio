@@ -26,6 +26,7 @@ cargo test --release
 Runs the unit tests and a full UI run that paints, undoes and redoes with simulated input. Pictures land in `target/screens/`:
 
 - `01_draw.png` … `10_settings_canvas.png` — the app at each step of the UI run
+- `flt_shape_1_cubes.png` … `flt_shape_5_illustrate.png` — shape filters (`cargo test --release shape_filter_screens`)
 - `flt_01_blur_preview.png` … `flt_04_check_colorblind.png` — filters and check views (`cargo test --release filter_screens`)
 - `trace_01_lines_preview.png` … `trace_03_result.png` — Auto-trace (`cargo test --release trace_screens`)
 - `vec_01_lines.png` … `vec_04_after_delete.png` — vector layers (`cargo test --release vector_screens`)

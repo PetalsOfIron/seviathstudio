@@ -17,14 +17,23 @@ use crate::select::Selection;
 pub enum Group {
     Blur,
     Stylize,
+    Shapes,
+    Illustration,
     Color,
     Lines,
     Adjust,
 }
 
 impl Group {
-    pub const ALL: [(Group, &'static str); 5] =
-        [(Group::Blur, "Blur & sharpen"), (Group::Stylize, "Stylize"), (Group::Color, "Color"), (Group::Lines, "Line art"), (Group::Adjust, "Adjust colors")];
+    pub const ALL: [(Group, &'static str); 7] = [
+        (Group::Blur, "Blur & sharpen"),
+        (Group::Stylize, "Stylize"),
+        (Group::Shapes, "Shapes"),
+        (Group::Illustration, "Illustration"),
+        (Group::Color, "Color"),
+        (Group::Lines, "Line art"),
+        (Group::Adjust, "Adjust colors"),
+    ];
 }
 
 pub enum Kind {
@@ -114,6 +123,81 @@ pub const FILTERS: &[FilterDef] = &[
         label: "Emboss",
         about: "Raised, carved look.",
         params: &[sl("strength", "Strength", 0.0, 3.0, 0.05, 1.0), unit("angle", "Light from", 0.0, 360.0, 1.0, 135.0, "°"), sl("keep", "Keep colors", 0.0, 1.0, 0.01, 0.6)],
+        curve: false,
+    },
+    FilterDef {
+        id: "blocks",
+        group: Group::Shapes,
+        label: "City blocks",
+        about: "Splits the picture into rectangles with thin light lines and digital pixel blocks (like a glitchy architectural print).",
+        params: &[
+            px("size", "Smallest block", 20.0, 600.0, 1.0, 140.0),
+            sl("flatten", "Flatten blocks", 0.0, 1.0, 0.01, 0.55),
+            sl("lines", "Lines", 0.0, 1.0, 0.01, 0.7),
+            px("lineWidth", "Line width", 1.0, 12.0, 0.5, 3.0),
+            ParamDef { key: "lineColor", label: "Line color", kind: Kind::Choice { options: &["Light", "Warm glow", "Dark", "From the picture"], def: 0 } },
+            sl("pixels", "Pixel blocks", 0.0, 1.0, 0.01, 0.35),
+            sl("glitch", "Shifted blocks", 0.0, 1.0, 0.01, 0.2),
+            sl("seed", "Pattern", 1.0, 999.0, 1.0, 7.0),
+        ],
+        curve: false,
+    },
+    FilterDef {
+        id: "cubes",
+        group: Group::Shapes,
+        label: "Cubes & tiles",
+        about: "Rebuilds the picture out of square tiles with beveled edges, or out of 3D cubes.",
+        params: &[
+            ParamDef { key: "mode", label: "Kind", kind: Kind::Choice { options: &["3D cubes", "Beveled tiles", "Flat squares"], def: 0 } },
+            px("size", "Size", 4.0, 200.0, 1.0, 36.0),
+            sl("depth", "Light & shade", 0.0, 1.0, 0.01, 0.6),
+            sl("gap", "Gap", 0.0, 0.4, 0.01, 0.04),
+            ParamDef { key: "bg", label: "Gaps show", kind: Kind::Choice { options: &["Dark", "Light", "Transparent"], def: 0 } },
+        ],
+        curve: false,
+    },
+    FilterDef {
+        id: "triangles",
+        group: Group::Shapes,
+        label: "Triangles (low poly)",
+        about: "Facets of flat color, with optional ink outlines and light/shadow on each facet.",
+        params: &[
+            px("size", "Triangle size", 6.0, 300.0, 1.0, 60.0),
+            sl("jitter", "Irregular", 0.0, 1.0, 0.01, 0.7),
+            px("outline", "Outline", 0.0, 8.0, 0.5, 0.0),
+            sl("facets", "Facet shading", 0.0, 1.0, 0.01, 0.35),
+            ParamDef { key: "colors", label: "Colors", kind: Kind::Choice { options: &["From the picture", "Black & gray"], def: 0 } },
+            sl("seed", "Pattern", 1.0, 999.0, 1.0, 3.0),
+        ],
+        curve: false,
+    },
+    FilterDef {
+        id: "spheres",
+        group: Group::Shapes,
+        label: "Spheres & bubbles",
+        about: "The picture as balls: matte spheres, or glass spheres that show the picture upside down inside, with shine and rainbow edges.",
+        params: &[
+            ParamDef { key: "mode", label: "Kind", kind: Kind::Choice { options: &["Glass", "Matte", "Flat dots"], def: 0 } },
+            px("size", "Size", 6.0, 600.0, 1.0, 60.0),
+            sl("gloss", "Shine", 0.0, 1.0, 0.01, 0.7),
+            sl("gap", "Gap", 0.0, 0.5, 0.01, 0.08),
+            ParamDef { key: "bg", label: "Background", kind: Kind::Choice { options: &["Faded picture", "White", "Dark", "Transparent"], def: 0 } },
+        ],
+        curve: false,
+    },
+    FilterDef {
+        id: "illustrate",
+        group: Group::Illustration,
+        label: "Make it an illustration",
+        about: "Photo or rough painting to clean illustration: smooth shapes, a limited palette of flat colors, and line art on the edges.",
+        params: &[
+            px("smooth", "Simplify", 1.0, 16.0, 1.0, 5.0),
+            sl("colors", "Colors", 3.0, 32.0, 1.0, 12.0),
+            sl("lines", "Line art", 0.0, 1.0, 0.01, 0.75),
+            px("thickness", "Line thickness", 0.5, 6.0, 0.25, 1.5),
+            sl("vivid", "Color lift", 0.0, 1.0, 0.01, 0.25),
+            ParamDef { key: "shading", label: "Cel shading", kind: Kind::Check { def: true } },
+        ],
         curve: false,
     },
     FilterDef { id: "posterize", group: Group::Color, label: "Posterize", about: "Fewer color steps, flat poster look.", params: &[sl("levels", "Steps", 2.0, 16.0, 1.0, 5.0)], curve: false },
@@ -368,6 +452,11 @@ pub fn run(id: &str, src: &RgbaImage, p: &Params, scale: f32) -> RgbaImage {
                 }
             });
         }
+        "blocks" => return blocks(src, p, s("lineWidth"), s("size")),
+        "cubes" => return mosaic(src, s("size"), p.f("mode") as usize, p.f("depth"), p.f("gap"), p.f("bg") as usize),
+        "triangles" => return triangles(src, p, s("size"), s("outline")),
+        "spheres" => return spheres(src, p.f("mode") as usize, s("size"), p.f("gloss"), p.f("gap"), p.f("bg") as usize),
+        "illustrate" => return illustrate(src, p, s("smooth").round().max(1.0) as usize, s("thickness")),
         "oil" => return kuwahara(src, s("radius").round().max(1.0) as usize),
         "pixelate" => return pixelate(src, s("size").round().max(2.0) as usize),
         "halftone" => return halftone(src, s("size").max(3.0), p.f("angle").to_radians(), p.f("color") > 0.5),
@@ -790,6 +879,479 @@ pub fn lightness(rgb: [u8; 3]) -> f32 {
     rgb_to_oklab([rgb[0] as f32 / 255.0, rgb[1] as f32 / 255.0, rgb[2] as f32 / 255.0])[0]
 }
 
+// ---------- shape filters: the picture rebuilt out of blocks, cubes, triangles or spheres ----------
+
+fn background(bg: usize, light_first: bool) -> [u8; 4] {
+    // dark / light / clear (or for spheres: picture, white, dark, clear: handled by the caller)
+    let _ = light_first;
+    match bg {
+        0 => [22, 22, 28, 255],
+        1 => [246, 245, 240, 255],
+        _ => [0, 0, 0, 0],
+    }
+}
+
+fn avg_rect_step(raw: &[u8], w: usize, h: usize, x0: f32, y0: f32, x1: f32, y1: f32, step: usize) -> [f32; 4] {
+    let (x0, y0) = (x0.max(0.0).floor() as usize, y0.max(0.0).floor() as usize);
+    let (x1, y1) = ((x1.ceil().max(0.0) as usize).min(w), (y1.ceil().max(0.0) as usize).min(h));
+    let (mut r, mut g, mut b, mut a, mut n) = (0f32, 0f32, 0f32, 0f32, 0f32);
+    let mut y = y0;
+    while y < y1 {
+        let mut x = x0;
+        while x < x1 {
+            let i = (y * w + x) * 4;
+            let al = raw[i + 3] as f32;
+            r += raw[i] as f32 * al;
+            g += raw[i + 1] as f32 * al;
+            b += raw[i + 2] as f32 * al;
+            a += al;
+            n += 1.0;
+            x += step.max(1);
+        }
+        y += step.max(1);
+    }
+    if a <= 0.0 { [0.0; 4] } else { [r / a, g / a, b / a, a / n] }
+}
+
+fn set_px(d: &mut [u8], i: usize, r: f32, g: f32, b: f32, a: f32, mix: f32) {
+    let c = [r, g, b, a];
+    for k in 0..4 {
+        let v = if mix >= 1.0 { c[k] } else { d[i + k] as f32 + (c[k] - d[i + k] as f32) * mix };
+        d[i + k] = clamp8(v);
+    }
+}
+
+/// Squares: flat mosaic, beveled tiles, or isometric 3D cubes.
+fn mosaic(src: &RgbaImage, size: f32, mode: usize, depth: f32, gap: f32, bg: usize) -> RgbaImage {
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    let raw = src.as_raw();
+    let size = if mode != 0 { size.max(3.0) } else { size.round().max(2.0) };
+    let mut out = RgbaImage::new(w as u32, h as u32);
+    let b = background(bg, false);
+    for px in out.pixels_mut() {
+        px.0 = b;
+    }
+    if mode == 0 {
+        return iso_cubes(src, out, size, depth, gap);
+    }
+    let size_i = size.round() as usize;
+    let g = (size * gap).round() as usize;
+    let d = out.as_mut();
+    for y0 in (0..h).step_by(size_i) {
+        for x0 in (0..w).step_by(size_i) {
+            let [r, gg, bb, a] = avg_rect_step(raw, w, h, x0 as f32, y0 as f32, (x0 + size_i) as f32, (y0 + size_i) as f32, if size_i > 24 { 2 } else { 1 });
+            if a <= 0.0 {
+                continue;
+            }
+            let bev = ((size * 0.14).round() as usize).max(1);
+            for y in y0 + g..(y0 + size_i).saturating_sub(g).min(h) {
+                for x in x0 + g..(x0 + size_i).saturating_sub(g).min(w) {
+                    let mut k = 0.0;
+                    if mode == 1 {
+                        let (lx, ly, s) = (x - x0 - g, y - y0 - g, size_i - 2 * g);
+                        if lx < bev || ly < bev {
+                            k = depth * 0.45; // lit edge
+                        }
+                        if s - 1 - lx.min(s - 1) < bev || s - 1 - ly.min(s - 1) < bev {
+                            k = -depth * 0.45; // shaded edge
+                        }
+                    }
+                    let f = |c: f32| if k >= 0.0 { c + (255.0 - c) * k } else { c * (1.0 + k) };
+                    set_px(d, (y * w + x) * 4, f(r), f(gg), f(bb), a, 1.0);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 3D cubes in isometric view: every hexagon is a cube with a light top, a mid left and a dark right face.
+fn iso_cubes(src: &RgbaImage, mut out: RgbaImage, size: f32, depth: f32, gap: f32) -> RgbaImage {
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    let raw = src.as_raw();
+    let r = size / 2.0; // hexagon radius
+    let hw = r * 3f32.sqrt(); // hexagon width
+    let shrink = 1.0 - gap;
+    let s3 = 3f32.sqrt();
+    let d = out.as_mut();
+    let mut row = -1i32;
+    while (row as f32) * r * 1.5 < h as f32 + r {
+        let cy = row as f32 * r * 1.5;
+        let mut col = -1i32;
+        while (col as f32) * hw < w as f32 + hw {
+            let cx = col as f32 * hw + if row.rem_euclid(2) == 1 { hw / 2.0 } else { 0.0 };
+            let [rr, gg, bb, a] = avg_rect_step(raw, w, h, cx - hw / 2.0, cy - r, cx + hw / 2.0, cy + r, 2);
+            col += 1;
+            if a <= 0.0 {
+                continue;
+            }
+            let top = [rr + (255.0 - rr) * depth * 0.35, gg + (255.0 - gg) * depth * 0.35, bb + (255.0 - bb) * depth * 0.35];
+            let left = [rr, gg, bb];
+            let right = [rr * (1.0 - depth * 0.45), gg * (1.0 - depth * 0.45), bb * (1.0 - depth * 0.45)];
+            let rad = r * shrink;
+            let (ya, yb) = ((cy - rad).floor().max(0.0) as usize, ((cy + rad).ceil().max(0.0) as usize).min(h));
+            let (xa, xb) = ((cx - hw / 2.0).floor().max(0.0) as usize, ((cx + hw / 2.0).ceil().max(0.0) as usize).min(w));
+            for y in ya..yb {
+                for x in xa..xb {
+                    let (dx, dy) = ((x as f32 + 0.5 - cx) / rad, (y as f32 + 0.5 - cy) / rad);
+                    let (ax, ay) = (dx.abs(), dy.abs());
+                    // inside the hexagon (pointy top)
+                    if ax > s3 / 2.0 || ay + ax / s3 > 1.0 {
+                        continue;
+                    }
+                    let c = if dy < -ax / s3 { top } else if dx < 0.0 { left } else { right };
+                    set_px(d, (y * w + x) * 4, c[0], c[1], c[2], a, 1.0);
+                }
+            }
+        }
+        row += 1;
+    }
+    out
+}
+
+fn split_blocks(cells: &mut Vec<[usize; 4]>, rand: &mut impl FnMut() -> f32, x: usize, y: usize, cw: usize, ch: usize, depth: u32, min_s: f32) {
+    let can_w = cw as f32 > min_s * 2.0;
+    let can_h = ch as f32 > min_s * 2.0;
+    if (!can_w && !can_h) || (depth > 2 && rand() < 0.22) {
+        cells.push([x, y, cw, ch]);
+        return;
+    }
+    let ratio = cw as f32 / ch as f32;
+    let vertical = can_w && (!can_h || ratio > 1.3 || (ratio > 0.75 && rand() < 0.5));
+    let t = 0.3 + rand() * 0.4;
+    if vertical {
+        let a = (cw as f32 * t).round() as usize;
+        split_blocks(cells, rand, x, y, a, ch, depth + 1, min_s);
+        split_blocks(cells, rand, x + a, y, cw - a, ch, depth + 1, min_s);
+    } else {
+        let a = (ch as f32 * t).round() as usize;
+        split_blocks(cells, rand, x, y, cw, a, depth + 1, min_s);
+        split_blocks(cells, rand, x, y + a, cw, ch - a, depth + 1, min_s);
+    }
+}
+
+/// City blocks: rectangles split again and again, flat-ish, with thin lines and pixel blocks.
+fn blocks(src: &RgbaImage, p: &Params, line_w: f32, size: f32) -> RgbaImage {
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    let raw = src.as_raw();
+    let mut rand = rng(p.f("seed").max(1.0) as u32);
+    let mut cells: Vec<[usize; 4]> = Vec::new();
+    split_blocks(&mut cells, &mut rand, 0, 0, w, h, 0, size.max(8.0));
+    let mut out = src.clone();
+    let (flatten, pixels, glitch) = (p.f("flatten"), p.f("pixels"), p.f("glitch"));
+    for &[x0, y0, cw, ch] in &cells {
+        // some blocks show a shifted part of the picture
+        let shift = if rand() < glitch * 0.5 { ((rand() - 0.5) * cw as f32 * 0.6).round() as isize } else { 0 };
+        let [mr, mg, mb, _] = avg_rect_step(raw, w, h, x0 as f32, y0 as f32, (x0 + cw) as f32, (y0 + ch) as f32, 3);
+        let pix = if rand() < pixels { ((cw.min(ch) as f32 / (4 + (rand() * 8.0).floor() as usize) as f32).round() as usize).max(3) } else { 0 };
+        for y in y0..(y0 + ch).min(h) {
+            for x in x0..(x0 + cw).min(w) {
+                let (mut sx, mut sy) = ((x as isize + shift).clamp(0, w as isize - 1) as usize, y);
+                if pix > 0 {
+                    sx = (x0 + (sx.saturating_sub(x0)) / pix * pix + (pix >> 1)).min(w - 1);
+                    sy = (y0 + (y - y0) / pix * pix + (pix >> 1)).min(h - 1);
+                }
+                let (k, j) = ((sy * w + sx) * 4, (y * w + x) * 4);
+                let f = if pix > 0 { flatten * 0.5 } else { flatten };
+                let d = out.as_mut();
+                d[j] = clamp8(raw[k] as f32 + (mr - raw[k] as f32) * f);
+                d[j + 1] = clamp8(raw[k + 1] as f32 + (mg - raw[k + 1] as f32) * f);
+                d[j + 2] = clamp8(raw[k + 2] as f32 + (mb - raw[k + 2] as f32) * f);
+                d[j + 3] = raw[k + 3];
+            }
+        }
+    }
+    // thin lines on part of the block edges
+    let lw = line_w.max(1.0).round() as usize;
+    let lines = p.f("lines");
+    let mode = p.f("lineColor") as usize;
+    for &[x0, y0, cw, ch] in &cells {
+        for side in 0..2 {
+            if rand() > lines {
+                continue;
+            }
+            let len = if rand() < 0.4 { 1.0 } else { 0.35 + rand() * 0.65 }; // the whole edge or a part of it
+            let horiz = side == 0;
+            let start = rand() * (1.0 - len);
+            let total = (if horiz { cw } else { ch }) as f32;
+            let mut t = 0.0;
+            while t < total * len {
+                for q in 0..lw {
+                    let (x, y) = if horiz { ((x0 as f32 + total * start + t).round() as isize, (y0 + q) as isize) } else { ((x0 + q) as isize, (y0 as f32 + ch as f32 * start + t).round() as isize) };
+                    if x < 0 || y < 0 || x >= w as isize || y >= h as isize {
+                        continue;
+                    }
+                    let j = (y as usize * w + x as usize) * 4;
+                    let soft = 1.0 - (q as f32 - (lw as f32 - 1.0) / 2.0).abs() / (lw as f32 / 2.0 + 0.5);
+                    let d = out.as_mut();
+                    let (mut r, mut g, mut b) = (250.0, 246.0, 236.0);
+                    match mode {
+                        1 => (r, g, b) = (255.0, 196.0, 140.0),
+                        2 => (r, g, b) = (24.0, 22.0, 30.0),
+                        3 => (r, g, b) = ((d[j] as f32 * 1.5 + 40.0).min(255.0), (d[j + 1] as f32 * 1.3 + 30.0).min(255.0), (d[j + 2] as f32 * 1.2 + 20.0).min(255.0)),
+                        _ => {}
+                    }
+                    let a = (d[j + 3] as f32).max(255.0 * soft);
+                    set_px(d, j, r, g, b, a, 0.85 * soft + 0.15);
+                }
+                t += 1.0;
+            }
+        }
+    }
+    out
+}
+
+/// Triangles: a jittered grid split into triangles, each one flat color.
+fn triangles(src: &RgbaImage, p: &Params, size: f32, outline: f32) -> RgbaImage {
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    let raw = src.as_raw();
+    let size = size.max(4.0);
+    let mut rand = rng(p.f("seed").max(1.0) as u32);
+    let jit = p.f("jitter");
+    let (cols, rows) = ((w as f32 / size).ceil() as usize + 1, (h as f32 / size).ceil() as usize + 1);
+    let mut pts: Vec<[f32; 2]> = Vec::new();
+    for r in 0..=rows {
+        for c in 0..=cols {
+            let edge = r == 0 || c == 0 || r == rows || c == cols;
+            let (jx, jy) = if edge { (0.0, 0.0) } else { ((rand() - 0.5) * size * jit, (rand() - 0.5) * size * jit) };
+            pts.push([c as f32 * size + jx, r as f32 * size + jy]);
+        }
+    }
+    let at = |r: usize, c: usize| pts[r * (cols + 1) + c];
+    let mut out = src.clone();
+    let mono = p.f("colors") > 0.5;
+    let facets = p.f("facets");
+    let mut fill_tri = |a: [f32; 2], b: [f32; 2], c: [f32; 2], rand: &mut dyn FnMut() -> f32| {
+        // color: a few samples inside the triangle
+        let (mut rr, mut gg, mut bb, mut aa, mut n) = (0f32, 0f32, 0f32, 0f32, 0f32);
+        for (u, v) in [(1.0 / 3.0, 1.0 / 3.0), (0.6, 0.2), (0.2, 0.6), (0.2, 0.2)] {
+            let (x, y) = ((a[0] + (b[0] - a[0]) * u + (c[0] - a[0]) * v).round(), (a[1] + (b[1] - a[1]) * u + (c[1] - a[1]) * v).round());
+            if x < 0.0 || y < 0.0 || x >= w as f32 || y >= h as f32 {
+                continue;
+            }
+            let k = (y as usize * w + x as usize) * 4;
+            rr += raw[k] as f32;
+            gg += raw[k + 1] as f32;
+            bb += raw[k + 2] as f32;
+            aa += raw[k + 3] as f32;
+            n += 1.0;
+        }
+        if n == 0.0 {
+            return;
+        }
+        let (mut rr, mut gg, mut bb, aa) = (rr / n, gg / n, bb / n, aa / n);
+        if mono {
+            let l = (0.299 * rr + 0.587 * gg + 0.114 * bb) / 255.0;
+            let v = if l < 0.45 { 8.0 } else if l < 0.8 { 100.0 } else { 238.0 };
+            (rr, gg, bb) = (v, v, v);
+        }
+        // facet shading: each face turned a little toward or away from the light
+        let s = (rand() - 0.5) * 2.0 * facets;
+        let sh = |v: f32| if s >= 0.0 { v + (255.0 - v) * s * 0.35 } else { v * (1.0 + s * 0.45) };
+        let (rr, gg, bb) = (sh(rr), sh(gg), sh(bb));
+        let min_y = a[1].min(b[1]).min(c[1]).floor().max(0.0) as usize;
+        let max_y = (a[1].max(b[1]).max(c[1]).ceil().max(0.0) as usize).min(h - 1);
+        let min_x = a[0].min(b[0]).min(c[0]).floor().max(0.0) as usize;
+        let max_x = (a[0].max(b[0]).max(c[0]).ceil().max(0.0) as usize).min(w - 1);
+        let e = |p0: [f32; 2], p1: [f32; 2], x: f32, y: f32| (p1[0] - p0[0]) * (y - p0[1]) - (p1[1] - p0[1]) * (x - p0[0]);
+        let area = e(a, b, c[0], c[1]);
+        if area.abs() < 1e-6 {
+            return;
+        }
+        let lens = [(b[0] - a[0]).hypot(b[1] - a[1]), (c[0] - b[0]).hypot(c[1] - b[1]), (a[0] - c[0]).hypot(a[1] - c[1])];
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                let (w0, w1, w2) = (e(b, c, px, py) / area, e(c, a, px, py) / area, e(a, b, px, py) / area);
+                if w0 < -0.001 || w1 < -0.001 || w2 < -0.001 {
+                    continue;
+                }
+                let j = (y * w + x) * 4;
+                // distance to the nearest edge, for the outline
+                let d = (w0 * (area.abs() / lens[1])).min(w1 * (area.abs() / lens[2])).min(w2 * (area.abs() / lens[0]));
+                let dst = out.as_mut();
+                if outline > 0.0 && d < outline / 2.0 {
+                    set_px(dst, j, 10.0, 10.0, 12.0, 255.0, 1.0);
+                } else {
+                    set_px(dst, j, rr, gg, bb, aa, 1.0);
+                }
+            }
+        }
+    };
+    for r in 0..rows {
+        for c in 0..cols {
+            let (p00, p10, p01, p11) = (at(r, c), at(r, c + 1), at(r + 1, c), at(r + 1, c + 1));
+            if rand() < 0.5 {
+                fill_tri(p00, p10, p11, &mut rand);
+                fill_tri(p00, p11, p01, &mut rand);
+            } else {
+                fill_tri(p00, p10, p01, &mut rand);
+                fill_tri(p10, p11, p01, &mut rand);
+            }
+        }
+    }
+    out
+}
+
+/// Spheres: matte balls, glass balls (the picture upside down inside), or flat dots.
+fn spheres(src: &RgbaImage, mode: usize, size: f32, gloss: f32, gap: f32, bg: usize) -> RgbaImage {
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    let raw = src.as_raw();
+    let size = size.max(4.0);
+    let mut out = RgbaImage::new(w as u32, h as u32);
+    if bg == 0 {
+        for (i, px) in out.pixels_mut().enumerate() {
+            let k = i * 4;
+            px.0 = [clamp8(raw[k] as f32 * 0.35 + 165.0), clamp8(raw[k + 1] as f32 * 0.35 + 165.0), clamp8(raw[k + 2] as f32 * 0.35 + 165.0), raw[k + 3]];
+        }
+    } else {
+        // white, dark, transparent
+        let c = match bg {
+            1 => [246, 245, 240, 255],
+            2 => [22, 22, 28, 255],
+            _ => [0, 0, 0, 0],
+        };
+        for px in out.pixels_mut() {
+            px.0 = c;
+        }
+    }
+    let rad = size / 2.0 * (1.0 - gap);
+    let d = out.as_mut();
+    let mut cy = size / 2.0;
+    while cy < h as f32 + size / 2.0 {
+        let mut cx = size / 2.0;
+        while cx < w as f32 + size / 2.0 {
+            let [mr, mg, mb, ma] = avg_rect_step(raw, w, h, cx - size / 2.0, cy - size / 2.0, cx + size / 2.0, cy + size / 2.0, if size > 30.0 { 2 } else { 1 });
+            if ma > 0.0 {
+                let (ya, yb) = ((cy - rad).floor().max(0.0) as usize, ((cy + rad).ceil().max(0.0) as usize).min(h));
+                let (xa, xb) = ((cx - rad).floor().max(0.0) as usize, ((cx + rad).ceil().max(0.0) as usize).min(w));
+                for y in ya..yb {
+                    for x in xa..xb {
+                        let (dx, dy) = ((x as f32 + 0.5 - cx) / rad, (y as f32 + 0.5 - cy) / rad);
+                        let d2 = dx * dx + dy * dy;
+                        if d2 > 1.0 {
+                            continue;
+                        }
+                        let edge_a = ((1.0 - d2.sqrt()) * rad).min(1.0); // smooth rim
+                        let z = (1.0 - d2).sqrt();
+                        let (mut r, mut g, mut b) = (mr, mg, mb);
+                        if mode == 1 {
+                            // matte: light from the upper left
+                            let lit = (-0.5 * dx - 0.6 * dy + 0.62 * z).max(0.0);
+                            let k = 0.35 + 0.75 * lit;
+                            let spec = lit.max(0.0).powf(30.0) * gloss * 255.0;
+                            (r, g, b) = (r * k + spec, g * k + spec, b * k + spec);
+                        } else if mode == 0 {
+                            // glass: inside, the world looks upside down and squeezed toward the middle
+                            let k = 0.55 + 0.45 * (1.0 - z);
+                            let sx = (cx - dx * rad * k * 1.6).round().clamp(0.0, w as f32 - 1.0) as usize;
+                            let sy = (cy - dy * rad * k * 1.6).round().clamp(0.0, h as f32 - 1.0) as usize;
+                            let q = (sy * w + sx) * 4;
+                            (r, g, b) = (raw[q] as f32, raw[q + 1] as f32, raw[q + 2] as f32);
+                            // darker rim, rainbow fringe near the bottom edge
+                            let rim = (1.0 - z).powf(2.2);
+                            (r, g, b) = (r * (1.0 - rim * 0.55), g * (1.0 - rim * 0.55), b * (1.0 - rim * 0.55));
+                            if dy > 0.3 && 1.0 - z > 0.35 {
+                                let hue = (dy.atan2(dx) * 3.0 + 1.0).rem_euclid(std::f32::consts::TAU);
+                                let t = (1.0 - z - 0.35) * dy * 0.9;
+                                r += (hue.sin() * 0.5 + 0.5) * 255.0 * t;
+                                g += ((hue + 2.1).sin() * 0.5 + 0.5) * 255.0 * t;
+                                b += ((hue + 4.2).sin() * 0.5 + 0.5) * 255.0 * t;
+                            }
+                            // window reflection (a soft oval highlight) and a sharp sparkle
+                            let (hx, hy) = (dx + 0.35, dy + 0.45);
+                            let hl = (1.0 - (hx * hx * 6.0 + hy * hy * 14.0)).max(0.0) * gloss;
+                            let sp = (1.0 - (dx + 0.55).hypot(dy + 0.55) * 7.0).max(0.0).powi(2) * gloss;
+                            let m = (hl * 0.8 + sp).min(1.0);
+                            (r, g, b) = (r + (255.0 - r) * m, g + (255.0 - g) * m, b + (255.0 - b) * m);
+                        }
+                        set_px(d, (y * w + x) * 4, r, g, b, 255.0, edge_a);
+                    }
+                }
+            }
+            cx += size;
+        }
+        cy += size;
+    }
+    out
+}
+
+/// Illustration: simplify, a limited palette (k-means), optional cel shading, then line art on the edges.
+fn illustrate(src: &RgbaImage, p: &Params, smooth_r: usize, thickness: f32) -> RgbaImage {
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    let smooth = kuwahara(src, smooth_r.max(1));
+    let sraw = smooth.as_raw();
+    let k = (p.f("colors").round() as usize).max(3);
+    let mut rand = rng(5);
+    let mut samples: Vec<[f32; 3]> = Vec::new();
+    let step = ((w * h) / 6000).max(1);
+    let mut i = 0;
+    while i < w * h {
+        let j = i * 4;
+        if sraw[j + 3] >= 20 {
+            samples.push([sraw[j] as f32, sraw[j + 1] as f32, sraw[j + 2] as f32]);
+        }
+        i += step;
+    }
+    let mut cents: Vec<[f32; 3]> = (0..k).map(|_| samples.get((rand() * samples.len() as f32) as usize).copied().unwrap_or([128.0; 3])).collect();
+    let dist = |a: &[f32; 3], b: &[f32; 3]| 0.3 * (a[0] - b[0]).powi(2) + 0.59 * (a[1] - b[1]).powi(2) + 0.11 * (a[2] - b[2]).powi(2);
+    for _ in 0..10 {
+        let mut acc = vec![[0f32; 4]; k];
+        for s in &samples {
+            let bi = (0..k).min_by(|&a, &b| dist(s, &cents[a]).total_cmp(&dist(s, &cents[b]))).unwrap_or(0);
+            for c in 0..3 {
+                acc[bi][c] += s[c];
+            }
+            acc[bi][3] += 1.0;
+        }
+        for (i, a) in acc.iter().enumerate() {
+            if a[3] > 0.0 {
+                cents[i] = [a[0] / a[3], a[1] / a[3], a[2] / a[3]];
+            }
+        }
+    }
+    // color lift: a bit more saturation in the palette
+    let vivid = p.f("vivid");
+    for c in cents.iter_mut() {
+        let l = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+        *c = [(l + (c[0] - l) * (1.0 + vivid)).clamp(0.0, 255.0), (l + (c[1] - l) * (1.0 + vivid)).clamp(0.0, 255.0), (l + (c[2] - l) * (1.0 + vivid)).clamp(0.0, 255.0)];
+    }
+    let mut out = RgbaImage::new(w as u32, h as u32);
+    let cel = p.b("shading");
+    let raw = src.as_raw();
+    out.as_mut().par_chunks_mut(4).enumerate().for_each(|(i, px)| {
+        let j = i * 4;
+        let s = [sraw[j] as f32, sraw[j + 1] as f32, sraw[j + 2] as f32];
+        let bi = (0..k).min_by(|&a, &b| dist(&s, &cents[a]).total_cmp(&dist(&s, &cents[b]))).unwrap_or(0);
+        let [mut r, mut g, mut b] = cents[bi];
+        if cel {
+            // two-tone cel shading: darker pixels of a color area get a cool shadow tone
+            let ls = 0.299 * s[0] + 0.587 * s[1] + 0.114 * s[2];
+            let lc = 0.299 * r + 0.587 * g + 0.114 * b;
+            if ls < lc - 18.0 {
+                (r, g, b) = (r * 0.78, g * 0.8, b * 0.88);
+            } else if ls > lc + 22.0 {
+                (r, g, b) = (r + (255.0 - r) * 0.25, g + (255.0 - g) * 0.22, b + (255.0 - b) * 0.18);
+            }
+        }
+        px.copy_from_slice(&[clamp8(r), clamp8(g), clamp8(b), raw[j + 3]]);
+    });
+    let lines = p.f("lines");
+    if lines > 0.0 {
+        let ink = line_art(src, thickness.max(0.5), 0.5);
+        for (i, px) in out.pixels_mut().enumerate() {
+            let t = ink[i] * lines;
+            if t <= 0.0 {
+                continue;
+            }
+            px.0[0] = clamp8(px.0[0] as f32 * (1.0 - t) + 22.0 * t);
+            px.0[1] = clamp8(px.0[1] as f32 * (1.0 - t) + 18.0 * t);
+            px.0[2] = clamp8(px.0[2] as f32 * (1.0 - t) + 26.0 * t);
+        }
+    }
+    out
+}
+
 // ---------- putting the result on a layer ----------
 
 /// Write a filtered picture (covering `(x0, y0)` and on) back onto the layer: limited by the
@@ -1014,6 +1576,68 @@ mod tests {
         let img = crate::files::layer_rgba(&e.layers[0], 0, 0, 100, 100);
         assert_eq!(img.get_pixel(10, 10).0, [0, 0, 255, 255]);
         assert_eq!(img.get_pixel(80, 10).0[3], 0);
+    }
+
+
+    #[test]
+    fn shape_filters_rebuild_the_picture() {
+        let img = RgbaImage::from_fn(160, 120, |x, y| image::Rgba([(x * 255 / 159) as u8, (y * 255 / 119) as u8, 120, 255]));
+        let distinct = |i: &RgbaImage| i.pixels().map(|p| p.0).collect::<std::collections::HashSet<_>>().len();
+        // flat squares: few colors, and gaps can be transparent
+        let mut p = defaults("cubes");
+        p.v.insert("mode", 2.0);
+        p.v.insert("size", 20.0);
+        p.v.insert("gap", 0.1);
+        p.v.insert("bg", 2.0);
+        let m = run("cubes", &img, &p, 1.0);
+        assert!(distinct(&m) < 100 && m.pixels().any(|p| p.0[3] == 0), "a mosaic with see-through gaps: {}", distinct(&m));
+        // 3D cubes: three shades of each hexagon
+        let c = run("cubes", &img, &defaults("cubes"), 1.0);
+        assert_ne!(c.as_raw(), img.as_raw());
+        assert!(c.pixels().any(|p| p.0 == [22, 22, 28, 255]), "dark gaps between the cubes");
+        // triangles: a handful of flat colors with the outline in ink
+        let mut t = defaults("triangles");
+        t.v.insert("outline", 2.0);
+        let tri = run("triangles", &img, &t, 1.0);
+        assert!(tri.pixels().any(|p| p.0 == [10, 10, 12, 255]), "ink outlines");
+        // spheres on transparent: round dots, and corners stay empty
+        let mut sp = defaults("spheres");
+        sp.v.insert("bg", 3.0);
+        sp.v.insert("size", 40.0);
+        sp.v.insert("mode", 2.0);
+        let s = run("spheres", &img, &sp, 1.0);
+        assert_eq!(s.get_pixel(0, 0).0[3], 0, "the corner between the balls is empty");
+        assert_eq!(s.get_pixel(20, 20).0[3], 255, "the middle of the first ball");
+        // glass shows something different from the matte look
+        sp.v.insert("mode", 0.0);
+        let glass = run("spheres", &img, &sp, 1.0);
+        sp.v.insert("mode", 1.0);
+        let matte = run("spheres", &img, &sp, 1.0);
+        assert_ne!(glass.get_pixel(20, 20), matte.get_pixel(20, 20));
+        // blocks: lines in the light color, the same size
+        let mut b = defaults("blocks");
+        b.v.insert("size", 20.0);
+        let blocks_out = run("blocks", &img, &b, 1.0);
+        assert_eq!(blocks_out.dimensions(), img.dimensions());
+        assert!(blocks_out.pixels().filter(|p| p.0[0] > 235 && p.0[1] > 230).count() > 20, "thin light lines");
+    }
+
+    #[test]
+    fn illustrate_limits_the_palette_and_draws_lines() {
+        let img = RgbaImage::from_fn(120, 120, |x, y| {
+            let v = ((x as f32 / 119.0) * 200.0) as u8;
+            if (x as f32 - 60.0).hypot(y as f32 - 60.0) < 30.0 { image::Rgba([200, 60, 60, 255]) } else { image::Rgba([v, v, 230 - v / 2, 255]) }
+        });
+        let mut p = defaults("illustrate");
+        p.v.insert("colors", 4.0);
+        p.v.insert("lines", 0.0);
+        p.v.insert("shading", 0.0);
+        let flat = run("illustrate", &img, &p, 1.0);
+        let n: std::collections::HashSet<[u8; 4]> = flat.pixels().map(|p| p.0).collect();
+        assert!(n.len() <= 4 + 3, "a few flat colors: {}", n.len());
+        p.v.insert("lines", 1.0);
+        let inked = run("illustrate", &img, &p, 1.0);
+        assert!(inked.pixels().any(|p| p.0[0] < 60 && p.0[1] < 60), "dark ink on the edges");
     }
 
     #[test]
