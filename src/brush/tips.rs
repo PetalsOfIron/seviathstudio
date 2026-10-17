@@ -78,6 +78,7 @@ fn base_key(tip: Tip, s: &BrushSettings) -> String {
     match tip {
         Tip::Round | Tip::Chalk | Tip::Wet => format!("{tip:?}:{:.2}", s.hardness),
         Tip::Shape => format!("shape:{:?}:{}:{:.2}:{:.2}", s.shape_base, s.sides, s.star_inner, s.hardness),
+        Tip::Image => format!("image:{:x}:{:.2}", s.tip_image.as_ref().map(|t| t.id).unwrap_or(0), s.hardness),
         _ => format!("{tip:?}"),
     }
 }
@@ -142,10 +143,30 @@ fn round_mask(hardness: f32) -> Mask {
     m
 }
 
+/// Your picture as a tip, centered in the 256 square; `hardness` below 1 softens its edges.
+fn image_mask(img: &super::tipimage::TipImage, hardness: f32) -> Mask {
+    let mut m = Mask::new(N);
+    let k = img.n as f32 / N as f32;
+    for y in 0..N {
+        for x in 0..N {
+            m.a[y * N + x] = img.at((x as f32 + 0.5) * k, (y as f32 + 0.5) * k);
+        }
+    }
+    let soft = (1.0 - hardness.clamp(0.0, 1.0)) * 6.0;
+    if soft > 0.4 {
+        m.blur_css(soft);
+    }
+    m
+}
+
 fn base_mask(tip: Tip, s: &BrushSettings) -> Mask {
     match tip {
         Tip::Round => round_mask(s.hardness),
         Tip::Shape => shape_mask(s.shape_base, s.sides, s.star_inner, s.hardness),
+        Tip::Image => match &s.tip_image {
+            Some(img) => image_mask(img, s.hardness),
+            None => round_mask(s.hardness),
+        },
         _ => procedural(tip, s.hardness),
     }
 }
@@ -325,7 +346,7 @@ fn procedural(tip: Tip, hardness: f32) -> Mask {
             }
             c.blur_css(0.8);
         }
-        Tip::Round | Tip::Shape => return round_mask(hardness),
+        Tip::Round | Tip::Shape | Tip::Image => return round_mask(hardness),
     }
     c
 }

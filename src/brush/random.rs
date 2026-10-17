@@ -245,6 +245,51 @@ pub fn randomize(s: &mut BrushSettings, groups: &[Group], seed: u32) {
     }
 }
 
+/// A close cousin of a brush: many numeric settings nudged by up to `amount` (0.25 = a quarter),
+/// the same seed always giving the same cousin. Nothing switches on or off.
+pub fn remix(s: &mut BrushSettings, seed: u32, amount: f32) {
+    let mut r = Rng::new(seed.wrapping_mul(2_246_822_519).wrapping_add(11));
+    let nudge = |r: &mut Rng, v: &mut f32, lo: f32, hi: f32| {
+        // only settings that are in use change: 0 stays 0
+        if v.abs() > 1e-4 {
+            *v = (*v * (1.0 + r.signed() * amount)).clamp(lo, hi);
+        }
+    };
+    nudge(&mut r, &mut s.hardness, 0.1, 1.0);
+    nudge(&mut r, &mut s.spacing, 0.02, 1.0);
+    nudge(&mut r, &mut s.roundness, 0.15, 1.0);
+    nudge(&mut r, &mut s.flow, 0.3, 1.0);
+    nudge(&mut r, &mut s.texture, 0.0, 0.6);
+    nudge(&mut r, &mut s.scatter, 0.0, 3.0);
+    nudge(&mut r, &mut s.size_jitter, 0.0, 0.7);
+    nudge(&mut r, &mut s.angle_jitter, 0.0, 1.0);
+    nudge(&mut r, &mut s.opacity_jitter, 0.0, 0.7);
+    nudge(&mut r, &mut s.color_jitter, 0.0, 0.8);
+    nudge(&mut r, &mut s.edge_amount, 0.0, 0.85);
+    nudge(&mut r, &mut s.edge_detail, 0.0, 1.0);
+    nudge(&mut r, &mut s.grain, 0.0, 0.8);
+    nudge(&mut r, &mut s.streaks, 0.0, 1.0);
+    nudge(&mut r, &mut s.wet_rim, 0.0, 1.0);
+    nudge(&mut r, &mut s.water, 0.0, 0.9);
+    nudge(&mut r, &mut s.bleed, 0.0, 1.0);
+    nudge(&mut r, &mut s.pool, 0.0, 1.0);
+    nudge(&mut r, &mut s.granulation, 0.0, 1.0);
+    nudge(&mut r, &mut s.pinch, 0.0, 0.9);
+    nudge(&mut r, &mut s.drift, -1.0, 1.0);
+    nudge(&mut r, &mut s.curl, 0.0, 1.0);
+    nudge(&mut r, &mut s.flyaways, 0.0, 1.0);
+    nudge(&mut r, &mut s.sheen, 0.0, 1.0);
+    nudge(&mut r, &mut s.fray_amount, 0.0, 0.9);
+    nudge(&mut r, &mut s.line_wave, 0.0, 1.0);
+    nudge(&mut r, &mut s.dot_spread, 0.0, 3.0);
+    nudge(&mut r, &mut s.tint, -1.0, 1.0);
+    if s.angle.abs() > 1e-4 && !s.follow_direction {
+        s.angle += r.signed() * 40.0 * amount;
+    }
+    s.seed = 1 + (r.next() * 99_000.0) as u32;
+    keep_visible(s);
+}
+
 /// How many pixels a short test stroke of this brush paints on an empty canvas.
 fn test_stroke(s: &BrushSettings) -> usize {
     use super::engine::{Sample, Stroke};
@@ -407,5 +452,25 @@ mod tests {
             assert!(s.lines <= 12 && s.dot_count <= 16 && s.dot_min <= s.dot_max, "seed {seed}");
             assert!(s.trans_color.iter().all(|c| (0.0..=1.0).contains(c)), "seed {seed}: {:?}", s.trans_color);
         }
+    }
+
+    #[test]
+    fn a_remix_is_a_close_cousin_that_still_paints() {
+        let base = crate::brush::presets().into_iter().find(|p| p.name == "Hair clumps").unwrap().s;
+        let mut seen = std::collections::HashSet::new();
+        for seed in 0..30u32 {
+            let mut s = base.clone();
+            remix(&mut s, seed, 0.25);
+            assert_eq!((s.tip, s.strands > 0, s.paint, s.dots == 0.0, s.lines, s.fray), (base.tip, true, base.paint, true, base.lines, base.fray), "nothing switches on or off");
+            assert!((s.hardness - base.hardness).abs() <= base.hardness * 0.26 + 1e-3, "close: {} vs {}", s.hardness, base.hardness);
+            assert_eq!((s.size, s.strands, s.opacity), (base.size, base.strands, base.opacity), "size, strand count and opacity are left alone");
+            seen.insert(format!("{:.4}{:.4}{}", s.spacing, s.sheen, s.seed));
+            assert!(test_stroke(&s) > 100, "seed {seed} still paints");
+        }
+        assert!(seen.len() >= 25, "different seeds, different cousins: {}", seen.len());
+        let (mut a, mut b) = (base.clone(), base.clone());
+        remix(&mut a, 7, 0.25);
+        remix(&mut b, 7, 0.25);
+        assert_eq!(format!("{a:?}"), format!("{b:?}"), "the same seed gives the same cousin");
     }
 }

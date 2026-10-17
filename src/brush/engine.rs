@@ -1975,4 +1975,26 @@ mod tests {
             }
         }
     }
+
+    // ---------- picture tips ----------
+
+    #[test]
+    fn a_picture_tip_stamps_the_picture() {
+        // a plus-shaped picture: a bar across and a bar down
+        let img = image::RgbaImage::from_fn(60, 60, |x, y| if (26..34).contains(&x) || (26..34).contains(&y) { image::Rgba([0, 0, 0, 255]) } else { image::Rgba([255, 255, 255, 255]) });
+        let tip = crate::brush::tipimage::TipImage::from_picture(&img).unwrap();
+        let s = BrushSettings { tip: Tip::Image, tip_image: Some(tip), size: 80.0, hardness: 1.0, spacing: 5.0, size_pressure: false, stabilize: 0.0, ..BrushSettings::default() };
+        let mut d = Document::new(300, 300);
+        let st = Stroke::begin(&mut d, 0, &s, BLUE, false, 1.0, false, Sample { x: 150.0, y: 150.0, p: 1.0 }, &none);
+        st.finish(&mut d, &none);
+        let alpha = |x: i32, y: i32| crate::files::layer_rgba(&d.layers[0], x, y, 1, 1).get_pixel(0, 0).0[3];
+        assert!(alpha(150, 150) > 200, "the middle of the plus");
+        assert!(alpha(150, 125) > 200 && alpha(125, 150) > 200, "its arms");
+        assert!(alpha(125, 125) < 40 && alpha(175, 175) < 40, "and the empty corners: the picture, not a square");
+        // a brush saved with a picture tip comes back painting the same
+        let json = crate::brush::userlib::to_json(&[crate::brush::userlib::UserBrush { settings: s.clone(), ..Default::default() }]);
+        let back = crate::brush::userlib::from_json(&json).unwrap().remove(0).settings;
+        assert_eq!(back.tip_image, s.tip_image);
+        assert!(crate::brush::tips::tip_mask(&back, 0).mips[0].a.iter().sum::<f32>() > 100.0);
+    }
 }

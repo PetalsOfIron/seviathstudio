@@ -6,11 +6,13 @@ pub mod engine;
 pub mod local;
 pub mod noise;
 pub mod random;
+pub mod tipimage;
+pub mod userlib;
 pub mod raster;
 pub mod textures;
 pub mod tips;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Tip {
     Round,
     Shape,
@@ -29,10 +31,12 @@ pub enum Tip {
     Scale,
     Sponge,
     Feather,
+    /// Your own picture (see `tip_image`).
+    Image,
 }
 
 impl Tip {
-    pub const ALL: [Tip; 17] = [
+    pub const ALL: [Tip; 18] = [
         Tip::Round,
         Tip::Shape,
         Tip::Bristle,
@@ -50,6 +54,7 @@ impl Tip {
         Tip::Scale,
         Tip::Sponge,
         Tip::Feather,
+        Tip::Image,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -70,11 +75,12 @@ impl Tip {
             Tip::Scale => "Scale",
             Tip::Sponge => "Sea sponge",
             Tip::Feather => "Feather",
+            Tip::Image => "Picture",
         }
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ShapeBase {
     Circle,
     Square,
@@ -117,7 +123,7 @@ impl ShapeBase {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Edge {
     Smooth,
     Ragged,
@@ -151,7 +157,7 @@ impl Edge {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Ends {
     Round,
     Taper,
@@ -159,7 +165,7 @@ pub enum Ends {
 }
 
 /// How paint behaves where it meets other paint.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Paint {
     /// The old way: colors lie over each other (and mix as plain RGB when the brush mixes).
     Normal,
@@ -178,7 +184,7 @@ impl Paint {
 }
 
 /// What changes the color along a stroke (from the brush color toward the second color).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Transition {
     Off,
     /// Over the length of the stroke.
@@ -202,7 +208,7 @@ impl Transition {
 }
 
 /// The edge fray engine: how the edge of a stroke breaks up (on top of the edge type).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Fray {
     Off,
     /// Tiny regular teeth, like a cheap saw.
@@ -223,7 +229,7 @@ impl Fray {
 }
 
 /// How often a mixing brush is dipped in fresh paint.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Dip {
     /// Fresh paint slowly comes back as you go (the default).
     Gradual,
@@ -241,13 +247,13 @@ impl Dip {
     ];
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum MixRefer {
     All,
     Layer,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TexKind {
     Paper,
     Watercolor,
@@ -350,7 +356,7 @@ impl TexKind {
 }
 
 /// Where a texture's colors come from when "keep texture colors" is on.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum TexPalette {
     /// The texture's own natural colors (wood browns, snake greens…).
     Natural,
@@ -359,7 +365,7 @@ pub enum TexPalette {
 }
 
 /// Extra tip for dual / triple brushes: it masks, adds to, or cuts the main tip (like CSP's 2-brush tip).
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SubTip {
     pub tip: Tip,
     pub shape_base: ShapeBase,
@@ -370,7 +376,7 @@ pub struct SubTip {
     pub strength: f32, // 0..1
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum SubMode {
     Mask,
     Add,
@@ -393,7 +399,8 @@ impl Default for SubTip {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct BrushSettings {
     pub size: f32,
     pub opacity: f32,
@@ -513,6 +520,8 @@ pub struct BrushSettings {
     pub temp_blend: bool,
     // tip and shape
     pub tip: Tip,
+    /// The picture stamped when the tip is Picture.
+    pub tip_image: Option<tipimage::TipImage>,
     pub roundness: f32,
     pub angle: f32, // degrees
     pub follow_direction: bool,
@@ -622,6 +631,7 @@ impl Default for BrushSettings {
             sss: 0.0,
             temp_blend: false,
             tip: Tip::Round,
+            tip_image: None,
             roundness: 1.0,
             angle: 0.0,
             follow_direction: false,
@@ -659,6 +669,67 @@ impl Default for BrushSettings {
 }
 
 impl BrushSettings {
+    /// A brush from outside (a file, a card) held to values the sliders allow.
+    pub fn sanitized(mut self) -> BrushSettings {
+        let d = BrushSettings::default();
+        let f = |v: f32, lo: f32, hi: f32, def: f32| if v.is_finite() { v.clamp(lo, hi) } else { def };
+        self.size = f(self.size, 0.5, 2000.0, d.size);
+        self.opacity = f(self.opacity, 0.0, 1.0, d.opacity);
+        self.flow = f(self.flow, 0.0, 1.0, d.flow);
+        self.hardness = f(self.hardness, 0.0, 1.0, d.hardness);
+        self.spacing = f(self.spacing, 0.01, 4.0, d.spacing);
+        self.min_size = f(self.min_size, 0.0, 1.0, d.min_size);
+        self.texture = f(self.texture, 0.0, 1.0, d.texture);
+        self.stabilize = f(self.stabilize, 0.0, 1.0, d.stabilize);
+        self.taper = f(self.taper, 0.0, 2.0, d.taper);
+        self.mix = f(self.mix, 0.0, 1.0, d.mix);
+        self.roundness = f(self.roundness, 0.05, 1.0, d.roundness);
+        self.angle = f(self.angle, -720.0, 720.0, d.angle);
+        self.scatter = f(self.scatter, 0.0, 4.0, d.scatter);
+        for v in [&mut self.size_jitter, &mut self.angle_jitter, &mut self.opacity_jitter, &mut self.color_jitter, &mut self.edge_amount, &mut self.edge_detail, &mut self.wet_rim, &mut self.grain, &mut self.streaks, &mut self.deform, &mut self.edge_holes, &mut self.hollow, &mut self.particle_gap, &mut self.water, &mut self.bleed, &mut self.pool, &mut self.granulation, &mut self.pinch, &mut self.dots, &mut self.fray_amount, &mut self.strand_fill, &mut self.clump, &mut self.curl, &mut self.strand_wobble, &mut self.flyaways, &mut self.sheen, &mut self.comb, &mut self.gloss, &mut self.dot_cluster, &mut self.terminator, &mut self.keep_detail, &mut self.sss, &mut self.dot_colors, &mut self.line_strength, &mut self.tex_color] {
+            *v = f(*v, 0.0, 1.0, 0.0);
+        }
+        self.outline_width = f(self.outline_width, 0.05, 0.6, d.outline_width);
+        self.particle_size = f(self.particle_size, 0.02, 1.0, d.particle_size);
+        self.star_inner = f(self.star_inner, 0.1, 0.9, d.star_inner);
+        self.tex_scale = f(self.tex_scale, 0.1, 8.0, d.tex_scale);
+        self.pressure_curve = f(self.pressure_curve, -1.0, 1.0, 0.0);
+        self.tint = f(self.tint, -1.0, 1.0, 0.0);
+        self.drift = f(self.drift, -1.0, 1.0, 0.0);
+        self.line_shade = f(self.line_shade, -1.0, 1.0, d.line_shade);
+        self.tip_start = f(self.tip_start, 0.0, 1.0, d.tip_start);
+        self.tip_end = f(self.tip_end, 0.0, 1.0, d.tip_end);
+        self.dot_min = f(self.dot_min, 0.005, 0.9, d.dot_min);
+        self.dot_max = f(self.dot_max, self.dot_min, 0.95, d.dot_max);
+        self.dot_spread = f(self.dot_spread, 0.0, 3.0, d.dot_spread);
+        self.line_wave = f(self.line_wave, 0.0, 1.0, d.line_wave);
+        self.line_width = f(self.line_width, 0.005, 0.5, d.line_width);
+        self.strand_width = f(self.strand_width, 0.003, 0.2, d.strand_width);
+        self.pinch_every = f(self.pinch_every, 10.0, 2000.0, d.pinch_every);
+        self.trans_len = f(self.trans_len, 20.0, 5000.0, d.trans_len);
+        self.drift_len = f(self.drift_len, 50.0, 5000.0, d.drift_len);
+        self.dip_every = f(self.dip_every, 10.0, 5000.0, d.dip_every);
+        self.line_len = f(self.line_len, 8.0, 1000.0, d.line_len);
+        self.curl_len = f(self.curl_len, 20.0, 1000.0, d.curl_len);
+        self.fray_len = f(self.fray_len, 1.0, 100.0, d.fray_len);
+        self.dash_len = f(self.dash_len, 1.0, 2000.0, d.dash_len);
+        self.gap_len = f(self.gap_len, 0.0, 2000.0, d.gap_len);
+        self.trans_color = self.trans_color.map(|c| f(c, 0.0, 1.0, 0.5));
+        self.particles = self.particles.min(60);
+        self.strands = self.strands.min(40);
+        self.lines = self.lines.min(12);
+        self.dot_count = self.dot_count.clamp(1, 16);
+        self.clump_count = self.clump_count.clamp(1, 8);
+        self.variants = self.variants.clamp(1, 8);
+        self.sides = self.sides.clamp(3, 12);
+        self.seed = self.seed.clamp(1, 99_999);
+        self.extra_tips.truncate(2);
+        if self.tip == Tip::Image && self.tip_image.is_none() {
+            self.tip = Tip::Round;
+        }
+        self
+    }
+
     /// Effects worked into the tip (edges, rim, grain, streaks, warp, in-tip texture, extra tips).
     pub fn has_edge_effects(&self) -> bool {
         self.edge != Edge::Smooth
