@@ -13,6 +13,7 @@ use crate::tabs::{self, Tab, draw::DrawState};
 use crate::theme::{self, *};
 use crate::widgets::{self, icon_button, segmented, tab_button};
 
+mod aihelper;
 mod animtab;
 mod celtab;
 mod streamtab;
@@ -59,6 +60,7 @@ pub struct SeviathApp {
     signs: signs::SignState,
     maker: fontmaker::FontMaker,
     rec: recording::RecUi,
+    ai: aihelper::AiUi,
     work: worklog::WorkClock,
     palette: commands::Palette,
     parts: partstab::PartsState,
@@ -106,6 +108,7 @@ impl SeviathApp {
             signs: Default::default(),
             maker: Default::default(),
             rec: Default::default(),
+            ai: Default::default(),
             work: Default::default(),
             palette: Default::default(),
             parts: Default::default(),
@@ -655,6 +658,7 @@ impl eframe::App for SeviathApp {
         self.signatures_window(&ctx);
         self.font_maker_window(&ctx);
         self.recorder_window(&ctx);
+        self.ai_window(&ctx);
         self.prerig_window(&ctx);
         self.palette_window(&ctx);
         self.recorder_tick(&ctx);

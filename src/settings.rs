@@ -37,6 +37,9 @@ pub struct Settings {
     pub rig_quality: u8,
     /// How many pictures a second the Stream tab sends to the browser source (OBS).
     pub stream_fps: u32,
+    /// The AIs that are set up (see aibridge.rs) and the one in use.
+    pub ai_providers: Vec<crate::aibridge::Provider>,
+    pub ai_active: usize,
     /// Keys you changed: action id → shortcut text ("" = no key). See actions.rs.
     pub shortcuts: std::collections::BTreeMap<String, String>,
     // ---- Canvas & view
@@ -101,6 +104,8 @@ impl Default for Settings {
             left_handed: false,
             rig_quality: 2,
             stream_fps: 30,
+            ai_providers: Vec::new(),
+            ai_active: 0,
             shortcuts: Default::default(),
             wheel: WheelAction::Zoom,
             zoom_speed: 1.0,

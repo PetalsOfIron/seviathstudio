@@ -821,6 +821,10 @@ impl SeviathApp {
                 ui.close();
                 self.open_recorder();
             }
+            if item(ui, "AI helper…", "") {
+                ui.close();
+                self.open_ai_helper();
+            }
             if item(ui, "Font from my drawings…", "") {
                 ui.close();
                 self.open_font_maker();
