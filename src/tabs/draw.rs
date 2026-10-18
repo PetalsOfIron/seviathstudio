@@ -442,6 +442,15 @@ impl DrawState {
         self.ref_view_rect
     }
 
+    /// Add colours to the swatches (the newest first); the oldest go when there are more than the settings allow.
+    pub fn add_swatches(&mut self, colors: &[Color32]) {
+        for c in colors.iter().rev() {
+            self.swatches.retain(|s| s != c);
+            self.swatches.insert(0, *c);
+        }
+        self.swatches.truncate(self.set.swatches_max.max(1));
+    }
+
     #[cfg(test)]
     #[cfg(test)]
     pub fn open_mix_chart(&mut self, colors: &[Color32]) {

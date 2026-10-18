@@ -5,6 +5,7 @@
 
 mod actions;
 mod ai;
+mod aibridge;
 mod anim;
 mod audio;
 mod aisetup;

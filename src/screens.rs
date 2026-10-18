@@ -3914,3 +3914,62 @@ fn animate_tab_pictures_become_drawings() {
     assert_eq!(color_at(&mut h, 4.0, 200, 5), Some([0, 0, 0, 0]), "above the picture it is empty");
     save(&mut h, "animate_7_pictures");
 }
+
+/// The AI helper: an AI on this computer (a stand-in that answers like Ollama) makes a brush and colours from words.
+#[test]
+fn ai_helper_makes_a_brush_and_colours_from_words() {
+    use std::io::{Read, Write};
+    let _gpu = lock_gpu();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten().take(4) {
+            let mut s = stream;
+            let mut buf = vec![0u8; 65536];
+            let mut n = 0;
+            loop {
+                let k = s.read(&mut buf[n..]).unwrap_or(0);
+                if k == 0 {
+                    break;
+                }
+                n += k;
+                let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                if let Some(p) = text.find("\r\n\r\n") {
+                    let want: usize = text[..p].to_lowercase().lines().find_map(|l| l.strip_prefix("content-length:").and_then(|v| v.trim().parse().ok())).unwrap_or(0);
+                    if n >= p + 4 + want {
+                        break;
+                    }
+                }
+            }
+            let body = serde_json::json!({"message": {"role": "assistant", "content": "Here: {\"size\": 33, \"opacity\": 0.5} and #FF0000 #00FF00 #0000FF"}}).to_string();
+            let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+        }
+    });
+    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().test_set_ai(crate::aibridge::Provider { url: format!("http://127.0.0.1:{port}"), ..crate::aibridge::Provider::ollama() });
+    h.state_mut().test_ai().open = true;
+    h.run_steps(3);
+    h.state_mut().test_ai_ask("a thick brush");
+    for _ in 0..100 {
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        if h.state_mut().test_ai().message.as_deref().is_some_and(|m| m.contains("brush is set up")) {
+            break;
+        }
+    }
+    let b = h.state().draw_mut_ref().brush().clone();
+    assert_eq!(b.size, 33.0, "{:?}", h.state_mut().test_ai().message);
+    assert!((b.opacity - 0.5).abs() < 1e-4);
+    h.state_mut().test_ai_colors("sunset");
+    for _ in 0..100 {
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        if h.state_mut().test_ai().message.as_deref().is_some_and(|m| m.contains("colours are in the swatches")) {
+            break;
+        }
+    }
+    assert!(h.state_mut().test_ai().message.as_deref().is_some_and(|m| m.starts_with("3 colours")), "{:?}", h.state_mut().test_ai().message);
+    h.run_steps(3);
+    save(&mut h, "ai_helper");
+}
