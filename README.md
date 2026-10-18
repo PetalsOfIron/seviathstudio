@@ -76,7 +76,7 @@ Performance check: `cargo test --release bench_full_redraw -- --ignored --nocapt
 - `src/filters.rs`, `src/check.rs` + `tabs/draw/filters_ui.rs` — filters (blurs, stylize, line art, levels, curves, HSL…) with live preview, and the check views
 - `src/trace.rs` + `tabs/draw/trace_ui.rs` — Auto-trace: pixel drawing to vector lines (center line, width as pressure) and color shapes
 - `src/fonts.rs`, `src/text.rs` + `tabs/draw/text_ui.rs` — text layers: fonts (app, installed, in-project), glyph outlines to vector shapes, bend on a curve
-- `src/rig/` (`mod.rs` model and keyform evaluation, `mesh.rs` auto mesh, `raster.rs` software renderer) + `app/rigtab.rs` — the Rig tab: meshes, Rotation, Warp, Line and Soft changers, glue, sliders with keyforms and grids, live preview
+- `src/rig/` (`mod.rs` model and keyform evaluation, `mesh.rs` auto mesh, `raster.rs` software renderer, `skin.rs` uncut skin with bones and painted weights) + `app/rigtab.rs` — the Rig tab: meshes, Rotation, Warp, Line and Soft changers, glue, sliders with keyforms and grids, live preview
 - `src/prerig.rs` + `app/prerigui.rs` — pre-rig improver: finds and fixes stray pixels, holes, ghost pixels, fringes
 - `src/parts.rs` + `app/partstab.rs` — Parts tab: tags, suggestions, pairs, checklist, templates
 - `src/layout.rs` + `tabs/draw/panels_ui.rs` + `app/layoutmenu.rs` — dockable, floating and window panels, workspaces

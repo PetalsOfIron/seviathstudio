@@ -44,6 +44,19 @@ impl LayerTex {
         Some(LayerTex { x0, y0, w, h, px })
     }
 
+    /// A texture from a picture that covers the page (not premultiplied).
+    pub fn from_rgba(img: &image::RgbaImage) -> LayerTex {
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        let px = img
+            .pixels()
+            .map(|p| {
+                let a = p[3] as f32 / 255.0;
+                [p[0] as f32 / 255.0 * a, p[1] as f32 / 255.0 * a, p[2] as f32 / 255.0 * a, a]
+            })
+            .collect();
+        LayerTex { x0: 0, y0: 0, w, h, px }
+    }
+
     /// How solid a texel is (0..1).
     pub fn alpha_at(&self, x: usize, y: usize) -> f32 {
         self.px.get(y * self.w + x).map(|p| p[3]).unwrap_or(0.0)

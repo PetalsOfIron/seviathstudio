@@ -2277,3 +2277,192 @@ fn rig_tab_more_changers_screens() {
     h.run_steps(4);
     save(&mut h, "rig_04_more_changers");
 }
+
+#[test]
+fn rig_tab_uncut_skin_screens() {
+    use crate::doc::LayerKind;
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 1900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    // one layer with the whole figure on it: a head, a body and an arm. Nothing is cut apart.
+    {
+        let d = h.state_mut().draw_mut();
+        let (w, h2) = (d.doc.w, d.doc.h);
+        let mut img = image::RgbaImage::new(w.min(3000), h2.min(4000));
+        for y in 0..img.height() as i32 {
+            for x in 0..img.width() as i32 {
+                let in_body = (1200..1800).contains(&x) && (1500..2600).contains(&y);
+                let in_arm = (1800..2400).contains(&x) && (1500..1750).contains(&y);
+                let in_head = (((x - 1500).pow(2) + (y - 1200).pow(2)) as f32).sqrt() <= 220.0;
+                if in_head {
+                    img.put_pixel(x as u32, y as u32, image::Rgba([240, 200, 170, 255]));
+                } else if in_body {
+                    img.put_pixel(x as u32, y as u32, image::Rgba([70, 130, 200, 255]));
+                } else if in_arm {
+                    img.put_pixel(x as u32, y as u32, image::Rgba([60, 110, 180, 255]));
+                }
+            }
+        }
+        let mut l = d.doc.new_layer("Whole drawing", LayerKind::Raster);
+        l.tiles = crate::files::tiles_from_rgba(&img, 0, 0, w, h2);
+        l.rev += 1;
+        d.doc.layers.insert(0, l);
+        d.doc.mark_all_dirty();
+    }
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(4);
+    h.get_by_label("Make one mesh of the drawing").click();
+    h.run_steps(5);
+    {
+        let sk = h.state().draw_mut_ref().doc.rig.skin.clone().expect("a skin");
+        assert!(sk.tris.len() > 40, "{} triangles", sk.tris.len());
+        assert!(!sk.layers.is_empty());
+        assert!(sk.bones.is_empty());
+    }
+    // a spine bone, and an arm bone inside it
+    h.state_mut().test_add_bone([1500.0, 2600.0], [1500.0, 1500.0]);
+    h.run_steps(3);
+    let spine = h.state_mut().test_rig().sel_changer.unwrap();
+    h.state_mut().test_add_bone([1800.0, 1625.0], [2400.0, 1625.0]);
+    h.run_steps(3);
+    let arm = h.state_mut().test_rig().sel_changer.unwrap();
+    {
+        let rig = h.state().draw_mut_ref().doc.rig.clone();
+        assert_eq!(rig.skin.as_ref().unwrap().bones.len(), 2);
+        assert_eq!(rig.changer(arm).unwrap().parent, Some(spine), "the arm bone sits inside the spine bone");
+    }
+    h.get_by_label("Weights from the bones").click();
+    h.run_steps(4);
+    {
+        let sk = h.state().draw_mut_ref().doc.rig.skin.clone().unwrap();
+        let w = sk.weights_at(2100.0, 1625.0);
+        assert!(w[1] > 0.9, "the middle of the arm follows the arm bone: {w:?}");
+        let w = sk.weights_at(1500.0, 2200.0);
+        assert!(w[0] > 0.9, "the body follows the spine: {w:?}");
+    }
+    // a slider for each bone
+    h.get_by_label("Slider for this bone").click();
+    h.run_steps(3);
+    let arm_slider = h.state_mut().test_rig().sel_param.unwrap();
+    h.state_mut().test_rig().sel_changer = Some(spine);
+    h.run_steps(2);
+    h.get_by_label("Slider for this bone").click();
+    h.run_steps(3);
+    let spine_slider = h.state_mut().test_rig().sel_param.unwrap();
+    assert_ne!(arm_slider, spine_slider);
+    assert!(h.state_mut().test_moved(u64::MAX) < 0.01, "sliders in the middle: nothing moves");
+    save(&mut h, "rig_05_skin_rest");
+    h.state_mut().test_rig().values.set(arm_slider, 45.0);
+    h.run_steps(3);
+    let arm_only = h.state_mut().test_moved(u64::MAX);
+    assert!(arm_only > 100.0, "the arm swings: {arm_only}");
+    h.state_mut().test_rig().values.set(spine_slider, 20.0);
+    h.state_mut().test_rig().heat = true;
+    h.run_steps(4);
+    let both = h.state_mut().test_moved(u64::MAX);
+    assert!(both > arm_only, "the spine moves everything that follows it: {both} vs {arm_only}");
+    save(&mut h, "rig_06_skin_posed");
+    // undo walks back through the edits (the last one was the second slider)
+    h.state_mut().test_rig().values = crate::rig::Values::default();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(3);
+    assert!(h.state().draw_mut_ref().doc.rig.params.len() == 1);
+}
+
+#[test]
+fn rig_tab_manual_weights_screens() {
+    use crate::doc::LayerKind;
+    use crate::rig::skin::{Brush, BrushOpts};
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 2300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    // the figure on one layer, plus a separate arm layer that is tagged as an arm
+    {
+        let d = h.state_mut().draw_mut();
+        let (w, h2) = (d.doc.w, d.doc.h);
+        let mut body = image::RgbaImage::new(w.min(3000), h2.min(4000));
+        for y in 1500..2600u32 {
+            for x in 1200..1800u32 {
+                body.put_pixel(x, y, image::Rgba([70, 130, 200, 255]));
+            }
+        }
+        let arm = image::RgbaImage::from_pixel(600, 250, image::Rgba([60, 110, 180, 255]));
+        let mut a = d.doc.new_layer("Body", LayerKind::Raster);
+        a.tiles = crate::files::tiles_from_rgba(&body, 0, 0, w, h2);
+        a.rev += 1;
+        let mut b = d.doc.new_layer("Arm", LayerKind::Raster);
+        b.tiles = crate::files::tiles_from_rgba(&arm, 1800, 1500, w, h2);
+        b.part = Some(crate::parts::Part::ArmL);
+        b.rev += 1;
+        d.doc.layers.insert(0, a);
+        d.doc.layers.insert(0, b);
+        d.doc.mark_all_dirty();
+    }
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(4);
+    h.get_by_label("Make one mesh of the drawing").click();
+    h.run_steps(4);
+    h.state_mut().test_add_bone([1500.0, 2600.0], [1500.0, 1500.0]);
+    h.run_steps(2);
+    let spine = h.state_mut().test_rig().sel_changer.unwrap();
+    h.state_mut().test_add_bone([1800.0, 1625.0], [2400.0, 1625.0]);
+    h.run_steps(2);
+    let arm_bone = h.state_mut().test_rig().sel_changer.unwrap();
+    let weight = |h: &Harness<'_, SeviathApp>, bone: usize, x: f32, y: f32| h.state().draw_mut_ref().doc.rig.skin.as_ref().unwrap().weight_at(bone, x, y);
+    // no automatic weights: everything is loose until you paint
+    assert_eq!(weight(&h, 1, 2100.0, 1625.0), 0.0);
+    // paint the arm bone over the arm, by hand
+    let before = h.state().history().entries.len();
+    h.state_mut().test_paint([2100.0, 1625.0], Brush::Add, BrushOpts { radius: 400.0, strength: 1.0, hardness: 1.0, keep_normalized: true });
+    h.run_steps(3);
+    assert!(weight(&h, 1, 2100.0, 1625.0) > 0.99, "painted");
+    assert_eq!(weight(&h, 1, 1500.0, 2400.0), 0.0, "and only there");
+    assert_eq!(h.state().history().entries.len(), before + 1, "one step for the stroke");
+    // the weights from a tag: the layer tagged as an arm gives the arm bone its shape
+    h.state_mut().test_rig().sel_changer = Some(arm_bone);
+    h.state_mut().test_rig().sel_changer = Some(spine);
+    h.run_steps(2);
+    h.get_by_label("Flood the whole bone").click();
+    h.run_steps(3);
+    assert!(weight(&h, 0, 1000.0, 3500.0) > 0.4, "flooded everywhere (to the strength)");
+    h.get_by_label("Clear this bone").click();
+    h.run_steps(3);
+    assert_eq!(weight(&h, 0, 1000.0, 3500.0), 0.0);
+    h.state_mut().test_rig().sel_changer = Some(arm_bone);
+    h.run_steps(2);
+    h.get_by_label("Clear this bone").click();
+    h.run_steps(3);
+    h.get_by_label("Give the bone the parts with this tag").click();
+    h.run_steps(3);
+    assert!(weight(&h, 1, 2100.0, 1625.0) > 0.95, "the arm layer's paint is the arm bone's weight");
+    assert_eq!(weight(&h, 1, 1500.0, 2200.0), 0.0, "the body is not");
+    // mirror the arm bone's weights onto the spine bone across the page's middle
+    h.state_mut().test_rig().mirror_to = Some(spine);
+    h.state_mut().test_rig().mirror_axis = 1500.0;
+    h.run_steps(2);
+    h.get_by_label("Mirror").click();
+    h.run_steps(3);
+    assert!(weight(&h, 0, 900.0, 1625.0) > 0.9, "the arm's weights are on the other side now: {}", weight(&h, 0, 900.0, 1625.0));
+    // painting shows the picture at rest, even with a slider moved
+    h.get_by_label("Slider for this bone").click();
+    h.run_steps(3);
+    let slider = h.state_mut().test_rig().sel_param.unwrap();
+    h.state_mut().test_rig().values.set(slider, 45.0);
+    h.run_steps(3);
+    assert!(h.state_mut().test_moved(u64::MAX) > 50.0, "posed");
+    h.state_mut().test_weight_mode(true);
+    h.run_steps(3);
+    assert!(h.state_mut().test_moved(u64::MAX) < 0.01, "at rest while painting");
+    save(&mut h, "rig_07_weight_painting");
+    h.state_mut().test_weight_mode(false);
+    h.run_steps(2);
+    assert!(h.state_mut().test_moved(u64::MAX) > 50.0);
+    // undo takes back the last weight step
+    let arm_after = weight(&h, 0, 900.0, 1625.0);
+    h.state_mut().test_rig().values = crate::rig::Values::default();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(3);
+    let _ = arm_after;
+}

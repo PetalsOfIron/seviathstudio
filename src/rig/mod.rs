@@ -6,6 +6,7 @@
 
 pub mod mesh;
 pub mod raster;
+pub mod skin;
 
 use std::collections::{HashMap, HashSet};
 
@@ -139,6 +140,8 @@ pub struct Rig {
     pub params: Vec<Param>,
     pub bindings: Vec<Binding>,
     pub glues: Vec<Glue>,
+    /// The uncut mode: one mesh over a group of layers, moved by bones with painted weights.
+    pub skin: Option<skin::Skin>,
     next_id: Id,
 }
 
@@ -257,7 +260,7 @@ impl Values {
 
 impl Rig {
     pub fn is_empty(&self) -> bool {
-        self.meshes.is_empty() && self.changers.is_empty() && self.params.is_empty()
+        self.meshes.is_empty() && self.changers.is_empty() && self.params.is_empty() && self.skin.is_none()
     }
 
     pub fn fresh_id(&mut self) -> Id {
@@ -645,6 +648,22 @@ impl Rig {
                 (Form::Soft { offset, grow }, Kind::Soft { .. }) => fin(offset[0]) && fin(offset[1]) && fin(*grow),
                 _ => false,
             })
+        });
+        // the skin keeps only bones that are still Rotation changers
+        let rot_ids: HashSet<Id> = self.changers.iter().filter(|c| matches!(c.kind, Kind::Rotation { .. })).map(|c| c.id).collect();
+        self.skin = self.skin.take().and_then(|sk| sk.sanitized()).map(|mut sk| {
+            let keep: Vec<bool> = sk.bones.iter().map(|b| rot_ids.contains(&b.changer)).collect();
+            let mut i = 0;
+            sk.bones.retain(|_| {
+                i += 1;
+                keep[i - 1]
+            });
+            let mut i = 0;
+            sk.planes.retain(|_| {
+                i += 1;
+                keep.get(i - 1).copied().unwrap_or(false)
+            });
+            sk
         });
         let counts: HashMap<Id, usize> = self.meshes.iter().map(|m| (m.id, m.verts.len())).collect();
         self.glues.truncate(2000);
