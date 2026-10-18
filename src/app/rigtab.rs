@@ -113,6 +113,8 @@ pub struct RigState {
     pub game: super::gameui::GameUi,
     /// The turn at every point of the curve(s) being edited (curves after curve), next to `warp_edit`.
     turn_edit: Option<Vec<f32>>,
+    /// The eyes and the mouth of an uncut figure are shown on the picture to be dragged.
+    pub(super) face_edit: bool,
     /// How many degrees the next *Turn* button turns by.
     turn_by: f32,
     /// The numbers of a numeric changer being set, and whether they are shown on the picture now.
@@ -2456,6 +2458,37 @@ impl SeviathApp {
                             drag_handle = Some((0, r.drag_delta() / sc));
                         }
                     }
+                }
+            }
+        }
+        // the face points of an uncut figure (for its blend shapes): drag the eyes and the mouth into place
+        if self.rigs.face_edit {
+            if let Some(mut f) = crate::vrm::model::face_marks(&rig) {
+                let mut changed = false;
+                let teal = Color32::from_rgb(60, 220, 200);
+                for (k, (at, label)) in [(f.eye_l, "eye"), (f.eye_r, "eye"), (f.mouth, "mouth")].into_iter().enumerate() {
+                    let s = to_screen(at);
+                    let (w, h) = if k == 2 { (f.mouth_w, f.mouth_w * 0.3) } else { (f.eye_w, f.eye_w * 0.55) };
+                    p.rect_stroke(Rect::from_center_size(s, vec2(w * sc, h * sc)), 4.0, Stroke::new(1.5, teal), egui::StrokeKind::Outside);
+                    p.circle_filled(s, 4.0, teal);
+                    p.text(s + vec2(0.0, -h * sc * 0.5 - 8.0), egui::Align2::CENTER_BOTTOM, label, egui::FontId::proportional(11.0), teal);
+                    let r = ui.interact(Rect::from_center_size(s, vec2(18.0, 18.0)), egui::Id::new(("face_point", k)), Sense::drag());
+                    if r.dragged() {
+                        let d = r.drag_delta() / sc;
+                        let v = [at[0] + d.x, at[1] + d.y];
+                        match k {
+                            0 => f.eye_l = v,
+                            1 => f.eye_r = v,
+                            _ => f.mouth = v,
+                        }
+                        changed = true;
+                    }
+                }
+                if changed {
+                    if let Some(sk) = Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut() {
+                        sk.face = Some(f);
+                    }
+                    self.rigs.game.model = None;
                 }
             }
         }

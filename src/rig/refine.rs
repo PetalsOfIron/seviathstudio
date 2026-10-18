@@ -115,8 +115,13 @@ pub fn split_tris(tris: &[[u32; 3]], cut: &HashMap<(u32, u32), u32>) -> Vec<[u32
 
 /// More triangles everywhere: every edge longer than `max_edge` is cut in two, again and again.
 pub fn subdivide(verts: &[[f32; 2]], tris: &[[u32; 3]], max_edge: f32, max_verts: usize) -> (Vec<[f32; 2]>, Vec<[u32; 3]>) {
+    subdivide_by(verts, tris, &|_| max_edge, max_verts)
+}
+
+/// The same, but the longest edge allowed depends on where the edge is (its middle): finer where it matters, such as a face.
+pub fn subdivide_by(verts: &[[f32; 2]], tris: &[[u32; 3]], max_edge: &dyn Fn([f32; 2]) -> f32, max_verts: usize) -> (Vec<[f32; 2]>, Vec<[u32; 3]>) {
     let (mut v, mut t) = (verts.to_vec(), tris.to_vec());
-    for _ in 0..8 {
+    for _ in 0..10 {
         let mut cut: HashMap<(u32, u32), u32> = HashMap::new();
         let mut order: Vec<(u32, u32)> = Vec::new();
         for tri in &t {
@@ -127,7 +132,7 @@ pub fn subdivide(verts: &[[f32; 2]], tris: &[[u32; 3]], max_edge: f32, max_verts
                     continue;
                 }
                 let (pa, pb) = (v[a as usize], v[b as usize]);
-                if (pa[0] - pb[0]).hypot(pa[1] - pb[1]) > max_edge && v.len() + order.len() < max_verts {
+                if (pa[0] - pb[0]).hypot(pa[1] - pb[1]) > max_edge([(pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0]) && v.len() + order.len() < max_verts {
                     cut.insert(key, (v.len() + order.len()) as u32);
                     order.push(key);
                 }

@@ -28,11 +28,13 @@ pub struct Options {
     pub max_texture: u32,
     /// Make finger bones (a thumb and four fingers of three bones on each hand).
     pub fingers: bool,
+    /// Make the face move: expressions (blink, smile, brows, where the eyes look) and a mouth that opens for the vowels.
+    pub face: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { name: "Character".into(), author: "Unknown".into(), height_m: 1.6, puff: 1.0, layer_gap: 0.003, max_texture: 2048, fingers: true }
+        Self { name: "Character".into(), author: "Unknown".into(), height_m: 1.6, puff: 1.0, layer_gap: 0.003, max_texture: 2048, fingers: true, face: true }
     }
 }
 
@@ -710,7 +712,18 @@ pub fn build_uncut(doc: &Document, opt: &Options) -> Option<Model3d> {
         crop
     };
     // a finer mesh, so it bends smoothly in a game
-    let (mesh_v, mesh_t) = crate::rig::refine::subdivide(&sk.verts, &sk.tris, (0.012 * height_px).max(3.0), 40_000);
+    let marks = if opt.face { face_marks(rig) } else { None };
+    let base_edge = (0.012 * height_px).max(3.0);
+    let (mesh_v, mesh_t) = match &marks {
+        // much finer around the eyes, the brows and the mouth, so they can close, lift and open smoothly
+        Some(m) => {
+            let (c, dist, fine) = (m.eye_center(), m.eye_distance(), (m.eye_w / 4.5).max(1.5));
+            let m = *m;
+            let inside = move |p: [f32; 2]| (p[0] - c[0]).abs() < dist * 0.9 + m.eye_w && p[1] > c[1] - 1.5 * m.eye_w && p[1] < m.mouth[1] + 0.9 * m.mouth_w;
+            crate::rig::refine::subdivide_by(&sk.verts, &sk.tris, &move |p| if inside(p) { fine.min(base_edge) } else { base_edge }, 80_000)
+        }
+        None => crate::rig::refine::subdivide(&sk.verts, &sk.tris, base_edge, 40_000),
+    };
     // depth: round inside the outline, the edge flat
     let d = edge_distance(&mesh_v, &mesh_t);
     let reach = (0.045 * height_px).max(4.0);
@@ -840,8 +853,88 @@ pub fn build_uncut(doc: &Document, opt: &Options) -> Option<Model3d> {
     }
     let part = Part3d { name: "Body".to_string(), layer: sk.layers.first().copied().unwrap_or(0), verts, normals, uvs, tris, joints, weights, image, morphs: Vec::new() };
     let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts: vec![part], bones, expressions: Vec::new(), springs: Vec::new(), colliders: Vec::new(), scale };
+    if let Some(m) = &marks {
+        add_face(&mut model, m, xc, vb[3]);
+    }
     normalize_to_t_pose(&mut model);
     Some(model)
+}
+
+/// Where the face of an uncut figure is: what the user set, else a guess from the head bone (its top and its base).
+pub fn face_marks(rig: &Rig) -> Option<super::face::FaceMarks> {
+    let sk = rig.skin.as_ref()?;
+    if let Some(f) = sk.face.and_then(|f| f.sanitized()) {
+        return Some(f);
+    }
+    sk.bones.iter().find_map(|b| {
+        let c = rig.changer(b.changer)?;
+        match c.kind {
+            crate::rig::Kind::Rotation { pivot } if c.name == "head" => Some(super::face::guess([pivot[0], b.tail[1]], pivot)),
+            _ => None,
+        }
+    })
+}
+
+/// Give a figure's face its blend shapes: every expression of `face::recipes` as a shape of the body, and a dark shape inside
+/// the mouth (a part of its own, flat until a vowel opens it). The page maps to the model by `x = (px - xc) * scale`,
+/// `y = (bottom - py) * scale`.
+fn add_face(model: &mut Model3d, m: &super::face::FaceMarks, xc: f32, bottom: f32) {
+    use super::face;
+    let s = model.scale;
+    let to3 = |p: [f32; 2]| -> [f32; 3] { [(p[0] - xc) * s, (bottom - p[1]) * s, 0.0] };
+    let body: Vec<[f32; 2]> = model.parts[0].verts.iter().map(|v| [v[0] / s + xc, bottom - v[1] / s]).collect();
+    for (name, rc) in face::recipes() {
+        let deltas: Vec<[f32; 3]> = body
+            .iter()
+            .map(|p| {
+                let d = face::shift(m, &rc, *p);
+                [d[0] * s, -d[1] * s, 0.0]
+            })
+            .collect();
+        if deltas.iter().all(|d| d[0] == 0.0 && d[1] == 0.0) {
+            continue;
+        }
+        let mi = model.parts[0].morphs.len();
+        model.parts[0].morphs.push(Morph { name: name.to_string(), deltas });
+        model.expressions.push(Expression { name: name.to_string(), binds: vec![(0, mi, 1.0)] });
+    }
+    // the inside of the mouth: in front of the lips, on the head bone
+    let Some(head) = model.bone("head") else { return };
+    let z = model.parts[0].verts.iter().zip(&body).filter(|(_, p)| (p[0] - m.mouth[0]).abs() < m.mouth_w && (p[1] - m.mouth[1]).abs() < m.mouth_w * 0.6).map(|(v, _)| v[2]).fold(0.0f32, f32::max) + 0.004;
+    let rest = face::mouth_shape(m, None);
+    let verts: Vec<[f32; 3]> = rest.iter().map(|p| { let v = to3(*p); [v[0], v[1], z] }).collect();
+    let n = verts.len();
+    let mut tris = face::mouth_tris();
+    let ring = face::mouth_shape(m, Some((1.0, 1.0)));
+    for t in &mut tris {
+        // the front faces the viewer: counter clockwise seen from +Z
+        let (a, b, c) = (to3(ring[t[0] as usize]), to3(ring[t[1] as usize]), to3(ring[t[2] as usize]));
+        if (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]) < 0.0 {
+            t.swap(1, 2);
+        }
+    }
+    let mut mouth = Part3d {
+        name: "Mouth".to_string(),
+        layer: model.parts[0].layer,
+        verts,
+        normals: vec![[0.0, 0.0, 1.0]; n],
+        uvs: vec![[0.5, 0.5]; n],
+        tris,
+        joints: vec![[head as u16, 0, 0, 0]; n],
+        weights: vec![[1.0, 0.0, 0.0, 0.0]; n],
+        image: RgbaImage::from_pixel(4, 4, image::Rgba([70, 22, 30, 255])),
+        morphs: Vec::new(),
+    };
+    let pi = model.parts.len();
+    for name in ["aa", "ih", "ou", "ee", "oh", "jawOpen"] {
+        let Some((rx, ry)) = face::vowel(name) else { continue };
+        let open = face::mouth_shape(m, Some((rx * m.mouth_w, ry * m.mouth_w)));
+        let deltas: Vec<[f32; 3]> = open.iter().zip(&rest).map(|(o, r)| [(o[0] - r[0]) * s, -(o[1] - r[1]) * s, 0.0]).collect();
+        let mi = mouth.morphs.len();
+        mouth.morphs.push(Morph { name: name.to_string(), deltas });
+        model.expressions.push(Expression { name: name.to_string(), binds: vec![(pi, mi, 1.0)] });
+    }
+    model.parts.push(mouth);
 }
 
 /// Which piece of the body a bone belongs to: 0 the body, 1 the left arm, 2 the right arm, 3 the left leg, 4 the right leg.
