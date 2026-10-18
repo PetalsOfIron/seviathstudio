@@ -4,6 +4,7 @@
 // `pose` turns slider values into changer shapes, `deformed` moves a mesh by its changers. The renderer
 // (raster.rs) draws the layers through the moved meshes.
 
+pub mod autorig;
 pub mod mesh;
 pub mod raster;
 pub mod skin;
@@ -142,6 +143,8 @@ pub struct Rig {
     pub glues: Vec<Glue>,
     /// The uncut mode: one mesh over a group of layers, moved by bones with painted weights.
     pub skin: Option<skin::Skin>,
+    /// What the automatic rigging made (and what you locked).
+    pub auto: Option<autorig::AutoRig>,
     next_id: Id,
 }
 
@@ -260,7 +263,7 @@ impl Values {
 
 impl Rig {
     pub fn is_empty(&self) -> bool {
-        self.meshes.is_empty() && self.changers.is_empty() && self.params.is_empty() && self.skin.is_none()
+        self.meshes.is_empty() && self.changers.is_empty() && self.params.is_empty() && self.skin.is_none() && self.auto.is_none()
     }
 
     pub fn fresh_id(&mut self) -> Id {
@@ -674,6 +677,13 @@ impl Rig {
             g.pairs.truncate(100_000);
             g.a != g.b && !g.pairs.is_empty()
         });
+        if let Some(a) = self.auto.as_mut() {
+            let cids: HashSet<Id> = self.changers.iter().map(|c| c.id).collect();
+            let pids: HashSet<Id> = self.params.iter().map(|p| p.id).collect();
+            a.changers.retain(|c| cids.contains(c));
+            a.params.retain(|p| pids.contains(p));
+            a.locked.retain(|c| cids.contains(c));
+        }
         let top = self.meshes.iter().map(|m| m.id).chain(self.changers.iter().map(|c| c.id)).chain(self.params.iter().map(|p| p.id)).max().unwrap_or(0);
         self.next_id = self.next_id.max(top);
         self

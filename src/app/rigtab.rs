@@ -94,6 +94,9 @@ pub struct RigState {
     bone_from: Option<[f32; 2]>,
     bone_chain: bool,
     pub wtool: WTool,
+    pub face_opts: rig::autorig::FaceOptions,
+    pub pro: bool,
+    play: bool,
     wopts: rig::skin::BrushOpts,
     feather: f32,
     lasso_pts: Vec<[f32; 2]>,
@@ -404,6 +407,7 @@ impl SeviathApp {
             self.rigs.skin_detail = 0.6;
             self.rigs.bone_chain = true;
             self.rigs.wopts = rig::skin::BrushOpts::default();
+            self.rigs.face_opts = rig::autorig::FaceOptions::default();
             self.rigs.feather = 60.0;
             self.rigs.mirror_axis = self.draw.doc.w as f32 / 2.0;
             self.rigs.tag_pick = Some(parts::Part::ArmL);
@@ -424,6 +428,17 @@ impl SeviathApp {
             if self.rigs.sel_param2.is_some_and(|p| rig.param(p).is_none()) {
                 self.rigs.sel_param2 = None;
             }
+        }
+        if self.rigs.play {
+            // every slider swings between its ends, each at its own pace
+            let t = ctx.input(|i| i.time) as f32;
+            let params: Vec<(Id, f32, f32, f32)> = self.draw.doc.rig.params.iter().map(|p| (p.id, p.min, p.max, p.default)).collect();
+            for (i, (id, lo, hi, def)) in params.iter().enumerate() {
+                let k = (t * (0.7 + 0.13 * i as f32) + i as f32).sin();
+                let v = if k >= 0.0 { def + (hi - def) * k } else { def + (def - lo) * k };
+                self.rigs.values.set(*id, v);
+            }
+            ctx.request_repaint();
         }
         self.rig_render(&ctx);
         let mut picked: Option<(LayerId, bool, bool)> = None;
@@ -464,6 +479,119 @@ impl SeviathApp {
     }
 
     fn rig_side(&mut self, ui: &mut Ui, now: f64) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Mode").size(12.0).color(TEXT_DIM));
+            if widgets::chip(ui, "Beginner", !self.rigs.pro).on_hover_text("Just the automatic rig and the sliders").clicked() {
+                self.rigs.pro = false;
+            }
+            if widgets::chip(ui, "Pro", self.rigs.pro).on_hover_text("Meshes, changers, glue, the uncut skin and keyforms").clicked() {
+                self.rigs.pro = true;
+            }
+        });
+        self.rig_auto_section(ui, now);
+        if self.rigs.pro {
+            self.rig_pro_sections(ui, now);
+        }
+        self.rig_sliders_section(ui, now);
+    }
+
+    /// Face rigging from the tags, in one click.
+    fn rig_auto_section(&mut self, ui: &mut Ui, now: f64) {
+        section_title(ui, "Auto-rig");
+        ui.label(RichText::new("Head turn, eyes, brows and a mouth that makes A I U E O, built from the Parts tags.").size(11.5).color(TEXT_DIM));
+        ui.horizontal_wrapped(|ui| {
+            if ui.button(RichText::new("This is a face").strong()).on_hover_text("Tags the picked parts (or every layer) by their names, then rigs the face").clicked() {
+                self.this_is_a_face(now);
+            }
+            if ui.button("Rig the face from the tags").on_hover_text("Replaces what the auto-rig made before, except what you locked").clicked() {
+                self.rig_the_face(now);
+            }
+            if ui.button(if self.rigs.play { "Stop the test motion" } else { "Test motion" }).on_hover_text("Every slider moves by itself, so you can see what the rig does").clicked() {
+                self.rigs.play = !self.rigs.play;
+                if !self.rigs.play {
+                    self.rigs.values = Values::default();
+                }
+            }
+        });
+        let o = &mut self.rigs.face_opts;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Head turn strength").size(12.0).color(TEXT_DIM));
+            ui.add(egui::Slider::new(&mut o.turn, 0.2..=2.5).show_value(false));
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut o.together_eyes, "Eyes together").on_hover_text("Off: one slider for each eye (for a face that is not symmetrical)");
+            ui.checkbox(&mut o.together_brows, "Brows together");
+            ui.checkbox(&mut o.vowels, "Mouth A I U E O");
+        });
+        if let Some(m) = &self.rigs.message {
+            ui.label(RichText::new(m).size(11.5).color(TEXT_DIM));
+        }
+        // lock: the automation leaves a changer you made by hand alone
+        if let (Some(cid), Some(a)) = (self.rigs.sel_changer, self.draw.doc.rig.auto.as_ref()) {
+            if a.changers.contains(&cid) {
+                let mut locked = a.locked.contains(&cid);
+                if ui.checkbox(&mut locked, "Keep my edits of this changer (lock)").on_hover_text("The next auto-rig leaves it as it is").changed() {
+                    self.rig_edit("Lock a changer", now, |r| {
+                        if let Some(a) = r.auto.as_mut() {
+                            a.locked.retain(|c| *c != cid);
+                            if locked {
+                                a.locked.push(cid);
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    fn rig_the_face(&mut self, now: f64) {
+        let (layers, w, h, o) = (self.draw.doc.layers.clone(), self.draw.doc.w, self.draw.doc.h, self.rigs.face_opts);
+        let mut result: Option<Result<rig::autorig::Report, String>> = None;
+        self.rig_edit("Rig the face", now, |r| {
+            // a failed run must change nothing
+            let mut tmp = r.clone();
+            let res = rig::autorig::rig_face(&mut tmp, &layers, w, h, &o);
+            if res.is_ok() {
+                *r = tmp;
+            }
+            result = Some(res);
+        });
+        self.rigs.values = Values::default();
+        self.rigs.message = Some(match result {
+            Some(Ok(rep)) => {
+                self.rigs.sel_param = self.draw.doc.rig.params.first().map(|p| p.id);
+                format!("Face rigged: {} meshes, {} changers, {} sliders. {}", rep.meshes, rep.changers, rep.params, rep.notes.join(" "))
+            }
+            Some(Err(e)) => e,
+            None => String::new(),
+        });
+    }
+
+    /// Tag the picked parts (or every layer) by their names, then rig the face.
+    fn this_is_a_face(&mut self, now: f64) {
+        let ids: Vec<LayerId> = if self.rigs.selected.is_empty() { self.draw.doc.layers.iter().map(|l| l.id).collect() } else { self.rigs.selected.clone() };
+        let layers: Vec<crate::doc::Layer> = self.draw.doc.layers.iter().filter(|l| ids.contains(&l.id)).cloned().collect();
+        let found = parts::suggest_with(&layers, self.draw.doc.w, self.draw.doc.h, false, &self.parts.rules);
+        let take: Vec<parts::Suggestion> = found.into_iter().filter(|s| s.confidence >= 0.3).collect();
+        if !take.is_empty() {
+            let n = take.len();
+            self.parts_edit(&format!("Tag {n} layers (this is a face)"), now, |d| {
+                for s in &take {
+                    if let Some(l) = d.layers.iter_mut().find(|l| l.id == s.layer) {
+                        l.part = Some(s.part);
+                    }
+                }
+            });
+        }
+        self.rig_the_face(now);
+    }
+
+    #[cfg(test)]
+    pub fn test_rig_the_face(&mut self) {
+        self.rig_the_face(0.0);
+    }
+
+    fn rig_pro_sections(&mut self, ui: &mut Ui, now: f64) {
         // ---- meshes ----
         section_title(ui, "Meshes");
         ui.label(RichText::new("A mesh cuts a layer into triangles, so it can bend.").size(11.5).color(TEXT_DIM));
@@ -784,6 +912,9 @@ impl SeviathApp {
             });
         }
 
+    }
+
+    fn rig_sliders_section(&mut self, ui: &mut Ui, now: f64) {
         // ---- sliders ----
         section_title(ui, "Sliders");
         let params: Vec<(Id, String, f32, f32, f32)> = self.draw.doc.rig.params.iter().map(|p| (p.id, p.name.clone(), p.min, p.max, p.default)).collect();
@@ -828,7 +959,9 @@ impl SeviathApp {
         });
 
         // ---- keyforms of the picked changer and slider ----
-        if let (Some(cid), Some(pid)) = (self.rigs.sel_changer, self.rigs.sel_param) {
+        if !self.rigs.pro {
+            ui.label(RichText::new("Pro mode shows the meshes, changers and keyforms behind these sliders.").size(11.5).color(TEXT_DIM));
+        } else if let (Some(cid), Some(pid)) = (self.rigs.sel_changer, self.rigs.sel_param) {
             self.rig_keyforms(ui, now, cid, pid);
         } else {
             ui.label(RichText::new("Pick a changer and a slider to say how the slider moves it.").size(11.5).color(TEXT_DIM));
