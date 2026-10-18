@@ -622,7 +622,11 @@ impl eframe::App for SeviathApp {
 
         match (self.workspace, self.tab) {
             (Workspace::Design, _) => self.design_workspace(ui),
-            (_, Tab::Draw) => self.draw.ui(ui),
+            (_, Tab::Draw) => {
+                self.cel_onion_for_draw(ui.ctx());
+                self.draw.ui(ui);
+                self.cel_frame_bar(ui.ctx());
+            }
             (_, Tab::Parts) => self.parts_ui(ui),
             (_, Tab::Rig) => self.rig_ui(ui),
             (_, Tab::Physics) => self.physics_ui(ui),

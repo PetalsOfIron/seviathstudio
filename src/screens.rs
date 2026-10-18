@@ -3719,6 +3719,13 @@ fn animate_tab_cels_show_by_frame_and_save() {
     h.state_mut().test_anim().frame = 4.0;
     h.run_steps(3);
     assert!(!vis(&mut h, cel1) && vis(&mut h, cel2), "the second shows at frame 4");
+    // in the Draw tab the frame before shows faintly (the red drawing), and the held blue drawings are not put again
+    h.state_mut().test_run_action_now("tab.1");
+    h.run_steps(4);
+    assert_eq!(h.state().draw_mut_ref().onion.len(), 1, "one ghost: the red drawing of frame 3");
+    save(&mut h, "animate_4_onion_in_draw");
+    h.state_mut().test_run_action_now("tab.5");
+    h.run_steps(3);
     // the pictures put together: red at frame 1, blue at frame 4, see-through around
     let ctx = h.ctx.clone();
     let red = h.state_mut().test_cel_preview_picture(&ctx, 1).unwrap();
