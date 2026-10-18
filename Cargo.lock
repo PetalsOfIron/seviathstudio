@@ -3293,6 +3293,7 @@ dependencies = [
  "dirs",
  "eframe",
  "egui_kittest",
+ "flate2",
  "image",
  "minimp4",
  "openh264",

@@ -2949,3 +2949,37 @@ fn physics_tab_screens() {
     h.run_steps(3);
     assert_eq!(h.state().draw_mut_ref().doc.rig.physics.len(), 2);
 }
+
+#[test]
+fn live2d_import_and_layer_eye_screens() {
+    use crate::import::caff::tests::make;
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let xml = crate::import::tests::model_xml();
+    let png = crate::import::tests::texture_png();
+    let data = make(0x7273423d, &[("tex.png", &png, false), ("main.xml", xml.as_bytes(), true)]);
+    let imp = crate::import::cmo3::import_bytes(data).unwrap();
+    let mut h = Harness::builder().with_size([1440.0, 1300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    let layer = imp.doc.layers[0].id;
+    h.state_mut().draw_mut().replace_document(imp.doc);
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(6);
+    assert_eq!(h.state().draw_mut_ref().doc.rig.meshes.len(), 1);
+    // the picture is drawn through the imported rig: turning the head moves the eye
+    let z = h.state().draw_mut_ref().doc.rig.params.iter().find(|p| p.name == "Angle Z").unwrap().id;
+    h.state_mut().test_rig().values.set(z, 30.0);
+    h.run_steps(3);
+    assert!(h.state_mut().test_moved(layer) > 5.0, "the imported eye turns with the head");
+    save(&mut h, "import_1_live2d");
+    // hide the layer with the eye: it is no longer drawn, and shows again
+    h.state_mut().toggle_layer_visible_for_test(layer);
+    h.run_steps(3);
+    assert!(!h.state().draw_mut_ref().doc.layers.iter().find(|l| l.id == layer).unwrap().visible);
+    assert_eq!(h.state_mut().test_moved(layer), 0.0, "a hidden layer is not in the picture");
+    save(&mut h, "import_2_hidden");
+    h.get_by_label("Show all").click();
+    h.run_steps(3);
+    assert!(h.state().draw_mut_ref().doc.layers.iter().find(|l| l.id == layer).unwrap().visible);
+    assert!(h.state_mut().test_moved(layer) > 5.0);
+}

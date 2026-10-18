@@ -141,6 +141,15 @@ pub struct RigState {
     inited: bool,
 }
 
+/// The eye at the left of a row in the parts list: true when it was clicked.
+pub(super) fn eye_toggle(ui: &mut Ui, row: Rect, id: LayerId, visible: bool) -> bool {
+    let eye = Rect::from_center_size(pos2(row.left() + 14.0, row.center().y), Vec2::splat(22.0));
+    let r = ui.interact(eye, ui.id().with(("rig_eye", id)), Sense::click());
+    let col = if r.hovered() { VENOM } else if visible { TEXT } else { TEXT_DIM };
+    crate::icons::paint(ui.painter(), eye.shrink(3.0), if visible { crate::icons::Icon::Eye } else { crate::icons::Icon::EyeOff }, col);
+    r.on_hover_text("Show or hide this layer").clicked()
+}
+
 fn hash_of(items: &[u64]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     items.hash(&mut h);
@@ -507,7 +516,9 @@ impl SeviathApp {
 
         egui::Panel::left("rig_layers").default_size(230.0).size_range(190.0..=380.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             section_title(ui, "Parts");
-            ui.label(RichText::new("Pick the parts to mesh or move.").size(11.5).color(TEXT_DIM));
+            ui.label(RichText::new("Pick the parts to mesh or move. The eye hides a layer.").size(11.5).color(TEXT_DIM));
+            self.rig_visibility_buttons(ui);
+            let mut toggle: Option<LayerId> = None;
             egui::ScrollArea::vertical().id_salt("rig_parts").show(ui, |ui| {
                 for l in self.draw.doc.layers.iter().filter(|l| parts::is_part_layer(l)) {
                     let on = self.rigs.selected.contains(&l.id);
@@ -516,17 +527,22 @@ impl SeviathApp {
                         ui.painter().rect_filled(rect, 4.0, HOVER);
                     }
                     let dot = l.part.map(|p| p.color()).unwrap_or(Color32::from_gray(70));
-                    ui.painter().circle_filled(rect.left_center() + vec2(10.0, 0.0), 5.0, dot);
-                    ui.painter().text(rect.left_center() + vec2(22.0, 0.0), egui::Align2::LEFT_CENTER, &l.name, egui::FontId::proportional(13.0), if l.visible { TEXT } else { TEXT_DIM });
+                    ui.painter().circle_filled(rect.left_center() + vec2(34.0, 0.0), 5.0, dot);
+                    ui.painter().text(rect.left_center() + vec2(46.0, 0.0), egui::Align2::LEFT_CENTER, &l.name, egui::FontId::proportional(13.0), if l.visible { TEXT } else { TEXT_DIM });
                     if self.draw.doc.rig.mesh_of(l.id).is_some() {
                         ui.painter().text(rect.right_center() - vec2(6.0, 0.0), egui::Align2::RIGHT_CENTER, "mesh", egui::FontId::proportional(11.0), VENOM);
                     }
-                    if resp.clicked() {
+                    if super::rigtab::eye_toggle(ui, rect, l.id, l.visible) {
+                        toggle = Some(l.id);
+                    } else if resp.clicked() {
                         let m = ctx.input(|i| i.modifiers);
                         picked = Some((l.id, m.command || m.ctrl, m.shift));
                     }
                 }
             });
+            if let Some(id) = toggle {
+                self.toggle_layer_visible(id);
+            }
         });
 
         egui::Panel::right("rig_tools").default_size(330.0).size_range(280.0..=500.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
@@ -538,6 +554,38 @@ impl SeviathApp {
         if let Some((id, c, s)) = picked.filter(|p| p.0 != u64::MAX) {
             self.rig_select(id, c, s);
         }
+    }
+
+    /// Show or hide one layer.
+    pub(super) fn toggle_layer_visible(&mut self, id: LayerId) {
+        if let Some(l) = self.draw.doc.layers.iter_mut().find(|l| l.id == id) {
+            l.visible = !l.visible;
+        }
+        self.draw.doc.mark_all_dirty();
+    }
+
+    #[cfg(test)]
+    pub fn toggle_layer_visible_for_test(&mut self, id: LayerId) {
+        self.toggle_layer_visible(id);
+    }
+
+    /// Show everything, or only the picked parts.
+    pub(super) fn rig_visibility_buttons(&mut self, ui: &mut Ui) {
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Show all").on_hover_text("Every layer is shown again").clicked() {
+                for l in self.draw.doc.layers.iter_mut().filter(|l| parts::is_part_layer(l)) {
+                    l.visible = true;
+                }
+                self.draw.doc.mark_all_dirty();
+            }
+            if ui.add_enabled(!self.rigs.selected.is_empty(), egui::Button::new("Only the picked")).on_hover_text("Hides every part that is not picked").clicked() {
+                let keep = self.rigs.selected.clone();
+                for l in self.draw.doc.layers.iter_mut().filter(|l| parts::is_part_layer(l)) {
+                    l.visible = keep.contains(&l.id);
+                }
+                self.draw.doc.mark_all_dirty();
+            }
+        });
     }
 
     fn rig_side(&mut self, ui: &mut Ui, now: f64) {
