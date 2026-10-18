@@ -120,6 +120,9 @@ pub struct RigState {
     joint_before: Option<crate::history::DocState>,
     /// Clicking the face points one after the other: 0 off, 1 first eye, 2 second eye, 3 mouth (with the first eye kept here).
     pub(super) face_click: u8,
+    /// Picking a part of the texture again: which part, and where the circle was started on the page.
+    pub(super) pick_part: Option<crate::vrm::texedit::Part>,
+    pub(super) pick_from: Option<[f32; 2]>,
     pub(super) face_first: [f32; 2],
     /// How many degrees the next *Turn* button turns by.
     turn_by: f32,
@@ -2484,6 +2487,55 @@ impl SeviathApp {
                             drag_handle = Some((0, r.drag_delta() / sc));
                         }
                     }
+                }
+            }
+        }
+        // the pieces picked again for the texture parts (drawn as amber circles), and the guide lines at the features
+        if let Some(sk) = &rig.skin {
+            for pk in &sk.tex.picks {
+                let (a, b) = (to_screen([pk.centre[0] - pk.radii[0], pk.centre[1] - pk.radii[1]]), to_screen([pk.centre[0] + pk.radii[0], pk.centre[1] + pk.radii[1]]));
+                let amber = Color32::from_rgb(255, 200, 60);
+                p.add(egui::Shape::ellipse_stroke(to_screen(pk.centre), (b - a) * 0.5, Stroke::new(1.5, amber)));
+                p.text(a, egui::Align2::LEFT_BOTTOM, pk.part.label(), egui::FontId::proportional(11.0), amber);
+            }
+            if self.rigs.game.guides {
+                if let Some(m0) = crate::vrm::model::face_marks(&rig) {
+                    let t = &sk.tex;
+                    let m = t.effective(&m0);
+                    let base = [t.head[0] + t.face[0], t.head[1] + t.face[1]];
+                    let brow = |left: bool| { let b = crate::vrm::texedit::TexEdit::brow_at(&m0, left); let o = if left { t.brow_l } else { t.brow_r }; [b[0] + base[0] + o[0], b[1] + base[1] + o[1]] };
+                    let nose = { let n = crate::vrm::texedit::TexEdit::nose_at(&m0); [n[0] + base[0] + t.nose[0], n[1] + base[1] + t.nose[1]] };
+                    let wide = m.eye_distance() * 1.1;
+                    let cx = m.eye_center()[0];
+                    for (y, name) in [((brow(true)[1] + brow(false)[1]) / 2.0, "eyebrows"), ((m.eye_l[1] + m.eye_r[1]) / 2.0, "eyes"), (nose[1], "nose"), (m.mouth[1], "mouth")] {
+                        let (a, b) = (to_screen([cx - wide, y]), to_screen([cx + wide, y]));
+                        p.line_segment([a, b], Stroke::new(1.0, Color32::from_rgb(0, 190, 220)));
+                        p.text(b + vec2(4.0, 0.0), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional(10.5), Color32::from_rgb(0, 190, 220));
+                    }
+                }
+            }
+        }
+        // picking a part again: drag a circle round the right piece of the drawing
+        if let Some(part) = self.rigs.pick_part {
+            p.text(rect.center_top() + vec2(0.0, 10.0), egui::Align2::CENTER_TOP, format!("Drag a circle around the {} on the picture", part.label().to_lowercase()), egui::FontId::proportional(15.0), Color32::from_rgb(255, 200, 60));
+            if resp.drag_started_by(egui::PointerButton::Primary) {
+                if let Some(pos) = ui.input(|i| i.pointer.press_origin()) {
+                    self.rigs.pick_from = Some(to_page(pos));
+                }
+            }
+            if let (Some(from), Some(pos)) = (self.rigs.pick_from, ui.input(|i| i.pointer.latest_pos())) {
+                let cur = to_page(pos);
+                let radii = [(cur[0] - from[0]).abs().max(3.0), (cur[1] - from[1]).abs().max(3.0)];
+                p.add(egui::Shape::ellipse_stroke(to_screen(from), vec2(radii[0] * sc, radii[1] * sc), Stroke::new(2.0, Color32::from_rgb(255, 200, 60))));
+                if resp.drag_stopped() {
+                    let pick = crate::vrm::texedit::Pick { part, centre: from, radii };
+                    if let Some(sk) = Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut() {
+                        sk.tex.picks.retain(|k| k.part != part);
+                        sk.tex.picks.push(pick);
+                    }
+                    self.rigs.pick_part = None;
+                    self.rigs.pick_from = None;
+                    self.rigs.game.tex_dirty = true;
                 }
             }
         }

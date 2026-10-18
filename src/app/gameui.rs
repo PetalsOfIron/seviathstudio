@@ -28,20 +28,32 @@ pub struct GameUi {
     pub ai_python: String,
     /// Guide lines on the preview, and a change of the texture parts waiting to be built (when the mouse is let go).
     pub guides: bool,
-    tex_dirty: bool,
+    pub(super) tex_dirty: bool,
+    paint_rev: u64,
+    /// Build the character with a plain texture, to paint it by hand with the brushes of the drawing app.
+    pub mesh_only: bool,
+    /// Painting straight on the 3D character: on or off, the brush, the paint kept for the project, the last place of the stroke, how many
+    /// times the picture of the preview must be made again, and the paint before each stroke (to undo).
+    pub paint3d: bool,
+    pub brush: crate::vrm::paint3d::Brush,
+    overlay: Option<image::RgbaImage>,
+    last_pt: Option<[f32; 2]>,
+    paint_gen: u64,
+    paint_undo: Vec<String>,
+    paint_rebuild: bool,
     pub ai_backend: usize,
     ai_job: Option<std::sync::mpsc::Receiver<Result<crate::vrm::face::FaceMarks, String>>>,
     /// The shape an AI made of the picture (the character is built on it), and the job that makes it.
     pub shape: Option<std::sync::Arc<crate::vrm::shape::Shape>>,
     shape_job: Option<std::sync::mpsc::Receiver<Result<Vec<u8>, String>>>,
-    tex: Option<((i32, Option<String>, u64, bool), egui::TextureHandle)>,
+    tex: Option<((i32, Option<String>, u64, bool, u64, bool), egui::TextureHandle)>,
     /// How many times the model was made (so the preview picture knows to change).
     made: u64,
 }
 
 impl Default for GameUi {
     fn default() -> Self {
-        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, expr: None, model: None, message: None, template: None, ai_python: default_python(), guides: false, tex_dirty: false, ai_backend: 0, ai_job: None, shape: None, shape_job: None, tex: None, made: 0 }
+        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, expr: None, model: None, message: None, template: None, ai_python: default_python(), guides: false, tex_dirty: false, paint_rev: 0, mesh_only: false, paint3d: false, brush: Default::default(), overlay: None, last_pt: None, paint_gen: 0, paint_undo: Vec::new(), paint_rebuild: false, ai_backend: 0, ai_job: None, shape: None, shape_job: None, tex: None, made: 0 }
     }
 }
 
@@ -49,7 +61,7 @@ impl SeviathApp {
     fn game_options(&self) -> Options {
         let g = &self.rigs.game;
         let name = if g.name.trim().is_empty() { self.files.name.clone() } else { g.name.clone() };
-        Options { name, author: if g.author.trim().is_empty() { "Unknown".into() } else { g.author.clone() }, height_m: g.height_m, puff: g.puff, template: g.template.as_ref().map(|t| t.1.clone()), shape: g.shape.clone(), ..Default::default() }
+        Options { name, author: if g.author.trim().is_empty() { "Unknown".into() } else { g.author.clone() }, height_m: g.height_m, puff: g.puff, template: g.template.as_ref().map(|t| t.1.clone()), shape: g.shape.clone(), mesh_only: g.mesh_only, ..Default::default() }
     }
 
     /// Make the 3D character from the document and its rig.
@@ -138,12 +150,41 @@ impl SeviathApp {
                 }
             });
         };
-        row(ui, "Head", &mut t.head);
-        row(ui, "Face", &mut t.face);
-        row(ui, "Left eye", &mut t.eye_l);
-        row(ui, "Right eye", &mut t.eye_r);
-        row(ui, "Nose", &mut t.nose);
-        row(ui, "Mouth", &mut t.mouth);
+        let picking = self.rigs.pick_part;
+        let mut start_pick: Option<Option<crate::vrm::texedit::Part>> = None;
+        for part in crate::vrm::texedit::Part::ALL {
+            row(ui, part.label(), t.offset_mut(part));
+            // pick the right piece of the drawing for this part again
+            ui.horizontal(|ui| {
+                ui.add_space(14.0);
+                let on = picking == Some(part);
+                if widgets::chip(ui, if on { "Drag a circle round it on the picture..." } else { "Pick it again" }, on).on_hover_text("The app found this part in the wrong place? Pick the right piece of the drawing: it is cut out and put where the part belongs, and the old one is painted over with skin").clicked() {
+                    start_pick = Some(if on { None } else { Some(part) });
+                }
+                if t.pick_of(part).is_some() && ui.small_button("Forget the pick").clicked() {
+                    t.picks.retain(|k| k.part != part);
+                }
+            });
+        }
+        if let Some(p) = start_pick {
+            self.rigs.pick_part = p;
+            self.rigs.pick_from = None;
+        }
+        let mut paint_now = false;
+        let mut see_again = false;
+        ui.horizontal_wrapped(|ui| {
+            if widgets::chip(ui, "Mesh only: plain texture", self.rigs.game.mesh_only).on_hover_text("Builds the character on the AI shape with one plain colour instead of your drawing, so the whole texture is painted by hand with the brushes of the drawing app (the drawing shows faintly on a locked layer to paint from)").clicked() {
+                self.rigs.game.mesh_only = !self.rigs.game.mesh_only;
+                self.rigs.game.tex_dirty = true;
+            }
+            if ui.button("Paint the texture").on_hover_text("Opens the Draw tab with the picture of the front of the character as it is now. Paint on the layer Texture paint with any brush of the drawing app (blend, smudge, the eyedropper picks colours from the texture), then come back: the paint is laid over the texture").clicked() {
+                paint_now = true;
+            }
+            if ui.small_button("Show the moved parts again").on_hover_text("Renews the locked layer under your paint with the parts as they are placed now").clicked() {
+                see_again = true;
+            }
+        });
+        ui.checkbox(&mut t.replace_old, "Paint the old part over with skin").on_hover_text("When a part is picked again, the place where the app thought it was is covered");
         ui.horizontal(|ui| {
             ui.label(RichText::new("Soft edges").size(12.0).color(TEXT_DIM));
             ui.add(egui::Slider::new(&mut t.feather, 0.05..=0.7).show_value(false)).on_hover_text("How softly a moved part blends into the skin around it");
@@ -163,6 +204,29 @@ impl SeviathApp {
                 sk.tex = t;
             }
             self.rigs.game.tex_dirty = true;
+        }
+        if paint_now || see_again {
+            let opt = self.game_options();
+            let before = self.draw.doc.snapshot();
+            let guides: Vec<(String, [f32; 3])> = self.rigs.game.model.as_ref().map(|m| m.landmarks.clone()).unwrap_or_default();
+            if let Some(paint_id) = crate::vrm::shape::make_paint_layers(&mut self.draw.doc, &opt, Some(&guides)) {
+                let after = self.draw.doc.snapshot();
+                self.history.push("Layers to paint the texture".to_owned(), crate::app::Tab::Rig, before, after, 0.0);
+                self.rigs.game.message = Some("The Draw tab shows the texture on a locked layer, with lines for the places of the features: blue the eyes, green the eyebrows, orange the nose, red the mouth, pink the nose and chin of the 3D shape. Paint on the layer Texture paint; come back to the Rig tab to see it on the character.".into());
+                if paint_now {
+                    self.draw.focus_layer(paint_id);
+                    self.tab = crate::app::Tab::Draw;
+                }
+            } else {
+                self.rigs.game.message = Some("The texture cannot be shown yet: make the 3D character first.".into());
+            }
+        }
+        // painting on the layer of the drawing app changes the character: remake it when it did
+        if let Some(l) = self.draw.doc.layers.iter().find(|l| l.id == self.draw.doc.rig.skin.as_ref().map(|s| s.tex.paint_layer).unwrap_or(0)) {
+            if self.rigs.game.paint_rev != l.rev {
+                self.rigs.game.paint_rev = l.rev;
+                self.rigs.game.tex_dirty = true;
+            }
         }
         // the character is made again when the mouse is let go (it takes a moment)
         if self.rigs.game.tex_dirty && !ui.input(|i| i.pointer.any_down()) {
@@ -388,18 +452,145 @@ impl SeviathApp {
                 }
             }
         });
-        let key = (self.rigs.game.yaw.round() as i32, self.rigs.game.expr.clone(), self.rigs.game.made, self.rigs.game.guides);
+        self.paint3d_controls(ui);
+        let paint = self.rigs.game.paint3d;
+        let (pw, ph) = if paint { (420u32, 672u32) } else { (300, 480) };
+        let key = (self.rigs.game.yaw.round() as i32, self.rigs.game.expr.clone(), self.rigs.game.made, self.rigs.game.guides, self.rigs.game.paint_gen, paint);
         if self.rigs.game.tex.as_ref().map(|t| &t.0) != Some(&key) {
             if let Some(m) = &self.rigs.game.model {
                 let active: Vec<(&str, f32)> = self.rigs.game.expr.as_deref().map(|e| vec![(e, 1.0)]).unwrap_or_default();
-                let img = preview::render_guides(m, key.0 as f32, 300, 480, &active, key.3);
+                let img = preview::render_guides(m, key.0 as f32, pw, ph, &active, key.3);
                 let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
                 let tex = ui.ctx().load_texture("game_preview", color, TextureOptions::LINEAR);
                 self.rigs.game.tex = Some((key, tex));
             }
         }
-        if let Some((_, t)) = &self.rigs.game.tex {
-            ui.image((t.id(), vec2(300.0, 480.0)));
+        let shown = self.rigs.game.tex.as_ref().map(|(_, t)| t.id());
+        if let Some(id) = shown {
+            let size = vec2(pw as f32, ph as f32);
+            let resp = ui.add(egui::Image::new((id, size)).sense(egui::Sense::drag()));
+            if paint {
+                self.paint3d_input(&resp, (pw, ph));
+            }
+        }
+    }
+
+    /// The controls for painting straight on the 3D character.
+    fn paint3d_controls(&mut self, ui: &mut Ui) {
+        if self.rigs.game.model.is_none() {
+            return;
+        }
+        use crate::vrm::paint3d::Tool;
+        ui.horizontal_wrapped(|ui| {
+            if widgets::chip(ui, "Paint on the 3D character", self.rigs.game.paint3d).on_hover_text("Paint straight on the model in the preview, as in VRoid: drag on it. The preview gets bigger. Turn the model with the Turn slider to reach the sides").clicked() {
+                self.rigs.game.paint3d = !self.rigs.game.paint3d;
+                self.rigs.game.last_pt = None;
+            }
+        });
+        if !self.rigs.game.paint3d {
+            return;
+        }
+        let b = &mut self.rigs.game.brush;
+        ui.horizontal_wrapped(|ui| {
+            for (tool, name, tip) in [(Tool::Brush, "Brush", "Paint with a colour"), (Tool::Eraser, "Eraser", "Take away what was painted by hand"), (Tool::Blend, "Blend", "Smudge: the colour becomes the average of what is around, so edges soften"), (Tool::Dropper, "Eyedropper", "Pick the colour under the pointer")] {
+                if widgets::chip(ui, name, b.tool == tool).on_hover_text(tip).clicked() {
+                    b.tool = tool;
+                }
+            }
+            ui.color_edit_button_srgb(&mut b.colour);
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Size").size(12.0).color(TEXT_DIM));
+            ui.add(egui::DragValue::new(&mut b.size).range(1.0..=200.0).speed(0.3));
+            ui.label(RichText::new("Hard").size(12.0).color(TEXT_DIM));
+            ui.add(egui::DragValue::new(&mut b.hardness).range(0.0..=1.0).speed(0.01));
+            ui.label(RichText::new("Opacity").size(12.0).color(TEXT_DIM));
+            ui.add(egui::DragValue::new(&mut b.opacity).range(0.05..=1.0).speed(0.01));
+        });
+        ui.horizontal_wrapped(|ui| {
+            if ui.add_enabled(!self.rigs.game.paint_undo.is_empty(), egui::Button::new("Undo the last stroke")).clicked() {
+                if let Some(prev) = self.rigs.game.paint_undo.pop() {
+                    if let Some(sk) = std::sync::Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut() {
+                        sk.tex.atlas_paint = prev;
+                    }
+                    self.rigs.game.overlay = None;
+                    self.game_make();
+                }
+            }
+            if ui.button("Clear all paint").clicked() {
+                if let Some(sk) = std::sync::Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut() {
+                    self.rigs.game.paint_undo.push(sk.tex.atlas_paint.clone());
+                    sk.tex.atlas_paint.clear();
+                }
+                self.rigs.game.overlay = None;
+                self.game_make();
+            }
+        });
+    }
+
+    /// Paint where the pointer drags on the preview.
+    fn paint3d_input(&mut self, resp: &egui::Response, size: (u32, u32)) {
+        use crate::vrm::paint3d;
+        let Some(pos) = resp.interact_pointer_pos() else {
+            if resp.drag_stopped() {
+                self.paint3d_end();
+            }
+            return;
+        };
+        let rel = pos - resp.rect.min;
+        let hit = self.rigs.game.model.as_ref().and_then(|m| preview::pick(m, self.rigs.game.yaw.round(), size.0, size.1, rel.x, rel.y));
+        if resp.drag_started() {
+            if let Some(sk) = self.draw.doc.rig.skin.as_ref() {
+                self.rigs.game.paint_undo.push(sk.tex.atlas_paint.clone());
+                self.rigs.game.paint_undo.truncate(12);
+            }
+            self.rigs.game.last_pt = None;
+        }
+        let Some((part, uv)) = hit else {
+            self.rigs.game.last_pt = None;
+            return;
+        };
+        let Some(model) = self.rigs.game.model.as_mut() else { return };
+        let dims = model.parts[0].image.dimensions();
+        if model.parts.get(part).map(|p| p.image.dimensions()) != Some(dims) {
+            self.rigs.game.last_pt = None;
+            return;
+        }
+        if self.rigs.game.overlay.as_ref().map(|o| o.dimensions()) != Some(dims) {
+            let stored = self.draw.doc.rig.skin.as_ref().and_then(|s| s.tex.atlas_paint_image()).filter(|i| i.dimensions() == dims);
+            self.rigs.game.overlay = Some(stored.unwrap_or_else(|| image::RgbaImage::new(dims.0, dims.1)));
+        }
+        let at = [uv[0] * dims.0 as f32, uv[1] * dims.1 as f32];
+        let brush = self.rigs.game.brush.clone();
+        let overlay = self.rigs.game.overlay.as_mut().unwrap();
+        let (picked, rebuild) = match self.rigs.game.last_pt {
+            Some(last) => paint3d::stroke(model, overlay, &brush, last, at),
+            None => paint3d::dab(model, overlay, &brush, at[0], at[1]),
+        };
+        if let Some(c) = picked {
+            self.rigs.game.brush.colour = c;
+        }
+        self.rigs.game.paint_rebuild |= rebuild;
+        self.rigs.game.last_pt = Some(at);
+        self.rigs.game.paint_gen += 1;
+        if resp.drag_stopped() {
+            self.paint3d_end();
+        }
+    }
+
+    /// The stroke is over: the paint is kept with the project (and the model made again when an eraser was used).
+    fn paint3d_end(&mut self) {
+        self.rigs.game.last_pt = None;
+        if self.rigs.game.brush.tool == crate::vrm::paint3d::Tool::Dropper {
+            return;
+        }
+        if let Some(o) = self.rigs.game.overlay.clone() {
+            if let Some(sk) = std::sync::Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut() {
+                sk.tex.set_atlas_paint(&o);
+            }
+        }
+        if std::mem::take(&mut self.rigs.game.paint_rebuild) {
+            self.game_make();
         }
     }
 

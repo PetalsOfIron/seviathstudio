@@ -36,11 +36,13 @@ pub struct Options {
     pub shape: Option<std::sync::Arc<super::shape::Shape>>,
     /// Make the hair a part of its own on bones with spring bones (for a character built on an AI shape).
     pub hair: bool,
+    /// Build the character on the AI shape with a plain, neutral texture instead of the drawing, to be painted by hand.
+    pub mesh_only: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { name: "Character".into(), author: "Unknown".into(), height_m: 1.6, puff: 1.0, layer_gap: 0.003, max_texture: 2048, fingers: true, face: true, template: None, shape: None, hair: true }
+        Self { name: "Character".into(), author: "Unknown".into(), height_m: 1.6, puff: 1.0, layer_gap: 0.003, max_texture: 2048, fingers: true, face: true, template: None, shape: None, hair: true, mesh_only: false }
     }
 }
 

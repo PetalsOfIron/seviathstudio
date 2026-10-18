@@ -7,6 +7,7 @@ pub mod face;
 pub mod hair;
 pub mod hands;
 pub mod model;
+pub mod paint3d;
 pub mod preview;
 pub mod shape;
 pub mod template;
