@@ -69,39 +69,57 @@ def with_dino(img):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     processor = AutoProcessor.from_pretrained(name)
     model = AutoModelForZeroShotObjectDetection.from_pretrained(name).to(device)
-    inputs = processor(images=img, text="eye. mouth.", return_tensors="pt").to(device)
+    inputs = processor(images=img, text="eye. mouth. lips.", return_tensors="pt").to(device)
     with torch.no_grad():
         outputs = model(**inputs)
     sizes = [img.size[::-1]]
     try:
-        res = processor.post_process_grounded_object_detection(outputs, inputs.input_ids, threshold=0.25, text_threshold=0.2, target_sizes=sizes)[0]
+        res = processor.post_process_grounded_object_detection(outputs, inputs.input_ids, threshold=0.2, text_threshold=0.15, target_sizes=sizes)[0]
     except TypeError:
-        res = processor.post_process_grounded_object_detection(outputs, inputs.input_ids, box_threshold=0.25, text_threshold=0.2, target_sizes=sizes)[0]
+        res = processor.post_process_grounded_object_detection(outputs, inputs.input_ids, box_threshold=0.2, text_threshold=0.15, target_sizes=sizes)[0]
     labels = res.get("text_labels") or res.get("labels")
     found = [(str(l), float(s), [float(v) for v in b]) for l, s, b in zip(labels, res["scores"], res["boxes"])]
-    eyes = sorted([f for f in found if "eye" in f[0]], key=lambda f: -f[1])
-    mouths = sorted([f for f in found if "mouth" in f[0]], key=lambda f: -f[1])
-    if len(eyes) < 2 or not mouths:
-        return None, "Grounding DINO did not find both eyes and the mouth (found %d eyes, %d mouths)." % (len(eyes), len(mouths))
+    eyes = sorted([f for f in found if "eye" in f[0]], key=lambda f: -f[1])[:6]
+    mouths = sorted([f for f in found if "mouth" in f[0] or "lip" in f[0]], key=lambda f: -f[1])
+    if len(eyes) < 2:
+        return None, "Grounding DINO found %d eyes, two are needed." % len(eyes)
 
     def centre(f):
         x0, y0, x1, y1 = f[2]
         return ((x0 + x1) / 2, (y0 + y1) / 2)
 
-    first = eyes[0]
-    # the second eye: the best one that is not on top of the first
-    second = next((e for e in eyes[1:] if abs(centre(e)[0] - centre(first)[0]) > 0.6 * (first[2][2] - first[2][0])), None)
-    if second is None:
-        return None, "Grounding DINO found only one eye."
-    pair = sorted([first, second], key=lambda f: -centre(f)[0])
-    m = mouths[0]
-    return {
-        "eye_l": centre(pair[0]),
-        "eye_r": centre(pair[1]),
-        "mouth": centre(m),
-        "eye_w": ((pair[0][2][2] - pair[0][2][0]) + (pair[1][2][2] - pair[1][2][0])) / 2,
-        "mouth_w": m[2][2] - m[2][0],
-    }, None
+    def width(f):
+        return f[2][2] - f[2][0]
+
+    # the two eyes: a pair side by side at the same height, apart by more than an eye's width, the best scores together
+    best = None
+    for i in range(len(eyes)):
+        for j in range(i + 1, len(eyes)):
+            a, b = eyes[i], eyes[j]
+            ca, cb = centre(a), centre(b)
+            w = (width(a) + width(b)) / 2
+            if abs(ca[0] - cb[0]) < 0.9 * w or abs(ca[1] - cb[1]) > 0.5 * w:
+                continue
+            score = a[1] + b[1]
+            if best is None or score > best[0]:
+                best = (score, a, b)
+    if best is None:
+        return None, "Grounding DINO found eyes, but no two that make a pair."
+    pair = sorted([best[1], best[2]], key=lambda f: -centre(f)[0])
+    out = {"eye_l": centre(pair[0]), "eye_r": centre(pair[1]), "eye_w": (width(pair[0]) + width(pair[1])) / 2}
+    mid_x = (out["eye_l"][0] + out["eye_r"][0]) / 2
+    dist = abs(out["eye_l"][0] - out["eye_r"][0])
+    # a mouth below the eyes and near the middle line
+    ok = [m for m in mouths if centre(m)[1] > out["eye_l"][1] + 0.3 * dist and abs(centre(m)[0] - mid_x) < 0.8 * dist]
+    if ok:
+        out["mouth"] = centre(ok[0])
+        out["mouth_w"] = width(ok[0])
+    else:
+        # no mouth found (a beast's snout, a mask): put it under the eyes the way faces usually are
+        out["mouth"] = (mid_x, (out["eye_l"][1] + out["eye_r"][1]) / 2 + 0.9 * dist)
+        out["mouth_w"] = 0.8 * dist
+        out["note"] = "the mouth was placed from the eyes"
+    return out, None
 
 
 def main():

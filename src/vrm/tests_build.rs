@@ -633,6 +633,17 @@ fn face_guess_sheet() {
                     }
                 }
             };
+            // the AI helper's points (yellow eyes, magenta mouth), when SEVIATH_AI_PYTHON names a Python that has the packages
+            if let (Ok(py), Some(crop)) = (std::env::var("SEVIATH_AI_PYTHON"), super::model::head_box(&d.rig)) {
+                match crate::ai::find_face(&py, &img, crop, "auto") {
+                    Ok(f) => {
+                        dot(f.eye_l, [255, 220, 0, 255]);
+                        dot(f.eye_r, [255, 220, 0, 255]);
+                        dot(f.mouth, [255, 0, 255, 255]);
+                    }
+                    Err(e) => eprintln!("{}: {e}", f.display()),
+                }
+            }
             dot(m.eye_l, [255, 0, 0, 255]);
             dot(m.eye_r, [255, 0, 0, 255]);
             dot(m.mouth, [0, 0, 255, 255]);
@@ -654,5 +665,5 @@ fn face_guess_sheet() {
         image::imageops::replace(&mut sheet, t, ((i as u32 % cols) * 240) as i64, ((i as u32 / cols) * 260) as i64);
     }
     let _ = std::fs::create_dir_all("target/screens");
-    sheet.save("target/screens/face_guess.png").unwrap();
+    sheet.save(if std::env::var("SEVIATH_AI_PYTHON").is_ok() { "target/screens/face_guess_ai.png" } else { "target/screens/face_guess.png" }).unwrap();
 }
