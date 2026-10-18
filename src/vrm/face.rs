@@ -44,7 +44,7 @@ pub fn guess(head_top: [f32; 2], neck: [f32; 2]) -> FaceMarks {
     let h = (neck[1] - head_top[1]).abs().max(20.0);
     let xc = head_top[0];
     let head_w = 0.72 * h;
-    FaceMarks { eye_l: [xc + 0.2 * head_w, head_top[1] + 0.54 * h], eye_r: [xc - 0.2 * head_w, head_top[1] + 0.54 * h], mouth: [xc, head_top[1] + 0.79 * h], eye_w: 0.19 * head_w, mouth_w: 0.24 * head_w }
+    FaceMarks { eye_l: [xc + 0.2 * head_w, head_top[1] + 0.61 * h], eye_r: [xc - 0.2 * head_w, head_top[1] + 0.61 * h], mouth: [xc, head_top[1] + 0.87 * h], eye_w: 0.19 * head_w, mouth_w: 0.24 * head_w }
 }
 
 fn smooth(t: f32) -> f32 {

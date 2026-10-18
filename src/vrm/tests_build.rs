@@ -242,7 +242,7 @@ fn physics_chains_become_spring_bones_and_colliders_in_both_formats() {
 }
 
 /// A document with one layer holding the whole picture (an uncut character).
-fn uncut_doc(img: &image::RgbaImage) -> Document {
+pub(crate) fn uncut_doc(img: &image::RgbaImage) -> Document {
     let mut d = Document::new(img.width(), img.height());
     let mut l = d.new_layer("Character", LayerKind::Raster);
     l.tiles = crate::files::tiles_from_rgba(img, 0, 0, img.width(), img.height());
@@ -511,6 +511,14 @@ fn an_uncut_figure_gets_a_face_with_blend_shapes_and_a_mouth_that_opens() {
     let (one, zero) = (export(&m, Format::Vrm1).unwrap(), export(&m, Format::Vrm0).unwrap());
     let (s1, s0) = (validate(&one).unwrap(), validate(&zero).unwrap());
     assert!(s1.expressions >= 19 && s0.expressions >= 19, "{} {}", s1.expressions, s0.expressions);
+    // for games: a plain GLB with the skeleton, the skin and the same blend shapes, and no VRM data
+    let glb = export(&m, Format::Glb).unwrap();
+    let sg = validate(&glb).unwrap();
+    assert_eq!(sg.version, 2);
+    assert!(sg.expressions >= 19 && sg.parts == 2 && sg.bones >= 20, "{sg:?}");
+    let g = super::gltf::read_glb(&glb).unwrap();
+    assert!(g.json["extensions"].get("VRMC_vrm").is_none() && g.json["extensions"].get("VRM").is_none());
+    assert!(g.json["meshes"][0]["extras"]["targetNames"].as_array().unwrap().iter().any(|n| n == "blink"));
     // face off: no shapes
     let plain = build_any(&d, &Options { face: false, ..Default::default() }).unwrap();
     assert_eq!(plain.parts.len(), 1);
@@ -585,4 +593,66 @@ fn face_sheet(template: Option<std::sync::Arc<super::template::Template>>, sheet
         let _ = std::fs::create_dir_all("target/screens");
         sheet.save(format!("target/screens/{sheet_name}.png")).unwrap();
     }
+}
+
+/// The head of every one of the user's uncut bases with the guessed eyes (red) and mouth (blue), to see where the guess fails.
+#[test]
+fn face_guess_sheet() {
+    let base = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Downloads/Bases/images/races/images");
+    let mut tiles: Vec<image::RgbaImage> = Vec::new();
+    for folder in ["female", "male"] {
+        let Ok(rd) = std::fs::read_dir(base.join(folder)) else { continue };
+        let mut files: Vec<std::path::PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "png")).collect();
+        files.sort();
+        for f in files {
+            let Ok(bytes) = std::fs::read(&f) else { continue };
+            let img = image::load_from_memory(&bytes).unwrap().to_rgba8();
+            let d = uncut_doc(&img);
+            let ids: Vec<crate::doc::LayerId> = d.layers.iter().map(|l| l.id).collect();
+            let mut rig = Rig::default();
+            if crate::rig::uncut::auto_rig(&mut rig, &d, &ids, 0.5).is_err() {
+                continue;
+            }
+            let mut d = d;
+            d.rig = std::sync::Arc::new(rig);
+            let Some(m) = super::model::face_marks(&d.rig) else { continue };
+            let sk = d.rig.skin.as_ref().unwrap();
+            let hb = sk.bones.iter().find(|b| d.rig.changer(b.changer).is_some_and(|c| c.name == "head")).unwrap();
+            let pivot = match d.rig.changer(hb.changer).unwrap().kind { crate::rig::Kind::Rotation { pivot } => pivot, _ => [0.0, 0.0] };
+            let hh = (pivot[1] - hb.tail[1]).abs().max(30.0);
+            let (x0, y0, w, h) = ((pivot[0] - hh * 0.9).max(0.0) as u32, (hb.tail[1] - 20.0).max(0.0) as u32, (hh * 1.8) as u32, (hh + 90.0) as u32);
+            let (w, h) = (w.min(img.width() - x0), h.min(img.height() - y0));
+            let mut crop = image::imageops::crop_imm(&img, x0, y0, w, h).to_image();
+            let mut dot = |p: [f32; 2], c: [u8; 4]| {
+                for dy in -4i32..=4 {
+                    for dx in -4i32..=4 {
+                        let (x, y) = ((p[0] - x0 as f32) as i32 + dx, (p[1] - y0 as f32) as i32 + dy);
+                        if x >= 0 && y >= 0 && (x as u32) < w && (y as u32) < h {
+                            crop.put_pixel(x as u32, y as u32, image::Rgba(c));
+                        }
+                    }
+                }
+            };
+            dot(m.eye_l, [255, 0, 0, 255]);
+            dot(m.eye_r, [255, 0, 0, 255]);
+            dot(m.mouth, [0, 0, 255, 255]);
+            // a green tick at the head pivot (the neck)
+            dot(pivot, [0, 200, 0, 255]);
+            let k = 260.0 / h as f32;
+            let flat = image::DynamicImage::ImageRgba8(crop);
+            let mut bg = image::RgbaImage::from_pixel(240, 260, image::Rgba([225, 225, 225, 255]));
+            let small = flat.resize(240, 260, image::imageops::FilterType::Triangle).to_rgba8();
+            let _ = k;
+            image::imageops::overlay(&mut bg, &small, 0, 0);
+            tiles.push(bg);
+        }
+    }
+    let cols = 8u32;
+    let rows = (tiles.len() as u32).div_ceil(cols).max(1);
+    let mut sheet = image::RgbaImage::from_pixel(cols * 240, rows * 260, image::Rgba([255, 255, 255, 255]));
+    for (i, t) in tiles.iter().enumerate() {
+        image::imageops::replace(&mut sheet, t, ((i as u32 % cols) * 240) as i64, ((i as u32 / cols) * 260) as i64);
+    }
+    let _ = std::fs::create_dir_all("target/screens");
+    sheet.save("target/screens/face_guess.png").unwrap();
 }

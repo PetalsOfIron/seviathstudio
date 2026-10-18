@@ -24,6 +24,10 @@ pub struct GameUi {
     pub message: Option<String>,
     /// Face shapes from a real model, and where they came from.
     pub template: Option<(String, std::sync::Arc<crate::vrm::template::Template>)>,
+    /// The command of Python for the AI helpers, which finder to use (0 auto, 1 MediaPipe, 2 Grounding DINO), and the job that runs.
+    pub ai_python: String,
+    pub ai_backend: usize,
+    ai_job: Option<std::sync::mpsc::Receiver<Result<crate::vrm::face::FaceMarks, String>>>,
     tex: Option<((i32, Option<String>, u64), egui::TextureHandle)>,
     /// How many times the model was made (so the preview picture knows to change).
     made: u64,
@@ -31,7 +35,7 @@ pub struct GameUi {
 
 impl Default for GameUi {
     fn default() -> Self {
-        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, expr: None, model: None, message: None, template: None, tex: None, made: 0 }
+        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, expr: None, model: None, message: None, template: None, ai_python: "python".into(), ai_backend: 0, ai_job: None, tex: None, made: 0 }
     }
 }
 
@@ -86,14 +90,78 @@ impl SeviathApp {
             }
         };
         let stem = self.rigs.game.model.as_ref().map(|m| m.name.clone()).unwrap_or_else(|| "character".into());
-        let suffix = if fmt == Format::Vrm1 { "" } else { "0" };
-        let picked = rfd::FileDialog::new().set_title("Save the 3D character").set_directory(self.settings.projects_folder()).set_file_name(format!("{stem}{suffix}.vrm")).add_filter("VRM model", &["vrm"]).save_file();
+        let (suffix, ext, kind) = match fmt {
+            Format::Vrm1 => ("", "vrm", "VRM model"),
+            Format::Vrm0 => ("0", "vrm", "VRM model"),
+            Format::Glb => ("", "glb", "glTF binary"),
+        };
+        let picked = rfd::FileDialog::new().set_title("Save the 3D character").set_directory(self.settings.projects_folder()).set_file_name(format!("{stem}{suffix}.{ext}")).add_filter(kind, &[ext]).save_file();
         if let Some(path) = picked {
             self.rigs.game.message = Some(match std::fs::write(&path, &bytes) {
-                Ok(()) => format!("Saved {} (VRM {}): {} parts, {} bones, {} expressions, checked.", path.display(), if summary.version == 1 { "1.0" } else { "0.x" }, summary.parts, summary.bones, summary.expressions),
+                Ok(()) => format!("Saved {} ({}): {} parts, {} bones, {} expressions, checked.", path.display(), match summary.version { 1 => "VRM 1.0", 0 => "VRM 0.x", _ => "GLB for games" }, summary.parts, summary.bones, summary.expressions),
                 Err(e) => format!("Could not save the file: {e}"),
             });
         }
+    }
+
+    /// Find the face with an AI helper (MediaPipe for real faces, Grounding DINO for drawings), in the background.
+    fn face_ai_row(&mut self, ui: &mut Ui) {
+        // the answer, when the helper is done
+        if let Some(rx) = &self.rigs.game.ai_job {
+            match rx.try_recv() {
+                Ok(Ok(marks)) => {
+                    if let Some(sk) = std::sync::Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut() {
+                        sk.face = Some(marks);
+                    }
+                    self.rigs.game.model = None;
+                    self.rigs.game.ai_job = None;
+                    self.rigs.face_edit = true;
+                    self.rigs.game.message = Some("The AI found the eyes and the mouth. Check them on the picture, drag them if they are off, then make the 3D character.".into());
+                }
+                Ok(Err(e)) => {
+                    self.rigs.game.ai_job = None;
+                    self.rigs.game.message = Some(format!("The AI could not find the face: {e}"));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(300)),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.rigs.game.ai_job = None,
+            }
+        }
+        let busy = self.rigs.game.ai_job.is_some();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Find the face with").size(12.0).color(TEXT_DIM));
+            for (i, n) in ["Auto", "MediaPipe (real faces)", "Grounding DINO (drawings)"].iter().enumerate() {
+                if widgets::chip(ui, n, self.rigs.game.ai_backend == i).clicked() {
+                    self.rigs.game.ai_backend = i;
+                }
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Python").size(12.0).color(TEXT_DIM));
+            ui.add(egui::TextEdit::singleline(&mut self.rigs.game.ai_python).desired_width(150.0)).on_hover_text("The command that starts Python with the AI packages installed (see the README, AI helpers)");
+            let label = if busy { "Looking..." } else { "Find the face with AI" };
+            if ui.add_enabled(!busy, egui::Button::new(label)).on_hover_text("Runs a helper program on the picture. It needs Python and its packages installed; without them the app keeps its own guess.").clicked() {
+                let rig = self.draw.doc.rig.clone();
+                let page = rig.skin.as_ref().and_then(|sk| crate::rig::uncut::composite(&self.draw.doc, &sk.layers));
+                match (page, crate::vrm::model::head_box(&rig)) {
+                    (Some(page), Some(crop)) => {
+                        let (python, backend) = (self.rigs.game.ai_python.clone(), ["auto", "mediapipe", "dino"][self.rigs.game.ai_backend.min(2)]);
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(crate::ai::find_face(&python, &page, crop, backend));
+                        });
+                        self.rigs.game.ai_job = Some(rx);
+                        self.rigs.game.message = Some("The AI is looking for the face. The first run can take a while (it loads the model).".into());
+                    }
+                    _ => self.rigs.game.message = Some("Rig the whole picture first (Auto-rig), then the face can be found.".into()),
+                }
+            }
+        });
+    }
+
+    #[cfg(test)]
+    pub fn test_face_click(&mut self, step: u8) {
+        self.rigs.face_click = step;
+        self.rigs.face_edit = true;
     }
 
     pub(super) fn rig_game_section(&mut self, ui: &mut Ui, _now: f64) {
@@ -115,9 +183,14 @@ impl SeviathApp {
             });
         }
         if self.draw.doc.rig.skin.is_some() {
+            self.face_ai_row(ui);
             ui.horizontal_wrapped(|ui| {
                 if widgets::chip(ui, "Set the face", self.rigs.face_edit).on_hover_text("Shows the eyes and the mouth on the picture: drag them into place so the blink, the smile and the mouth move the right parts").clicked() {
                     self.rigs.face_edit = !self.rigs.face_edit;
+                }
+                if widgets::chip(ui, "Click the eyes and mouth", self.rigs.face_click > 0).on_hover_text("Click the first eye, the other eye and then the middle of the mouth on the picture").clicked() {
+                    self.rigs.face_click = if self.rigs.face_click > 0 { 0 } else { 1 };
+                    self.rigs.face_edit = true;
                 }
                 if let Some(mut f) = crate::vrm::model::face_marks(&self.draw.doc.rig) {
                     let before = f;
@@ -163,11 +236,16 @@ impl SeviathApp {
                 self.game_make();
             }
             let has = self.rigs.game.model.is_some();
-            if ui.add_enabled(has, egui::Button::new("Save as VRM 1.0")).on_hover_text("The newer format").clicked() {
+            ui.label(RichText::new("VTubers").size(12.0).color(TEXT_DIM));
+            if ui.add_enabled(has, egui::Button::new("Save as VRM 1.0")).on_hover_text("For VTuber apps: the newer format").clicked() {
                 self.game_save(Format::Vrm1);
             }
-            if ui.add_enabled(has, egui::Button::new("Save as VRM 0.x")).on_hover_text("The older format many apps still use").clicked() {
+            if ui.add_enabled(has, egui::Button::new("Save as VRM 0.x")).on_hover_text("For VTuber apps: the older format many apps still use").clicked() {
                 self.game_save(Format::Vrm0);
+            }
+            ui.label(RichText::new("Games").size(12.0).color(TEXT_DIM));
+            if ui.add_enabled(has, egui::Button::new("Save as GLB")).on_hover_text("For game engines (Unity, Unreal, Godot, Bevy): the skeleton, the skin and the blend shapes in one plain glTF file").clicked() {
+                self.game_save(Format::Glb);
             }
         });
         if let Some(m) = &self.rigs.game.message {
