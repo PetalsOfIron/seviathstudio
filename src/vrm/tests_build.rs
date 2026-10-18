@@ -284,7 +284,7 @@ fn an_uncut_figure_is_rigged_and_becomes_a_valid_vrm_in_both_formats() {
     let (one, zero) = (export(&m, Format::Vrm1).unwrap(), export(&m, Format::Vrm0).unwrap());
     let (s1, s0) = (validate(&one).unwrap(), validate(&zero).unwrap());
     assert_eq!((s1.version, s0.version), (1, 0));
-    assert_eq!(s2.parts, 1);
+    assert_eq!(s1.parts, 2);
     // the preview turns round
     let front = super::preview::render(&m, 0.0, 400, 520, &[]);
     let side = super::preview::render(&m, 50.0, 400, 520, &[]);
