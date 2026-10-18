@@ -4,11 +4,13 @@
 pub mod gltf;
 pub mod export;
 pub mod face;
+pub mod hair;
 pub mod hands;
 pub mod model;
 pub mod preview;
 pub mod shape;
 pub mod template;
+pub mod texedit;
 
 #[cfg(test)]
 mod tests {

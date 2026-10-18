@@ -11,6 +11,39 @@ pub fn render(model: &Model3d, yaw_deg: f32, w: u32, h: u32, active: &[(&str, f3
     render_posed(model, yaw_deg, w, h, active, &[])
 }
 
+/// The same picture with guide lines at the places of the features: the eyes, the nose and the mouth where the texture puts them
+/// (cyan) and the nose and the chin of the shape itself (pink), each as a line across the face and a dot where it is on the model.
+pub fn render_guides(model: &Model3d, yaw_deg: f32, w: u32, h: u32, active: &[(&str, f32)], show: bool) -> RgbaImage {
+    let mut img = render_posed(model, yaw_deg, w, h, active, &[]);
+    if !show {
+        return img;
+    }
+    let (s, c) = yaw_deg.to_radians().sin_cos();
+    let top = model.parts.iter().flat_map(|p| p.verts.iter().map(|v| v[1])).fold(0.0f32, f32::max).max(0.1);
+    let scale = h as f32 * 0.9 / top;
+    for (name, p) in &model.landmarks {
+        let (x, y) = (w as f32 / 2.0 + (p[0] * c + p[2] * s) * scale, h as f32 * 0.95 - p[1] * scale);
+        let col = if name.starts_with("mesh") { Rgba([255, 0, 200, 255]) } else { Rgba([0, 190, 220, 255]) };
+        let half = 0.1 * scale;
+        let mut px = |ix: i32, iy: i32, col: Rgba<u8>| {
+            if ix >= 0 && iy >= 0 && (ix as u32) < w && (iy as u32) < h {
+                img.put_pixel(ix as u32, iy as u32, col);
+            }
+        };
+        for dx in (-half as i32)..=(half as i32) {
+            if dx % 6 < 4 {
+                px(x as i32 + dx, y as i32, col);
+            }
+        }
+        for dy in -3..=3 {
+            for dx in -3..=3 {
+                px(x as i32 + dx, y as i32 + dy, col);
+            }
+        }
+    }
+    img
+}
+
 /// Where a point goes when the bones are turned: `pose` are bone names with an angle in degrees (counter-clockwise seen
 /// from the front), every bone turning about its own joint together with the bones above it.
 fn pose_point(model: &Model3d, bone: usize, turn: &[f32], p: [f32; 3]) -> [f32; 3] {
