@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::vrm::face::FaceMarks;
 
 const FACE_SCRIPT: &str = include_str!("../tools/ai/face_points.py");
+const TRACK_SCRIPT: &str = include_str!("../tools/ai/track.py");
 const SHAPE_SCRIPT: &str = include_str!("../tools/ai/shape3d.py");
 
 /// Only one helper at a time.
@@ -167,4 +168,23 @@ mod tests {
             Ok(_) => panic!("a flat picture has no face"),
         }
     }
+}
+
+/// Start the camera tracker as a program of its own. It sends what it sees to this computer on `port` and runs until it is killed.
+pub fn start_tracker(python: &str, camera: i32, port: u16) -> Result<std::process::Child, String> {
+    let folder = helper_folder();
+    std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    let script = folder.join("track.py");
+    std::fs::write(&script, TRACK_SCRIPT).map_err(|e| e.to_string())?;
+    let model = crate::aisetup::tracker_model();
+    let log = std::fs::File::create(crate::aisetup::root().join("track.log")).map_err(|e| e.to_string())?;
+    let err = log.try_clone().map_err(|e| e.to_string())?;
+    let mut cmd = Command::new(python);
+    cmd.arg(&script).arg("--model").arg(&model).args(["--camera", &camera.to_string(), "--port", &port.to_string()]).stdout(log).stderr(err);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd.spawn().map_err(|e| format!("Could not start the camera program ({e})."))
 }

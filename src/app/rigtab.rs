@@ -122,6 +122,8 @@ pub struct RigState {
     pub(super) face_click: u8,
     /// The Animate tab: playhead, timeline view and the saving job.
     pub(super) anim: super::animtab::AnimUi,
+    /// The Stream tab: tracking sources, inputs, outputs.
+    pub(super) stream: super::streamtab::StreamUi,
     /// Editing the hair: on or off, the tool (0 move joints, 1 add a strand, 2 add hair with the brush, 3 take hair away), the picked
     /// strand, the joints of the strand being made, the radius of the hair brush, the picture of the hair on the canvas, the hair the
     /// app found (before corrections) and a change waiting to be built.

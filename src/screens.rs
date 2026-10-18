@@ -3537,3 +3537,55 @@ fn animation_is_saved_as_gif_and_mp4() {
     assert!(bytes.len() > 2000 && &bytes[4..8] == b"ftyp", "{} bytes {:?}", bytes.len(), h.state_mut().test_anim().message);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The Stream tab: a face sent over the network moves a slider, the browser source serves the picture, and the screen is saved.
+#[test]
+fn stream_tab_follows_a_sent_face_and_serves_the_picture() {
+    use crate::track::net::{Arg, tests::{osc_bundle, osc_message}};
+    use std::io::{Read, Write};
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    let (id, lo, hi) = { let p = h.state().draw_mut_ref().doc.rig.params[0].clone(); (p.id, p.min, p.max) };
+    h.state_mut().test_rig_edit(|r| {
+        r.tracking.maps.push(crate::track::Map { param: id, input: "MouthOpen".into(), in_lo: 0.0, in_hi: 1.0, out_lo: lo, out_hi: hi, clamp: true, smoothing: 0.0, invert: false });
+        r.tracking.auto_blink = false;
+    });
+    h.state_mut().test_run_action_now("tab.6");
+    h.run_steps(3);
+    h.state_mut().test_stream().sources[1].port = 48_555;
+    h.state_mut().test_stream_source(1, true);
+    assert!(h.state_mut().test_stream().sources[1].error.is_none(), "{:?}", h.state_mut().test_stream().sources[1].error);
+    let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let pkt = osc_bundle(&[osc_message("/VMC/Ext/Blend/Val", &[Arg::Str("jawOpen".into()), Arg::Float(1.0)])]);
+    for _ in 0..40 {
+        sock.send_to(&pkt, "127.0.0.1:48555").unwrap();
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(h.state_mut().test_stream().tracked, "the face is heard");
+    let v = h.state_mut().test_rig().values.0.get(&id).copied().unwrap_or(f32::NAN);
+    assert!((v - hi).abs() < (hi - lo) * 0.1, "the open mouth moved the slider to its top: {v} of {lo}..{hi}");
+    // the browser source serves the newest picture
+    h.state_mut().test_stream().server = crate::outputs::BrowserSource::start(48_734).ok();
+    if h.state_mut().test_stream().server.is_some() {
+        for _ in 0..8 {
+            h.run_steps(1);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", 48_734)).unwrap();
+        s.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+        s.write_all(b"GET /frame.png HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        let mut all = Vec::new();
+        let _ = s.read_to_end(&mut all);
+        assert!(all.starts_with(b"HTTP/1.1 200"), "{}", String::from_utf8_lossy(&all[..all.len().min(80)]));
+        assert!(all.windows(4).any(|w| w == b"\x89PNG"));
+    }
+    save(&mut h, "stream_1");
+    // switched off again
+    h.state_mut().test_stream_source(1, false);
+    h.run_steps(2);
+    assert!(h.state_mut().test_stream().sources[1].rx.is_none());
+}
