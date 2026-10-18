@@ -178,3 +178,60 @@ fn real_models_open_and_draw() {
         render(&v, "turned");
     }
 }
+
+/// The real `.moc3` files of the VTube Studio folder, when they are on this computer: they must open and draw like the `.cmo3` ones.
+#[test]
+fn real_moc3_models_open_and_draw() {
+    use crate::rig::raster::{self, Item, LayerTex};
+    let base = std::path::PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\VTube Studio\VTube Studio_Data\StreamingAssets\Live2DModels");
+    let _ = std::fs::create_dir_all("target/screens");
+    for n in ["hiyori_vts", "Beija", "Evielin", "Selena3"] {
+        let dir = base.join(n);
+        let Some(model3) = std::fs::read_dir(&dir).ok().and_then(|d| d.flatten().map(|e| e.path()).find(|p| p.to_string_lossy().ends_with(".model3.json"))) else { continue };
+        let files = super::runtime::load_folder(&model3).unwrap();
+        let moc = std::fs::read(dir.join(files.model.file_references.moc.replace('\\', "/"))).unwrap();
+        let textures: Vec<Vec<u8>> = files.textures.iter().map(|p| std::fs::read(p).unwrap()).collect();
+        let t0 = std::time::Instant::now();
+        let imp = super::moc3::import_bytes(&moc, textures, n).unwrap_or_else(|e| panic!("{n}: {e}"));
+        eprintln!("{n}: {} params, {} meshes, {} warps, {} rotations, {} morphs in {:?}", imp.report.params, imp.report.meshes, imp.report.warps, imp.report.rotations, imp.report.morphs, t0.elapsed());
+        for note in &imp.report.notes {
+            eprintln!("  note: {note}");
+        }
+        assert!(imp.report.meshes > 5 && imp.report.params > 5, "{n} has parts");
+        if std::env::var("MOC3_DEBUG").is_ok() {
+            for m in &imp.doc.rig.meshes {
+                let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+                for v in &m.verts {
+                    for k in 0..2 {
+                        lo[k] = lo[k].min(v[k]);
+                        hi[k] = hi[k].max(v[k]);
+                    }
+                }
+                let name = imp.doc.layers.iter().find(|l| l.id == m.layer).map(|l| l.name.clone()).unwrap_or_default();
+                eprintln!("  mesh {name}: {:?} to {:?} parent {:?}", lo.map(|x| x as i32), hi.map(|x| x as i32), m.parent);
+            }
+        }
+        let (w, h) = (imp.doc.w, imp.doc.h);
+        let scale = (900.0 / w.max(h) as f32).min(1.0);
+        let (pw, ph) = (((w as f32 * scale) as usize).max(8), ((h as f32 * scale) as usize).max(8));
+        let rig = &*imp.doc.rig;
+        let render = |vals: &Values, tag: &str| {
+            let pose = rig.pose(vals);
+            let all = rig.deformed_all(&pose);
+            let texes: Vec<_> = imp.doc.layers.iter().rev().filter_map(|l| rig.mesh_of(l.id).map(|m| (m, LayerTex::of(l, w, h)))).collect();
+            let items: Vec<Item> = texes.iter().filter_map(|(m, t)| t.as_ref().map(|t| Item { tex: t, rest: &m.verts, now: all[rig.meshes.iter().position(|x| x.id == m.id).unwrap()].clone(), tris: &m.tris, opacity: 1.0 })).collect();
+            let px = raster::render(&items, pw, ph, scale, Some(eframe::egui::Color32::from_rgb(244, 242, 236)));
+            let mut img = image::RgbaImage::new(pw as u32, ph as u32);
+            for (i, p) in px.iter().enumerate() {
+                img.put_pixel((i % pw) as u32, (i / pw) as u32, image::Rgba([p.r(), p.g(), p.b(), 255]));
+            }
+            img.save(format!("target/screens/moc3_{n}_{tag}.png")).unwrap();
+        };
+        render(&Values::default(), "rest");
+        let mut v = Values::default();
+        for p in rig.params.iter().filter(|p| p.cid.starts_with("ParamAngle")) {
+            v.set(p.id, p.max * 0.8);
+        }
+        render(&v, "turned");
+    }
+}

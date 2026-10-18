@@ -3,6 +3,7 @@
 
 pub mod caff;
 pub mod cmo3;
+pub mod moc3;
 pub mod runtime;
 pub mod xml;
 
