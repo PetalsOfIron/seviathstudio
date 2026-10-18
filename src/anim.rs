@@ -134,9 +134,21 @@ impl Track {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+/// A named place on the timeline (the start of a walk, the moment of a hit...). Markers cut the animation into parts that can be
+/// played and saved on their own.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Marker {
     pub frame: u32,
+    pub name: String,
+}
+
+/// The sound of the animation: the file it is read from (kept by its path) and the frame it starts at (negative: before the start).
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioRef {
+    pub path: String,
+    pub offset: f32,
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -152,12 +164,13 @@ pub struct Animation {
     pub ping_pong: bool,
     pub tracks: Vec<Track>,
     pub markers: Vec<Marker>,
+    pub audio: Option<AudioRef>,
     next_id: u32,
 }
 
 impl Default for Animation {
     fn default() -> Self {
-        Animation { fps: 24.0, length: 120, range: None, looping: true, ping_pong: false, tracks: Vec::new(), markers: Vec::new(), next_id: 1 }
+        Animation { fps: 24.0, length: 120, range: None, looping: true, ping_pong: false, tracks: Vec::new(), markers: Vec::new(), audio: None, next_id: 1 }
     }
 }
 
@@ -204,6 +217,37 @@ impl Animation {
             }
         }
         (f, d)
+    }
+
+    /// Add a marker at `frame` (one that is there is renamed) and keep the list in order. Returns its index.
+    pub fn set_marker(&mut self, frame: u32, name: &str) -> usize {
+        if let Some(i) = self.markers.iter().position(|m| m.frame == frame) {
+            self.markers[i].name = name.to_string();
+            return i;
+        }
+        self.markers.push(Marker { frame, name: name.to_string() });
+        self.markers.sort_by_key(|m| m.frame);
+        self.markers.iter().position(|m| m.frame == frame).unwrap_or(0)
+    }
+
+    /// The first and last frame of the part a marker begins: up to the frame before the next marker, or the end.
+    pub fn marker_range(&self, i: usize) -> Option<[u32; 2]> {
+        let m = self.markers.get(i)?;
+        let end = self.markers.get(i + 1).map(|n| n.frame.saturating_sub(1)).unwrap_or(self.length.saturating_sub(1));
+        Some([m.frame, end.max(m.frame + 1).min(self.length.saturating_sub(1).max(m.frame + 1))])
+    }
+
+    /// Make (or remake) the track of a slider from a value in 0 to 1 for every frame (the mouth from the loudness of a sound): the keys
+    /// that matter, scaled to the range of the slider. Returns how many keys the track has.
+    pub fn set_from_curve(&mut self, param: Id, name: &str, values: &[f32], lo: f32, hi: f32) -> usize {
+        let t = self.track_for(Target::Param(param), name);
+        let samples: Vec<(f32, f32)> = values.iter().enumerate().map(|(f, v)| (f as f32, lo + (hi - lo) * v.clamp(0.0, 1.0))).collect();
+        let keys = simplify(&samples, ((hi - lo).abs() * 0.02).max(1e-4));
+        self.tracks[t].keys.clear();
+        for (f, v) in keys {
+            self.tracks[t].set_key(f, v, Ease::Linear);
+        }
+        self.tracks[t].keys.len()
     }
 
     pub fn track(&self, target: Target) -> Option<usize> {
@@ -294,6 +338,28 @@ pub fn simplify(samples: &[(f32, f32)], tol: f32) -> Vec<(f32, f32)> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn markers_cut_the_animation_into_parts() {
+        let mut a = Animation { length: 100, ..Default::default() };
+        a.set_marker(40, "Walk");
+        a.set_marker(0, "Idle");
+        a.set_marker(70, "Jump");
+        assert_eq!(a.markers.iter().map(|m| (m.frame, m.name.as_str())).collect::<Vec<_>>(), [(0, "Idle"), (40, "Walk"), (70, "Jump")], "kept in order");
+        assert_eq!(a.marker_range(0), Some([0, 39]));
+        assert_eq!(a.marker_range(1), Some([40, 69]));
+        assert_eq!(a.marker_range(2), Some([70, 99]), "the last part goes to the end");
+        assert_eq!(a.marker_range(3), None);
+        // a marker where one is only gives it the new name
+        assert_eq!(a.set_marker(40, "Run"), 1);
+        assert_eq!(a.markers.len(), 3);
+        assert_eq!(a.markers[1].name, "Run");
+        // saved and read back (old files have no names)
+        let back: Animation = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        assert_eq!(back.markers, a.markers);
+        let old: Animation = serde_json::from_str("{\"markers\":[{\"frame\":5}]}").unwrap();
+        assert_eq!(old.markers, [Marker { frame: 5, name: String::new() }]);
+    }
     use super::*;
 
     fn track(keys: &[(f32, f32, Ease)]) -> Track {

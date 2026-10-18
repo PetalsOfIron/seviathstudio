@@ -16,6 +16,7 @@ use crate::theme::*;
 use crate::widgets::{self, section_title};
 
 const ROW: f32 = 22.0;
+const LANE: f32 = 36.0;
 const RULER: f32 = 26.0;
 const NAMES: f32 = 190.0;
 
@@ -37,6 +38,8 @@ struct ExportJob {
     mp4: Option<crate::recorder::Writer>,
     base_values: crate::rig::Values,
     error: Option<String>,
+    /// The pictures of a sprite sheet, collected until the last frame.
+    sheet: Vec<image::RgbaImage>,
 }
 
 pub struct AnimUi {
@@ -56,12 +59,21 @@ pub struct AnimUi {
     pub export_side: u32,
     pub export_work_area: bool,
     pub export_transparent: bool,
+    pub export_cols: u32,
     job: Option<ExportJob>,
     /// What the layers looked like before the animation moved them, to put back when it stops.
     base: Option<HashMap<u64, (f32, bool)>>,
     /// A change being made (a key dragged, a number dragged): the document before it, kept as one undo step when the mouse is let go.
     pending: Option<(String, DocState)>,
     pub view_zoom: f32,
+    /// The sound of the animation as it was read (its path and the numbers), what went wrong reading a path, and whether it plays now.
+    pub audio: Option<(String, crate::audio::Audio)>,
+    audio_failed: Option<String>,
+    audio_playing: bool,
+    audio_last: f32,
+    player: Option<crate::audio::Player>,
+    /// The slider the lip sync is made for.
+    pub lip_param: Option<Id>,
 }
 
 impl Default for AnimUi {
@@ -83,12 +95,50 @@ impl Default for AnimUi {
             export_side: 720,
             export_work_area: false,
             export_transparent: true,
+            export_cols: 0,
             job: None,
             base: None,
             pending: None,
             view_zoom: 1.0,
+            audio: None,
+            audio_failed: None,
+            audio_playing: false,
+            audio_last: 0.0,
+            player: None,
+            lip_param: None,
         }
     }
+}
+
+/// Put the pictures of an animation side by side in one picture (rows of `cols` columns; 0 for a square-ish sheet) and write the
+/// numbers a game needs next to it as `<name>.json`: the size of a frame, the columns, the frame rate and the marked parts.
+pub(crate) fn write_sprite_sheet(frames: &[image::RgbaImage], cols: u32, path: &std::path::Path, anim: &crate::anim::Animation, first_frame: u32) -> Result<(), String> {
+    let Some(f0) = frames.first() else { return Err("There are no frames to put on a sheet.".into()) };
+    let (fw, fh) = f0.dimensions();
+    let n = frames.len() as u32;
+    let cols = if cols == 0 { (n as f32).sqrt().ceil() as u32 } else { cols.min(n) }.max(1);
+    let rows = n.div_ceil(cols);
+    if (cols as u64 * fw as u64) > 16_384 || (rows as u64 * fh as u64) > 16_384 {
+        return Err(format!("The sheet would be {}x{} pixels, which is too big. Use a smaller size or more columns.", cols * fw, rows * fh));
+    }
+    let mut sheet = image::RgbaImage::new(cols * fw, rows * fh);
+    for (i, f) in frames.iter().enumerate() {
+        image::imageops::replace(&mut sheet, f, ((i as u32 % cols) * fw) as i64, ((i as u32 / cols) * fh) as i64);
+    }
+    sheet.save(path).map_err(|e| e.to_string())?;
+    let parts: Vec<serde_json::Value> = (0..anim.markers.len())
+        .filter_map(|i| {
+            let [a, b] = anim.marker_range(i)?;
+            // only the parts inside what was saved, counted from the first saved frame
+            let (a, b) = (a.max(first_frame), b.min(first_frame + n - 1));
+            (a <= b).then(|| serde_json::json!({"name": anim.markers[i].name, "start": a - first_frame, "end": b - first_frame}))
+        })
+        .collect();
+    let json = serde_json::json!({
+        "image": path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+        "frame_width": fw, "frame_height": fh, "columns": cols, "rows": rows, "frames": n, "fps": anim.fps, "parts": parts,
+    });
+    std::fs::write(path.with_extension("json"), serde_json::to_string_pretty(&json).unwrap_or_default()).map_err(|e| e.to_string())
 }
 
 fn target_color(t: &Target) -> Color32 {
@@ -190,6 +240,7 @@ impl SeviathApp {
         self.rig_init();
         self.anim_keys(&ctx);
         self.anim_playback(&ctx);
+        self.anim_sync_audio();
         self.phys_tick(&ctx);
         self.anim_export_step(&ctx);
         self.rig_render(&ctx);
@@ -231,6 +282,60 @@ impl SeviathApp {
         }
         if del {
             self.anim_delete_selected();
+        }
+    }
+
+    /// Read the sound the animation names when it is not read yet.
+    fn anim_load_audio(&mut self) {
+        let want = self.draw.doc.rig.anim.audio.as_ref().map(|a| a.path.clone());
+        match want {
+            None => {
+                self.rigs.anim.audio = None;
+                self.rigs.anim.audio_failed = None;
+            }
+            Some(p) => {
+                if self.rigs.anim.audio.as_ref().is_some_and(|(q, _)| *q == p) || self.rigs.anim.audio_failed.as_ref() == Some(&p) {
+                    return;
+                }
+                match std::fs::read(&p).map_err(|e| format!("Could not read {p}: {e}")).and_then(crate::audio::Audio::decode) {
+                    Ok(a) => {
+                        self.rigs.anim.audio = Some((p, a));
+                        self.rigs.anim.audio_failed = None;
+                    }
+                    Err(e) => {
+                        self.rigs.anim.message = Some(e);
+                        self.rigs.anim.audio = None;
+                        self.rigs.anim.audio_failed = Some(p);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The sound plays when the timeline plays, from where the playhead is; it is cut when the timeline stops, goes back (the back
+    /// part of back and forth) or jumps back (a loop).
+    fn anim_sync_audio(&mut self) {
+        self.anim_load_audio();
+        let ui = &mut self.rigs.anim;
+        let (fps, offset) = (self.draw.doc.rig.anim.fps.max(1.0), self.draw.doc.rig.anim.audio.as_ref().map(|a| a.offset).unwrap_or(0.0));
+        let should = ui.playing && ui.dir > 0.0 && ui.job.is_none() && ui.audio.is_some();
+        let jumped = ui.frame < ui.audio_last - 0.5;
+        ui.audio_last = ui.frame;
+        if !should {
+            if ui.audio_playing {
+                if let Some(p) = &ui.player {
+                    p.stop();
+                }
+                ui.audio_playing = false;
+            }
+            return;
+        }
+        if !ui.audio_playing || jumped {
+            let player = ui.player.get_or_insert_with(crate::audio::Player::new);
+            if let Some((_, a)) = &ui.audio {
+                player.play(a, (ui.frame - offset) / fps);
+            }
+            ui.audio_playing = true;
         }
     }
 
@@ -336,6 +441,12 @@ impl SeviathApp {
                     self.rigs.anim.playing = false;
                 }
             }
+            if ui.button("Add marker").on_hover_text("A named place at the playhead; markers cut the animation into parts").clicked() {
+                let here = self.rigs.anim.frame.round().max(0.0) as u32;
+                let n = self.draw.doc.rig.anim.markers.len() + 1;
+                let name = format!("Part {n}");
+                self.anim_mut("Add marker").set_marker(here, &name);
+            }
             let mut a = self.draw.doc.rig.anim.clone();
             ui.checkbox(&mut a.looping, "Loop");
             ui.add_enabled(a.looping, egui::Checkbox::new(&mut a.ping_pong, "Back and forth"));
@@ -372,7 +483,9 @@ impl SeviathApp {
         let tracks_n = self.draw.doc.rig.anim.tracks.len();
         let area = Rect::from_min_size(avail.min, vec2(avail.width(), avail.height().max(80.0)));
         let key_left = area.left() + NAMES;
-        let rows_top = area.top() + RULER;
+        let lane = if self.draw.doc.rig.anim.audio.is_some() { LANE } else { 0.0 };
+        let ruler_b = area.top() + RULER;
+        let rows_top = ruler_b + lane;
         let (resp, painter) = ui.allocate_painter(area.size(), Sense::click_and_drag());
         painter.rect_filled(area, 4.0, Color32::from_rgb(18, 24, 22));
         let zoom = self.rigs.anim.zoom;
@@ -401,18 +514,42 @@ impl SeviathApp {
             if x < key_left || x > area.right() {
                 continue;
             }
-            painter.line_segment([pos2(x, rows_top - 8.0), pos2(x, rows_top)], Stroke::new(1.0, TEXT_DIM));
+            painter.line_segment([pos2(x, ruler_b - 8.0), pos2(x, ruler_b)], Stroke::new(1.0, TEXT_DIM));
             painter.text(pos2(x + 3.0, area.top() + 4.0), egui::Align2::LEFT_TOP, format!("{f}"), egui::FontId::proportional(10.5), TEXT_DIM);
         }
         // the work area and the end
         let (r0, r1) = a.play_range();
         let (rx0, rx1) = (self.anim_x(key_left, r0 as f32).max(key_left), self.anim_x(key_left, r1 as f32 + 1.0).min(area.right()));
         if rx1 > rx0 {
-            painter.rect_filled(Rect::from_min_max(pos2(rx0, rows_top - 4.0), pos2(rx1, rows_top)), 0.0, Color32::from_rgba_unmultiplied(60, 200, 130, 90));
+            painter.rect_filled(Rect::from_min_max(pos2(rx0, ruler_b - 4.0), pos2(rx1, ruler_b)), 0.0, Color32::from_rgba_unmultiplied(60, 200, 130, 90));
         }
         let endx = self.anim_x(key_left, a.length as f32);
         if endx >= key_left && endx <= area.right() {
             painter.line_segment([pos2(endx, rows_top), pos2(endx, area.bottom())], Stroke::new(1.0, Color32::from_rgb(120, 60, 60)));
+        }
+        // the waveform of the sound
+        if let (Some(r), Some((_, au))) = (&a.audio, &self.rigs.anim.audio) {
+            let w = (area.right() - key_left).max(2.0);
+            let n = (w / 2.0) as usize;
+            let (from, to) = ((scroll_now - r.offset) / a.fps.max(1.0), (scroll_now + w / zoom - r.offset) / a.fps.max(1.0));
+            let mid = ruler_b + LANE / 2.0;
+            for (i, (lo, hi)) in au.peaks(from, to, n).into_iter().enumerate() {
+                let x = key_left + i as f32 * 2.0;
+                if hi - lo > 0.0 {
+                    painter.line_segment([pos2(x, mid - hi * (LANE / 2.0 - 2.0)), pos2(x, mid - lo * (LANE / 2.0 - 2.0) + 1.0)], Stroke::new(1.5, Color32::from_rgb(120, 190, 150)));
+                }
+            }
+            painter.text(pos2(area.left() + 8.0, mid), egui::Align2::LEFT_CENTER, "Sound", egui::FontId::proportional(11.5), TEXT_DIM);
+        }
+        // the markers
+        for m in &a.markers {
+            let x = self.anim_x(key_left, m.frame as f32);
+            if x < key_left || x > area.right() {
+                continue;
+            }
+            painter.line_segment([pos2(x, ruler_b), pos2(x, area.bottom())], Stroke::new(1.0, Color32::from_rgba_unmultiplied(120, 170, 255, 70)));
+            painter.add(egui::Shape::convex_polygon(vec![pos2(x, ruler_b - 14.0), pos2(x + 6.0, ruler_b - 10.0), pos2(x, ruler_b - 6.0)], Color32::from_rgb(120, 170, 255), Stroke::NONE));
+            painter.text(pos2(x + 8.0, ruler_b - 15.0), egui::Align2::LEFT_TOP, &m.name, egui::FontId::proportional(10.5), Color32::from_rgb(150, 190, 255));
         }
         // the rows
         let selected_track = self.rigs.anim.sel_track;
@@ -760,6 +897,8 @@ impl SeviathApp {
                 });
             }
         }
+        self.anim_sound_ui(ui);
+        self.anim_markers_ui(ui);
         self.anim_export_ui(ui);
         if let Some(m) = &self.rigs.anim.message {
             ui.label(RichText::new(m).size(11.5).color(TEXT_DIM));
@@ -768,10 +907,115 @@ impl SeviathApp {
 
     // ---- saving the animation ----
 
+    fn anim_sound_ui(&mut self, ui: &mut Ui) {
+        section_title(ui, "Sound");
+        let a = self.draw.doc.rig.anim.clone();
+        let Some(r) = a.audio.clone() else {
+            ui.label(RichText::new("Add a voice or music: it plays with the timeline, is drawn above the tracks, and the mouth can be made from it.").size(11.5).color(TEXT_DIM));
+            if ui.button("Add a sound...").on_hover_text("WAV, MP3, OGG, FLAC or AAC").clicked() {
+                if let Some(p) = rfd::FileDialog::new().set_title("A sound").set_directory(self.settings.projects_folder()).add_filter("Sound", &["wav", "mp3", "ogg", "flac", "aac", "m4a"]).pick_file() {
+                    self.anim_mut("Add a sound").audio = Some(crate::anim::AudioRef { path: p.to_string_lossy().to_string(), offset: 0.0 });
+                    self.rigs.anim.audio_failed = None;
+                }
+            }
+            return;
+        };
+        let name = std::path::Path::new(&r.path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let secs = self.rigs.anim.audio.as_ref().map(|(_, au)| au.seconds());
+        ui.label(RichText::new(match secs {
+            Some(s) => format!("{name}  ({s:.1} s)"),
+            None => format!("{name}  (cannot be read)"),
+        }).size(12.0));
+        let mut off = r.offset;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Starts at frame").size(12.0).color(TEXT_DIM));
+            ui.add(egui::DragValue::new(&mut off).speed(0.5));
+            if ui.small_button("Remove").clicked() {
+                self.anim_mut("Remove the sound").audio = None;
+            }
+        });
+        if (off - r.offset).abs() > 1e-6 {
+            if let Some(au) = self.anim_mut("Move the sound").audio.as_mut() {
+                au.offset = off;
+            }
+        }
+        if let Some(on) = self.rigs.anim.player.as_ref().and_then(|p| p.sound_card()) {
+            if !on {
+                ui.label(RichText::new("No sound card was found, so the sound stays silent.").size(11.5).color(GOLD));
+            }
+        }
+        // the mouth from the sound
+        let params: Vec<(Id, String, f32, f32)> = self.draw.doc.rig.params.iter().map(|p| (p.id, p.name.clone(), p.min, p.max)).collect();
+        if !params.is_empty() && secs.is_some() {
+            let guess = params.iter().find(|p| p.1.to_lowercase().replace([' ', '_'], "").contains("mouthopen")).map(|p| p.0);
+            let sel = self.rigs.anim.lip_param.filter(|id| params.iter().any(|p| p.0 == *id)).or(guess).unwrap_or(params[0].0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Mouth slider").size(12.0).color(TEXT_DIM));
+                let label = params.iter().find(|p| p.0 == sel).map(|p| p.1.clone()).unwrap_or_default();
+                egui::ComboBox::from_id_salt("lip_param").selected_text(label).width(130.0).show_ui(ui, |ui| {
+                    for p in &params {
+                        if ui.selectable_label(sel == p.0, &p.1).clicked() {
+                            self.rigs.anim.lip_param = Some(p.0);
+                        }
+                    }
+                });
+            });
+            if ui.button("Make the mouth from the sound").on_hover_text("A track for that slider: open when the sound is loud, shut when it is quiet").clicked() {
+                if let (Some((_, au)), Some((id, pname, lo, hi))) = (self.rigs.anim.audio.clone(), params.iter().find(|p| p.0 == sel).cloned()) {
+                    let curve = au.mouth_open(a.fps.max(1.0), r.offset, a.length as usize);
+                    let keys = self.anim_mut("Mouth from the sound").set_from_curve(id, &pname, &curve, lo, hi);
+                    self.rigs.anim.message = Some(format!("The track {pname} has {keys} keys from the sound."));
+                }
+            }
+        }
+    }
+
+    fn anim_markers_ui(&mut self, ui: &mut Ui) {
+        let a = self.draw.doc.rig.anim.clone();
+        if a.markers.is_empty() {
+            return;
+        }
+        section_title(ui, "Markers");
+        ui.label(RichText::new("A marker begins a part that goes on until the next marker. Play only a part, or save a sprite sheet of it and the .json lists all parts.").size(11.5).color(TEXT_DIM));
+        let mut edited = a.markers.clone();
+        let mut remove: Option<usize> = None;
+        let mut go: Option<u32> = None;
+        let mut only: Option<[u32; 2]> = None;
+        for (i, m) in edited.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut m.name).desired_width(110.0));
+                ui.label(RichText::new(format!("frame {}", m.frame)).size(11.5).color(TEXT_DIM));
+                if ui.small_button("Go").on_hover_text("Put the playhead here").clicked() {
+                    go = Some(m.frame);
+                }
+                if ui.small_button("Play this part").on_hover_text("The work area becomes this part").clicked() {
+                    only = a.marker_range(i);
+                }
+                if ui.small_button("Delete").clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            edited.remove(i);
+        }
+        if edited != a.markers {
+            self.anim_mut("Markers").markers = edited;
+        }
+        if let Some(f) = go {
+            self.rigs.anim.frame = f as f32;
+            self.rigs.anim.playing = false;
+        }
+        if let Some(r) = only {
+            self.anim_mut("Play a part").range = Some(r);
+            self.rigs.anim.frame = r[0] as f32;
+        }
+    }
+
     fn anim_export_ui(&mut self, ui: &mut Ui) {
         section_title(ui, "Save the animation");
         ui.horizontal_wrapped(|ui| {
-            for (i, n) in ["PNG pictures", "GIF", "MP4 video"].iter().enumerate() {
+            for (i, n) in ["PNG pictures", "GIF", "MP4 video", "Sprite sheet"].iter().enumerate() {
                 if widgets::chip(ui, n, self.rigs.anim.export_kind == i as u8).clicked() {
                     self.rigs.anim.export_kind = i as u8;
                 }
@@ -783,6 +1027,10 @@ impl SeviathApp {
             ui.checkbox(&mut self.rigs.anim.export_work_area, "Only the part that plays");
             if self.rigs.anim.export_kind != 2 {
                 ui.checkbox(&mut self.rigs.anim.export_transparent, "See-through background");
+            }
+            if self.rigs.anim.export_kind == 3 {
+                ui.label(RichText::new("Columns").size(12.0).color(TEXT_DIM));
+                ui.add(egui::DragValue::new(&mut self.rigs.anim.export_cols).range(0..=64)).on_hover_text("0 chooses a square-ish sheet");
             }
         });
         let busy = self.rigs.anim.job.is_some();
@@ -811,7 +1059,7 @@ impl SeviathApp {
             (((w as f32 * k).round() as u32).max(8), ((h as f32 * k).round() as u32).max(8))
         };
         let name = self.files.name.clone();
-        let mut job = ExportJob { kind, frames, next: 0, size, transparent: self.rigs.anim.export_transparent && kind != 2, dir: PathBuf::new(), path: PathBuf::new(), gif: None, mp4: None, base_values: self.rigs.values.clone(), error: None };
+        let mut job = ExportJob { kind, frames, next: 0, size, transparent: self.rigs.anim.export_transparent && kind != 2, dir: PathBuf::new(), path: PathBuf::new(), gif: None, mp4: None, base_values: self.rigs.values.clone(), error: None, sheet: Vec::new() };
         match kind {
             0 => {
                 let Some(dir) = rfd::FileDialog::new().set_title("Folder for the pictures").set_directory(self.settings.projects_folder()).pick_folder() else { return };
@@ -831,6 +1079,10 @@ impl SeviathApp {
                         return;
                     }
                 }
+            }
+            3 => {
+                let Some(p) = rfd::FileDialog::new().set_title("Save the sprite sheet").set_directory(self.settings.projects_folder()).set_file_name(format!("{name}.png")).add_filter("PNG picture", &["png"]).save_file() else { return };
+                job.path = p;
             }
             _ => {
                 let Some(p) = rfd::FileDialog::new().set_title("Save the video").set_directory(self.settings.projects_folder()).set_file_name(format!("{name}.mp4")).add_filter("MP4 video", &["mp4"]).save_file() else { return };
@@ -889,6 +1141,10 @@ impl SeviathApp {
                     Some(enc) => enc.encode_frame(image::Frame::from_parts(img, 0, 0, image::Delay::from_numer_denom_ms(1000, fps.round() as u32))).map_err(|e| e.to_string()),
                     None => Ok(()),
                 },
+                3 => {
+                    job.sheet.push(img);
+                    Ok(())
+                }
                 _ => match job.mp4.as_mut() {
                     Some(w) => {
                         let mut rgb = Vec::with_capacity((img.width() * img.height() * 3) as usize);
@@ -922,10 +1178,18 @@ impl SeviathApp {
                 w.finish();
             }
             drop(job.gif.take());
+            if job.kind == 3 && job.error.is_none() {
+                let a = &self.draw.doc.rig.anim;
+                let first = job.frames.first().copied().unwrap_or(0);
+                if let Err(e) = write_sprite_sheet(&job.sheet, self.rigs.anim.export_cols, &job.path, a, first) {
+                    job.error = Some(e);
+                }
+            }
             self.rigs.anim.message = Some(match job.error {
                 Some(e) => format!("Saving stopped: {e}"),
                 None => match job.kind {
                     0 => format!("Saved {n} pictures in {}.", job.dir.display()),
+                    3 => format!("Saved the sprite sheet {} with its .json next to it ({n} frames).", job.path.display()),
                     _ => format!("Saved {} ({n} frames).", job.path.display()),
                 },
             });
@@ -947,7 +1211,7 @@ impl SeviathApp {
         let (w, h) = (self.draw.doc.w, self.draw.doc.h);
         let k = (side as f32 / w.max(h) as f32).min(1.0);
         let size = (((w as f32 * k).round() as u32).max(8), ((h as f32 * k).round() as u32).max(8));
-        let job = ExportJob { kind: 0, frames: (0..a.length).collect(), next: 0, size, transparent: false, dir, path: PathBuf::new(), gif: None, mp4: None, base_values: self.rigs.values.clone(), error: None };
+        let job = ExportJob { kind: 0, frames: (0..a.length).collect(), next: 0, size, transparent: false, dir, path: PathBuf::new(), gif: None, mp4: None, base_values: self.rigs.values.clone(), error: None, sheet: Vec::new() };
         self.rigs.anim.job = Some(job);
     }
 
@@ -960,8 +1224,9 @@ impl SeviathApp {
             let k = (side as f32 / w.max(h) as f32).min(1.0);
             (((w as f32 * k).round() as u32).max(8), ((h as f32 * k).round() as u32).max(8))
         };
-        let mut job = ExportJob { kind, frames: (0..a.length).collect(), next: 0, size, transparent: kind == 1, dir: PathBuf::new(), path: path.clone(), gif: None, mp4: None, base_values: self.rigs.values.clone(), error: None };
-        if kind == 1 {
+        let mut job = ExportJob { kind, frames: (0..a.length).collect(), next: 0, size, transparent: kind == 1, dir: PathBuf::new(), path: path.clone(), gif: None, mp4: None, base_values: self.rigs.values.clone(), error: None, sheet: Vec::new() };
+        if kind == 3 {
+        } else if kind == 1 {
             let mut enc = image::codecs::gif::GifEncoder::new(std::fs::File::create(&path).unwrap());
             let _ = enc.set_repeat(image::codecs::gif::Repeat::Infinite);
             job.gif = Some(enc);
@@ -981,5 +1246,50 @@ impl SeviathApp {
     #[cfg(test)]
     pub fn test_anim_busy(&self) -> bool {
         self.rigs.anim.job.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_sprite_sheet_puts_the_frames_in_rows_and_says_where_the_parts_are() {
+        let dir = std::env::temp_dir().join(format!("seviath_sheet_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let frames: Vec<image::RgbaImage> = (0..5u8).map(|i| image::RgbaImage::from_pixel(4, 3, image::Rgba([i * 40, 0, 0, 255]))).collect();
+        let mut a = crate::anim::Animation::default();
+        a.length = 10;
+        a.fps = 12.0;
+        a.set_marker(0, "Idle");
+        a.set_marker(3, "Walk");
+        let path = dir.join("hero.png");
+        // 5 frames: a 3 by 2 sheet
+        write_sprite_sheet(&frames, 0, &path, &a, 0).unwrap();
+        let img = image::open(&path).unwrap().to_rgba8();
+        assert_eq!(img.dimensions(), (12, 6));
+        assert_eq!(img.get_pixel(0, 0).0[0], 0);
+        assert_eq!(img.get_pixel(4, 0).0[0], 40, "the second frame is next to the first");
+        assert_eq!(img.get_pixel(0, 3).0[0], 120, "the fourth starts the second row");
+        assert_eq!(img.get_pixel(11, 5).0[3], 0, "the empty place is see-through");
+        let j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("hero.json")).unwrap()).unwrap();
+        assert_eq!((j["frame_width"].as_u64(), j["frame_height"].as_u64(), j["columns"].as_u64(), j["rows"].as_u64(), j["frames"].as_u64()), (Some(4), Some(3), Some(3), Some(2), Some(5)));
+        assert_eq!(j["image"], "hero.png");
+        assert_eq!((j["parts"][0]["name"].as_str(), j["parts"][0]["start"].as_u64(), j["parts"][0]["end"].as_u64()), (Some("Idle"), Some(0), Some(2)));
+        assert_eq!((j["parts"][1]["name"].as_str(), j["parts"][1]["start"].as_u64(), j["parts"][1]["end"].as_u64()), (Some("Walk"), Some(3), Some(4)), "cut at the last saved frame");
+        // a set number of columns, and a sheet that is too big is refused
+        write_sprite_sheet(&frames, 5, &path, &a, 0).unwrap();
+        assert_eq!(image::open(&path).unwrap().to_rgba8().dimensions(), (20, 3));
+        let big = vec![image::RgbaImage::new(9000, 10); 2];
+        assert!(write_sprite_sheet(&big, 2, &path, &a, 0).unwrap_err().contains("too big"));
+        assert!(write_sprite_sheet(&[], 0, &path, &a, 0).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+impl AnimUi {
+    pub fn test_audio_playing(&self) -> bool {
+        self.audio_playing
     }
 }
