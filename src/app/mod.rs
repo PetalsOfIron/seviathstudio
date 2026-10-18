@@ -14,6 +14,7 @@ use crate::theme::{self, *};
 use crate::widgets::{self, icon_button, segmented, tab_button};
 
 mod animtab;
+mod streamtab;
 mod commands;
 mod files;
 mod layoutmenu;
@@ -625,6 +626,7 @@ impl eframe::App for SeviathApp {
             (_, Tab::Rig) => self.rig_ui(ui),
             (_, Tab::Physics) => self.physics_ui(ui),
             (_, Tab::Animate) => self.anim_ui(ui),
+            (_, Tab::Stream) => self.stream_ui(ui),
             (_, t) => tabs::placeholder::ui(ui, t),
         }
 

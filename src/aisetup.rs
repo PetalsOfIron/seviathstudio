@@ -67,6 +67,18 @@ impl Status {
     }
 }
 
+const FACE_MODEL_URL: &str = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task";
+
+/// The face model of the camera tracker.
+pub fn tracker_model() -> PathBuf {
+    root().join("models").join("face_landmarker.task")
+}
+
+/// Can the camera tracker start: the Python environment and the face model are there.
+pub fn tracker_ready() -> bool {
+    venv_python(&root()).exists() && tracker_model().exists()
+}
+
 /// Look at the folder (only at the files, nothing is started).
 pub fn status() -> Status {
     status_in(&root())
@@ -208,6 +220,13 @@ pub fn install(step: &Sender<String>) -> Result<(), String> {
         let bytes = std::fs::read(&zip_path).map_err(|e| e.to_string())?;
         unzip_stripped(&bytes, &root.join("Hunyuan3D-2"))?;
         let _ = std::fs::remove_file(&zip_path);
+    }
+    if !tracker_model().exists() {
+        let _ = step.send("Downloading the face model for the camera (4 MB)".into());
+        std::fs::create_dir_all(root.join("models")).map_err(|e| e.to_string())?;
+        let mut cmd = Command::new("curl");
+        cmd.args(["-L", "--fail", "--silent", "--show-error", "-o"]).arg(tracker_model()).arg(FACE_MODEL_URL);
+        run_logged(cmd, &log)?;
     }
     // a last look: do the packages start?
     let _ = step.send("Checking that it works".into());

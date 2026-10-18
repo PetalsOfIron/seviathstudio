@@ -293,6 +293,8 @@ pub struct Rig {
     pub vtube: Option<crate::import::runtime::Vtube>,
     /// The timeline of the character (Animate tab).
     pub anim: crate::anim::Animation,
+    /// How tracking (the face from a camera, a phone or a program) moves the sliders (Stream tab).
+    pub tracking: crate::track::TrackMapping,
     next_id: Id,
 }
 

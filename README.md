@@ -2,7 +2,7 @@
 
 Open-source app to **draw, rig, animate and stream a 2D character from one file**, with reliable PSD export — made for VTuber artists, riggers and VTubers. Native Rust, built with [egui](https://github.com/emilk/egui).
 
-This is the Rust version. It is being built tab by tab: **Draw** works today (brush engine with 103 brushes and pen pressure, layers with blend modes, clipping and folders, undo history, selections, quick mask, move & transform, paint bucket with gap closing, live symmetry, layer filters and batch edits, print size (DPI), guides, project templates, gradients and a color randomizer, vector layers (pen, eraser, node editing, pressure graph, auto-trace), filters and color adjustments, check views, projects with autosave, PSD / OpenRaster / Krita import and PSD / ORA / PNG / JPEG / WebP export); Parts, Rig, Physics, Animate and Stream follow. Live2D `.cmo3` models open from File, Open.
+This is the Rust version. It is being built tab by tab: **Draw** works today (brush engine with 103 brushes and pen pressure, layers with blend modes, clipping and folders, undo history, selections, quick mask, move & transform, paint bucket with gap closing, live symmetry, layer filters and batch edits, print size (DPI), guides, project templates, gradients and a color randomizer, vector layers (pen, eraser, node editing, pressure graph, auto-trace), filters and color adjustments, check views, projects with autosave, PSD / OpenRaster / Krita import and PSD / ORA / PNG / JPEG / WebP export); Parts, Rig, Physics, Animate and Stream (face tracking, VMC and camera, OBS browser source, model window) work too. Live2D `.cmo3` models open from File, Open.
 
 ## Build and run
 
