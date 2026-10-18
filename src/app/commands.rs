@@ -39,7 +39,7 @@ impl SeviathApp {
     pub(super) fn command_keys(&mut self, ctx: &egui::Context) {
         let typing = ctx.egui_wants_keyboard_input();
         let keys = self.settings.shortcuts.clone();
-        let fired = ctx.input_mut(|i| actions::pressed(i, &keys, ACTIONS.iter().filter(|d| !is_draw_action(d.id) && (d.typing_ok || !typing))));
+        let fired = ctx.input_mut(|i| actions::pressed(i, &keys, ACTIONS.iter().filter(|d| !is_draw_action(d.id) && (d.typing_ok || !typing) && !(d.id == "rig.keypose" && self.tab != Tab::Rig))));
         let redo_alias = !typing && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z));
         for id in fired {
             // the pose key only means something in the Rig tab

@@ -3378,3 +3378,162 @@ fn live2d_runtime_physics_screens() {
     h.state_mut().phys_advance(1.0 / 60.0);
     assert!(h.state_mut().test_phys().param_out.is_empty());
 }
+
+/// The Animate tab: tracks with keys move the sliders, the playhead applies them, and the animation is saved as pictures.
+#[test]
+fn animate_tab_screens() {
+    use crate::anim::{Ease, Target};
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    // the sliders of the character: the first two that move something
+    let params: Vec<(u32, String, f32, f32)> = h.state().draw_mut_ref().doc.rig.params.iter().map(|p| (p.id, p.name.clone(), p.min, p.max)).collect();
+    assert!(params.len() >= 2, "the test character has sliders: {}", params.len());
+    let mut layer = 0;
+    h.state_mut().test_rig_edit(|r| {
+        r.anim.length = 24;
+        r.anim.fps = 12.0;
+        for (id, name, lo, hi) in params.iter().take(2) {
+            let t = r.anim.track_for(Target::Param(*id), name);
+            r.anim.tracks[t].set_key(0.0, *lo, Ease::InOut);
+            r.anim.tracks[t].set_key(12.0, *hi, Ease::Linear);
+            r.anim.tracks[t].set_key(23.0, (*lo + *hi) / 2.0, Ease::Linear);
+        }
+        layer = r.meshes.first().map(|m| m.layer).unwrap_or(0);
+    });
+    let _ = layer;
+    h.state_mut().test_run_action_now("tab.5");
+    h.run_steps(5);
+    // at frame 0 and at frame 12 the character looks different
+    h.state_mut().test_anim().frame = 0.0;
+    h.run_steps(3);
+    let a = h.state_mut().test_still(300).expect("a picture");
+    h.state_mut().test_anim().frame = 12.0;
+    h.run_steps(3);
+    let b = h.state_mut().test_still(300).expect("a picture");
+    assert_ne!(a.as_raw(), b.as_raw(), "the sliders were moved by the tracks");
+    save(&mut h, "animate_1_timeline");
+    // playing moves the playhead and stops at the end when it does not loop
+    h.state_mut().test_rig_edit(|r| r.anim.looping = false);
+    h.state_mut().test_anim().frame = 20.0;
+    h.state_mut().test_anim().playing = true;
+    for _ in 0..40 {
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    assert!(!h.state_mut().test_anim().playing && h.state_mut().test_anim().frame >= 22.9, "played to the end: {}", h.state_mut().test_anim().frame);
+    // saved as pictures: one for every frame, and the first and the middle differ
+    let dir = std::env::temp_dir().join(format!("seviath_anim_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    h.state_mut().test_anim_export_png(dir.clone(), 240);
+    for _ in 0..200 {
+        h.run_steps(1);
+        if !h.state_mut().test_anim_busy() {
+            break;
+        }
+    }
+    assert!(!h.state_mut().test_anim_busy());
+    let count = std::fs::read_dir(&dir).unwrap().flatten().count();
+    assert_eq!(count, 24, "{:?}", h.state_mut().test_anim().message);
+    let f0 = image::open(dir.join("frame_0001.png")).unwrap().to_rgba8();
+    let f12 = image::open(dir.join("frame_0013.png")).unwrap().to_rgba8();
+    assert_ne!(f0.as_raw(), f12.as_raw());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Keying by keyboard, auto key from a slider, deleting, and undo of timeline edits.
+#[test]
+fn animate_tab_keys_autokey_and_undo() {
+    use crate::anim::Target;
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    let (id, name) = { let p = h.state().draw_mut_ref().doc.rig.params[0].clone(); (p.id, p.name) };
+    h.state_mut().test_rig_edit(|r| {
+        r.anim.track_for(Target::Param(id), &name);
+    });
+    h.state_mut().test_run_action_now("tab.5");
+    h.run_steps(4);
+    // K puts a key on the picked track at the playhead, with the value of the slider
+    h.state_mut().test_anim().sel_track = Some(0);
+    h.state_mut().test_anim().frame = 6.0;
+    h.state_mut().test_rig().values.set(id, 5.0);
+    h.run_steps(2);
+    h.key_press(eframe::egui::Key::K);
+    h.run_steps(3);
+    let keys = |h: &mut Harness<'_, SeviathApp>| h.state().draw_mut_ref().doc.rig.anim.tracks[0].keys.clone();
+    let k = keys(&mut h);
+    assert_eq!(k.len(), 1, "{k:?}");
+    assert_eq!((k[0].frame, k[0].value), (6.0, 5.0));
+    // that was one undo step: undo takes it away
+    h.key_press_modifiers(eframe::egui::Modifiers::COMMAND, eframe::egui::Key::Z);
+    h.run_steps(3);
+    assert!(keys(&mut h).is_empty(), "undone");
+    // Delete takes the picked key away
+    h.state_mut().test_anim().frame = 8.0;
+    h.state_mut().test_rig().values.set(id, 2.0);
+    h.state_mut().test_rig_edit(|r| { r.anim.tracks[0].set_key(8.0, 2.0, crate::anim::Ease::Linear); });
+    h.state_mut().test_anim().sel = Some((0, 0));
+    h.run_steps(2);
+    h.key_press(eframe::egui::Key::Delete);
+    h.run_steps(3);
+    assert!(keys(&mut h).is_empty());
+    // space plays and pauses
+    h.key_press(eframe::egui::Key::Space);
+    h.run_steps(2);
+    assert!(h.state_mut().test_anim().playing);
+    h.key_press(eframe::egui::Key::Space);
+    h.run_steps(2);
+    assert!(!h.state_mut().test_anim().playing);
+}
+
+/// The animation saved as a GIF and as an MP4 video.
+#[test]
+fn animation_is_saved_as_gif_and_mp4() {
+    use crate::anim::{Ease, Target};
+    use image::AnimationDecoder;
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1200, 800].map(|v| v as f32)).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    let (id, name, lo, hi) = { let p = h.state().draw_mut_ref().doc.rig.params[0].clone(); (p.id, p.name, p.min, p.max) };
+    h.state_mut().test_rig_edit(|r| {
+        r.anim.length = 10;
+        r.anim.fps = 10.0;
+        let t = r.anim.track_for(Target::Param(id), &name);
+        r.anim.tracks[t].set_key(0.0, lo, Ease::Linear);
+        r.anim.tracks[t].set_key(9.0, hi, Ease::Linear);
+    });
+    h.state_mut().test_run_action_now("tab.5");
+    h.run_steps(4);
+    let dir = std::env::temp_dir().join(format!("seviath_anim_vid_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let wait = |h: &mut Harness<'_, SeviathApp>| {
+        for _ in 0..300 {
+            h.run_steps(1);
+            if !h.state_mut().test_anim_busy() {
+                break;
+            }
+        }
+        assert!(!h.state_mut().test_anim_busy());
+    };
+    let gif = dir.join("a.gif");
+    h.state_mut().test_anim_export_file(1, gif.clone(), 200);
+    wait(&mut h);
+    let frames = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(std::fs::File::open(&gif).unwrap())).unwrap().into_frames().collect_frames().unwrap();
+    assert_eq!(frames.len(), 10, "{:?}", h.state_mut().test_anim().message);
+    assert_ne!(frames[0].buffer().as_raw(), frames[9].buffer().as_raw());
+    let mp4 = dir.join("a.mp4");
+    h.state_mut().test_anim_export_file(2, mp4.clone(), 200);
+    wait(&mut h);
+    let bytes = std::fs::read(&mp4).unwrap();
+    assert!(bytes.len() > 2000 && &bytes[4..8] == b"ftyp", "{} bytes {:?}", bytes.len(), h.state_mut().test_anim().message);
+    let _ = std::fs::remove_dir_all(&dir);
+}
