@@ -96,7 +96,23 @@ pub fn page(ui: &mut Ui, page: Page, s: &mut Settings, pen: &mut PenMonitor) {
             ui.checkbox(&mut s.reduced_motion, "Reduce motion (no sliding or fading)");
             ui.checkbox(&mut s.show_tooltips, "Show help when hovering buttons");
             ui.checkbox(&mut s.left_handed, "Left-handed layout (tools on the right, layers on the left)");
+            ui.add_space(6.0);
+            section_title(ui, "Drawing the character");
+            row(ui, "Quality", |ui| {
+                for (i, (name, px)) in crate::settings::RIG_QUALITY.iter().enumerate() {
+                    if ui.selectable_label(s.rig_quality as usize == i, format!("{name} ({px:.0})")).clicked() {
+                        s.rig_quality = i as u8;
+                    }
+                }
+            });
+            hint(ui, "How sharp the character is in the Rig, Physics, Animate and Stream tabs (the longest side in pixels). The drawing is done by the processor: pick a lower step if the movement is slow.");
+            row(ui, "Stream pictures a second", |ui| {
+                ui.add(egui::Slider::new(&mut s.stream_fps, 5..=60).step_by(5.0));
+            });
+            hint(ui, "How many pictures a second the OBS browser source gets.");
             if reset_button(ui) {
+                s.rig_quality = d.rig_quality;
+                s.stream_fps = d.stream_fps;
                 s.ui_scale = d.ui_scale;
                 s.high_contrast = d.high_contrast;
                 s.reduced_motion = d.reduced_motion;

@@ -3605,6 +3605,19 @@ fn stream_tab_follows_a_sent_face_and_serves_the_picture() {
     assert!((val(&mut h) - e_def).abs() < 1e-3, "off again: {}", val(&mut h));
     h.state_mut().test_stream().hub.as_ref().unwrap().push(crate::hotkeys::InputEvent { input: crate::hotkeys::Input::Pad { button: "South".into() }, pressed: true });
     h.run_steps(3);
+    // emotes: the plain face and the expression, at three sizes each, cut to the face
+    let dir = std::env::temp_dir().join(format!("seviath_emotes_{}", std::process::id()));
+    let n = h.state_mut().test_stream_emotes(&dir).unwrap();
+    assert_eq!(n, 6, "two looks at three sizes");
+    let neutral = image::open(dir.join("Neutral_112.png")).unwrap().to_rgba8();
+    let happy = image::open(dir.join("Happy_112.png")).unwrap().to_rgba8();
+    assert_eq!(neutral.dimensions(), (112, 112));
+    assert!(neutral.pixels().any(|p| p.0[3] > 200), "the face is drawn");
+    assert!(neutral.pixels().any(|p| p.0[3] == 0), "the background is see-through");
+    assert_ne!(neutral.as_raw(), happy.as_raw(), "the expression changes the picture");
+    assert_eq!(image::open(dir.join("Happy_28.png")).unwrap().to_rgba8().dimensions(), (28, 28));
+    assert!((h.state_mut().test_rig().values.0.get(&e_id).copied().unwrap_or(e_def) - e_hi).abs() < 1e-3, "the sliders are as they were");
+    let _ = std::fs::remove_dir_all(&dir);
     save(&mut h, "stream_2_expressions");
     save(&mut h, "stream_1");
     // switched off again

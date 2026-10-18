@@ -33,6 +33,10 @@ pub struct Settings {
     pub reduced_motion: bool,
     pub show_tooltips: bool,
     pub left_handed: bool,
+    /// How sharp the character is drawn in the Rig, Physics, Animate and Stream tabs: 0 Potato to 4 Max (see `preview_px`).
+    pub rig_quality: u8,
+    /// How many pictures a second the Stream tab sends to the browser source (OBS).
+    pub stream_fps: u32,
     /// Keys you changed: action id → shortcut text ("" = no key). See actions.rs.
     pub shortcuts: std::collections::BTreeMap<String, String>,
     // ---- Canvas & view
@@ -95,6 +99,8 @@ impl Default for Settings {
             reduced_motion: false,
             show_tooltips: true,
             left_handed: false,
+            rig_quality: 2,
+            stream_fps: 30,
             shortcuts: Default::default(),
             wheel: WheelAction::Zoom,
             zoom_speed: 1.0,
@@ -168,6 +174,8 @@ impl Settings {
     /// Keep every value in a safe range (hand-edited or older files).
     pub fn sanitized(mut self) -> Self {
         self.ui_scale = self.ui_scale.clamp(0.6, 2.5);
+        self.rig_quality = self.rig_quality.min(4);
+        self.stream_fps = self.stream_fps.clamp(1, 120);
         self.zoom_speed = self.zoom_speed.clamp(0.2, 4.0);
         self.rotate_snap = self.rotate_snap.clamp(1.0, 90.0);
         self.pixel_grid_from = self.pixel_grid_from.clamp(4.0, 64.0);
@@ -225,6 +233,16 @@ impl Settings {
     }
 }
 
+/// The names of the quality steps and the longest side of the picture of the character at each (the drawing is done by the
+/// processor, so a weaker computer can pick a lower step).
+pub const RIG_QUALITY: [(&str, f32); 5] = [("Potato", 400.0), ("Low", 600.0), ("Medium", 900.0), ("High", 1400.0), ("Max", 2000.0)];
+
+impl Settings {
+    pub fn preview_px(&self) -> f32 {
+        RIG_QUALITY[(self.rig_quality as usize).min(RIG_QUALITY.len() - 1)].1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +269,8 @@ mod tests {
         assert_eq!(old.ui_scale, 1.5);
         assert_eq!(old.undo_steps, 200);
         // silly values are clamped
+        assert_eq!((old.rig_quality, old.stream_fps, old.preview_px()), (2, 30, 900.0));
+        assert_eq!(Settings { rig_quality: 200, ..Settings::default() }.preview_px(), 2000.0, "a silly step is the highest");
         let bad = Settings { ui_scale: 99.0, pressure_min: 0.95, ..Settings::default() }.sanitized();
         assert!(bad.ui_scale <= 2.5 && bad.pressure_max > bad.pressure_min);
     }

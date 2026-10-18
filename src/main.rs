@@ -16,6 +16,7 @@ mod check;
 mod colorpick;
 mod colorprofiles;
 mod doc;
+mod emotes;
 mod expressions;
 mod hotkeys;
 mod effects;
