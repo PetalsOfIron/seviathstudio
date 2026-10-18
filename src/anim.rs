@@ -75,6 +75,17 @@ pub enum Target {
     Opacity(u64),
     /// Whether a layer is shown (on from 0.5).
     Visible(u64),
+    /// The camera: how far it is moved across and down (pixels), how close it is (percent) and how far it is turned (degrees).
+    CameraX,
+    CameraY,
+    CameraZoom,
+    CameraRotate,
+}
+
+impl Target {
+    pub fn is_camera(&self) -> bool {
+        matches!(self, Target::CameraX | Target::CameraY | Target::CameraZoom | Target::CameraRotate)
+    }
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -263,12 +274,13 @@ pub struct Animation {
     pub audio: Option<AudioRef>,
     pub cel_tracks: Vec<CelTrack>,
     pub onion: Onion,
+    pub shake: crate::camera::Shake,
     next_id: u32,
 }
 
 impl Default for Animation {
     fn default() -> Self {
-        Animation { fps: 24.0, length: 120, range: None, looping: true, ping_pong: false, tracks: Vec::new(), markers: Vec::new(), audio: None, cel_tracks: Vec::new(), onion: Onion::default(), next_id: 1 }
+        Animation { fps: 24.0, length: 120, range: None, looping: true, ping_pong: false, tracks: Vec::new(), markers: Vec::new(), audio: None, cel_tracks: Vec::new(), onion: Onion::default(), shake: crate::camera::Shake::default(), next_id: 1 }
     }
 }
 
@@ -366,6 +378,25 @@ impl Animation {
         out
     }
 
+    /// Where the camera looks at a frame: the camera tracks, and the shake on top.
+    pub fn camera_at(&self, frame: f32) -> crate::camera::Camera {
+        let mut c = crate::camera::Camera::default();
+        for (t, v) in self.sample(frame) {
+            match t {
+                Target::CameraX => c.x = v,
+                Target::CameraY => c.y = v,
+                Target::CameraZoom => c.zoom = v.max(1.0),
+                Target::CameraRotate => c.rot = v,
+                _ => {}
+            }
+        }
+        let (dx, dy, dr) = self.shake.at(frame / self.fps.max(1.0));
+        c.x += dx;
+        c.y += dy;
+        c.rot += dr;
+        c
+    }
+
     pub fn track(&self, target: Target) -> Option<usize> {
         self.tracks.iter().position(|t| t.target == target)
     }
@@ -454,6 +485,25 @@ pub fn simplify(samples: &[(f32, f32)], tol: f32) -> Vec<(f32, f32)> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn camera_tracks_give_the_camera_at_a_frame() {
+        let mut a = Animation::default();
+        assert!(a.camera_at(10.0).is_default());
+        let z = a.track_for(Target::CameraZoom, "Zoom");
+        a.tracks[z].set_key(0.0, 100.0, Ease::Linear);
+        a.tracks[z].set_key(10.0, 200.0, Ease::Linear);
+        let x = a.track_for(Target::CameraX, "Pan");
+        a.tracks[x].set_key(0.0, 0.0, Ease::Linear);
+        a.tracks[x].set_key(10.0, -50.0, Ease::Linear);
+        let c = a.camera_at(5.0);
+        assert_eq!((c.zoom, c.x, c.y, c.rot), (150.0, -25.0, 0.0, 0.0));
+        assert!(Target::CameraRotate.is_camera() && !Target::Param(1).is_camera());
+        // a shake moves it a little without a track
+        a.shake.on = true;
+        assert_ne!(a.camera_at(3.0).x, -15.0 + 0.0, "the shake is added");
+        assert!((a.camera_at(3.0).x - (-15.0)).abs() <= a.shake.amount + 1e-3);
+    }
 
     #[test]
     fn a_cel_track_shows_the_drawing_of_the_exposure_in_force() {

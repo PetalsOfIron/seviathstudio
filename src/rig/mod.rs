@@ -15,6 +15,7 @@ pub mod refine;
 pub mod raster;
 pub mod skin;
 pub mod uncut;
+pub mod views;
 
 use std::collections::{HashMap, HashSet};
 
@@ -298,6 +299,8 @@ pub struct Rig {
     /// Expressions made in this program (sliders saved under a name) and the keys, pad buttons and MIDI notes that switch expressions.
     pub own_exprs: Vec<crate::expressions::OwnExpr>,
     pub hotkeys: Vec<crate::hotkeys::Binding>,
+    /// Views of the character (front, side, back) that one slider switches between.
+    pub views: views::Views,
     next_id: Id,
 }
 
