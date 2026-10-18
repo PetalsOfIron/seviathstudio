@@ -35,7 +35,7 @@ pub struct GameUi {
 
 impl Default for GameUi {
     fn default() -> Self {
-        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, expr: None, model: None, message: None, template: None, ai_python: "python".into(), ai_backend: 0, ai_job: None, tex: None, made: 0 }
+        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, expr: None, model: None, message: None, template: None, ai_python: default_python(), ai_backend: 0, ai_job: None, tex: None, made: 0 }
     }
 }
 
@@ -287,5 +287,14 @@ impl SeviathApp {
     #[cfg(test)]
     pub fn test_game(&mut self) -> &mut GameUi {
         &mut self.rigs.game
+    }
+}
+
+/// The Python that has the AI packages: the one in the SeviathAI folder of the user when it is there, else plain `python`.
+fn default_python() -> String {
+    let venv = dirs::home_dir().map(|h| h.join("SeviathAI").join("venv").join("Scripts").join("python.exe"));
+    match venv {
+        Some(p) if p.exists() => p.to_string_lossy().to_string(),
+        _ => "python".to_string(),
     }
 }
