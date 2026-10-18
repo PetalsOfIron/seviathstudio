@@ -291,6 +291,8 @@ pub struct Rig {
     pub expressions: Vec<crate::import::runtime::Expression>,
     pub live_motions: Vec<crate::import::runtime::Motion>,
     pub vtube: Option<crate::import::runtime::Vtube>,
+    /// The timeline of the character (Animate tab).
+    pub anim: crate::anim::Animation,
     next_id: Id,
 }
 

@@ -120,6 +120,8 @@ pub struct RigState {
     joint_before: Option<crate::history::DocState>,
     /// Clicking the face points one after the other: 0 off, 1 first eye, 2 second eye, 3 mouth (with the first eye kept here).
     pub(super) face_click: u8,
+    /// The Animate tab: playhead, timeline view and the saving job.
+    pub(super) anim: super::animtab::AnimUi,
     /// Editing the hair: on or off, the tool (0 move joints, 1 add a strand, 2 add hair with the brush, 3 take hair away), the picked
     /// strand, the joints of the strand being made, the radius of the hair brush, the picture of the hair on the canvas, the hair the
     /// app found (before corrections) and a change waiting to be built.
@@ -204,7 +206,7 @@ pub struct RigState {
     turn_deg: f32,
     cols_rows: (u32, u32),
     tex: HashMap<LayerId, (u64, Option<Arc<LayerTex>>)>,
-    image: Option<TextureHandle>,
+    pub(super) image: Option<TextureHandle>,
     rendered: Option<u64>,
     /// pixels of the picture per page pixel
     scale: f32,
@@ -373,7 +375,7 @@ impl SeviathApp {
     }
 
     /// Everything that is drawn, bottom first: (layer, mesh or a plain box, opacity).
-    fn rig_items(&mut self) -> Vec<(LayerId, Arc<LayerTex>, Vec<[f32; 2]>, Vec<[f32; 2]>, Vec<[u32; 3]>, f32)> {
+    pub(super) fn rig_items(&mut self) -> Vec<(LayerId, Arc<LayerTex>, Vec<[f32; 2]>, Vec<[f32; 2]>, Vec<[u32; 3]>, f32)> {
         let rig = self.draw.doc.rig.clone();
         let painting = self.rigs.mode == Mode::Weight;
         let mut pose = if painting { rig.pose(&Values::default()) } else { rig.pose(&self.rigs.values) };
@@ -433,6 +435,25 @@ impl SeviathApp {
             out = idx.into_iter().filter_map(|i| taken[i].take()).collect();
         }
         out
+    }
+
+    /// The character as it is now, as a picture of `size` pixels (fitted), with `paper` behind it (None: see-through). None when there is
+    /// nothing to draw.
+    pub(super) fn rig_still(&mut self, size: (u32, u32), paper: Option<Color32>) -> Option<image::RgbaImage> {
+        let (w, h) = (self.draw.doc.w as f32, self.draw.doc.h as f32);
+        let scale = (size.0 as f32 / w).min(size.1 as f32 / h);
+        let items = self.rig_items();
+        if items.is_empty() {
+            return None;
+        }
+        let list: Vec<Item> = items.iter().map(|(_, tex, rest, now, tris, op)| Item { tex, rest, now: now.clone(), tris, opacity: *op }).collect();
+        let px = raster::render(&list, size.0 as usize, size.1 as usize, scale, paper);
+        let mut img = image::RgbaImage::new(size.0, size.1);
+        for (i, c) in px.iter().enumerate() {
+            let [r, g, b, a] = c.to_srgba_unmultiplied();
+            img.put_pixel((i % size.0 as usize) as u32, (i / size.0 as usize) as u32, image::Rgba([r, g, b, a]));
+        }
+        Some(img)
     }
 
     pub(super) fn rig_render(&mut self, ctx: &egui::Context) {

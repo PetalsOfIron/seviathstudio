@@ -119,7 +119,7 @@ fn frame_rgb(w: u32, h: u32, s: DocState, out: (u32, u32)) -> Vec<u8> {
     rgb
 }
 
-struct Writer {
+pub(crate) struct Writer {
     enc: Encoder,
     mux: Box<minimp4::Mp4Muxer<BufWriter<std::fs::File>>>,
     size: (u32, u32),
@@ -128,7 +128,7 @@ struct Writer {
 }
 
 impl Writer {
-    fn new(path: &Path, size: (u32, u32), fps: u32) -> Result<Self, String> {
+    pub(crate) fn new(path: &Path, size: (u32, u32), fps: u32) -> Result<Self, String> {
         let file = std::fs::File::create(path).map_err(|e| format!("Can't make the video file: {e}"))?;
         let bps = ((size.0 as f64 * size.1 as f64 * fps as f64 * 0.12) as u32).clamp(600_000, 60_000_000);
         let cfg = EncoderConfig::new()
@@ -146,7 +146,7 @@ impl Writer {
         Ok(Self { enc, mux, size, fps, last: None })
     }
 
-    fn write(&mut self, rgb: Vec<u8>) -> Result<(), String> {
+    pub(crate) fn write(&mut self, rgb: Vec<u8>) -> Result<(), String> {
         let yuv = YUVBuffer::from_rgb_source(RgbSliceU8::new(&rgb, (self.size.0 as usize, self.size.1 as usize)));
         let bits = self.enc.encode(&yuv).map_err(|e| format!("Couldn't encode a frame: {e}"))?;
         let data = bits.to_vec();
@@ -157,7 +157,7 @@ impl Writer {
         Ok(())
     }
 
-    fn finish(self) {
+    pub(crate) fn finish(self) {
         self.mux.close();
     }
 }

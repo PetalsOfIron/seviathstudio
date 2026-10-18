@@ -13,6 +13,7 @@ use crate::tabs::{self, Tab, draw::DrawState};
 use crate::theme::{self, *};
 use crate::widgets::{self, icon_button, segmented, tab_button};
 
+mod animtab;
 mod commands;
 mod files;
 mod layoutmenu;
@@ -623,6 +624,7 @@ impl eframe::App for SeviathApp {
             (_, Tab::Parts) => self.parts_ui(ui),
             (_, Tab::Rig) => self.rig_ui(ui),
             (_, Tab::Physics) => self.physics_ui(ui),
+            (_, Tab::Animate) => self.anim_ui(ui),
             (_, t) => tabs::placeholder::ui(ui, t),
         }
 
