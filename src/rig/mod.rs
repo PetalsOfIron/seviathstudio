@@ -5,6 +5,7 @@
 // (raster.rs) draws the layers through the moved meshes.
 
 pub mod autorig;
+pub mod changers;
 pub mod check;
 pub mod gizmo;
 pub mod mesh;
@@ -18,6 +19,8 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::doc::LayerId;
+
+pub use changers::PathSpot;
 
 pub type Id = u32;
 
@@ -45,6 +48,22 @@ pub enum Kind {
     Line { pts: Vec<[f32; 2]>, width: f32 },
     /// A soft push: everything within `radius` of the centre moves, most in the middle (cheeks, eyes, belly).
     Soft { center: [f32; 2], radius: f32 },
+    /// Several curves put anywhere on a part, each dragged at its own spots (Live2D and Inochi path deformers, but many).
+    Paths { paths: Vec<PathSpot> },
+    /// Puppet-warp pins: drag a pin and the picture follows smoothly; pins you leave alone hold it still.
+    Pins { pts: Vec<[f32; 2]> },
+    /// Shifts everything (Inochi translate).
+    Move,
+    /// Stretches everything about a point (Inochi scale, Live2D rotation scale).
+    Scale { center: [f32; 2] },
+    /// Turns everything over, through flat (Live2D reflect).
+    Flip { center: [f32; 2], vertical: bool },
+    /// Opacity of everything in it (Live2D keyform and part opacity).
+    Fade,
+    /// Moves everything forward or back in the stack of layers (Live2D draw order, Inochi z-sort).
+    Order,
+    /// A wave that runs through everything, moved along by a slider.
+    Wave { center: [f32; 2] },
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -75,6 +94,12 @@ pub enum Form {
     Line { offsets: Vec<[f32; 2]> },
     /// How far a Soft changer pushes, and how much it grows (0.2 = 20% bigger in the middle).
     Soft { offset: [f32; 2], grow: f32 },
+    /// The numbers of Move, Scale, Flip, Fade, Order and Wave (see `changers::val_names`).
+    Vals { v: Vec<f32> },
+    /// How far each pin moved.
+    Pins { offsets: Vec<[f32; 2]> },
+    /// How far each point of each curve moved.
+    Paths { offsets: Vec<Vec<[f32; 2]>> },
 }
 
 /// How a value moves between two keys.
@@ -261,6 +286,9 @@ pub struct Pose {
     pub warp: HashMap<Id, Vec<[f32; 2]>>,
     pub line: HashMap<Id, Vec<[f32; 2]>>,
     pub soft: HashMap<Id, ([f32; 2], f32)>,
+    pub vals: HashMap<Id, Vec<f32>>,
+    pub pins: HashMap<Id, Vec<[f32; 2]>>,
+    pub paths: HashMap<Id, Vec<Vec<[f32; 2]>>>,
 }
 
 pub const MAX_WARP: u32 = 24;
@@ -289,6 +317,9 @@ fn lerp_form(a: &Form, b: &Form, t: f32) -> Form {
         (Form::Rot { deg: x }, Form::Rot { deg: y }) => Form::Rot { deg: x + (y - x) * t },
         (Form::Warp { offsets: x }, Form::Warp { offsets: y }) if x.len() == y.len() => Form::Warp { offsets: x.iter().zip(y).map(|(p, q)| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]).collect() },
         (Form::Line { offsets: x }, Form::Line { offsets: y }) if x.len() == y.len() => Form::Line { offsets: x.iter().zip(y).map(|(p, q)| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]).collect() },
+        (Form::Vals { v: x }, Form::Vals { v: y }) if x.len() == y.len() => Form::Vals { v: x.iter().zip(y).map(|(p, q)| p + (q - p) * t).collect() },
+        (Form::Pins { offsets: x }, Form::Pins { offsets: y }) if x.len() == y.len() => Form::Pins { offsets: x.iter().zip(y).map(|(p, q)| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]).collect() },
+        (Form::Paths { offsets: x }, Form::Paths { offsets: y }) if x.len() == y.len() && x.iter().zip(y).all(|(a, b)| a.len() == b.len()) => Form::Paths { offsets: x.iter().zip(y).map(|(a, b)| a.iter().zip(b).map(|(p, q)| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]).collect()).collect() },
         (Form::Soft { offset: a, grow: g }, Form::Soft { offset: b, grow: h }) => Form::Soft { offset: [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t], grow: g + (h - g) * t },
         _ => a.clone(),
     }
@@ -316,9 +347,9 @@ pub fn curve_samples(pts: &[[f32; 2]], per: usize) -> Vec<[f32; 2]> {
 }
 
 /// Move a point along with a bent curve: it keeps its place along the curve and its distance to the side.
-fn bend_along(rest: &[[f32; 2]], offsets: &[[f32; 2]], width: f32, p: [f32; 2]) -> [f32; 2] {
+pub(crate) fn bend_along(rest: &[[f32; 2]], offsets: &[[f32; 2]], width: f32, p: [f32; 2]) -> ([f32; 2], f32) {
     if rest.len() < 2 || offsets.len() != rest.len() {
-        return p;
+        return (p, 0.0);
     }
     let moved: Vec<[f32; 2]> = rest.iter().zip(offsets).map(|(a, o)| [a[0] + o[0], a[1] + o[1]]).collect();
     let (r, d) = (curve_samples(rest, 8), curve_samples(&moved, 8));
@@ -354,7 +385,7 @@ fn bend_along(rest: &[[f32; 2]], offsets: &[[f32; 2]], width: f32, p: [f32; 2]) 
         let t = ((best - w) / w).min(1.0);
         1.0 - t * t * (3.0 - 2.0 * t)
     };
-    [p[0] + (new[0] - p[0]) * fade, p[1] + (new[1] - p[1]) * fade]
+    ([p[0] + (new[0] - p[0]) * fade, p[1] + (new[1] - p[1]) * fade], fade)
 }
 
 impl Values {
@@ -419,6 +450,9 @@ impl Rig {
             Kind::Warp { cols, rows, .. } => Form::Warp { offsets: vec![[0.0, 0.0]; ((cols + 1) * (rows + 1)) as usize] },
             Kind::Line { pts, .. } => Form::Line { offsets: vec![[0.0, 0.0]; pts.len()] },
             Kind::Soft { .. } => Form::Soft { offset: [0.0, 0.0], grow: 0.0 },
+            Kind::Paths { paths } => Form::Paths { offsets: paths.iter().map(|p| vec![[0.0, 0.0]; p.pts.len()]).collect() },
+            Kind::Pins { pts } => Form::Pins { offsets: vec![[0.0, 0.0]; pts.len()] },
+            k => Form::Vals { v: changers::rest_vals(k).unwrap_or_default() },
         })
     }
 
@@ -505,6 +539,35 @@ impl Rig {
                         }
                     }
                 }
+                Form::Vals { v } => {
+                    let rest = self.changer(b.changer).and_then(|c| changers::rest_vals(&c.kind)).unwrap_or_default();
+                    if rest.len() == v.len() {
+                        let e = pose.vals.entry(b.changer).or_insert_with(|| rest.clone());
+                        for ((a, x), r) in e.iter_mut().zip(&v).zip(&rest) {
+                            *a += x - r;
+                        }
+                    }
+                }
+                Form::Pins { offsets } => {
+                    let e = pose.pins.entry(b.changer).or_insert_with(|| vec![[0.0, 0.0]; offsets.len()]);
+                    if e.len() == offsets.len() {
+                        for (a, o) in e.iter_mut().zip(&offsets) {
+                            a[0] += o[0];
+                            a[1] += o[1];
+                        }
+                    }
+                }
+                Form::Paths { offsets } => {
+                    let e = pose.paths.entry(b.changer).or_insert_with(|| offsets.iter().map(|o| vec![[0.0, 0.0]; o.len()]).collect());
+                    if e.len() == offsets.len() && e.iter().zip(&offsets).all(|(a, b)| a.len() == b.len()) {
+                        for (ea, oa) in e.iter_mut().zip(&offsets) {
+                            for (a, o) in ea.iter_mut().zip(oa) {
+                                a[0] += o[0];
+                                a[1] += o[1];
+                            }
+                        }
+                    }
+                }
                 Form::Soft { offset, grow } => {
                     let e = pose.soft.entry(b.changer).or_insert(([0.0, 0.0], 0.0));
                     e.0[0] += offset[0];
@@ -532,6 +595,14 @@ impl Rig {
             Kind::Warp { rect, cols, rows } => Kind::Warp { rect: [2.0 * axis_x - rect[2], rect[1], 2.0 * axis_x - rect[0], rect[3]], cols: *cols, rows: *rows },
             Kind::Line { pts, width } => Kind::Line { pts: pts.iter().map(|p| flip(*p)).collect(), width: *width },
             Kind::Soft { center, radius } => Kind::Soft { center: flip(*center), radius: *radius },
+            Kind::Paths { paths } => Kind::Paths { paths: paths.iter().map(|sp| PathSpot { pts: sp.pts.iter().map(|p| flip(*p)).collect(), width: sp.width }).collect() },
+            Kind::Pins { pts } => Kind::Pins { pts: pts.iter().map(|p| flip(*p)).collect() },
+            Kind::Move => Kind::Move,
+            Kind::Scale { center } => Kind::Scale { center: flip(*center) },
+            Kind::Flip { center, vertical } => Kind::Flip { center: flip(*center), vertical: *vertical },
+            Kind::Fade => Kind::Fade,
+            Kind::Order => Kind::Order,
+            Kind::Wave { center } => Kind::Wave { center: flip(*center) },
         };
         let new = self.add_changer(name, kind.clone(), c.parent);
         let copies: Vec<Binding> = self.bindings.iter().filter(|b| b.changer == id).cloned().collect();
@@ -552,6 +623,10 @@ impl Rig {
                     }
                     (Form::Line { offsets }, _) => offsets.iter_mut().for_each(|o| o[0] = -o[0]),
                     (Form::Soft { offset, .. }, _) => offset[0] = -offset[0],
+                    (Form::Pins { offsets }, _) => offsets.iter_mut().for_each(|o| o[0] = -o[0]),
+                    (Form::Paths { offsets }, _) => offsets.iter_mut().flatten().for_each(|o| o[0] = -o[0]),
+                    (Form::Vals { v }, Kind::Move) => v[0] = -v[0],
+                    (Form::Vals { v }, Kind::Wave { .. }) if v.len() > 3 => v[3] = 180.0 - v[3],
                     _ => {}
                 }
             }
@@ -666,8 +741,21 @@ impl Rig {
             }
             Kind::Line { pts, width } => {
                 let Some(off) = pose.line.get(&c.id) else { return p };
-                bend_along(pts, off, *width, p)
+                bend_along(pts, off, *width, p).0
             }
+            Kind::Paths { paths } => match pose.paths.get(&c.id) {
+                Some(off) => changers::blend_paths(paths, off, p),
+                None => p,
+            },
+            Kind::Pins { pts } => match pose.pins.get(&c.id) {
+                Some(off) => changers::pin_shift(pts, off, p),
+                None => p,
+            },
+            Kind::Move | Kind::Scale { .. } | Kind::Flip { .. } | Kind::Wave { .. } => match pose.vals.get(&c.id) {
+                Some(v) => changers::apply_vals(&c.kind, v, p),
+                None => p,
+            },
+            Kind::Fade | Kind::Order => p,
             Kind::Soft { center, radius } => {
                 let Some((offset, grow)) = pose.soft.get(&c.id) else { return p };
                 let d = ((p[0] - center[0]).hypot(p[1] - center[1]) / radius.max(1e-3)).min(1.0);
@@ -818,6 +906,22 @@ impl Rig {
                 *radius = if fin(*radius) { radius.clamp(1.0, 10000.0) } else { 100.0 };
                 center.iter().all(|v| fin(*v))
             }
+            Kind::Paths { paths } => {
+                paths.truncate(changers::MAX_PATHS);
+                for sp in paths.iter_mut() {
+                    sp.pts.truncate(MAX_LINE_POINTS);
+                    sp.width = if fin(sp.width) { sp.width.clamp(1.0, 5000.0) } else { 50.0 };
+                }
+                paths.retain(|sp| sp.pts.len() >= 2 && sp.pts.iter().all(|p| fin(p[0]) && fin(p[1])));
+                !paths.is_empty()
+            }
+            Kind::Pins { pts } => {
+                pts.truncate(changers::MAX_PINS);
+                !pts.is_empty() && pts.iter().all(|p| fin(p[0]) && fin(p[1]))
+            }
+            Kind::Scale { center } | Kind::Wave { center } => center.iter().all(|v| fin(*v)),
+            Kind::Flip { center, .. } => center.iter().all(|v| fin(*v)),
+            Kind::Move | Kind::Fade | Kind::Order => true,
         });
         let ids: HashSet<Id> = self.changers.iter().map(|c| c.id).collect();
         // a changer whose parent is missing or that would loop sits at the top
@@ -874,6 +978,9 @@ impl Rig {
                 (Form::Warp { offsets }, Kind::Warp { cols, rows, .. }) => offsets.len() == ((cols + 1) * (rows + 1)) as usize && offsets.iter().all(|o| fin(o[0]) && fin(o[1])),
                 (Form::Line { offsets }, Kind::Line { pts, .. }) => offsets.len() == pts.len() && offsets.iter().all(|o| fin(o[0]) && fin(o[1])),
                 (Form::Soft { offset, grow }, Kind::Soft { .. }) => fin(offset[0]) && fin(offset[1]) && fin(*grow),
+                (Form::Pins { offsets }, Kind::Pins { pts }) => offsets.len() == pts.len() && offsets.iter().all(|o| fin(o[0]) && fin(o[1])),
+                (Form::Paths { offsets }, Kind::Paths { paths }) => offsets.len() == paths.len() && offsets.iter().zip(paths).all(|(o, sp)| o.len() == sp.pts.len() && o.iter().all(|v| fin(v[0]) && fin(v[1]))),
+                (Form::Vals { v }, k) => changers::rest_vals(k).is_some_and(|r| r.len() == v.len()) && v.iter().all(|x| fin(*x)),
                 _ => false,
             })
         });

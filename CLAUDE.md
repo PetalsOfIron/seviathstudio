@@ -44,9 +44,9 @@
 - Effects/adjustments: `Layer.fx` + `Layer.adjust` (LayerKind::Adjust); drawn in `Document::composite_into`; effect reach is capped at 200 px so a tile only needs its 8 neighbours (`take_dirty` widens by one ring when effects exist); `files::bake` for PSD/ORA.
 
 ## Where the work stands
-- Milestones **1–20b done** (see ROADMAP "Done"). 408 tests pass.
+- Milestones **1–20b done** (see ROADMAP "Done"). 413 tests pass.
 - Plan Part AT core is done (Info screen, PNG credit, README credit). ROADMAP now includes Parts AS (milestone **9a**) and AV (**37a**).
-- Everything up to milestone 30d is done (see ROADMAP "Done"). **Next: 30e — more changers (Path, Pin, Move, Scale, Flip, Fade, Order, Wave; see ROADMAP), then 30c — rig an uncut character into 3D for games (AI and own rig mixable, VRM engine)** (21 to 24 are dropped, the app is offline), then rigging, animation, streaming, games and AI (26–51).
+- Everything up to milestone 30e is done (see ROADMAP "Done"). **Next: 30c — rig an uncut character into 3D for games (AI and own rig mixable, VRM engine)** (21 to 24 are dropped, the app is offline), then rigging, animation, streaming, games and AI (26–51).
 - Gotcha: egui `consume_key(Modifiers::NONE, key)` also matches when Alt is held, so check keys with Alt/Ctrl **before** plain tool keys (see the order in `DrawState::ui`). In kittest, hold modifiers for clicks with `Event::ModifiersChanged`.
 - Gotcha: inside `DrawState::ui` a change made by code is picked up by `track_history` by itself: set `label_hint` instead of using `apply_external` (that is for code that runs outside the draw frame, e.g. menus), or the step is recorded twice.
 - Gotcha: very long bash heredocs sometimes fail to parse — write the Python patch script with the Write tool into the scratchpad and run it.

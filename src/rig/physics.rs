@@ -88,8 +88,11 @@ pub struct PhysChain {
     pub name: String,
     pub kind: Kind,
     pub material: Material,
-    /// The Line changer this moves.
+    /// The Line or Path changer this moves.
     pub changer: Id,
+    /// Which curve of a Path changer (0 for a Line changer).
+    #[serde(default)]
+    pub path: usize,
     /// How strongly the points are pulled back to where they belong, 0..1: at the root and at the tip.
     pub stiff_root: f32,
     pub stiff_tip: f32,
@@ -126,6 +129,7 @@ impl PhysChain {
             kind,
             material,
             changer,
+            path: 0,
             // heavy cloth hangs more and is slower to be moved
             stiff_root: (r * if material == Material::Heavy { 0.9 } else { 1.0 }).clamp(0.0, 1.0),
             stiff_tip: (t * mass_k * 0.9_f32.max(0.5)).clamp(0.0, 1.0),
@@ -223,7 +227,7 @@ struct State {
 /// The running simulation of every chain (kept by the app, not saved).
 #[derive(Default)]
 pub struct PhysSim {
-    states: HashMap<Id, State>,
+    states: HashMap<(Id, usize), State>,
     /// Which rig the states belong to.
     key: u64,
     acc: f32,
@@ -262,10 +266,18 @@ fn rig_key(rig: &Rig) -> u64 {
             v.to_bits().hash(&mut h);
         }
     }
+    for c in &rig.physics {
+        c.path.hash(&mut h);
+    }
     for c in &rig.changers {
-        if let ChangerKind::Line { pts, .. } = &c.kind {
-            c.id.hash(&mut h);
-            c.parent.hash(&mut h);
+        let lists: Vec<&Vec<[f32; 2]>> = match &c.kind {
+            ChangerKind::Line { pts, .. } => vec![pts],
+            ChangerKind::Paths { paths } => paths.iter().map(|p| &p.pts).collect(),
+            _ => continue,
+        };
+        c.id.hash(&mut h);
+        c.parent.hash(&mut h);
+        for pts in lists {
             for p in pts {
                 p[0].to_bits().hash(&mut h);
                 p[1].to_bits().hash(&mut h);
@@ -286,14 +298,14 @@ impl PhysSim {
     }
 
     /// Where the simulation has the points of a chain now (page positions), for drawing and tests.
-    pub fn world_positions(&self, changer: Id) -> Option<&Vec<[f32; 2]>> {
-        self.states.get(&changer).map(|s| &s.pos)
+    pub fn world_positions(&self, changer: Id, path: usize) -> Option<&Vec<[f32; 2]>> {
+        self.states.get(&(changer, path)).map(|s| &s.pos)
     }
 
     /// Advance by `dt` seconds. `base` is the pose the sliders make (without physics); `rest` the pose with every
     /// slider at its default (used to find out how things hang when nothing moves). Returns, for each Line changer
     /// with physics, the offsets to add to its pose.
-    pub fn step(&mut self, rig: &Rig, base: &Pose, rest: &Pose, dt: f32) -> HashMap<Id, Vec<[f32; 2]>> {
+    pub fn step(&mut self, rig: &Rig, base: &Pose, rest: &Pose, dt: f32) -> HashMap<(Id, usize), Vec<[f32; 2]>> {
         let key = rig_key(rig);
         if key != self.key {
             self.states.clear();
@@ -306,14 +318,23 @@ impl PhysSim {
         let mut out = HashMap::new();
         for ch in rig.physics.iter().filter(|c| c.enabled && c.kind != Kind::Solid) {
             let Some(line) = rig.changer(ch.changer) else { continue };
-            let ChangerKind::Line { pts, .. } = &line.kind else { continue };
+            // the curve this moves and how the sliders have bent it already
+            let (pts, base_off): (&Vec<[f32; 2]>, Vec<[f32; 2]>) = match &line.kind {
+                ChangerKind::Line { pts, .. } => (pts, base.line.get(&ch.changer).cloned().unwrap_or_default()),
+                ChangerKind::Paths { paths } => match paths.get(ch.path) {
+                    Some(sp) => (&sp.pts, base.paths.get(&ch.changer).and_then(|p| p.get(ch.path)).cloned().unwrap_or_default()),
+                    None => continue,
+                },
+                _ => continue,
+            };
+            let slot = (ch.changer, ch.path);
             if pts.len() < 2 {
                 continue;
             }
             // where each point belongs now (the sliders' pose of the line and everything around it)
             let target: Vec<[f32; 2]> = pts.iter().map(|p| rig.deform_point(base, Some(line.id), *p)).collect();
             let rest_target: Vec<[f32; 2]> = pts.iter().map(|p| rig.deform_point(rest, Some(line.id), *p)).collect();
-            if !self.states.contains_key(&ch.changer) {
+            if !self.states.contains_key(&slot) {
                 // start hanging where it belongs, then let it settle for two seconds with nothing moving
                 let mut st = State { pos: rest_target.clone(), prev: rest_target.clone(), baseline: vec![[0.0, 0.0]; pts.len()] };
                 for _ in 0..240 {
@@ -326,16 +347,15 @@ impl PhysSim {
                     st.pos[i] = [target[i][0] + b[0], target[i][1] + b[1]];
                     st.prev[i] = st.pos[i];
                 }
-                self.states.insert(ch.changer, st);
+                self.states.insert(slot, st);
             }
             let (wind, dir) = (rig.world.wind, rig.world.wind_dir);
             let t0 = self.time;
-            if let Some(st) = self.states.get_mut(&ch.changer) {
+            if let Some(st) = self.states.get_mut(&slot) {
                 for s in 0..steps {
                     advance(rig, ch, st, &target, base, wind, dir, t0 + s as f32 * STEP);
                 }
                 // turn the result into offsets of the line (in its own frame, before the changers around it)
-                let base_off = base.line.get(&ch.changer).cloned().unwrap_or_else(|| vec![[0.0, 0.0]; pts.len()]);
                 let mut offs = Vec::with_capacity(pts.len());
                 for (i, p) in pts.iter().enumerate() {
                     let world = [st.pos[i][0] - target[i][0] - st.baseline[i][0], st.pos[i][1] - target[i][1] - st.baseline[i][1]];
@@ -344,7 +364,7 @@ impl PhysSim {
                     let ok = local[0].is_finite() && local[1].is_finite();
                     offs.push(if ok && i > 0 { local } else { [0.0, 0.0] });
                 }
-                out.insert(ch.changer, offs);
+                out.insert(slot, offs);
             }
         }
         self.time += steps as f32 * STEP;
@@ -442,7 +462,7 @@ mod tests {
         (r, head, tilt, line)
     }
 
-    fn run(sim: &mut PhysSim, r: &Rig, vals: &Values, seconds: f32) -> HashMap<Id, Vec<[f32; 2]>> {
+    fn run(sim: &mut PhysSim, r: &Rig, vals: &Values, seconds: f32) -> HashMap<(Id, usize), Vec<[f32; 2]>> {
         let base = r.pose(vals);
         let rest = r.pose(&Values::default());
         let mut out = HashMap::new();
@@ -452,8 +472,8 @@ mod tests {
         out
     }
 
-    fn tip_len(o: &HashMap<Id, Vec<[f32; 2]>>, line: Id) -> f32 {
-        let t = o[&line].last().unwrap();
+    fn tip_len(o: &HashMap<(Id, usize), Vec<[f32; 2]>>, line: Id) -> f32 {
+        let t = o[&(line, 0)].last().unwrap();
         t[0].hypot(t[1])
     }
 
@@ -488,7 +508,7 @@ mod tests {
         run(&mut sim2, &r, &Values::default(), 0.5);
         let base = r.pose(&v);
         let rest = r.pose(&Values::default());
-        let xs: Vec<f32> = (0..90).map(|_| sim2.step(&r, &base, &rest, 1.0 / 60.0)[&line].last().unwrap()[0]).collect();
+        let xs: Vec<f32> = (0..90).map(|_| sim2.step(&r, &base, &rest, 1.0 / 60.0)[&(line, 0)].last().unwrap()[0]).collect();
         let (hi, lo) = (xs.iter().cloned().fold(f32::MIN, f32::max), xs.iter().cloned().fold(f32::MAX, f32::min));
         assert!(hi - lo > 5.0, "it moves back and forth: {lo}..{hi}");
     }
@@ -506,7 +526,7 @@ mod tests {
         run(&mut b, &loose, &Values::default(), 0.3);
         let (os, ol) = (run(&mut a, &stiff, &v, 0.2), run(&mut b, &loose, &v, 0.2));
         assert!(tip_len(&os, line) < tip_len(&ol, line) * 0.5, "{} vs {}", tip_len(&os, line), tip_len(&ol, line));
-        assert_eq!(ol[&line][0], [0.0, 0.0], "the root is fixed to its place");
+        assert_eq!(ol[&(line, 0)][0], [0.0, 0.0], "the root is fixed to its place");
     }
 
     #[test]
@@ -529,8 +549,8 @@ mod tests {
         for _ in 0..240 {
             let l = sim_l.step(&light, &base, &base, 1.0 / 60.0);
             let h = sim_h.step(&heavy, &base, &base, 1.0 / 60.0);
-            max_l = max_l.max(l[&line].last().unwrap()[0]);
-            max_h = max_h.max(h[&line].last().unwrap()[0]);
+            max_l = max_l.max(l[&(line, 0)].last().unwrap()[0]);
+            max_h = max_h.max(h[&(line, 0)].last().unwrap()[0]);
         }
         assert!(max_l > 20.0, "wind from the left pushes it to the right: {max_l}");
         assert!(max_h < max_l, "heavy {max_h} vs light {max_l}");
@@ -539,7 +559,7 @@ mod tests {
         let mut sim = PhysSim::default();
         let mut min_x = 0.0f32;
         for _ in 0..240 {
-            min_x = min_x.min(sim.step(&light, &base, &base, 1.0 / 60.0)[&line].last().unwrap()[0]);
+            min_x = min_x.min(sim.step(&light, &base, &base, 1.0 / 60.0)[&(line, 0)].last().unwrap()[0]);
         }
         assert!(min_x < -20.0, "{min_x}");
     }
@@ -555,7 +575,7 @@ mod tests {
         let mut worst = f32::MAX;
         for _ in 0..300 {
             sim.step(&r, &base, &base, 1.0 / 60.0);
-            for p in sim.world_positions(line).unwrap().iter().skip(1) {
+            for p in sim.world_positions(line, 0).unwrap().iter().skip(1) {
                 worst = worst.min(dist(*p, [560.0, 560.0]));
             }
         }
@@ -566,7 +586,7 @@ mod tests {
         let mut through = f32::MAX;
         for _ in 0..300 {
             free.step(&r, &base, &base, 1.0 / 60.0);
-            for p in free.world_positions(line).unwrap().iter().skip(1) {
+            for p in free.world_positions(line, 0).unwrap().iter().skip(1) {
                 through = through.min(dist(*p, [560.0, 560.0]));
             }
         }
@@ -588,11 +608,11 @@ mod tests {
         // add the offsets to the pose like the app does, and see where the points go
         let mut pose = base.clone();
         let e = pose.line.entry(line).or_insert_with(|| vec![[0.0, 0.0]; 5]);
-        for (a, o) in e.iter_mut().zip(&offs[&line]) {
+        for (a, o) in e.iter_mut().zip(&offs[&(line, 0)]) {
             a[0] += o[0];
             a[1] += o[1];
         }
-        let world = sim.world_positions(line).unwrap().clone();
+        let world = sim.world_positions(line, 0).unwrap().clone();
         let ChangerKindRef(pts) = points_of(&r, line);
         for (i, p) in pts.iter().enumerate() {
             let got = r.deform_point(&pose, Some(line), *p);
@@ -607,6 +627,39 @@ mod tests {
             K::Line { pts, .. } => ChangerKindRef(pts.clone()),
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn a_curve_of_a_path_changer_flows_like_a_line_and_the_other_curves_stay() {
+        use crate::rig::PathSpot;
+        let mut r = Rig::default();
+        let head = r.add_changer("Head", K::Rotation { pivot: [500.0, 700.0] }, None);
+        let tilt = r.add_param("Tilt", -30.0, 30.0, 0.0);
+        r.bind_rotation(head, tilt, 30.0);
+        let strand = |x: f32| PathSpot { pts: (0..5).map(|i| [x, 400.0 + 80.0 * i as f32]).collect(), width: 40.0 };
+        let pc = r.new_path_changer("Cloth", strand(500.0), Some(head));
+        assert_eq!(r.add_path(pc, strand(600.0)), Some(1));
+        // only the second curve has physics
+        let mut chain = PhysChain::new("Hem", Kind::Cloth, Material::Normal, pc);
+        chain.path = 1;
+        r.physics.push(chain);
+        let mut sim = PhysSim::default();
+        run(&mut sim, &r, &Values::default(), 0.5);
+        let mut v = Values::default();
+        v.set(tilt, 30.0);
+        let early = run(&mut sim, &r, &v, 0.15);
+        assert!(early.contains_key(&(pc, 1)) && !early.contains_key(&(pc, 0)));
+        let t = early[&(pc, 1)].last().unwrap();
+        assert!(t[0].hypot(t[1]) > 10.0, "the curve lags behind the head: {t:?}");
+        assert!(sim.world_positions(pc, 1).is_some() && sim.world_positions(pc, 0).is_none());
+        // at rest nothing moves
+        let calm = run(&mut PhysSim::default(), &r, &Values::default(), 2.0);
+        let t = calm[&(pc, 1)].last().unwrap();
+        assert!(t[0].hypot(t[1]) < 1.0);
+        // deleting the curve takes its physics with it
+        assert!(r.add_path(pc, strand(700.0)).is_some());
+        assert!(r.remove_path(pc, 1));
+        assert!(r.physics.is_empty());
     }
 
     #[test]
@@ -678,7 +731,7 @@ mod tests {
                 _ => 1.0 / 30.0,
             };
             let o = sim.step(&r, &base, &rest, dt);
-            for p in &o[&line] {
+            for p in &o[&(line, 0)] {
                 assert!(p[0].is_finite() && p[1].is_finite());
                 worst = worst.max(p[0].hypot(p[1]));
             }

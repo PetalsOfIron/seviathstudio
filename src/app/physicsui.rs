@@ -20,7 +20,7 @@ pub const MOTIONS: [(&str, &str, f32, f32, f32); 4] = [("Shake the head", "Angle
 pub struct PhysUi {
     pub on: bool,
     pub sim: PhysSim,
-    pub offs: HashMap<Id, Vec<[f32; 2]>>,
+    pub offs: HashMap<(Id, usize), Vec<[f32; 2]>>,
     pub sel: Option<usize>,
     pub kind: PKind,
     pub material: Material,
@@ -37,18 +37,32 @@ impl Default for PhysUi {
 
 impl super::rigtab::RigState {
     /// Add what the physics does to a pose (after the sliders and IK).
-    pub fn add_phys(&self, pose: &mut crate::rig::Pose) {
+    pub fn add_phys(&self, rig: &crate::rig::Rig, pose: &mut crate::rig::Pose) {
         if !self.phys.on {
             return;
         }
-        for (id, offs) in &self.phys.offs {
-            let e = pose.line.entry(*id).or_insert_with(|| vec![[0.0, 0.0]; offs.len()]);
-            if e.len() != offs.len() {
-                continue;
-            }
-            for (a, o) in e.iter_mut().zip(offs) {
-                a[0] += o[0];
-                a[1] += o[1];
+        for ((id, path), offs) in &self.phys.offs {
+            let Some(c) = rig.changer(*id) else { continue };
+            match &c.kind {
+                crate::rig::Kind::Line { .. } => {
+                    let e = pose.line.entry(*id).or_insert_with(|| vec![[0.0, 0.0]; offs.len()]);
+                    if e.len() == offs.len() {
+                        for (a, o) in e.iter_mut().zip(offs) {
+                            a[0] += o[0];
+                            a[1] += o[1];
+                        }
+                    }
+                }
+                crate::rig::Kind::Paths { paths } => {
+                    let e = pose.paths.entry(*id).or_insert_with(|| paths.iter().map(|p| vec![[0.0, 0.0]; p.pts.len()]).collect());
+                    if let Some(e) = e.get_mut(*path).filter(|e| e.len() == offs.len()) {
+                        for (a, o) in e.iter_mut().zip(offs) {
+                            a[0] += o[0];
+                            a[1] += o[1];
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }

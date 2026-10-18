@@ -852,6 +852,37 @@ pub fn import_bytes(data: Vec<u8>) -> Result<Imported, String> {
                 }
             }
         }
+        // opacity and draw order that change with a slider: Fade and Order changers
+        let mut opacity = opacity;
+        if grid.axes.iter().any(|a| a.keys.len() >= 2) && grid.forms.len() > 1 {
+            let head = |f: NodeId| dom.child(f, "super");
+            let ops: Vec<f32> = grid.forms.iter().map(|(_, f)| head(*f).and_then(|d| dom.child_f(d, "opacity")).unwrap_or(1.0)).collect();
+            let ords: Vec<f32> = grid.forms.iter().map(|(_, f)| head(*f).and_then(|d| dom.child_i(d, "drawOrder")).unwrap_or(500) as f32).collect();
+            let spread = |v: &[f32]| v.iter().cloned().fold(f32::MIN, f32::max) - v.iter().cloned().fold(f32::MAX, f32::min);
+            if spread(&ops) > 0.01 {
+                let w = imp.rig.add_changer(&format!("{nm} opacity"), Kind::Fade, mesh_parent);
+                let before = imp.rig.bindings.len();
+                imp.bind(w, &grid, &|f| Some(Form::Vals { v: vec![head(f).and_then(|d| dom.child_f(d, "opacity")).unwrap_or(1.0).clamp(0.0, 1.0)] }), &nm);
+                if imp.rig.bindings.len() > before {
+                    mesh_parent = Some(w);
+                    // the opacity now comes from the changer
+                    opacity = 1.0;
+                } else {
+                    imp.rig.changers.retain(|c| c.id != w);
+                }
+            }
+            if spread(&ords) > 0.5 {
+                let def = order_opacity.first().copied().unwrap_or(500.0);
+                let w = imp.rig.add_changer(&format!("{nm} order"), Kind::Order, mesh_parent);
+                let before = imp.rig.bindings.len();
+                imp.bind(w, &grid, &|f| Some(Form::Vals { v: vec![(head(f).and_then(|d| dom.child_i(d, "drawOrder")).unwrap_or(500) as f32 - def) * 0.1] }), &nm);
+                if imp.rig.bindings.len() > before {
+                    mesh_parent = Some(w);
+                } else {
+                    imp.rig.changers.retain(|c| c.id != w);
+                }
+            }
+        }
         let id = imp.rig.fresh_id();
         made.push(Made { draw_order, name: nm, visible, opacity, tiles, mesh: ArtMesh { id, layer: 0, verts, tris, parent: mesh_parent } });
     }

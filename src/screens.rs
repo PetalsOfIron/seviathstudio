@@ -3033,3 +3033,110 @@ fn sharp_curves_and_smooth_warp_screens() {
     assert_eq!(h.state_mut().test_tris(layer), 2, "off: only the mesh it has");
     save(&mut h, "warp_2_plain");
 }
+
+#[test]
+fn new_changers_screens() {
+    use crate::doc::LayerKind;
+    use crate::rig::{Form, Kind};
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 2300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    let (a, b);
+    {
+        let d = h.state_mut().draw_mut();
+        let (w, h2) = (d.doc.w, d.doc.h);
+        let mut add = |name: &str, x: i32, y: i32, bw: u32, bh: u32, c: [u8; 3]| {
+            let img = image::RgbaImage::from_pixel(bw, bh, image::Rgba([c[0], c[1], c[2], 255]));
+            let mut l = d.doc.new_layer(name, LayerKind::Raster);
+            l.tiles = crate::files::tiles_from_rgba(&img, x, y, w, h2);
+            l.rev += 1;
+            let id = l.id;
+            d.doc.layers.insert(0, l);
+            id
+        };
+        a = add("cloth", 800, 800, 500, 600, [200, 60, 90]);
+        b = add("eyelid", 1100, 900, 300, 120, [60, 90, 200]);
+        d.doc.mark_all_dirty();
+    }
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    h.state_mut().test_rig().pro = true;
+    h.state_mut().test_rig().selected = vec![a, b];
+    h.run_steps(2);
+    {
+        h.state_mut().test_rig_edit(|r| {
+            for (l, rect) in [(a, [800.0, 800.0, 1300.0, 1400.0]), (b, [1100.0, 900.0, 1400.0, 1020.0])] {
+                let id = r.fresh_id();
+                r.meshes.push(crate::rig::ArtMesh { id, layer: l, verts: vec![[rect[0], rect[1]], [rect[2], rect[1]], [rect[2], rect[3]], [rect[0], rect[3]]], tris: vec![[0, 1, 2], [0, 2, 3]], parent: None });
+            }
+        });
+    }
+    h.run_steps(3);
+    // the buttons make the changers
+    h.state_mut().test_rig().selected = vec![a];
+    h.run_steps(2);
+    for label in ["New Pin changer", "New Move changer", "New Scale changer", "New Flip changer", "New Fade changer", "New Order changer", "New Wave changer"] {
+        h.get_by_label(label).click();
+        h.run_steps(3);
+    }
+    {
+        let rig = &h.state().draw_mut_ref().doc.rig;
+        let kinds: Vec<&Kind> = rig.changers.iter().map(|c| &c.kind).collect();
+        assert!(kinds.iter().any(|k| matches!(k, Kind::Pins { pts } if pts.len() == 4)));
+        assert!(kinds.iter().any(|k| matches!(k, Kind::Move)) && kinds.iter().any(|k| matches!(k, Kind::Scale { .. })));
+        assert!(kinds.iter().any(|k| matches!(k, Kind::Flip { .. })) && kinds.iter().any(|k| matches!(k, Kind::Fade)));
+        assert!(kinds.iter().any(|k| matches!(k, Kind::Order)) && kinds.iter().any(|k| matches!(k, Kind::Wave { .. })));
+    }
+    // a path drawn on the picture makes a Path changer around the picked part; a second stroke adds a curve
+    h.state_mut().test_rig().selected = vec![b];
+    h.state_mut().test_rig().sel_changer = None;
+    h.state_mut().test_stroke(vec![[1100.0, 960.0], [1250.0, 940.0], [1400.0, 960.0]]);
+    h.run_steps(3);
+    let pc = h.state().draw_mut_ref().doc.rig.changers.iter().find(|c| matches!(c.kind, Kind::Paths { .. })).unwrap().id;
+    assert_eq!(h.state().draw_mut_ref().doc.rig.meshes.iter().find(|m| m.layer == b).unwrap().parent, Some(pc));
+    h.state_mut().test_stroke(vec![[1100.0, 900.0], [1250.0, 900.0], [1400.0, 900.0]]);
+    h.run_steps(3);
+    match &h.state().draw_mut_ref().doc.rig.changer(pc).unwrap().kind {
+        Kind::Paths { paths } => assert_eq!(paths.len(), 2, "two spots on one part"),
+        _ => unreachable!(),
+    }
+    // closing the eyelid: a slider drags the first path down; fading hides the cloth; order moves it to the front
+    let (fade, order, pins) = {
+        let rig = &h.state().draw_mut_ref().doc.rig;
+        let f = |pred: fn(&Kind) -> bool| rig.changers.iter().find(|c| pred(&c.kind)).unwrap().id;
+        (f(|k| matches!(k, Kind::Fade)), f(|k| matches!(k, Kind::Order)), f(|k| matches!(k, Kind::Pins { .. })))
+    };
+    h.state_mut().test_rig_edit(|r| {
+        // the cloth sits inside order, inside fade, inside the pins
+        r.changers.iter_mut().find(|c| c.id == fade).unwrap().parent = Some(pins);
+        r.changers.iter_mut().find(|c| c.id == order).unwrap().parent = Some(fade);
+        r.meshes.iter_mut().find(|m| m.layer == a).unwrap().parent = Some(order);
+        let p = r.add_param("Eye open", 0.0, 1.0, 1.0);
+        let mut off = vec![vec![[0.0, 0.0]; 5], vec![[0.0, 0.0]; 5]];
+        for o in off[0].iter_mut() {
+            *o = [0.0, 40.0];
+        }
+        r.set_keyform(pc, p, 0.0, Form::Paths { offsets: off });
+        r.set_keyform(fade, p, 0.0, Form::Vals { v: vec![0.3] });
+        r.set_keyform(order, p, 0.0, Form::Vals { v: vec![5.0] });
+        let mut pin_off = vec![[0.0, 0.0]; 4];
+        pin_off[3] = [60.0, 40.0];
+        r.set_keyform(pins, p, 0.0, Form::Pins { offsets: pin_off });
+    });
+    h.run_steps(3);
+    let eye = h.state().draw_mut_ref().doc.rig.params.iter().find(|p| p.name == "Eye open").unwrap().id;
+    assert!(h.state_mut().test_moved(b) < 0.5, "open: as drawn");
+    assert_eq!(h.state_mut().test_stack(a).map(|s| s.1), Some(1.0));
+    h.state_mut().test_rig().values.set(eye, 0.0);
+    h.run_steps(3);
+    assert!(h.state_mut().test_moved(b) > 15.0, "the path drags the eyelid down: {}", h.state_mut().test_moved(b));
+    assert!(h.state_mut().test_moved(a) > 20.0, "the pins pull the cloth");
+    let (pos_a, op_a) = h.state_mut().test_stack(a).unwrap();
+    assert!((op_a - 0.3).abs() < 0.01, "faded: {op_a}");
+    assert!(pos_a > h.state_mut().test_stack(b).unwrap().0, "moved forward past the eyelid");
+    save(&mut h, "changers_1_new");
+    // numbers of a numeric changer can be typed and saved at the slider value
+    h.state_mut().test_rig().values = crate::rig::Values::default();
+    h.run_steps(2);
+}
