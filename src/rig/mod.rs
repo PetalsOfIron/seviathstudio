@@ -9,6 +9,7 @@ pub mod changers;
 pub mod check;
 pub mod gizmo;
 pub mod mesh;
+pub mod paramphys;
 pub mod physics;
 pub mod refine;
 pub mod raster;
@@ -83,6 +84,9 @@ pub struct Param {
     pub min: f32,
     pub max: f32,
     pub default: f32,
+    /// The Live2D id of the slider ("ParamAngleX"), for the files of a Live2D model; empty when it has none.
+    #[serde(default)]
+    pub cid: String,
 }
 
 /// The shape of a changer: degrees for a Rotation, the offsets of the control points for a Warp.
@@ -281,6 +285,12 @@ pub struct Rig {
     pub world: physics::World,
     /// Warp changers that bend smoothly (a curve through the control points) instead of in straight cells.
     pub smooth: Vec<Id>,
+    /// Live2D style physics that moves sliders (from a model's physics file), and what else came with the runtime files of a model:
+    /// its expressions, its motions as they were, and the settings VTube Studio saved for it.
+    pub param_physics: paramphys::ParamPhysics,
+    pub expressions: Vec<crate::import::runtime::Expression>,
+    pub live_motions: Vec<crate::import::runtime::Motion>,
+    pub vtube: Option<crate::import::runtime::Vtube>,
     next_id: Id,
 }
 
@@ -460,7 +470,7 @@ impl Rig {
 
     pub fn add_param(&mut self, name: &str, min: f32, max: f32, default: f32) -> Id {
         let id = self.fresh_id();
-        self.params.push(Param { id, name: name.chars().filter(|c| !c.is_control()).take(40).collect(), min, max, default: default.clamp(min, max) });
+        self.params.push(Param { id, name: name.chars().filter(|c| !c.is_control()).take(40).collect(), min, max, default: default.clamp(min, max), cid: String::new() });
         id
     }
 

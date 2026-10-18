@@ -2322,7 +2322,8 @@ impl SeviathApp {
         self.heat_overlay(ui.ctx(), &p, page);
         let to_page = |s: Pos2| [(s.x - page.min.x) / sc, (s.y - page.min.y) / sc];
         let rig = self.draw.doc.rig.clone();
-        let mut pose = if self.rigs.mode == Mode::Weight { rig.pose(&Values::default()) } else { rig.pose(&self.rigs.values) };
+        let shown = self.rigs.effective_values();
+        let mut pose = if self.rigs.mode == Mode::Weight { rig.pose(&Values::default()) } else { rig.pose(&shown) };
         self.rigs.put_edit(&rig, &mut pose);
         self.rigs.put_vals(&mut pose);
         self.rigs.add_phys(&rig, &mut pose);

@@ -3343,3 +3343,38 @@ fn missing_ai_files_show_the_download_button_screens() {
     crate::aisetup::TEST_ROOT.with(|r| *r.borrow_mut() = None);
     let _ = std::fs::remove_dir_all(&empty);
 }
+
+/// The Live2D files section of the Physics tab, and the swinging of a Live2D model moving sliders.
+#[test]
+fn live2d_runtime_physics_screens() {
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 1400.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    let phys = br#"{"Version":3,"Meta":{"Fps":60,"EffectiveForces":{"Gravity":{"X":0,"Y":-1},"Wind":{"X":0,"Y":0}},"PhysicsDictionary":[{"Id":"PhysicsSetting1","Name":"Hair"}]},"PhysicsSettings":[{"Id":"PhysicsSetting1","Input":[{"Source":{"Target":"Parameter","Id":"ParamAngleX"},"Weight":100,"Type":"X","Reflect":false}],"Output":[{"Destination":{"Target":"Parameter","Id":"ParamHair"},"VertexIndex":2,"Scale":20,"Weight":100,"Type":"Angle","Reflect":false}],"Vertices":[{"Position":{"X":0,"Y":0},"Mobility":1,"Delay":0.9,"Acceleration":1,"Radius":0},{"Position":{"X":0,"Y":10},"Mobility":0.95,"Delay":0.9,"Acceleration":1,"Radius":10},{"Position":{"X":0,"Y":20},"Mobility":0.95,"Delay":0.9,"Acceleration":1,"Radius":10},{"Position":{"X":0,"Y":30},"Mobility":0.95,"Delay":0.9,"Acceleration":1,"Radius":10}],"Normalization":{"Position":{"Minimum":-10,"Default":0,"Maximum":10},"Angle":{"Minimum":-10,"Default":0,"Maximum":10}}}]}"#;
+    let (mut x, mut hair) = (0, 0);
+    h.state_mut().test_rig_edit(|r| {
+        x = r.add_param("Angle X", -30.0, 30.0, 0.0);
+        hair = r.add_param("Hair", -1.0, 1.0, 0.0);
+        r.params.iter_mut().find(|p| p.id == x).unwrap().cid = "ParamAngleX".into();
+        r.params.iter_mut().find(|p| p.id == hair).unwrap().cid = "ParamHair".into();
+        r.param_physics = crate::import::runtime::parse_physics3(phys).unwrap();
+        r.expressions = vec![crate::import::runtime::parse_exp3("tilt", br#"{"Parameters":[{"Id":"ParamAngleX","Value":10,"Blend":"Add"}]}"#).unwrap()];
+    });
+    h.state_mut().test_run_action_now("tab.4");
+    h.run_steps(4);
+    save(&mut h, "physics_live2d_files");
+    // the head turns: the hair swings and gives values to its slider; the values the user set are not changed
+    h.state_mut().test_rig().values.set(x, 25.0);
+    let mut peak = 0.0f32;
+    for _ in 0..40 {
+        h.state_mut().phys_advance(1.0 / 60.0);
+        peak = peak.max(h.state_mut().test_phys().param_out.get(&hair).copied().unwrap_or(0.0).abs());
+    }
+    assert!(peak > 0.02, "the hair slider was driven: {peak}");
+    assert_eq!(h.state_mut().test_rig().values.0.get(&hair), None, "what the user set is untouched");
+    assert!(h.state_mut().test_rig().effective_values().0.contains_key(&hair), "what is shown has the swing");
+    // switched off: no swing
+    h.state_mut().test_rig_edit(|r| r.param_physics.on = false);
+    h.state_mut().phys_advance(1.0 / 60.0);
+    assert!(h.state_mut().test_phys().param_out.is_empty());
+}
