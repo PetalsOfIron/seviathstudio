@@ -75,6 +75,7 @@ impl RigState {
 
 #[derive(Default)]
 pub struct RigState {
+    pub phys: super::physicsui::PhysUi,
     pub selected: Vec<LayerId>,
     anchor: Option<LayerId>,
     density: f32,
@@ -156,7 +157,8 @@ impl SeviathApp {
         }
         let after = self.draw.doc.snapshot();
         self.log_step(label, now);
-        self.history.push(label.to_owned(), Tab::Rig, before, after, now);
+        let tab = if self.tab == Tab::Physics { Tab::Physics } else { Tab::Rig };
+        self.history.push(label.to_owned(), tab, before, after, now);
     }
 
     #[cfg(test)]
@@ -238,6 +240,7 @@ impl SeviathApp {
         let mut pose = if painting { rig.pose(&Values::default()) } else { rig.pose(&self.rigs.values) };
         // a Warp being edited shows the shape being dragged
         self.rigs.put_edit(&rig, &mut pose);
+        self.rigs.add_phys(&mut pose);
         let all = rig.deformed_all(&pose);
         let ids: Vec<(LayerId, f32)> = self.draw.doc.layers.iter().rev().filter(|l| l.visible && matches!(l.kind, crate::doc::LayerKind::Raster | crate::doc::LayerKind::Vector)).map(|l| (l.id, l.opacity / 100.0)).collect();
         let mut out = Vec::new();
@@ -272,7 +275,7 @@ impl SeviathApp {
         out
     }
 
-    fn rig_render(&mut self, ctx: &egui::Context) {
+    pub(super) fn rig_render(&mut self, ctx: &egui::Context) {
         let d = &self.draw.doc;
         let mut key: Vec<u64> = vec![d.w as u64, d.h as u64, Arc::as_ptr(&d.rig) as usize as u64];
         for l in &d.layers {
@@ -292,6 +295,16 @@ impl SeviathApp {
             }
             key.push(self.rigs.soft_grow.to_bits() as u64);
         }
+        if self.rigs.phys.on {
+            let mut ids: Vec<_> = self.rigs.phys.offs.iter().collect();
+            ids.sort_by_key(|(k, _)| **k);
+            for (k, v) in ids {
+                key.push(*k as u64);
+                for o in v {
+                    key.extend([o[0].to_bits() as u64, o[1].to_bits() as u64]);
+                }
+            }
+        }
         let key = hash_of(&key);
         if self.rigs.rendered == Some(key) && self.rigs.image.is_some() {
             return;
@@ -309,7 +322,7 @@ impl SeviathApp {
         self.rigs.rendered = Some(key);
     }
 
-    fn rig_select(&mut self, id: LayerId, ctrl: bool, shift: bool) {
+    pub(super) fn rig_select(&mut self, id: LayerId, ctrl: bool, shift: bool) {
         let order: Vec<LayerId> = self.draw.doc.layers.iter().filter(|l| parts::is_part_layer(l)).map(|l| l.id).collect();
         let r = &mut self.rigs;
         if shift && r.anchor.is_some() {
@@ -393,7 +406,7 @@ impl SeviathApp {
         self.rigs.sel_changer = Some(new_id);
     }
 
-    fn make_meshes(&mut self, ids: Vec<LayerId>, now: f64) {
+    pub(super) fn make_meshes(&mut self, ids: Vec<LayerId>, now: f64) {
         let density = self.rigs.density;
         let d = &self.draw.doc;
         let made: Vec<(LayerId, Option<(Vec<[f32; 2]>, Vec<[u32; 3]>)>)> = ids.iter().map(|id| (*id, d.layers.iter().find(|l| l.id == *id).and_then(|l| rig::mesh::generate(l, d.w, d.h, density)))).collect();
@@ -414,9 +427,7 @@ impl SeviathApp {
         self.rigs.message = Some(format!("{n} meshes made."));
     }
 
-    pub(super) fn rig_ui(&mut self, ui: &mut Ui) {
-        let ctx = ui.ctx().clone();
-        let now = ctx.input(|i| i.time);
+    pub(super) fn rig_init(&mut self) {
         if !self.rigs.inited {
             self.rigs.density = 0.5;
             self.rigs.wire = true;
@@ -436,6 +447,13 @@ impl SeviathApp {
             self.rigs.zoom = 1.0;
             self.rigs.inited = true;
         }
+    }
+
+    pub(super) fn rig_ui(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        let now = ctx.input(|i| i.time);
+        self.rig_init();
+        self.phys_tick(&ctx);
         self.rigs.selected.retain(|id| self.draw.doc.index_of(*id).is_some());
         {
             let rig = &self.draw.doc.rig;
@@ -1718,7 +1736,7 @@ impl SeviathApp {
         }
     }
 
-    fn rig_view(&mut self, ui: &mut Ui, now: f64, picked: &mut Option<(LayerId, bool, bool)>) {
+    pub(super) fn rig_view(&mut self, ui: &mut Ui, now: f64, picked: &mut Option<(LayerId, bool, bool)>) {
         let rect = ui.available_rect_before_wrap();
         let resp = ui.allocate_rect(rect, Sense::click_and_drag());
         let (dw, dh) = (self.draw.doc.w as f32, self.draw.doc.h as f32);
@@ -1749,6 +1767,7 @@ impl SeviathApp {
         let rig = self.draw.doc.rig.clone();
         let mut pose = if self.rigs.mode == Mode::Weight { rig.pose(&Values::default()) } else { rig.pose(&self.rigs.values) };
         self.rigs.put_edit(&rig, &mut pose);
+        self.rigs.add_phys(&mut pose);
         let all = rig.deformed_all(&pose);
         // triangles of the picked parts
         if self.rigs.wire {

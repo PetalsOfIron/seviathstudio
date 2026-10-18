@@ -19,6 +19,7 @@ mod layoutmenu;
 mod fontmaker;
 mod newproject;
 mod partstab;
+mod physicsui;
 mod prerigui;
 mod recording;
 mod rigtab;
@@ -620,6 +621,7 @@ impl eframe::App for SeviathApp {
             (_, Tab::Draw) => self.draw.ui(ui),
             (_, Tab::Parts) => self.parts_ui(ui),
             (_, Tab::Rig) => self.rig_ui(ui),
+            (_, Tab::Physics) => self.physics_ui(ui),
             (_, t) => tabs::placeholder::ui(ui, t),
         }
 

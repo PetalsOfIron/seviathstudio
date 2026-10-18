@@ -2844,3 +2844,108 @@ fn rig_tab_joined_sliders_screens() {
     h.run_steps(3);
     assert_eq!(h.state().draw_mut_ref().doc.rig.pads.len(), n, "split brings the two sliders back");
 }
+
+#[test]
+fn physics_tab_screens() {
+    use crate::doc::LayerKind;
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 2200.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    {
+        let d = h.state_mut().draw_mut();
+        let (w, h2) = (d.doc.w, d.doc.h);
+        let mut add = |name: &str, x: i32, y: i32, bw: u32, bh: u32, c: [u8; 3]| {
+            let img = image::RgbaImage::from_pixel(bw, bh, image::Rgba([c[0], c[1], c[2], 255]));
+            let mut l = d.doc.new_layer(name, LayerKind::Raster);
+            l.tiles = crate::files::tiles_from_rgba(&img, x, y, w, h2);
+            l.rev += 1;
+            d.doc.layers.insert(0, l);
+        };
+        add("hair back", 1000, 500, 1000, 1100, [90, 60, 140]);
+        add("face", 1100, 700, 800, 900, [240, 205, 180]);
+        add("eye L", 1550, 1100, 200, 90, [40, 70, 140]);
+        add("eye R", 1250, 1100, 200, 90, [40, 70, 140]);
+        add("mouth", 1350, 1450, 300, 70, [200, 80, 90]);
+        add("hair front", 1050, 600, 900, 250, [110, 70, 170]);
+        add("earring", 1010, 1200, 60, 200, [230, 200, 60]);
+        d.doc.mark_all_dirty();
+    }
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    h.get_by_label("This is a face").click();
+    h.run_steps(5);
+    h.state_mut().test_run_action_now("tab.4");
+    h.run_steps(5);
+    let layer = |h: &Harness<'_, SeviathApp>, n: &str| h.state().draw_mut_ref().doc.layers.iter().find(|l| l.name == n).unwrap().id;
+    let (back, ring) = (layer(&h, "hair back"), layer(&h, "earring"));
+    // before: nothing moves
+    save(&mut h, "phys_1_before");
+    h.state_mut().test_rig().selected = vec![back];
+    h.run_steps(2);
+    h.get_by_label("Make it move").click();
+    h.run_steps(5);
+    {
+        let rig = &h.state().draw_mut_ref().doc.rig;
+        assert_eq!(rig.physics.len(), 1);
+        assert_eq!(rig.physics[0].kind, crate::rig::physics::Kind::Hair);
+        let m = rig.mesh_of(back).unwrap();
+        assert_eq!(m.parent, Some(rig.physics[0].changer), "the part hangs from its curve");
+    }
+    h.state_mut().test_rig().selected = vec![ring];
+    h.state_mut().test_phys().kind = crate::rig::physics::Kind::Hanging;
+    h.run_steps(2);
+    h.get_by_label("Make it move").click();
+    h.run_steps(5);
+    assert_eq!(h.state().draw_mut_ref().doc.rig.physics.len(), 2);
+    // at rest nothing is moved, even after some time
+    for _ in 0..120 {
+        h.state_mut().phys_advance(1.0 / 60.0);
+    }
+    assert!(h.state_mut().test_moved(back) < 2.0, "as drawn at rest: {}", h.state_mut().test_moved(back));
+    // the head shakes: the hair follows with a delay
+    let ax = h.state().draw_mut_ref().doc.rig.params.iter().find(|p| p.name == "Angle X").unwrap().id;
+    h.state_mut().test_rig().values.set(ax, 28.0);
+    let mut worst: f32 = 0.0;
+    for _ in 0..20 {
+        h.state_mut().phys_advance(1.0 / 60.0);
+    }
+    worst = worst.max(h.state_mut().test_moved(back));
+    assert!(worst > 5.0, "the hair moves: {worst}");
+    save(&mut h, "phys_2_moving");
+    // wind pushes
+    h.state_mut().test_rig().values = crate::rig::Values::default();
+    h.state_mut().test_rig_edit(|r| r.world.wind = crate::rig::physics::Wind::Storm);
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().doc.rig.world.wind, crate::rig::physics::Wind::Storm);
+    for _ in 0..90 {
+        h.state_mut().phys_advance(1.0 / 60.0);
+    }
+    assert!(h.state_mut().test_moved(ring) > 5.0, "the earring blows: {}", h.state_mut().test_moved(ring));
+    // a test motion runs and ends
+    h.get_by_label("Shake the head").click();
+    h.run_steps(3);
+    assert!(h.state_mut().test_phys().motion.is_some());
+    for _ in 0..200 {
+        h.state_mut().phys_advance(1.0 / 60.0);
+    }
+    assert!(h.state_mut().test_phys().motion.is_none(), "the motion ends");
+    save(&mut h, "phys_3_storm");
+    // physics off: the sliders alone
+    h.state_mut().test_phys().on = false;
+    h.run_steps(3);
+    assert!(h.state_mut().test_moved(ring) < 1.0);
+    // removing puts the part back
+    h.state_mut().test_phys().on = true;
+    h.state_mut().test_phys().sel = Some(1);
+    h.run_steps(3);
+    h.get_by_label("Remove").click();
+    h.run_steps(3);
+    let rig = h.state().draw_mut_ref().doc.rig.clone();
+    assert_eq!(rig.physics.len(), 1);
+    assert!(rig.mesh_of(ring).unwrap().parent.is_none(), "back to where it was");
+    // undo brings it back
+    h.state_mut().test_run_action_now("edit.undo");
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().doc.rig.physics.len(), 2);
+}
