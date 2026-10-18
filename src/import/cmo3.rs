@@ -465,14 +465,14 @@ struct Texture {
     m: [f32; 6],
 }
 
-fn texture_of(dom: &Dom, mesh: NodeId, caff: &Caff, cache: &mut HashMap<String, Option<Arc<image::RgbaImage>>>) -> Option<Texture> {
+fn texture_of(dom: &Dom, mesh: NodeId, read: &dyn Fn(&str) -> Option<Vec<u8>>, cache: &mut HashMap<String, Option<Arc<image::RgbaImage>>>) -> Option<Texture> {
     let tex = dom.resolve(dom.child(mesh, "texture")?);
     let res = dom.resolve(dom.child(tex, "srcImageResource")?);
     let path = dom.attr(dom.child(res, "imageFileBuf")?, "path")?.to_owned();
     let img = cache
         .entry(path.clone())
         .or_insert_with(|| {
-            let bytes = caff.read(&path).ok()?;
+            let bytes = read(&path)?;
             image::load_from_memory(&bytes).ok().map(|i| Arc::new(i.to_rgba8()))
         })
         .clone()?;
@@ -637,6 +637,12 @@ pub fn import_bytes(data: Vec<u8>) -> Result<Imported, String> {
     drop(xml_bytes);
     let dom = Dom::parse(&xml)?;
     drop(xml);
+    import_dom(dom, &|path| caff.read(path).ok())
+}
+
+/// Convert a model written as the XML tree of a `.cmo3` (the `.moc3` reader writes the same tree). `read` gives the bytes of a
+/// texture file by its path.
+pub fn import_dom(dom: Dom, read: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Imported, String> {
     let root = dom.nodes.iter().position(|n| n.tag == "CModelSource").ok_or("The file has no model in it.")?;
     let name = dom.child_text(root, "name").unwrap_or("Live2D model").chars().filter(|c| !c.is_control()).take(60).collect::<String>();
     let canvas = dom.child(root, "canvas");
@@ -804,7 +810,7 @@ pub fn import_bytes(data: Vec<u8>) -> Result<Imported, String> {
             continue;
         }
         // the art
-        let Some(tex) = texture_of(&dom, m, &caff, &mut cache) else {
+        let Some(tex) = texture_of(&dom, m, read, &mut cache) else {
             no_texture += 1;
             continue;
         };
