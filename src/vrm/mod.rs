@@ -3,6 +3,8 @@
 
 pub mod gltf;
 pub mod export;
+pub mod face;
+pub mod hands;
 pub mod model;
 pub mod preview;
 

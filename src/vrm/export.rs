@@ -184,7 +184,9 @@ pub fn export(model: &Model3d, fmt: Format) -> Result<Vec<u8>, String> {
         }
         Format::Vrm0 => {
             b.extensions_used = vec!["KHR_materials_unlit".into(), "VRM".into()];
-            let bones: Vec<Value> = model.bones.iter().filter(|b| b.humanoid).map(|bone| json!({ "bone": bone.name, "node": hb(&bone.name).unwrap(), "useDefaultValues": true })).collect();
+            // 0.x calls the three bones of a thumb Proximal, Intermediate and Distal
+            let old = |n: &str| -> String { n.replace("ThumbProximal", "ThumbIntermediate").replace("ThumbMetacarpal", "ThumbProximal") };
+            let bones: Vec<Value> = model.bones.iter().filter(|b| b.humanoid).map(|bone| json!({ "bone": old(&bone.name), "node": hb(&bone.name).unwrap(), "useDefaultValues": true })).collect();
             let mut groups = vec![json!({ "name": "Neutral", "presetName": "neutral", "binds": [], "isBinary": false, "materialValues": [] })];
             for e in &model.expressions {
                 let preset = PRESETS0.iter().find(|p| p.0 == e.name).map(|p| p.1).unwrap_or("unknown");

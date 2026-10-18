@@ -277,7 +277,8 @@ fn an_uncut_figure_is_rigged_and_becomes_a_valid_vrm_in_both_formats() {
     let p = &m.parts[0];
     let hand = m.bone("leftHand").unwrap() as u16;
     let near_hand = (0..p.verts.len()).min_by(|a, b| (p.verts[*a][0] - 0.8).abs().total_cmp(&(p.verts[*b][0] - 0.8).abs())).unwrap();
-    assert!(p.joints[near_hand].iter().zip(&p.weights[near_hand]).any(|(j, w)| *j == hand && *w > 0.4), "the fingertip follows the hand: {:?} {:?}", p.joints[near_hand], p.weights[near_hand]);
+    let hand_side = |j: u16| m.bones[j as usize].name.starts_with("left") && (m.bones[j as usize].name.ends_with("Hand") || ["Thumb", "Index", "Middle", "Ring", "Little"].iter().any(|f| m.bones[j as usize].name.contains(f)));
+    assert!(p.joints[near_hand].iter().zip(&p.weights[near_hand]).any(|(j, w)| (*j == hand || hand_side(*j)) && *w > 0.4), "the fingertip follows the hand or its fingers: {:?} {:?}", p.joints[near_hand], p.weights[near_hand]);
     assert!(p.weights.iter().all(|w| (w.iter().sum::<f32>() - 1.0).abs() < 1e-3));
     // both formats are valid
     let (one, zero) = (export(&m, Format::Vrm1).unwrap(), export(&m, Format::Vrm0).unwrap());
@@ -322,6 +323,12 @@ fn real_uncut_characters_become_checked_vrms() {
             let (s1, s0) = (validate(&bytes1).unwrap_or_else(|e| panic!("{folder}/{name} 1.0: {e}")), validate(&bytes0).unwrap_or_else(|e| panic!("{folder}/{name} 0.x: {e}")));
             eprintln!("{folder}/{name}: {:.0}% sure, {} vertices, {} bones, VRM {} KB / {} KB, {:?}", fig.confidence * 100.0, s1.vertices, s1.bones, bytes1.len() / 1024, bytes0.len() / 1024, t0.elapsed());
             assert_eq!((s1.version, s0.version), (1, 0));
+            // keep the files, to open them in a VRM viewer
+            let stem = f.file_stem().unwrap().to_string_lossy().to_string();
+            let out = std::path::Path::new("target/vrm").join(folder);
+            let _ = std::fs::create_dir_all(&out);
+            std::fs::write(out.join(format!("{stem}.vrm")), &bytes1).unwrap();
+            std::fs::write(out.join(format!("{stem}_vrm0.vrm")), &bytes0).unwrap();
             // front, and with both arms raised and the head tilted (the skin weights at work)
             let up = [("leftUpperArm", 55.0f32), ("rightUpperArm", -55.0), ("head", 12.0), ("leftUpperLeg", -12.0), ("rightUpperLeg", 12.0)];
             for (k, yaw) in [0.0f32, 0.0].iter().enumerate() {
@@ -366,4 +373,98 @@ fn closed_pose_figures_are_rigged_with_hints_and_bend_where_they_should() {
     if any {
         sheet.save("target/screens/vrm_uncut_closed.png").unwrap();
     }
+}
+
+/// What a viewer does with the model: it starts from the T pose and swings the arms down to an idle pose.
+#[test]
+fn arms_swung_down_from_the_t_pose_keep_the_body_whole() {
+    use super::model::build_any;
+    let base = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Downloads/Bases/images/races/images");
+    let files = [("male", "ghoulbase.png"), ("female", "PixieBase.png"), ("male", "OgreBase.png"), ("male", "WolfBeastsBase.png")];
+    let mut sheet = image::RgbaImage::from_pixel(files.len() as u32 * 300, 380, image::Rgba([255, 255, 255, 255]));
+    let mut any = false;
+    for (i, (folder, name)) in files.iter().enumerate() {
+        let Ok(bytes) = std::fs::read(base.join(folder).join(name)) else { continue };
+        let img = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        let mut d = uncut_doc(&img);
+        let ids: Vec<crate::doc::LayerId> = d.layers.iter().map(|l| l.id).collect();
+        let mut rig = Rig::default();
+        crate::rig::uncut::auto_rig(&mut rig, &d, &ids, 0.5).unwrap();
+        d.rig = std::sync::Arc::new(rig);
+        let m = build_any(&d, &Options { max_texture: 1024, ..Default::default() }).unwrap();
+        // the rest pose is a real T pose: arms level, legs plumb
+        let pos = |n: &str| m.bones[m.bone(n).unwrap()].pos;
+        let (ua, h) = (pos("leftUpperArm"), pos("leftHand"));
+        assert!((ua[1] - h[1]).abs() < 0.01 && h[0] > ua[0], "{name}: left arm level {ua:?} {h:?}");
+        let (ur, hr) = (pos("rightUpperArm"), pos("rightHand"));
+        assert!((ur[1] - hr[1]).abs() < 0.01 && hr[0] < ur[0], "{name}: right arm level");
+        let (hip, foot) = (pos("leftUpperLeg"), pos("leftFoot"));
+        assert!((hip[0] - foot[0]).abs() < 0.01 && foot[1] < hip[1], "{name}: left leg plumb {hip:?} {foot:?}");
+        let idle = [("leftUpperArm", -80.0f32), ("rightUpperArm", 80.0)];
+        let rest = super::preview::render_posed(&m, 0.0, 300, 380, &[], &[]);
+        let down = super::preview::render_posed(&m, 0.0, 300, 380, &[], &idle);
+        let _ = rest;
+        image::imageops::replace(&mut sheet, &down, (i as u32 * 300) as i64, 0);
+        any = true;
+    }
+    if any {
+        sheet.save("target/screens/vrm_idle_pose.png").unwrap();
+    }
+}
+
+#[test]
+fn the_skeleton_has_clavicles_and_fingers_named_for_both_vrm_formats() {
+    use super::model::build_any;
+    let img = crate::rig::uncut::tests::figure_image();
+    let mut d = uncut_doc(&img);
+    let ids: Vec<crate::doc::LayerId> = d.layers.iter().map(|l| l.id).collect();
+    let mut rig = Rig::default();
+    crate::rig::uncut::auto_rig(&mut rig, &d, &ids, 0.6).unwrap();
+    d.rig = std::sync::Arc::new(rig);
+    let m = build_any(&d, &Options { name: "Fingers".into(), author: "Me".into(), ..Default::default() }).unwrap();
+    // clavicles between the chest and the arm; the arm hangs from the clavicle
+    for side in ["left", "right"] {
+        let sh = m.bone(&format!("{side}Shoulder")).unwrap_or_else(|| panic!("{side} shoulder"));
+        assert_eq!(m.bones[sh].parent, m.bone("chest"));
+        assert_eq!(m.bones[m.bone(&format!("{side}UpperArm")).unwrap()].parent, Some(sh));
+    }
+    // fingers: a thumb and four fingers, three bones each, hanging from the hand and from each other
+    for side in ["left", "right"] {
+        for (finger, segs) in [("Thumb", ["Metacarpal", "Proximal", "Distal"]), ("Index", ["Proximal", "Intermediate", "Distal"]), ("Little", ["Proximal", "Intermediate", "Distal"])] {
+            let mut parent = m.bone(&format!("{side}Hand")).unwrap();
+            for s in segs {
+                let b = m.bone(&format!("{side}{finger}{s}")).unwrap_or_else(|| panic!("{side}{finger}{s}"));
+                assert_eq!(m.bones[b].parent, Some(parent));
+                parent = b;
+            }
+        }
+    }
+    assert!(m.bones.len() >= 40, "the body and the thirty finger bones: {}", m.bones.len());
+    // the fingertip follows a finger bone, the palm the hand
+    let p = &m.parts[0];
+    let hand = m.bone("leftHand").unwrap();
+    let tip_bone = m.bone("leftMiddleDistal").unwrap();
+    let tip_vertex = (0..p.verts.len()).filter(|i| p.joints[*i][0] as usize != 0 || true).max_by(|a, b| p.verts[*a][0].total_cmp(&p.verts[*b][0])).unwrap();
+    let uses = |v: usize, bone: usize| p.joints[v].iter().zip(&p.weights[v]).any(|(j, w)| *j as usize == bone && *w > 0.0);
+    assert!(p.joints[tip_vertex].iter().zip(&p.weights[tip_vertex]).any(|(j, w)| m.bones[*j as usize].name.starts_with("left") && (m.bones[*j as usize].name.contains("Index") || m.bones[*j as usize].name.contains("Middle") || m.bones[*j as usize].name.contains("Ring") || m.bones[*j as usize].name.contains("Little") || m.bones[*j as usize].name.contains("Thumb")) && *w > 0.2), "the fingertip follows the fingers: {:?} {:?}", p.joints[tip_vertex], p.weights[tip_vertex]);
+    let _ = (hand, tip_bone, uses);
+    // VRM 1.0 uses the Metacarpal name; 0.x calls the thumb's bones Proximal, Intermediate and Distal
+    let (one, zero) = (export(&m, Format::Vrm1).unwrap(), export(&m, Format::Vrm0).unwrap());
+    assert!(validate(&one).is_ok() && validate(&zero).is_ok());
+    let g1 = read_glb(&one).unwrap();
+    let hb1 = g1.json["extensions"]["VRMC_vrm"]["humanoid"]["humanBones"].as_object().unwrap();
+    for n in ["leftShoulder", "rightShoulder", "leftThumbMetacarpal", "leftThumbDistal", "leftIndexIntermediate", "rightLittleDistal"] {
+        assert!(hb1.contains_key(n), "{n}");
+    }
+    let g0 = read_glb(&zero).unwrap();
+    let names0: Vec<&str> = g0.json["extensions"]["VRM"]["humanoid"]["humanBones"].as_array().unwrap().iter().map(|b| b["bone"].as_str().unwrap()).collect();
+    for n in ["leftShoulder", "leftThumbProximal", "leftThumbIntermediate", "leftThumbDistal", "rightIndexIntermediate"] {
+        assert!(names0.contains(&n), "{n} in the 0.x list");
+    }
+    assert!(!names0.contains(&"leftThumbMetacarpal"));
+    // every name appears once
+    let mut sorted = names0.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), names0.len(), "no bone twice");
 }

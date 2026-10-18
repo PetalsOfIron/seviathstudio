@@ -314,9 +314,23 @@ pub fn clear_bones(rig: &mut Rig) {
     }
 }
 
+/// A limb followed along the outline: its three bones, the path of its middle and how wide it is along the way.
+#[derive(Clone, Debug)]
+pub struct Limb {
+    pub bones: [&'static str; 3],
+    pub path: Vec<[f32; 2]>,
+    /// Half the width of the limb at every point of the path (page pixels).
+    pub half: Vec<f32>,
+    /// Where the second and the third bone begin, as a share of the length of the path.
+    pub splits: [f32; 2],
+    /// The bone that carries the root of the limb (the clavicle for an arm).
+    pub root: Option<&'static str>,
+}
+
 /// The joints found, in page pixels (VRM humanoid names).
 #[derive(Clone, Debug)]
 pub struct Figure {
+    pub limbs: Vec<Limb>,
     pub joints: Vec<(&'static str, [f32; 2])>,
     /// Where the piece after a bone ends (the tips of the hands, feet and head).
     pub tips: Vec<(&'static str, [f32; 2])>,
@@ -439,11 +453,26 @@ pub fn detect_with(img: &RgbaImage, hints: Hints) -> Option<Figure> {
     let arm_thick = (0.095 * height).max(6.0);
     let mut joints: Vec<(&'static str, [f32; 2])> = Vec::new();
     let mut tips: Vec<(&'static str, [f32; 2])> = Vec::new();
+    let mut limbs: Vec<Limb> = Vec::new();
+    // half the width of the figure along a path
+    let halves = |path: &[[f32; 2]], dflt: f32, cap: f32| -> Vec<f32> {
+        (0..path.len())
+            .map(|i| {
+                let (a, b) = (path[i.saturating_sub(1)], path[(i + 1).min(path.len() - 1)]);
+                let d = norm([b[0] - a[0], b[1] - a[1]]);
+                match m.across(path[i], d, cap * 1.3) {
+                    Some((_, w)) if w <= cap && w >= 2.0 => w / 2.0,
+                    _ => dflt,
+                }
+            })
+            .collect()
+    };
     for left in [true, false] {
         let sgn = if left { 1.0 } else { -1.0 };
         let pre = if left { "left" } else { "right" };
         let shoulder = [xc + sgn * shoulder_half, shoulder_y + 0.02 * height];
         let mut best: Vec<[f32; 2]> = Vec::new();
+        let mut arms_down_fallback_used = false;
         for deg in [0.0f32, 12.0, 25.0, 38.0, 52.0, 66.0, 80.0].iter().copied().filter(|_| hints.arms != Hold::Down) {
             let (s, c) = deg.to_radians().sin_cos();
             let dir = [sgn * c, s];
@@ -474,6 +503,7 @@ pub fn detect_with(img: &RgbaImage, hints: Hints) -> Option<Figure> {
                 notes.push(format!("The {pre} arm is against the body: it is put hanging at the side."));
                 let top = [xc + sgn * (shoulder_half_down), shoulder_y + 0.02 * height];
                 best = vec![top, [top[0] + sgn * 0.02 * height, top[1] + 0.20 * height], [top[0] + sgn * 0.035 * height, top[1] + 0.38 * height]];
+                arms_down_fallback_used = true;
                 conf += 0.1;
             } else {
                 notes.push(format!("No {pre} arm found: it is put out sideways."));
@@ -482,6 +512,16 @@ pub fn detect_with(img: &RgbaImage, hints: Hints) -> Option<Figure> {
         } else {
             conf += 0.2;
         }
+        // the shoulder joint is at the root of the arm, a little inside the outline where the arm leaves the body
+        let pivot = if best.len() >= 3 && !arms_down_fallback_used {
+            let (a, b) = (best[1], best[2]);
+            let d = norm([b[0] - a[0], b[1] - a[1]]);
+            [a[0] - d[0] * 0.03 * height, a[1] - d[1] * 0.03 * height]
+        } else {
+            best[0]
+        };
+        best[0] = pivot;
+        let shoulder = pivot;
         let l = path_len(&best);
         let hand_len = (0.09 * height).min(l * 0.3);
         let name = |s: &str| -> &'static str {
@@ -494,9 +534,13 @@ pub fn detect_with(img: &RgbaImage, hints: Hints) -> Option<Figure> {
                 (false, _) => "rightHand",
             }
         };
+        limbs.push(Limb { bones: [name("UpperArm"), name("LowerArm"), name("Hand")], half: halves(&best, 0.04 * height, arm_thick), path: best.clone(), splits: [0.34, 0.74], root: Some(if left { "leftShoulder" } else { "rightShoulder" }) });
         joints.push((name("UpperArm"), shoulder));
-        joints.push((name("LowerArm"), along(&best, l * 0.5)));
-        joints.push((name("Hand"), along(&best, l - hand_len)));
+        let _ = hand_len;
+        // the elbow and the wrist where a normal rig has them: the forearm is longer than the upper arm
+        joints.push((name("LowerArm"), along(&best, l * 0.34)));
+        joints.push((name("Hand"), along(&best, l * 0.74)));
+        joints.push((if left { "leftShoulder" } else { "rightShoulder" }, [xc + sgn * 0.04 * height, shoulder_y - 0.005 * height]));
         tips.push((name("Hand"), *best.last().unwrap()));
     }
     // legs: from the hip down, the longest run that is thin enough to be a leg
@@ -544,9 +588,10 @@ pub fn detect_with(img: &RgbaImage, hints: Hints) -> Option<Figure> {
         }
         let l = path_len(&best);
         let (up, low, foot, toes) = if left { ("leftUpperLeg", "leftLowerLeg", "leftFoot", "leftToes") } else { ("rightUpperLeg", "rightLowerLeg", "rightFoot", "rightToes") };
+        limbs.push(Limb { bones: [up, low, foot], half: halves(&best, 0.06 * height, leg_thick), path: best.clone(), splits: [0.33, 0.80], root: None });
         joints.push((up, hip));
-        joints.push((low, along(&best, l * 0.5)));
-        joints.push((foot, along(&best, (l - 0.045 * height).max(l * 0.8))));
+        joints.push((low, along(&best, l * 0.33)));
+        joints.push((foot, along(&best, l * 0.80)));
         let end = *best.last().unwrap();
         joints.push((toes, [end[0], (end[1]).min(by1 as f32)]));
         tips.push((toes, [end[0], end[1].min(by1 as f32)]));
@@ -557,26 +602,31 @@ pub fn detect_with(img: &RgbaImage, hints: Hints) -> Option<Figure> {
     joints.push(("hips", [xc, hips_y]));
     joints.push(("spine", spine));
     joints.push(("chest", chest));
-    joints.push(("neck", [xc, neck_y]));
-    joints.push(("head", head_c));
+    // as in a normal rig: the head bone starts where the head meets the neck, the neck bone a little below
+    let _ = head_c;
+    joints.push(("neck", [xc, neck_y + 0.049 * height]));
+    joints.push(("head", [xc, neck_y]));
     tips.push(("head", [xc, top]));
     // back to page pixels
     let k = m.scale;
     let page = |p: [f32; 2]| [(p[0] + 0.5) * k, (p[1] + 0.5) * k];
-    Some(Figure { joints: joints.into_iter().map(|(n, p)| (n, page(p))).collect(), tips: tips.into_iter().map(|(n, p)| (n, page(p))).collect(), confidence: conf.clamp(0.0, 1.0), notes })
+    let limbs: Vec<Limb> = limbs.into_iter().map(|l| Limb { path: l.path.iter().map(|p| page(*p)).collect(), half: l.half.iter().map(|h| h * k).collect(), ..l }).collect();
+    Some(Figure { limbs, joints: joints.into_iter().map(|(n, p)| (n, page(p))).collect(), tips: tips.into_iter().map(|(n, p)| (n, page(p))).collect(), confidence: conf.clamp(0.0, 1.0), notes })
 }
 
 /// The bones to make, in order: (name, parent, the bone its piece runs to).
-pub const BONES: [(&str, Option<&str>, Option<&str>); 17] = [
+pub const BONES: [(&str, Option<&str>, Option<&str>); 19] = [
     ("hips", None, Some("spine")),
     ("spine", Some("hips"), Some("chest")),
     ("chest", Some("spine"), Some("neck")),
     ("neck", Some("chest"), Some("head")),
     ("head", Some("neck"), None),
-    ("leftUpperArm", Some("chest"), Some("leftLowerArm")),
+    ("leftShoulder", Some("chest"), Some("leftUpperArm")),
+    ("leftUpperArm", Some("leftShoulder"), Some("leftLowerArm")),
     ("leftLowerArm", Some("leftUpperArm"), Some("leftHand")),
     ("leftHand", Some("leftLowerArm"), None),
-    ("rightUpperArm", Some("chest"), Some("rightLowerArm")),
+    ("rightShoulder", Some("chest"), Some("rightUpperArm")),
+    ("rightUpperArm", Some("rightShoulder"), Some("rightLowerArm")),
     ("rightLowerArm", Some("rightUpperArm"), Some("rightHand")),
     ("rightHand", Some("rightLowerArm"), None),
     ("leftUpperLeg", Some("hips"), Some("leftLowerLeg")),
@@ -608,11 +658,118 @@ pub fn add_skeleton(rig: &mut Rig, fig: &Figure) -> Vec<Id> {
         }
         ids.push(id);
     }
-    let snapshot = rig.clone();
-    if let Some(s) = rig.skin.as_mut() {
-        s.auto_weights(&snapshot);
+    if fig.limbs.len() >= 2 {
+        paint_weights(rig, fig);
+    } else {
+        let snapshot = rig.clone();
+        if let Some(s) = rig.skin.as_mut() {
+            s.auto_weights(&snapshot);
+        }
     }
     ids
+}
+
+fn smooth(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Weights from the limbs: a place on an arm follows the arm bones, a place on a leg the leg bones, and everything
+/// else follows the bones of the middle line by its height. So the chest keeps its width when an arm swings.
+pub fn paint_weights(rig: &mut Rig, fig: &Figure) {
+    let names: Vec<String> = match rig.skin.as_ref() {
+        Some(sk) => sk.bones.iter().map(|b| rig.changer(b.changer).map(|c| c.name.clone()).unwrap_or_default()).collect(),
+        None => return,
+    };
+    let idx = |n: &str| names.iter().position(|x| x == n);
+    // the middle line: bone and height of each joint, from the top of the head down
+    let chain: Vec<(usize, f32)> = ["head", "neck", "chest", "spine", "hips"].iter().filter_map(|n| Some((idx(n)?, fig.joint(n)?[1]))).collect();
+    let Some(sk) = rig.skin.as_mut() else { return };
+    let c = sk.cell as f32;
+    let nb = names.len();
+    for gy in 0..sk.gh {
+        for gx in 0..sk.gw {
+            let p = [(gx as f32 + 0.5) * c, (gy as f32 + 0.5) * c];
+            let mut w = vec![0.0f32; nb];
+            // arms and legs
+            let mut total = 0.0f32;
+            let mut limb_w: Vec<(usize, f32)> = Vec::new();
+            for limb in &fig.limbs {
+                let (mut best_d, mut best_s, mut best_h) = (f32::MAX, 0.0f32, 1.0f32);
+                let mut acc = 0.0f32;
+                for i in 0..limb.path.len().saturating_sub(1) {
+                    let (a, b) = (limb.path[i], limb.path[i + 1]);
+                    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                    let l2 = (dx * dx + dy * dy).max(1e-6);
+                    let t = (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2).clamp(0.0, 1.0);
+                    let d = (p[0] - (a[0] + dx * t)).hypot(p[1] - (a[1] + dy * t));
+                    let seg = l2.sqrt();
+                    if d < best_d {
+                        best_d = d;
+                        best_s = acc + t * seg;
+                        best_h = limb.half[i] + (limb.half[i + 1] - limb.half[i]) * t;
+                    }
+                    acc += seg;
+                }
+                let len = acc;
+                if len < 1.0 {
+                    continue;
+                }
+                let r = best_h * 1.12 + 2.0;
+                let mut mem = if best_d <= r { 1.0 } else { (1.0 - (best_d - r) / (0.45 * r + 4.0)).max(0.0) };
+                // near the root the limb fades into the body
+                let raw = mem;
+                let g = smooth(best_s / (0.14 * len));
+                mem *= g;
+                // where the arm meets the body the clavicle carries it
+                if let (Some(rb), true) = (limb.root.and_then(&idx), raw * (1.0 - g) > 0.0) {
+                    limb_w.push((rb, raw * (1.0 - g)));
+                    total += raw * (1.0 - g);
+                }
+                if mem <= 0.0 {
+                    continue;
+                }
+                let s = best_s / len;
+                let bw = 0.07;
+                let wh = smooth((s - limb.splits[1] + bw) / (2.0 * bw));
+                let wu = 1.0 - smooth((s - limb.splits[0] + bw) / (2.0 * bw));
+                let wl = (1.0 - wu - wh).max(0.0);
+                for (k, share) in [wu, wl, wh].iter().enumerate() {
+                    if let (Some(bi), true) = (idx(limb.bones[k]), *share > 0.0) {
+                        limb_w.push((bi, mem * share));
+                    }
+                }
+                total += mem;
+            }
+            let norm = if total > 1.0 { total } else { 1.0 };
+            for (bi, v) in &limb_w {
+                w[*bi] += v / norm;
+            }
+            let body = (1.0 - total / norm).max(0.0);
+            // the middle line by height
+            if body > 0.0 && !chain.is_empty() {
+                let y = p[1];
+                let mut put = |bi: usize, v: f32| w[bi] += body * v;
+                if y <= chain[0].1 {
+                    put(chain[0].0, 1.0);
+                } else if y >= chain[chain.len() - 1].1 {
+                    put(chain[chain.len() - 1].0, 1.0);
+                } else {
+                    for pair in chain.windows(2) {
+                        if y >= pair[0].1 && y <= pair[1].1 {
+                            let t = smooth((y - pair[0].1) / (pair[1].1 - pair[0].1).max(1e-3));
+                            put(pair[0].0, 1.0 - t);
+                            put(pair[1].0, t);
+                            break;
+                        }
+                    }
+                }
+            }
+            for i in 0..nb {
+                sk.planes[i][(gy * sk.gw + gx) as usize] = (w[i].clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -665,8 +822,11 @@ pub(crate) mod tests {
         // the hand is out at the end of the arm
         assert!(j("leftHand")[0] > 600.0 && j("rightHand")[0] < 200.0, "{:?} {:?}", j("leftHand"), j("rightHand"));
         assert!(j("leftLowerArm")[0] > j("leftUpperArm")[0] && j("leftLowerArm")[0] < j("leftHand")[0]);
+        assert!(j("leftShoulder")[0] > 400.0 && j("leftShoulder")[0] < j("leftUpperArm")[0], "the clavicle is between the middle and the arm");
+        // as in a normal rig the head bone starts at the neck, and the neck is below it
+        assert!(j("head")[1] < j("neck")[1]);
         // the feet are at the bottom, the knees half way
-        assert!(j("leftFoot")[1] > 880.0 && j("rightFoot")[1] > 880.0, "{:?}", j("leftFoot"));
+        assert!(j("leftFoot")[1] > 850.0 && j("rightFoot")[1] > 850.0, "{:?}", j("leftFoot"));
         assert!(j("leftFoot")[0] > 400.0 && j("rightFoot")[0] < 400.0, "legs on their own sides");
         let k = j("leftLowerLeg");
         assert!(k[1] > 600.0 && k[1] < 800.0, "{k:?}");
