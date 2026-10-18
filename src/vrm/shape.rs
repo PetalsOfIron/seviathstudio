@@ -431,7 +431,7 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
     }
     let part = Part3d { name: "Body".to_string(), layer: sk.layers.first().copied().unwrap_or(0), verts, normals, uvs, tris: out_tris, joints, weights, image: atlas, morphs: Vec::new() };
     let bones: Vec<Bone> = bones;
-    let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts: vec![part], bones, expressions: Vec::new(), springs: Vec::new(), colliders: Vec::new(), scale, landmarks: Vec::new() };
+    let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts: vec![part], bones, expressions: Vec::new(), springs: Vec::new(), colliders: Vec::new(), scale, landmarks: Vec::new(), hair_chains: Vec::new() };
     if let Some(m) = &marks {
         // The face is a part of its own, as on a VRoid model: only it carries the blend shapes, so the shapes do not have to
         // be written for every point of the body. Its triangles are the ones that face the front inside the face box.
@@ -484,8 +484,9 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
     // the hair: found on the drawing, a part of its own on bones that swing
     if opt.hair {
         if let Some(hb) = head_box(rig) {
-            if let Some(mask) = super::hair::hair_mask(&page, hb) {
-                super::hair::add_hair(&mut model, &mask, |v| [v[0] / scale + xc, vb[3] - v[1] / scale]);
+            if let Some(mut mask) = super::hair::hair_mask(&page, hb) {
+                mask.apply_dabs(&sk.hair.dabs);
+                super::hair::add_hair(&mut model, &mask, |v| [v[0] / scale + xc, vb[3] - v[1] / scale], &sk.hair, (xc, vb[3], scale));
             }
         }
     }

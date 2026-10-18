@@ -5,6 +5,7 @@ pub mod gltf;
 pub mod export;
 pub mod face;
 pub mod hair;
+pub mod hairedit;
 pub mod hands;
 pub mod model;
 pub mod paint3d;

@@ -32,6 +32,11 @@ pub struct GameUi {
     paint_rev: u64,
     /// Build the character with a plain texture, to paint it by hand with the brushes of the drawing app.
     pub mesh_only: bool,
+    /// Downloading the AI files: the job, what it is doing now, and whether the licences were accepted.
+    setup_job: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    setup_step: Option<std::sync::mpsc::Receiver<String>>,
+    setup_text: String,
+    pub setup_agree: bool,
     /// Painting straight on the 3D character: on or off, the brush, the paint kept for the project, the last place of the stroke, how many
     /// times the picture of the preview must be made again, and the paint before each stroke (to undo).
     pub paint3d: bool,
@@ -53,7 +58,7 @@ pub struct GameUi {
 
 impl Default for GameUi {
     fn default() -> Self {
-        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, expr: None, model: None, message: None, template: None, ai_python: default_python(), guides: false, tex_dirty: false, paint_rev: 0, mesh_only: false, paint3d: false, brush: Default::default(), overlay: None, last_pt: None, paint_gen: 0, paint_undo: Vec::new(), paint_rebuild: false, ai_backend: 0, ai_job: None, shape: None, shape_job: None, tex: None, made: 0 }
+        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, expr: None, model: None, message: None, template: None, ai_python: default_python(), guides: false, tex_dirty: false, paint_rev: 0, mesh_only: false, setup_job: None, setup_step: None, setup_text: String::new(), setup_agree: false, paint3d: false, brush: Default::default(), overlay: None, last_pt: None, paint_gen: 0, paint_undo: Vec::new(), paint_rebuild: false, ai_backend: 0, ai_job: None, shape: None, shape_job: None, tex: None, made: 0 }
     }
 }
 
@@ -235,6 +240,60 @@ impl SeviathApp {
         }
     }
 
+    /// The AI tools are not part of the app. When they are missing this says so and offers a button that downloads them.
+    fn ai_setup_ui(&mut self, ui: &mut Ui) {
+        // what the job says
+        if let Some(rx) = &self.rigs.game.setup_step {
+            while let Ok(s) = rx.try_recv() {
+                self.rigs.game.setup_text = s;
+            }
+        }
+        if let Some(rx) = &self.rigs.game.setup_job {
+            match rx.try_recv() {
+                Ok(r) => {
+                    self.rigs.game.setup_job = None;
+                    self.rigs.game.setup_step = None;
+                    self.rigs.game.message = Some(match r {
+                        Ok(()) => "The AI files are installed. The models themselves (a few GB) are fetched the first time the shape or the face is made.".to_string(),
+                        Err(e) => format!("The download did not finish: {e}"),
+                    });
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(700)),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.rigs.game.setup_job = None,
+            }
+        }
+        let status = crate::aisetup::status();
+        let running = self.rigs.game.setup_job.is_some();
+        if status.ready() && !running {
+            return;
+        }
+        ui.group(|ui| {
+            ui.label(RichText::new("The AI files are missing").strong());
+            if running {
+                ui.label(RichText::new(format!("{}...", self.rigs.game.setup_text)).size(12.0).color(TEXT));
+                let last = crate::aisetup::tail(&crate::aisetup::log_path(), 1);
+                if !last.is_empty() {
+                    ui.label(RichText::new(last.chars().take(110).collect::<String>()).size(10.5).color(TEXT_DIM));
+                }
+                ui.label(RichText::new("This takes a while. The full log is in the folder of the AI files (setup.log).").size(11.0).color(TEXT_DIM));
+                return;
+            }
+            ui.label(RichText::new(format!("Missing: {}. They are not part of the app: they are large and have their own licences, so they are downloaded to {}.", status.missing().join(", "), crate::aisetup::root().display())).size(11.5).color(TEXT_DIM));
+            ui.checkbox(&mut self.rigs.game.setup_agree, "I accept the licences: PyTorch (BSD), MediaPipe and Transformers (Apache 2.0), Hunyuan3D 2 (Tencent Hunyuan Community License, see its page on GitHub).");
+            ui.label(RichText::new("About 3 GB now (Python packages and PyTorch with CUDA, so an NVIDIA graphics card is needed), and a few GB more the first time the AI models run. It needs Python 3.10, 3.11 or 3.12 and an internet connection.").size(11.0).color(TEXT_DIM));
+            if ui.add_enabled(self.rigs.game.setup_agree, egui::Button::new(RichText::new("Download the AI files").strong())).clicked() {
+                let (tx, rx) = std::sync::mpsc::channel::<String>();
+                let (dtx, drx) = std::sync::mpsc::channel::<Result<(), String>>();
+                std::thread::spawn(move || {
+                    let _ = dtx.send(crate::aisetup::install(&tx));
+                });
+                self.rigs.game.setup_job = Some(drx);
+                self.rigs.game.setup_step = Some(rx);
+                self.rigs.game.setup_text = "Starting".into();
+            }
+        });
+    }
+
     /// Make the 3D shape of the character with an AI helper (Hunyuan3D 2 mini), in the background. The character is then built on
     /// that shape (the drawing is laid on it) instead of on a card.
     fn shape_ai_row(&mut self, ui: &mut Ui) {
@@ -263,7 +322,7 @@ impl SeviathApp {
         let busy = self.rigs.game.shape_job.is_some();
         ui.horizontal_wrapped(|ui| {
             let label = if busy { "Making the shape..." } else { "Make the 3D shape with AI" };
-            if ui.add_enabled(!busy, egui::Button::new(label)).on_hover_text("Hunyuan3D 2 mini makes a 3D shape of the whole character from the picture (about a minute or two on the graphics card, one job at a time). Your drawing is then laid on it. It needs the AI packages (see the README).").clicked() {
+            if ui.add_enabled(!busy && crate::aisetup::status().ready(), egui::Button::new(label)).on_hover_text("Hunyuan3D 2 mini makes a 3D shape of the whole character from the picture (about a minute or two on the graphics card, one job at a time). Your drawing is then laid on it. It needs the AI packages (see the README).").clicked() {
                 let page = self.draw.doc.rig.skin.as_ref().and_then(|sk| crate::rig::uncut::composite(&self.draw.doc, &sk.layers)).map(|p| crate::rig::uncut::cut_out_background(&p));
                 match page {
                     Some(page) => {
@@ -320,7 +379,7 @@ impl SeviathApp {
             ui.label(RichText::new("Python").size(12.0).color(TEXT_DIM));
             ui.add(egui::TextEdit::singleline(&mut self.rigs.game.ai_python).desired_width(150.0)).on_hover_text("The command that starts Python with the AI packages installed (see the README, AI helpers)");
             let label = if busy { "Looking..." } else { "Find the face with AI" };
-            if ui.add_enabled(!busy, egui::Button::new(label)).on_hover_text("Runs a helper program on the picture. It needs Python and its packages installed; without them the app keeps its own guess.").clicked() {
+            if ui.add_enabled(!busy && crate::aisetup::status().ready(), egui::Button::new(label)).on_hover_text("Runs a helper program on the picture. It needs Python and its packages installed; without them the app keeps its own guess.").clicked() {
                 let rig = self.draw.doc.rig.clone();
                 let page = rig.skin.as_ref().and_then(|sk| crate::rig::uncut::composite(&self.draw.doc, &sk.layers));
                 match (page, crate::vrm::model::head_box(&rig)) {
@@ -364,9 +423,11 @@ impl SeviathApp {
             });
         }
         if self.draw.doc.rig.skin.is_some() {
+            self.ai_setup_ui(ui);
             self.shape_ai_row(ui);
             self.face_ai_row(ui);
             self.texture_parts_ui(ui);
+            self.hair_ui(ui);
             ui.horizontal_wrapped(|ui| {
                 if widgets::chip(ui, "Set the face", self.rigs.face_edit).on_hover_text("Shows the eyes and the mouth on the picture: drag them into place so the blink, the smile and the mouth move the right parts").clicked() {
                     self.rigs.face_edit = !self.rigs.face_edit;
@@ -471,6 +532,226 @@ impl SeviathApp {
             let resp = ui.add(egui::Image::new((id, size)).sense(egui::Sense::drag()));
             if paint {
                 self.paint3d_input(&resp, (pw, ph));
+            }
+        }
+    }
+
+    /// The hair of a character on an AI shape: the strands (bone chains that swing in a game or a VRM app) and the hair brush.
+    fn hair_ui(&mut self, ui: &mut Ui) {
+        if self.rigs.game.shape.is_none() {
+            return;
+        }
+        section_title(ui, "Hair");
+        ui.label(RichText::new("The hair is its own part on bone chains (strands). Show them on the picture to drag their joints, add a strand by clicking its joints from the scalp down, delete one, change how it swings, or correct where the hair is with the hair brush.").size(11.5).color(TEXT_DIM));
+        ui.horizontal_wrapped(|ui| {
+            if widgets::chip(ui, "Edit the hair", self.rigs.hair_edit).clicked() {
+                self.rigs.hair_edit = !self.rigs.hair_edit;
+                self.rigs.hair_new.clear();
+                if self.rigs.hair_edit {
+                    // the strands the app made are the start
+                    self.hair_adopt_auto();
+                }
+            }
+            if ui.small_button("Reset the hair").on_hover_text("Forget every change: the app makes the strands and finds the hair again").clicked() {
+                if let Some(sk) = std::sync::Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut() {
+                    sk.hair = Default::default();
+                }
+                self.rigs.hair_sel = None;
+                self.rigs.hair_tex = None;
+                self.rigs.hair_dirty = true;
+            }
+        });
+        if !self.rigs.hair_edit {
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
+            for (i, name, tip) in [(0u8, "Move joints", "Drag the joints of the strands on the picture"), (1, "Add a strand", "Click the joints of a new strand from the scalp down, then Finish"), (2, "Hair brush +", "Paint over what the app took for something else: it becomes hair"), (3, "Hair brush -", "Paint over what is not hair: it stops being hair")] {
+                if widgets::chip(ui, name, self.rigs.hair_tool == i).on_hover_text(tip).clicked() {
+                    self.rigs.hair_tool = i;
+                    self.rigs.hair_new.clear();
+                }
+            }
+        });
+        if self.rigs.hair_tool == 1 {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(format!("{} joints so far", self.rigs.hair_new.len())).size(12.0).color(TEXT_DIM));
+                if ui.add_enabled(self.rigs.hair_new.len() >= 2, egui::Button::new("Finish the strand")).clicked() {
+                    let joints = std::mem::take(&mut self.rigs.hair_new);
+                    if let Some(sk) = std::sync::Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut() {
+                        sk.hair.chains.push(crate::vrm::hairedit::HairChain { joints, ..Default::default() });
+                        self.rigs.hair_sel = Some(sk.hair.chains.len() - 1);
+                    }
+                    self.rigs.hair_dirty = true;
+                }
+                if ui.small_button("Clear").clicked() {
+                    self.rigs.hair_new.clear();
+                }
+            });
+        }
+        if self.rigs.hair_tool >= 2 {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Brush size").size(12.0).color(TEXT_DIM));
+                ui.add(egui::DragValue::new(&mut self.rigs.hair_r).range(3.0..=300.0).speed(0.5).suffix(" px"));
+            });
+        }
+        // the picked strand: how it hangs and swings
+        let sel = self.rigs.hair_sel;
+        if let Some(sk) = std::sync::Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut() {
+            if let Some(c) = sel.and_then(|i| sk.hair.chains.get_mut(i)) {
+                let before = c.clone();
+                ui.label(RichText::new(format!("Strand {} ({} joints)", sel.unwrap() + 1, c.joints.len())).size(12.0).color(TEXT_DIM));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Hangs").size(12.0).color(TEXT_DIM));
+                    for (v, name) in [(1.0f32, "front"), (0.0, "middle"), (-1.0, "back")] {
+                        if widgets::chip(ui, name, (c.layer - v).abs() < 0.01).clicked() {
+                            c.layer = v;
+                        }
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Stiff").size(12.0).color(TEXT_DIM));
+                    ui.add(egui::DragValue::new(&mut c.stiffness).range(0.0..=1.5).speed(0.01));
+                    ui.label(RichText::new("Gravity").size(12.0).color(TEXT_DIM));
+                    ui.add(egui::DragValue::new(&mut c.gravity).range(0.0..=1.0).speed(0.01));
+                    ui.label(RichText::new("Drag").size(12.0).color(TEXT_DIM));
+                    ui.add(egui::DragValue::new(&mut c.drag).range(0.0..=1.0).speed(0.01));
+                });
+                let changed = *c != before;
+                let mut delete = false;
+                if ui.small_button("Delete this strand").clicked() {
+                    delete = true;
+                }
+                if delete {
+                    sk.hair.chains.remove(sel.unwrap());
+                    self.rigs.hair_sel = None;
+                    self.rigs.hair_dirty = true;
+                } else if changed {
+                    self.rigs.hair_dirty = true;
+                }
+            }
+        }
+        // the character is made again when the mouse is let go
+        if self.rigs.hair_dirty && !ui.input(|i| i.pointer.any_down()) {
+            self.rigs.hair_dirty = false;
+            self.game_make();
+        }
+    }
+
+    /// Start editing from the strands the app made: they are copied into the project.
+    fn hair_adopt_auto(&mut self) {
+        let auto = self.rigs.game.model.as_ref().map(|m| m.hair_chains.clone()).unwrap_or_default();
+        if let Some(sk) = std::sync::Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut() {
+            if sk.hair.chains.is_empty() {
+                sk.hair.chains = auto;
+            }
+        }
+    }
+
+    /// The hair on the canvas: the hair found (green), the strands with their joints, and the hair brush.
+    pub(super) fn hair_canvas(&mut self, ui: &mut Ui, resp: &egui::Response, p: &egui::Painter, to_screen: &dyn Fn([f32; 2]) -> egui::Pos2, to_page: &dyn Fn(egui::Pos2) -> [f32; 2], sc: f32) {
+        use egui::{Color32, Stroke};
+        let dabs_now = self.draw.doc.rig.skin.as_ref().map(|s| s.hair.dabs.len()).unwrap_or(0);
+        // the picture of the hair: found on the drawing, corrected by the dabs
+        if self.rigs.hair_base.is_none() {
+            let opt = self.game_options();
+            if let Some(setup) = crate::vrm::model::uncut_setup(&self.draw.doc, &opt) {
+                if let Some(hb) = crate::vrm::model::head_box(&self.draw.doc.rig) {
+                    self.rigs.hair_base = crate::vrm::hair::hair_mask(&setup.page, hb);
+                }
+            }
+        }
+        let stale = self.rigs.hair_tex.as_ref().map(|t| t.0) != Some(dabs_now);
+        if stale {
+            if let Some(base) = &self.rigs.hair_base {
+                let mut m = base.clone();
+                if let Some(sk) = self.draw.doc.rig.skin.as_ref() {
+                    m.apply_dabs(&sk.hair.dabs);
+                }
+                let (img, at) = m.to_image();
+                let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+                let tex = ui.ctx().load_texture("hair_mask", ci, egui::TextureOptions::NEAREST);
+                self.rigs.hair_tex = Some((dabs_now, tex, at));
+            }
+        }
+        if let Some((_, tex, at)) = &self.rigs.hair_tex {
+            let size = tex.size_vec2();
+            let rect = egui::Rect::from_min_max(to_screen([at[0] as f32, at[1] as f32]), to_screen([at[0] as f32 + size.x, at[1] as f32 + size.y]));
+            p.image(tex.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        // the strands
+        let chains: Vec<crate::vrm::hairedit::HairChain> = self.draw.doc.rig.skin.as_ref().map(|s| s.hair.chains.clone()).unwrap_or_default();
+        let green = Color32::from_rgb(120, 255, 170);
+        let amber = Color32::from_rgb(255, 200, 60);
+        let mut drag: Option<(usize, usize, [f32; 2])> = None;
+        let mut stopped = false;
+        for (ci, c) in chains.iter().enumerate() {
+            let on = self.rigs.hair_sel == Some(ci);
+            let col = if on { amber } else { green };
+            let pts: Vec<egui::Pos2> = c.joints.iter().map(|j| to_screen(*j)).collect();
+            for w in pts.windows(2) {
+                p.line_segment([w[0], w[1]], Stroke::new(if on { 3.0 } else { 2.0 }, col));
+            }
+            for (ji, s) in pts.iter().enumerate() {
+                p.circle_filled(*s, if ji == 0 { 4.0 } else { 5.5 }, if ji == 0 { Color32::WHITE } else { col });
+                if self.rigs.hair_tool == 0 {
+                    let r = ui.interact(egui::Rect::from_center_size(*s, egui::vec2(16.0, 16.0)), egui::Id::new(("hair_joint", ci, ji)), egui::Sense::drag());
+                    if r.drag_started() || r.clicked() {
+                        self.rigs.hair_sel = Some(ci);
+                    }
+                    if r.dragged() {
+                        if let Some(pp) = r.interact_pointer_pos() {
+                            drag = Some((ci, ji, to_page(pp)));
+                        }
+                    }
+                    if r.drag_stopped() {
+                        stopped = true;
+                    }
+                }
+            }
+        }
+        if let Some((ci, ji, at)) = drag {
+            if let Some(c) = std::sync::Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut().and_then(|s| s.hair.chains.get_mut(ci)) {
+                if let Some(j) = c.joints.get_mut(ji) {
+                    *j = at;
+                }
+            }
+        }
+        if stopped {
+            self.rigs.hair_dirty = true;
+        }
+        // a new strand: click its joints from the scalp down
+        if self.rigs.hair_tool == 1 {
+            if resp.clicked_by(egui::PointerButton::Primary) {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    self.rigs.hair_new.push(to_page(pos));
+                }
+            }
+            let pts: Vec<egui::Pos2> = self.rigs.hair_new.iter().map(|j| to_screen(*j)).collect();
+            for w in pts.windows(2) {
+                p.line_segment([w[0], w[1]], Stroke::new(2.0, Color32::WHITE));
+            }
+            for s in &pts {
+                p.circle_filled(*s, 5.0, Color32::WHITE);
+            }
+        }
+        // the hair brush
+        if self.rigs.hair_tool >= 2 {
+            if let Some(pos) = ui.input(|i| i.pointer.hover_pos()).filter(|q| resp.rect.contains(*q)) {
+                p.circle_stroke(pos, self.rigs.hair_r * sc, Stroke::new(1.5, if self.rigs.hair_tool == 2 { green } else { Color32::from_rgb(255, 90, 90) }));
+            }
+            if resp.dragged_by(egui::PointerButton::Primary) || resp.clicked_by(egui::PointerButton::Primary) {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    let at = to_page(pos);
+                    let r = self.rigs.hair_r;
+                    let add = self.rigs.hair_tool == 2;
+                    if let Some(sk) = std::sync::Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut() {
+                        let far = sk.hair.dabs.last().is_none_or(|d| (d.at[0] - at[0]).hypot(d.at[1] - at[1]) > r * 0.4 || d.add != add);
+                        if far {
+                            sk.hair.dabs.push(crate::vrm::hairedit::HairDab { at, radius: r, add });
+                        }
+                    }
+                    self.rigs.hair_dirty = true;
+                }
             }
         }
     }
@@ -595,6 +876,19 @@ impl SeviathApp {
     }
 
     #[cfg(test)]
+    pub fn test_game_make(&mut self) {
+        self.game_make();
+    }
+
+    #[cfg(test)]
+    pub fn test_hair_edit(&mut self, on: bool) {
+        self.rigs.hair_edit = on;
+        if on {
+            self.hair_adopt_auto();
+        }
+    }
+
+    #[cfg(test)]
     pub fn test_game(&mut self) -> &mut GameUi {
         &mut self.rigs.game
     }
@@ -602,9 +896,6 @@ impl SeviathApp {
 
 /// The Python that has the AI packages: the one in the SeviathAI folder of the user when it is there, else plain `python`.
 fn default_python() -> String {
-    let venv = dirs::home_dir().map(|h| h.join("SeviathAI").join("venv").join("Scripts").join("python.exe"));
-    match venv {
-        Some(p) if p.exists() => p.to_string_lossy().to_string(),
-        _ => "python".to_string(),
-    }
+    let p = crate::aisetup::venv_python(&crate::aisetup::root());
+    if p.exists() { p.to_string_lossy().to_string() } else { "python".to_string() }
 }
