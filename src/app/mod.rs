@@ -21,6 +21,7 @@ mod newproject;
 mod partstab;
 mod prerigui;
 mod recording;
+mod rigtab;
 mod worklog;
 mod signs;
 
@@ -57,6 +58,7 @@ pub struct SeviathApp {
     palette: commands::Palette,
     parts: partstab::PartsState,
     prerig: prerigui::PreRig,
+    rigs: rigtab::RigState,
     layout_name: String,
 }
 
@@ -103,6 +105,7 @@ impl SeviathApp {
             palette: Default::default(),
             parts: Default::default(),
             prerig: Default::default(),
+            rigs: Default::default(),
             layout_name: String::new(),
         }
     }
@@ -616,6 +619,7 @@ impl eframe::App for SeviathApp {
             (Workspace::Design, _) => self.design_workspace(ui),
             (_, Tab::Draw) => self.draw.ui(ui),
             (_, Tab::Parts) => self.parts_ui(ui),
+            (_, Tab::Rig) => self.rig_ui(ui),
             (_, t) => tabs::placeholder::ui(ui, t),
         }
 

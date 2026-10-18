@@ -19,6 +19,7 @@ pub struct DocState {
     pub selection: Option<crate::select::Selection>,
     pub presets: Vec<crate::layerfilter::Preset>,
     pub meta: crate::meta::ProjectMeta,
+    pub rig: std::sync::Arc<crate::rig::Rig>,
 }
 
 impl Document {
@@ -39,7 +40,7 @@ impl Document {
     }
 
     pub fn snapshot(&self) -> DocState {
-        DocState { layers: self.layers.clone(), paper: self.paper, selection: self.selection.clone(), presets: self.filter_presets.clone(), meta: self.meta.clone() }
+        DocState { layers: self.layers.clone(), paper: self.paper, selection: self.selection.clone(), presets: self.filter_presets.clone(), meta: self.meta.clone(), rig: self.rig.clone() }
     }
 
     pub fn restore(&mut self, s: &DocState) {
@@ -49,6 +50,7 @@ impl Document {
         self.selection = s.selection.clone();
         self.filter_presets = s.presets.clone();
         self.meta = s.meta.clone();
+        self.rig = s.rig.clone();
         // fresh revisions so cached thumbnails never show an old picture
         for l in &mut self.layers {
             l.rev = l.rev.wrapping_add(1_000_003);
@@ -61,6 +63,7 @@ impl Document {
         sel_id(&self.selection) == sel_id(&s.selection)
             && self.filter_presets == s.presets
             && self.meta == s.meta
+            && (std::sync::Arc::ptr_eq(&self.rig, &s.rig) || *self.rig == *s.rig)
             && self.paper == s.paper
             && self.layers.len() == s.layers.len() && self.layers.iter().zip(&s.layers).all(|(a, b)| layer_same(a, b))
     }
