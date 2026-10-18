@@ -22,6 +22,8 @@ pub struct GameUi {
     pub expr: Option<String>,
     pub model: Option<Model3d>,
     pub message: Option<String>,
+    /// Face shapes from a real model, and where they came from.
+    pub template: Option<(String, std::sync::Arc<crate::vrm::template::Template>)>,
     tex: Option<((i32, Option<String>, u64), egui::TextureHandle)>,
     /// How many times the model was made (so the preview picture knows to change).
     made: u64,
@@ -29,7 +31,7 @@ pub struct GameUi {
 
 impl Default for GameUi {
     fn default() -> Self {
-        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, expr: None, model: None, message: None, tex: None, made: 0 }
+        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, expr: None, model: None, message: None, template: None, tex: None, made: 0 }
     }
 }
 
@@ -37,7 +39,7 @@ impl SeviathApp {
     fn game_options(&self) -> Options {
         let g = &self.rigs.game;
         let name = if g.name.trim().is_empty() { self.files.name.clone() } else { g.name.clone() };
-        Options { name, author: if g.author.trim().is_empty() { "Unknown".into() } else { g.author.clone() }, height_m: g.height_m, puff: g.puff, ..Default::default() }
+        Options { name, author: if g.author.trim().is_empty() { "Unknown".into() } else { g.author.clone() }, height_m: g.height_m, puff: g.puff, template: g.template.as_ref().map(|t| t.1.clone()), ..Default::default() }
     }
 
     /// Make the 3D character from the document and its rig.
@@ -49,7 +51,13 @@ impl SeviathApp {
                 let (parts, bones) = (m.parts.len(), m.bones.len());
                 self.rigs.game.model = Some(m);
                 self.rigs.game.made += 1;
-                self.rigs.game.message = Some(format!("A 3D character with {parts} parts, {bones} bones and {expr} expressions."));
+                let guessed = self.draw.doc.rig.skin.as_ref().is_some_and(|k| k.face.is_none());
+                if guessed {
+                    // show the guessed eyes and mouth on the picture, ready to be dragged
+                    self.rigs.face_edit = true;
+                }
+                let hint = if guessed { " The eyes and the mouth are only guessed: drag them into place on the picture (Set the face)." } else { "" };
+                self.rigs.game.message = Some(format!("A 3D character with {parts} parts, {bones} bones and {expr} expressions.{hint}"));
             }
             None => {
                 self.rigs.game.model = None;
@@ -126,6 +134,30 @@ impl SeviathApp {
                 }
             });
         }
+        ui.horizontal_wrapped(|ui| {
+            let label = match &self.rigs.game.template {
+                Some((n, _)) => format!("Face shapes from {n}"),
+                None => "Face shapes from a model...".to_string(),
+            };
+            if ui.button(label).on_hover_text("Pick a VRM 1.0 model with a VRoid-style face (Fcl_* shapes): its blink, smile, brows and mouth shapes are moved onto this face").clicked() {
+                if let Some(path) = rfd::FileDialog::new().set_title("A VRM model with face shapes").set_directory(self.settings.projects_folder()).add_filter("VRM model", &["vrm"]).pick_file() {
+                    self.rigs.game.message = Some(match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| crate::vrm::template::Template::from_vrm(&b)) {
+                        Ok(t) => {
+                            let n = t.names().len();
+                            let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                            self.rigs.game.template = Some((name.clone(), std::sync::Arc::new(t)));
+                            self.rigs.game.model = None;
+                            format!("Took {n} face shapes from {name}. Make the 3D character again to use them.")
+                        }
+                        Err(e) => format!("Could not use that model: {e}"),
+                    });
+                }
+            }
+            if self.rigs.game.template.is_some() && ui.small_button("Use the built-in shapes").clicked() {
+                self.rigs.game.template = None;
+                self.rigs.game.model = None;
+            }
+        });
         ui.horizontal_wrapped(|ui| {
             if ui.button(RichText::new("Make the 3D character").strong()).on_hover_text("Builds it from the parts with a mesh (the layers' order gives the depth), the Parts tags (the skeleton) and the face sliders (the expressions)").clicked() {
                 self.game_make();

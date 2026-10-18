@@ -30,11 +30,13 @@ pub struct Options {
     pub fingers: bool,
     /// Make the face move: expressions (blink, smile, brows, where the eyes look) and a mouth that opens for the vowels.
     pub face: bool,
+    /// Face shapes taken from a real model (see `template.rs`); the built-in shapes fill in what it does not give.
+    pub template: Option<std::sync::Arc<super::template::Template>>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { name: "Character".into(), author: "Unknown".into(), height_m: 1.6, puff: 1.0, layer_gap: 0.003, max_texture: 2048, fingers: true, face: true }
+        Self { name: "Character".into(), author: "Unknown".into(), height_m: 1.6, puff: 1.0, layer_gap: 0.003, max_texture: 2048, fingers: true, face: true, template: None }
     }
 }
 
@@ -854,7 +856,7 @@ pub fn build_uncut(doc: &Document, opt: &Options) -> Option<Model3d> {
     let part = Part3d { name: "Body".to_string(), layer: sk.layers.first().copied().unwrap_or(0), verts, normals, uvs, tris, joints, weights, image, morphs: Vec::new() };
     let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts: vec![part], bones, expressions: Vec::new(), springs: Vec::new(), colliders: Vec::new(), scale };
     if let Some(m) = &marks {
-        add_face(&mut model, m, xc, vb[3]);
+        add_face(&mut model, m, xc, vb[3], opt.template.as_deref());
     }
     normalize_to_t_pose(&mut model);
     Some(model)
@@ -878,25 +880,42 @@ pub fn face_marks(rig: &Rig) -> Option<super::face::FaceMarks> {
 /// Give a figure's face its blend shapes: every expression of `face::recipes` as a shape of the body, and a dark shape inside
 /// the mouth (a part of its own, flat until a vowel opens it). The page maps to the model by `x = (px - xc) * scale`,
 /// `y = (bottom - py) * scale`.
-fn add_face(model: &mut Model3d, m: &super::face::FaceMarks, xc: f32, bottom: f32) {
+fn add_face(model: &mut Model3d, m: &super::face::FaceMarks, xc: f32, bottom: f32, template: Option<&super::template::Template>) {
     use super::face;
     let s = model.scale;
     let to3 = |p: [f32; 2]| -> [f32; 3] { [(p[0] - xc) * s, (bottom - p[1]) * s, 0.0] };
     let body: Vec<[f32; 2]> = model.parts[0].verts.iter().map(|v| [v[0] / s + xc, bottom - v[1] / s]).collect();
-    for (name, rc) in face::recipes() {
-        let deltas: Vec<[f32; 3]> = body
-            .iter()
-            .map(|p| {
-                let d = face::shift(m, &rc, *p);
-                [d[0] * s, -d[1] * s, 0.0]
-            })
-            .collect();
+    // what a real model's face does to every point of the picture, for all its shapes at once
+    let fields: Vec<Option<Vec<[f32; 2]>>> = match template {
+        Some(t) => body.iter().map(|p| t.field(m, *p)).collect(),
+        None => Vec::new(),
+    };
+    let from_template = template.map(|t| t.names()).unwrap_or_default();
+    let mut names: Vec<(String, Option<face::Recipe>)> = face::recipes().into_iter().map(|(n, r)| (n.to_string(), Some(r))).collect();
+    for n in &from_template {
+        if !names.iter().any(|x| x.0 == *n) {
+            names.push((n.to_string(), None));
+        }
+    }
+    for (name, rc) in names {
+        let deltas: Vec<[f32; 3]> = match from_template.iter().position(|n| *n == name) {
+            Some(k) => fields.iter().map(|f| f.as_ref().map_or([0.0; 3], |f| [f[k][0] * s, -f[k][1] * s, 0.0])).collect(),
+            None => {
+                let Some(rc) = rc else { continue };
+                body.iter()
+                    .map(|p| {
+                        let d = face::shift(m, &rc, *p);
+                        [d[0] * s, -d[1] * s, 0.0]
+                    })
+                    .collect()
+            }
+        };
         if deltas.iter().all(|d| d[0] == 0.0 && d[1] == 0.0) {
             continue;
         }
         let mi = model.parts[0].morphs.len();
-        model.parts[0].morphs.push(Morph { name: name.to_string(), deltas });
-        model.expressions.push(Expression { name: name.to_string(), binds: vec![(0, mi, 1.0)] });
+        model.parts[0].morphs.push(Morph { name: name.clone(), deltas });
+        model.expressions.push(Expression { name, binds: vec![(0, mi, 1.0)] });
     }
     // the inside of the mouth: in front of the lips, on the head bone
     let Some(head) = model.bone("head") else { return };
@@ -932,7 +951,11 @@ fn add_face(model: &mut Model3d, m: &super::face::FaceMarks, xc: f32, bottom: f3
         let deltas: Vec<[f32; 3]> = open.iter().zip(&rest).map(|(o, r)| [(o[0] - r[0]) * s, -(o[1] - r[1]) * s, 0.0]).collect();
         let mi = mouth.morphs.len();
         mouth.morphs.push(Morph { name: name.to_string(), deltas });
-        model.expressions.push(Expression { name: name.to_string(), binds: vec![(pi, mi, 1.0)] });
+        // a vowel may already move the lips of the body (from the template): the mouth opens as well
+        match model.expressions.iter_mut().find(|e| e.name == name) {
+            Some(e) => e.binds.push((pi, mi, 1.0)),
+            None => model.expressions.push(Expression { name: name.to_string(), binds: vec![(pi, mi, 1.0)] }),
+        }
     }
     model.parts.push(mouth);
 }
