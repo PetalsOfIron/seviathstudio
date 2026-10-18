@@ -2765,3 +2765,82 @@ fn rig_tab_gizmo_screens() {
     h.run_steps(3);
     assert_eq!(h.state().draw_mut_ref().doc.rig.poses.len(), poses);
 }
+
+#[test]
+fn rig_tab_joined_sliders_screens() {
+    use crate::doc::LayerKind;
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 2300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    {
+        let d = h.state_mut().draw_mut();
+        let (w, h2) = (d.doc.w, d.doc.h);
+        let mut add = |name: &str, x: i32, y: i32, bw: u32, bh: u32, c: [u8; 3]| {
+            let img = image::RgbaImage::from_pixel(bw, bh, image::Rgba([c[0], c[1], c[2], 255]));
+            let mut l = d.doc.new_layer(name, LayerKind::Raster);
+            l.tiles = crate::files::tiles_from_rgba(&img, x, y, w, h2);
+            l.rev += 1;
+            d.doc.layers.insert(0, l);
+        };
+        add("hair back", 1000, 600, 1000, 1100, [90, 60, 140]);
+        add("face", 1100, 800, 800, 900, [240, 205, 180]);
+        add("eye L", 1550, 1200, 220, 100, [240, 240, 240]);
+        add("eye R", 1230, 1200, 220, 100, [240, 240, 240]);
+        add("iris L", 1620, 1210, 80, 80, [40, 70, 140]);
+        add("iris R", 1300, 1210, 80, 80, [40, 70, 140]);
+        add("mouth inside", 1350, 1560, 300, 70, [120, 30, 50]);
+        add("mouth", 1350, 1560, 300, 70, [200, 80, 90]);
+        d.doc.mark_all_dirty();
+    }
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    h.get_by_label("This is a face").click();
+    h.run_steps(6);
+    let rig = h.state().draw_mut_ref().doc.rig.clone();
+    for n in ["Head", "Eyeballs", "Mouth"] {
+        assert!(rig.pads.iter().any(|p| p.name == n), "a joined square {n}");
+    }
+    assert!(rig.params.iter().any(|p| p.name == "Eyeball X") && rig.params.iter().any(|p| p.name == "Mouth form"));
+    let areas = h.state_mut().test_rig().pad_areas.clone();
+    assert_eq!(areas.len(), 3, "three squares are shown");
+    // drag in the eyeball square to the top right crossing: both sliders move
+    let area = areas.iter().find(|a| a.0 == "Eyeballs").unwrap().1;
+    let at = area.right_top();
+    h.hover_at(at - vec2(1.0, -1.0));
+    h.step();
+    button(&h, at - vec2(1.0, -1.0), true);
+    h.step();
+    button(&h, at - vec2(1.0, -1.0), false);
+    h.run_steps(3);
+    let id = |n: &str| rig.params.iter().find(|p| p.name == n).unwrap().id;
+    let (bx, by) = (h.state_mut().test_rig().values.0.get(&id("Eyeball X")).copied(), h.state_mut().test_rig().values.0.get(&id("Eyeball Y")).copied());
+    assert_eq!((bx, by), (Some(1.0), Some(1.0)), "landed on the corner key point: both sliders are at their ends");
+    let iris = h.state().draw_mut_ref().doc.layers.iter().find(|l| l.name == "iris L").unwrap().id;
+    assert!(h.state_mut().test_moved(iris) > 10.0, "the iris looks up and right");
+    save(&mut h, "rig_13_pads");
+    // the mouth square: smile and open
+    let area = h.state_mut().test_rig().pad_areas.iter().find(|a| a.0 == "Mouth").unwrap().1;
+    // the right end of the form line, with the mouth closed (the bottom of the open line)
+    let corner = area.right_bottom() - vec2(1.0, 1.0);
+    h.hover_at(corner);
+    h.step();
+    button(&h, corner, true);
+    h.step();
+    button(&h, corner, false);
+    h.run_steps(3);
+    let form = h.state_mut().test_rig().values.0.get(&id("Mouth form")).copied();
+    assert_eq!(form, Some(1.0), "the right end of the mouth line is the smile");
+    assert_eq!(h.state_mut().test_rig().values.0.get(&id("Mouth open")).copied(), Some(0.0), "and the mouth stays closed");
+    // joining by hand and splitting
+    let n = h.state().draw_mut_ref().doc.rig.pads.len();
+    h.state_mut().test_rig_edit(|r| {
+        let (a, b) = (r.params.iter().find(|p| p.name == "Mouth A").unwrap().id, r.params.iter().find(|p| p.name == "Mouth I").unwrap().id);
+        r.pads.push(crate::rig::Pad { name: "A + I".into(), x: a, y: b });
+    });
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().doc.rig.pads.len(), n + 1);
+    h.get_all_by_label("Split").last().unwrap().click();
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().doc.rig.pads.len(), n, "split brings the two sliders back");
+}

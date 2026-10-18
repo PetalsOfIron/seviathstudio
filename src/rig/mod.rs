@@ -203,6 +203,15 @@ impl Clip {
     }
 }
 
+/// Two sliders joined into one square pad (like eyeball left-right and up-down, or mouth form and mouth open).
+/// The first slider is the pad's horizontal line, the second its vertical line.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Pad {
+    pub name: String,
+    pub x: Id,
+    pub y: Id,
+}
+
 /// A seam: vertices of two meshes that sit together at rest are pulled together when the meshes move apart.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Glue {
@@ -223,6 +232,7 @@ pub struct Rig {
     pub bindings: Vec<Binding>,
     pub glues: Vec<Glue>,
     pub iks: Vec<Ik>,
+    pub pads: Vec<Pad>,
     pub poses: Vec<SavedPose>,
     pub clips: Vec<Clip>,
     /// The uncut mode: one mesh over a group of layers, moved by bones with painted weights.
@@ -347,7 +357,7 @@ impl Values {
 
 impl Rig {
     pub fn is_empty(&self) -> bool {
-        self.meshes.is_empty() && self.changers.is_empty() && self.params.is_empty() && self.skin.is_none() && self.auto.is_none() && self.iks.is_empty() && self.poses.is_empty() && self.clips.is_empty()
+        self.meshes.is_empty() && self.changers.is_empty() && self.params.is_empty() && self.skin.is_none() && self.auto.is_none() && self.iks.is_empty() && self.poses.is_empty() && self.clips.is_empty() && self.pads.is_empty()
     }
 
     pub fn fresh_id(&mut self) -> Id {
@@ -540,6 +550,65 @@ impl Rig {
             self.bindings.push(b);
         }
         Some(new)
+    }
+
+    /// The key points of a slider: where a changer has a saved shape for it, plus the original (default) point, in order.
+    /// For a slider with two key points the original drawing is at one end, with three it is in the middle.
+    pub fn key_points(&self, param: Id) -> Vec<f32> {
+        let Some(p) = self.param(param) else { return Vec::new() };
+        let mut v: Vec<f32> = self.bindings.iter().filter(|b| b.params.contains(&param)).flat_map(|b| b.keys[b.params.iter().position(|x| *x == param).unwrap_or(0)].clone()).collect();
+        v.push(p.default);
+        v.sort_by(|a, b| a.total_cmp(b));
+        v.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+        v
+    }
+
+    /// The points drawn on a slider: its key points plus both ends and the original, in order (like the parameter
+    /// palettes of Live2D and Inochi2D: two points for an open-close slider, three for an angle).
+    pub fn display_points(&self, param: Id) -> Vec<f32> {
+        let Some(p) = self.param(param) else { return Vec::new() };
+        let mut v = self.key_points(param);
+        v.extend([p.min, p.max, p.default]);
+        v.sort_by(|a, b| a.total_cmp(b));
+        v.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+        v
+    }
+
+    /// Has a shape been saved at this point of the slider? (The original drawing does not count: it is always there.)
+    pub fn key_is_set(&self, param: Id, value: f32) -> bool {
+        let default = self.param(param).map(|p| p.default).unwrap_or(0.0);
+        if (value - default).abs() < 1e-4 {
+            return false;
+        }
+        self.bindings.iter().any(|b| b.params.len() == 1 && b.params[0] == param && b.keys[0].iter().any(|k| (k - value).abs() < 1e-4))
+    }
+
+    /// Put a key point of a slider back to the original drawing, for every changer that uses it.
+    pub fn reset_key(&mut self, param: Id, value: f32) {
+        let ids: Vec<(usize, Id)> = self.bindings.iter().enumerate().filter(|(_, b)| b.params == [param]).map(|(i, b)| (i, b.changer)).collect();
+        for (bi, changer) in ids {
+            let Some(rest) = self.rest_form(changer) else { continue };
+            let b = &mut self.bindings[bi];
+            if let Some(k) = b.keys[0].iter().position(|k| (k - value).abs() < 1e-4) {
+                b.forms[k] = rest;
+            }
+        }
+    }
+
+    /// Take a key point away (the default point stays: it is the original drawing).
+    pub fn remove_key(&mut self, param: Id, value: f32) {
+        let default = self.param(param).map(|p| p.default).unwrap_or(0.0);
+        if (value - default).abs() < 1e-4 {
+            self.reset_key(param, value);
+            return;
+        }
+        for b in self.bindings.iter_mut().filter(|b| b.params == [param]) {
+            if let Some(k) = b.keys[0].iter().position(|k| (k - value).abs() < 1e-4) {
+                b.keys[0].remove(k);
+                b.forms.remove(k);
+            }
+        }
+        self.bindings.retain(|b| !(b.params.len() == 1 && b.keys[0].is_empty()));
     }
 
     /// The slider values that are not at their default, ready to keep.
@@ -846,6 +915,14 @@ impl Rig {
                     clean(f);
                 }
                 c.name = c.name.chars().filter(|c| !c.is_control()).take(40).collect();
+            }
+        }
+        {
+            let pids: HashSet<Id> = self.params.iter().map(|p| p.id).collect();
+            self.pads.truncate(200);
+            self.pads.retain(|p| p.x != p.y && pids.contains(&p.x) && pids.contains(&p.y));
+            for p in &mut self.pads {
+                p.name = p.name.chars().filter(|c| !c.is_control()).take(40).collect();
             }
         }
         if let Some(a) = self.auto.as_mut() {

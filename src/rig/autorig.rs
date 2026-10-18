@@ -84,7 +84,7 @@ fn depth(p: Part) -> f32 {
         Part::Face => 0.5,
         Part::EarL | Part::EarR => 0.2,
         Part::HairSideL | Part::HairSideR => 0.6,
-        Part::EyeL | Part::EyeR | Part::Blush => 0.9,
+        Part::EyeL | Part::EyeR | Part::EyeballL | Part::EyeballR | Part::Blush => 0.9,
         Part::BrowL | Part::BrowR => 0.95,
         Part::Mouth | Part::MouthInside => 1.0,
         Part::Nose => 1.2,
@@ -96,7 +96,7 @@ fn depth(p: Part) -> f32 {
 fn is_face_part(p: Part) -> bool {
     matches!(
         p,
-        Part::Face | Part::EyeL | Part::EyeR | Part::BrowL | Part::BrowR | Part::Nose | Part::Mouth | Part::MouthInside | Part::EarL | Part::EarR | Part::Blush | Part::HairFront | Part::HairSideL | Part::HairSideR | Part::HairBack
+        Part::Face | Part::EyeL | Part::EyeR | Part::EyeballL | Part::EyeballR | Part::BrowL | Part::BrowR | Part::Nose | Part::Mouth | Part::MouthInside | Part::EarL | Part::EarR | Part::Blush | Part::HairFront | Part::HairSideL | Part::HairSideR | Part::HairBack
     )
 }
 
@@ -176,7 +176,7 @@ pub fn rig_face(rig: &mut Rig, layers: &[Layer], doc_w: u32, doc_h: u32, o: &Fac
         })
         .collect();
     let has = |p: Part| items.iter().any(|i| i.1 == p);
-    if !has(Part::Face) && !has(Part::EyeL) && !has(Part::EyeR) {
+    if !has(Part::Face) && !has(Part::EyeL) && !has(Part::EyeR) && !has(Part::EyeballL) && !has(Part::EyeballR) {
         return Err("Tag the face first: the face base and the eyes (Parts tab, or the Tag everything for me button).".into());
     }
     let rect_of = |parts: &[Part]| -> Option<[f32; 4]> { items.iter().filter(|i| parts.contains(&i.1)).map(|i| i.2).reduce(union) };
@@ -200,8 +200,10 @@ pub fn rig_face(rig: &mut Rig, layers: &[Layer], doc_w: u32, doc_h: u32, o: &Fac
     let mut mk = Maker { rig, changers: Vec::new(), params: Vec::new() };
 
     // head turn and tilt
+    let mut pads: Vec<(String, Id, Id)> = Vec::new();
     let ax = mk.param("Angle X", -30.0, 30.0, 0.0);
     let ay = mk.param("Angle Y", -30.0, 30.0, 0.0);
+    pads.push(("Head".into(), ax, ay));
     let az = mk.param("Angle Z", -30.0, 30.0, 0.0);
     let pivot = [(head[0] + head[2]) / 2.0, head[3] - 0.08 * hh];
     let tilt = mk.changer("Head tilt", Kind::Rotation { pivot }, None);
@@ -227,8 +229,9 @@ pub fn rig_face(rig: &mut Rig, layers: &[Layer], doc_w: u32, doc_h: u32, o: &Fac
         }
     };
 
-    // eyes: closing
+    // eyes: closing, and smiling (the lower lid comes up)
     let eye_param_all = if o.together_eyes && (has(Part::EyeL) || has(Part::EyeR)) { Some(mk.param("Eyes open", 0.0, 1.0, 1.0)) } else { None };
+    let smile_all = if o.together_eyes && (has(Part::EyeL) || has(Part::EyeR)) { Some(mk.param("Eyes smile", 0.0, 1.0, 0.0)) } else { None };
     for (part, name) in [(Part::EyeL, "Eye L open"), (Part::EyeR, "Eye R open")] {
         if let (Some(r), Some(p)) = (rect_of(&[part]), par(part)) {
             let prm = match eye_param_all {
@@ -239,27 +242,65 @@ pub fn rig_face(rig: &mut Rig, layers: &[Layer], doc_w: u32, doc_h: u32, o: &Fac
             let h = (r[3] - r[1]) + 4.0;
             // closed: the top edge comes down to the bottom, leaving a line
             mk.rig.set_keyform(c, prm, 0.0, Form::Warp { offsets: vec![[0.0, 0.9 * h], [0.0, 0.9 * h], [0.0, 0.0], [0.0, 0.0]] });
+            // smiling: the lower edge comes up in a happy curve
+            let sm = match smile_all {
+                Some(a) => a,
+                None => mk.param(&format!("{} smile", part.label()), 0.0, 1.0, 0.0),
+            };
+            mk.rig.set_keyform(c, sm, 1.0, Form::Warp { offsets: vec![[0.0, 0.1 * h], [0.0, 0.1 * h], [0.0, -0.45 * h], [0.0, -0.45 * h]] });
+            set_parent(&mut parent_of, part, c);
+        }
+    }
+    // eyeballs: look left-right and up-down (one pair of sliders for both, or one pair each)
+    let ball_all = if o.together_eyes && (has(Part::EyeballL) || has(Part::EyeballR)) {
+        let (x, y) = (mk.param("Eyeball X", -1.0, 1.0, 0.0), mk.param("Eyeball Y", -1.0, 1.0, 0.0));
+        pads.push(("Eyeballs".into(), x, y));
+        Some((x, y))
+    } else {
+        None
+    };
+    for (part, eye, side) in [(Part::EyeballL, Part::EyeL, "L"), (Part::EyeballR, Part::EyeR, "R")] {
+        if let (Some(r), Some(p)) = (rect_of(&[part]), par(part)) {
+            let (px, py) = match ball_all {
+                Some(a) => a,
+                None => {
+                    let (x, y) = (mk.param(&format!("Eyeball {side} X"), -1.0, 1.0, 0.0), mk.param(&format!("Eyeball {side} Y"), -1.0, 1.0, 0.0));
+                    pads.push((format!("Eyeball {side}"), x, y));
+                    (x, y)
+                }
+            };
+            // how far it can look: a share of the eye it sits in
+            let e = rect_of(&[eye]).unwrap_or_else(|| grow(r, (r[2] - r[0]) * 0.5));
+            let (ew, eh) = ((e[2] - e[0]).max(1.0), (e[3] - e[1]).max(1.0));
+            let c = mk.changer(&format!("{} look", part.label()), Kind::Warp { rect: grow(r, 2.0), cols: 1, rows: 1 }, Some(p));
+            let (dx, dy) = (0.22 * ew, 0.30 * eh);
+            mk.slide(c, px, 1.0, [dx, 0.0]);
+            mk.slide(c, px, -1.0, [-dx, 0.0]);
+            mk.slide(c, py, 1.0, [0.0, -dy]);
+            mk.slide(c, py, -1.0, [0.0, dy]);
             set_parent(&mut parent_of, part, c);
         }
     }
     // brows: up and down
-    let brow_all = if o.together_brows && (has(Part::BrowL) || has(Part::BrowR)) { Some(mk.param("Brows", -1.0, 1.0, 0.0)) } else { None };
+    let brow_all = if o.together_brows && (has(Part::BrowL) || has(Part::BrowR)) { Some(mk.param("Brows", 0.0, 1.0, 0.0)) } else { None };
     for (part, name) in [(Part::BrowL, "Brow L"), (Part::BrowR, "Brow R")] {
         if let (Some(r), Some(p)) = (rect_of(&[part]), par(part)) {
             let prm = match brow_all {
                 Some(a) => a,
-                None => mk.param(name, -1.0, 1.0, 0.0),
+                None => mk.param(name, 0.0, 1.0, 0.0),
             };
             let c = mk.changer(&format!("{} raise", part.label()), Kind::Warp { rect: grow(r, 2.0), cols: 1, rows: 1 }, Some(p));
             let up = 0.5 * (r[3] - r[1]) + 0.03 * hh;
+            // two key points: the normal place (left end) and raised (right end)
             mk.slide(c, prm, 1.0, [0.0, -up]);
-            mk.slide(c, prm, -1.0, [0.0, 0.6 * up]);
             set_parent(&mut parent_of, part, c);
         }
     }
     // mouth: open, and the five vowels
     if let Some(mr) = rect_of(&[Part::Mouth, Part::MouthInside]) {
         let open = mk.param("Mouth open", 0.0, 1.0, 0.0);
+        let form = mk.param("Mouth form", -1.0, 1.0, 0.0);
+        pads.push(("Mouth".into(), form, open));
         let vowels: Vec<(Id, &str, (f32, f32, f32))> = if o.vowels {
             [("A", (0.05, 0.9, 0.1)), ("I", (0.18, 0.12, 0.0)), ("U", (-0.22, 0.35, 0.05)), ("E", (0.12, 0.45, 0.0)), ("O", (-0.18, 0.7, 0.1))].iter().map(|(n, s)| (mk.param(&format!("Mouth {n}"), 0.0, 1.0, 0.0), *n, *s)).collect()
         } else {
@@ -291,6 +332,26 @@ pub fn rig_face(rig: &mut Rig, layers: &[Layer], doc_w: u32, doc_h: u32, o: &Fac
             let (Some(_), Some(p)) = (rect_of(&[part]), par(part)) else { continue };
             let c = mk.changer(&format!("{} shape", part.label()), Kind::Warp { rect: grow(mr, 2.0), cols: 2, rows: 2 }, Some(p));
             mk.rig.set_keyform(c, open, 1.0, Form::Warp { offsets: shape(0.0, 0.8, 0.0) });
+            // mouth form has three key points: sad, the original drawing in the middle, smiling
+            let curve = |k: f32| -> Vec<[f32; 2]> {
+                let mut v = Vec::new();
+                for r in 0..3 {
+                    for col in 0..3 {
+                        let corner = col != 1;
+                        let y = match (r, corner) {
+                            (0, true) => -0.25 * k * mh,
+                            (1, true) => -0.35 * k * mh,
+                            (2, true) => -0.20 * k * mh,
+                            (2, false) => 0.10 * k * mh,
+                            _ => 0.0,
+                        };
+                        v.push([0.0, y]);
+                    }
+                }
+                v
+            };
+            mk.rig.set_keyform(c, form, 1.0, Form::Warp { offsets: curve(1.0) });
+            mk.rig.set_keyform(c, form, -1.0, Form::Warp { offsets: curve(-0.8) });
             for (prm, _, (corner, bottom, top)) in &vowels {
                 mk.rig.set_keyform(c, *prm, 1.0, Form::Warp { offsets: shape(*corner, *bottom, *top) });
             }
@@ -311,6 +372,12 @@ pub fn rig_face(rig: &mut Rig, layers: &[Layer], doc_w: u32, doc_h: u32, o: &Fac
     }
     report.changers = changers.len();
     report.params = params.len();
+    // pads: earlier ones that point at sliders that are gone are dropped, then the new ones are added
+    let alive: Vec<Id> = rig.params.iter().map(|p| p.id).collect();
+    rig.pads.retain(|p| alive.contains(&p.x) && alive.contains(&p.y));
+    for (name, x, y) in pads {
+        rig.pads.push(super::Pad { name, x, y });
+    }
     record(rig, "face", changers, params);
     let _ = ids;
     Ok(report)
@@ -583,10 +650,14 @@ mod tests {
         let rep = rig_face(&mut r, &d.layers, d.w, d.h, &FaceOptions::default()).unwrap();
         assert_eq!(rep.meshes, 10, "every tagged face layer has a mesh, the background does not");
         assert!(r.mesh_of(d.layers.iter().find(|l| l.name == "Background").unwrap().id).is_none());
-        for n in ["Angle X", "Angle Y", "Angle Z", "Eyes open", "Brows", "Mouth open", "Mouth A", "Mouth I", "Mouth U", "Mouth E", "Mouth O"] {
+        for n in ["Angle X", "Angle Y", "Angle Z", "Eyes open", "Eyes smile", "Brows", "Mouth open", "Mouth form", "Mouth A", "Mouth I", "Mouth U", "Mouth E", "Mouth O"] {
             param(&r, n);
         }
-        assert_eq!(rep.params, 11);
+        assert_eq!(rep.params, 13);
+        // two sliders are joined into a pad for the head and for the mouth
+        let pad = |name: &str| r.pads.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("a pad {name}")).clone();
+        assert_eq!((pad("Head").x, pad("Head").y), (param(&r, "Angle X"), param(&r, "Angle Y")));
+        assert_eq!((pad("Mouth").x, pad("Mouth").y), (param(&r, "Mouth form"), param(&r, "Mouth open")));
         assert!(rep.changers >= 10, "{}", rep.changers);
         assert!(r.mesh_of(d.layers.iter().find(|l| l.name == "Mouth").unwrap().id).unwrap().parent.is_some());
         // it all survives cleaning
@@ -836,5 +907,114 @@ mod tests {
         let mut only = Document::new(100, 100);
         add(&mut only, "x", None, (10, 10, 50, 50));
         assert!(rig_hair(&mut e, &only.layers, 100, 100).unwrap_err().contains("Tag the hair"));
+    }
+
+    #[test]
+    fn sliders_have_two_or_three_key_points_with_the_original_drawing_at_the_default() {
+        let d = face();
+        let mut r = Rig::default();
+        rig_face(&mut r, &d.layers, d.w, d.h, &FaceOptions::default()).unwrap();
+        let keys = |n: &str| r.key_points(param(&r, n));
+        // three key points: left, the original drawing in the middle, right
+        assert_eq!(keys("Angle X"), [-30.0, 0.0, 30.0]);
+        assert_eq!(keys("Mouth form"), [-1.0, 0.0, 1.0]);
+        // two key points: the original drawing at the left (closed mouth, brows in their place)
+        assert_eq!(keys("Mouth open"), [0.0, 1.0]);
+        assert_eq!(keys("Brows"), [0.0, 1.0]);
+        // eyes: open is the original drawing, at the right end
+        assert_eq!(keys("Eyes open"), [0.0, 1.0]);
+        assert_eq!(keys("Eyes smile"), [0.0, 1.0], "two key points, the original drawing at the left");
+        // what is drawn on a slider: the ends and the original too, and which points have a saved shape
+        let ax = param(&r, "Angle X");
+        assert_eq!(r.display_points(ax), [-30.0, 0.0, 30.0]);
+        assert!(r.key_is_set(ax, 30.0) && r.key_is_set(ax, -30.0) && !r.key_is_set(ax, 0.0), "the original drawing is never 'set'");
+        let bare = r.params.iter().find(|p| p.name == "Head tilt").map(|p| p.id);
+        assert!(bare.is_none());
+        let eyes = r.param(param(&r, "Eyes open")).unwrap();
+        assert_eq!((eyes.min, eyes.default, eyes.max), (0.0, 1.0, 1.0));
+        let brows = r.param(param(&r, "Brows")).unwrap();
+        assert_eq!((brows.min, brows.default, brows.max), (0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn the_middle_key_can_be_changed_and_put_back_to_the_original_drawing() {
+        let d = face();
+        let mut r = Rig::default();
+        rig_face(&mut r, &d.layers, d.w, d.h, &FaceOptions::default()).unwrap();
+        let ax = param(&r, "Angle X");
+        let nose = r.changers.iter().find(|c| c.name == "Turn Nose").unwrap().id;
+        // edit the middle key: the nose is moved at the middle of the slider
+        r.set_keyform(nose, ax, 0.0, Form::Warp { offsets: vec![[20.0, 0.0]; 4] });
+        let first = mesh_of(&d, &r, "Nose").verts[0][0];
+        let shift = |r: &Rig| {
+            let m = mesh_of(&d, r, "Nose");
+            r.deformed(m, &r.pose(&Values::default()))[0][0] - first
+        };
+        let at_mid = shift(&r);
+        assert!((at_mid - 20.0).abs() < 0.5, "the middle key is editable: {at_mid}");
+        // put it back to the original drawing
+        r.reset_key(ax, 0.0);
+        let back = shift(&r);
+        assert!(back.abs() < 0.01, "{back}");
+        // the ends can be removed, the middle one stays (it is the original drawing)
+        r.remove_key(ax, 30.0);
+        assert_eq!(r.key_points(ax), [-30.0, 0.0], "a key point belongs to the slider: it goes for every changer");
+        r.remove_key(ax, 0.0);
+        assert!(r.key_points(ax).contains(&0.0));
+    }
+
+    #[test]
+    fn eyeballs_look_around_inside_the_eye_and_the_pads_join_the_sliders() {
+        let mut d = face();
+        add(&mut d, "iris L", Some(Part::EyeballL), (585, 405, 615, 445));
+        add(&mut d, "iris R", Some(Part::EyeballR), (385, 405, 415, 445));
+        let mut r = Rig::default();
+        rig_face(&mut r, &d.layers, d.w, d.h, &FaceOptions::default()).unwrap();
+        let (bx, by) = (param(&r, "Eyeball X"), param(&r, "Eyeball Y"));
+        let pad = r.pads.iter().find(|p| p.name == "Eyeballs").expect("eyeball X and Y are one pad");
+        assert_eq!((pad.x, pad.y), (bx, by));
+        let ball = mesh_of(&d, &r, "iris L");
+        let mut v = Values::default();
+        v.set(bx, 1.0);
+        let now = r.deformed(ball, &r.pose(&v));
+        let dx = now[0][0] - ball.verts[0][0];
+        assert!(dx > 5.0 && dx < 30.0, "it looks right, but stays inside the eye: {dx}");
+        let eye = mesh_of(&d, &r, "Eye L");
+        assert!((r.deformed(eye, &r.pose(&v))[0][0] - eye.verts[0][0]).abs() < 1.0, "the eye itself stays");
+        v.set(by, 1.0);
+        assert!(r.deformed(ball, &r.pose(&v))[0][1] < ball.verts[0][1], "up looks up");
+        // one eyeball slider pair per eye when the eyes are separate
+        let mut sep = Rig::default();
+        rig_face(&mut sep, &d.layers, d.w, d.h, &FaceOptions { together_eyes: false, ..FaceOptions::default() }).unwrap();
+        assert!(sep.params.iter().any(|p| p.name == "Eyeball L X") && sep.params.iter().any(|p| p.name == "Eyeball R Y"));
+        assert!(sep.pads.iter().any(|p| p.name == "Eyeball L") && sep.pads.iter().any(|p| p.name == "Eyeball R"));
+        // making the rig again does not pile up pads
+        let n = r.pads.len();
+        rig_face(&mut r, &d.layers, d.w, d.h, &FaceOptions::default()).unwrap();
+        assert_eq!(r.pads.len(), n);
+        // and cleaning keeps them
+        assert_eq!(r.clone().sanitized().pads.len(), n);
+        // a pad that points at a slider that is gone is dropped
+        let mut bad = r.clone();
+        bad.pads.push(crate::rig::Pad { name: "x".into(), x: 9999, y: bx });
+        assert_eq!(bad.sanitized().pads.len(), n);
+    }
+
+    #[test]
+    fn mouth_form_smiles_and_frowns_and_the_brows_only_go_up() {
+        let d = face();
+        let mut r = Rig::default();
+        rig_face(&mut r, &d.layers, d.w, d.h, &FaceOptions::default()).unwrap();
+        let form = param(&r, "Mouth form");
+        let m = mesh_of(&d, &r, "Mouth");
+        // the leftmost vertices are the corners of the mouth
+        let corner = (0..m.verts.len()).min_by(|a, b| m.verts[*a][0].total_cmp(&m.verts[*b][0])).unwrap();
+        let mut v = Values::default();
+        v.set(form, 1.0);
+        assert!(r.deformed(m, &r.pose(&v))[corner][1] < m.verts[corner][1] - 3.0, "smile: the corners go up");
+        v.set(form, -1.0);
+        assert!(r.deformed(m, &r.pose(&v))[corner][1] > m.verts[corner][1] + 3.0, "sad: the corners go down");
+        v.set(form, 0.0);
+        assert!((r.deformed(m, &r.pose(&v))[corner][1] - m.verts[corner][1]).abs() < 0.01, "the middle is the original drawing");
     }
 }

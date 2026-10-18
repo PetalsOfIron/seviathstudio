@@ -101,6 +101,9 @@ pub struct RigState {
     pub gizmo: bool,
     pub gtarget: usize,
     pub snap: f32,
+    join: (Option<Id>, Option<Id>),
+    /// Where each joined square is on the screen (for the tests).
+    pub pad_areas: Vec<(String, Rect)>,
     gdrag: Option<(rig::gizmo::Axis, Pos2, f32)>,
     pub warnings: Vec<String>,
     /// Where the rings were drawn last: centre and radius on the screen (for the tests).
@@ -1240,21 +1243,115 @@ impl SeviathApp {
     }
 
     fn rig_sliders_section(&mut self, ui: &mut Ui, now: f64) {
+        let rig = self.draw.doc.rig.clone();
+        // ---- pads: two sliders joined into one square ----
+        section_title(ui, "Joined sliders");
+        ui.label(RichText::new("Two sliders joined into one square: drag inside it to move both. Orange line: the first slider. Blue line: the second. The dots are where the two lines cross (green: the original drawing, yellow: a saved shape, grey: nothing saved yet, red: where you are).").size(11.5).color(TEXT_DIM));
+        let mut split: Option<usize> = None;
+        self.rigs.pad_areas.clear();
+        for (pi, pad) in rig.pads.iter().enumerate() {
+            let (Some(px), Some(py)) = (rig.param(pad.x), rig.param(pad.y)) else { continue };
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&pad.name).strong());
+                ui.label(RichText::new(format!("= {} + {}", px.name, py.name)).size(11.5).color(TEXT_DIM));
+                ui.label(RichText::new(format!("{:.2}  {:.2}", rig.value(&self.rigs.values, px.id), rig.value(&self.rigs.values, py.id))).size(11.5).monospace());
+                if ui.small_button("Split").on_hover_text("Back to two separate sliders").clicked() {
+                    split = Some(pi);
+                }
+            });
+            let (mut vx, mut vy) = (rig.value(&self.rigs.values, px.id), rig.value(&self.rigs.values, py.id));
+            let (kx, ky) = (rig.display_points(px.id), rig.display_points(py.id));
+            let (sx, sy): (Vec<f32>, Vec<f32>) = (kx.iter().copied().filter(|k| rig.key_is_set(px.id, *k)).collect(), ky.iter().copied().filter(|k| rig.key_is_set(py.id, *k)).collect());
+            let a = PadAxis { name: &px.name, lo: px.min, hi: px.max, def: px.default, keys: &kx, set: &sx };
+            let b = PadAxis { name: &py.name, lo: py.min, hi: py.max, def: py.default, keys: &ky, set: &sy };
+            let (moved, area) = pad_widget(ui, &a, &b, &mut vx, &mut vy);
+            self.rigs.pad_areas.push((pad.name.clone(), area));
+            if moved {
+                self.rigs.values.set(px.id, vx);
+                self.rigs.values.set(py.id, vy);
+                self.rigs.sel_param = Some(px.id);
+                self.rigs.sel_param2 = Some(py.id);
+            }
+        }
+        if rig.pads.is_empty() {
+            ui.label(RichText::new("None yet. The auto-rig makes them for the head, the eyeballs and the mouth.").size(11.5).color(TEXT_DIM));
+        }
+        if let Some(i) = split {
+            self.rig_edit("Split a pad", now, |r| {
+                if i < r.pads.len() {
+                    r.pads.remove(i);
+                }
+            });
+        }
+        // join two sliders by hand
+        let names: Vec<(Id, String)> = rig.params.iter().map(|p| (p.id, p.name.clone())).collect();
+        if names.len() >= 2 {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Join").size(12.0).color(TEXT_DIM));
+                let first = self.rigs.join.0.filter(|id| names.iter().any(|n| n.0 == *id));
+                let second = self.rigs.join.1.filter(|id| names.iter().any(|n| n.0 == *id));
+                let label = |o: Option<Id>| o.and_then(|id| names.iter().find(|n| n.0 == id)).map(|n| n.1.clone()).unwrap_or_else(|| "pick".into());
+                egui::ComboBox::from_id_salt("join_a").selected_text(label(first)).width(110.0).show_ui(ui, |ui| {
+                    for (id, n) in &names {
+                        if ui.selectable_label(first == Some(*id), n).clicked() {
+                            self.rigs.join.0 = Some(*id);
+                        }
+                    }
+                });
+                ui.label(RichText::new("with").size(12.0).color(TEXT_DIM));
+                egui::ComboBox::from_id_salt("join_b").selected_text(label(second)).width(110.0).show_ui(ui, |ui| {
+                    for (id, n) in &names {
+                        if ui.selectable_label(second == Some(*id), n).clicked() {
+                            self.rigs.join.1 = Some(*id);
+                        }
+                    }
+                });
+                if ui.add_enabled(first.is_some() && second.is_some() && first != second, egui::Button::new("Join")).clicked() {
+                    if let (Some(x), Some(y)) = (first, second) {
+                        let name = format!("{} + {}", label(first), label(second));
+                        self.rig_edit("Join two sliders", now, |r| {
+                            r.pads.retain(|p| !(p.x == x && p.y == y));
+                            r.pads.push(rig::Pad { name, x, y });
+                        });
+                    }
+                }
+            });
+        }
+
         // ---- sliders ----
         section_title(ui, "Sliders");
-        let params: Vec<(Id, String, f32, f32, f32)> = self.draw.doc.rig.params.iter().map(|p| (p.id, p.name.clone(), p.min, p.max, p.default)).collect();
+        ui.label(RichText::new("The circles on a slider are its key points. Green: the original drawing. Yellow: a shape is saved there. Grey: nothing saved yet. The red dot is where the slider is.").size(11.5).color(TEXT_DIM));
+        let in_pad = |id: Id| rig.pads.iter().any(|p| p.x == id || p.y == id);
+        let params: Vec<(Id, String, f32, f32, f32)> = rig.params.iter().map(|p| (p.id, p.name.clone(), p.min, p.max, p.default)).collect();
         let mut del_param: Option<Id> = None;
+        let mut hidden = 0;
+        let mut last_group = "";
         for (id, name, lo, hi, def) in &params {
-            let mut v = self.draw.doc.rig.value(&self.rigs.values, *id);
+            if in_pad(*id) && !self.rigs.pro {
+                hidden += 1;
+                continue;
+            }
+            let g = slider_group(name);
+            if g != last_group {
+                last_group = g;
+                ui.add_space(2.0);
+                ui.label(RichText::new(g).size(12.0).strong().color(TEXT_DIM));
+            }
+            let mut v = rig.value(&self.rigs.values, *id);
             let on = self.rigs.sel_param == Some(*id);
+            let keys = rig.display_points(*id);
+            let set: Vec<f32> = keys.iter().copied().filter(|k| rig.key_is_set(*id, *k)).collect();
             ui.horizontal(|ui| {
                 if widgets::chip(ui, name, on).clicked() {
                     self.rigs.sel_param = Some(*id);
                 }
-                if ui.add(egui::Slider::new(&mut v, *lo..=*hi).max_decimals(1)).changed() {
+                if key_slider(ui, &mut v, *lo, *hi, *def, &keys, &set, 150.0) {
                     self.rigs.values.set(*id, v);
+                    self.rigs.sel_param = Some(*id);
                 }
-                if ui.small_button("0").on_hover_text("Back to the middle").clicked() {
+                ui.label(RichText::new(format!("{v:.1}")).size(11.5).color(TEXT_DIM));
+                if ui.small_button("Original").on_hover_text("Back to the original drawing (the filled mark)").clicked() {
                     self.rigs.values.set(*id, *def);
                 }
                 if on && ui.small_button("Delete").clicked() {
@@ -1262,10 +1359,14 @@ impl SeviathApp {
                 }
             });
         }
+        if hidden > 0 {
+            ui.label(RichText::new(format!("{hidden} sliders are inside the joined squares above. Pro mode shows them here too.")).size(11.5).color(TEXT_DIM));
+        }
         if let Some(id) = del_param {
             self.rig_edit("Delete slider", now, |r| {
                 r.params.retain(|p| p.id != id);
                 r.bindings.retain(|b| !b.params.contains(&id));
+                r.pads.retain(|p| p.x != id && p.y != id);
             });
             self.rigs.values.0.remove(&id);
             self.rigs.sel_param = None;
@@ -1286,10 +1387,50 @@ impl SeviathApp {
         // ---- keyforms of the picked changer and slider ----
         if !self.rigs.pro {
             ui.label(RichText::new("Pro mode shows the meshes, changers and keyforms behind these sliders.").size(11.5).color(TEXT_DIM));
-        } else if let (Some(cid), Some(pid)) = (self.rigs.sel_changer, self.rigs.sel_param) {
-            self.rig_keyforms(ui, now, cid, pid);
+        } else if let Some(pid) = self.rigs.sel_param {
+            self.rig_key_points(ui, now, pid);
+            if let Some(cid) = self.rigs.sel_changer {
+                self.rig_keyforms(ui, now, cid, pid);
+            } else {
+                ui.label(RichText::new("Pick a changer to say how this slider moves it.").size(11.5).color(TEXT_DIM));
+            }
         } else {
             ui.label(RichText::new("Pick a changer and a slider to say how the slider moves it.").size(11.5).color(TEXT_DIM));
+        }
+    }
+
+    /// The key points of the picked slider, in words: how many there are and which one is the original drawing.
+    fn rig_key_points(&mut self, ui: &mut Ui, now: f64, pid: Id) {
+        let rig = self.draw.doc.rig.clone();
+        let Some(p) = rig.param(pid).cloned() else { return };
+        let keys = rig.key_points(pid);
+        section_title(ui, &format!("Key points of {}", p.name));
+        let at = |k: f32| (k - p.default).abs() < 1e-4;
+        let text = match keys.len() {
+            1 => "Only the original drawing so far. Put the slider at its other end, move the part and save the shape to add a key point.".to_owned(),
+            2 => format!("Two key points. The original drawing is at the {} end ({}).", if keys[0] == p.default { "left" } else { "right" }, if keys[0] == p.default { "for example a closed mouth" } else { "for example open eyes" }),
+            _ => "Three key points. The original drawing is the middle one: put the slider there and the drawing is as you drew it. You can edit the middle one too.".to_owned(),
+        };
+        ui.label(RichText::new(text).size(11.5).color(TEXT_DIM));
+        let value = rig.value(&self.rigs.values, pid);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            for k in &keys {
+                let label = if at(*k) { format!("{k:.1} (original)") } else { format!("{k:.1}") };
+                if widgets::chip(ui, &label, (value - k).abs() < 1e-3).on_hover_text("Go to this key point").clicked() {
+                    self.rigs.values.set(pid, *k);
+                }
+            }
+        });
+        if let Some(k) = keys.iter().copied().find(|k| (value - k).abs() < 1e-3) {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Put this key point back to the original drawing").on_hover_text("The shape saved at this key point is cleared").clicked() {
+                    self.rig_edit("Original drawing at a key point", now, |r| r.reset_key(pid, k));
+                }
+                if !at(k) && ui.button("Remove this key point").clicked() {
+                    self.rig_edit("Remove a key point", now, |r| r.remove_key(pid, k));
+                }
+            });
         }
     }
 
@@ -1514,7 +1655,12 @@ impl SeviathApp {
                 ui.horizontal(|ui| {
                     if !editing {
                         if ui.button("Edit the shape").clicked() {
-                            // start from what is on screen now
+                            // show only this slider (and the one it is joined with), so the saved shape is just its own
+                            let mut only = Values::default();
+                            for id in std::iter::once(pid).chain(pid2) {
+                                only.set(id, rig.value(&self.rigs.values, id));
+                            }
+                            self.rigs.values = only;
                             let pose = rig.pose(&self.rigs.values);
                             let off: Vec<[f32; 2]> = match &c.kind {
                                 Kind::Warp { cols, rows, .. } => pose.warp.get(&cid).cloned().unwrap_or_else(|| vec![[0.0, 0.0]; ((cols + 1) * (rows + 1)) as usize]),
@@ -2025,4 +2171,153 @@ fn skin_composite(d: &Document, ids: &[LayerId]) -> Option<image::RgbaImage> {
     }
     let tmp = Document::from_parts(d.w, d.h, Color32::TRANSPARENT, layers);
     Some(crate::files::flatten(&tmp))
+}
+
+/// A slider drawn like in Live2D and Inochi2D: circles at its key points, a red dot where it is now.
+/// Clicking near a key point snaps to it. Returns true when the value changed.
+fn key_slider(ui: &mut Ui, v: &mut f32, lo: f32, hi: f32, def: f32, keys: &[f32], set: &[f32], width: f32) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click_and_drag());
+    let rail = Rect::from_min_max(pos2(rect.min.x + 8.0, rect.center().y - 2.0), pos2(rect.max.x - 8.0, rect.center().y + 2.0));
+    let span = (hi - lo).max(1e-6);
+    let x_of = |val: f32| rail.min.x + (val - lo) / span * rail.width();
+    let p = ui.painter();
+    p.rect_filled(rail, 2.0, LINE);
+    // the key points as circles: green = the original drawing, yellow = a shape is saved, grey = nothing saved yet
+    for k in keys {
+        let c = pos2(x_of(*k), rail.center().y);
+        if (*k - def).abs() < 1e-4 {
+            p.circle_filled(c, 6.0, VENOM);
+        } else if set.iter().any(|s| (s - k).abs() < 1e-4) {
+            p.circle_filled(c, 5.0, Color32::from_rgb(240, 210, 70));
+        } else {
+            p.circle_stroke(c, 4.5, Stroke::new(1.5, TEXT_DIM));
+        }
+    }
+    // where the slider is now: a red dot
+    p.circle_filled(pos2(x_of(v.clamp(lo, hi)), rail.center().y), 4.0, Color32::from_rgb(235, 80, 90));
+    let mut changed = false;
+    if resp.dragged() || resp.clicked() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let mut nv = (lo + (pos.x - rail.min.x) / rail.width().max(1.0) * span).clamp(lo, hi);
+            // near a key point: land exactly on it
+            if let Some(k) = keys.iter().copied().find(|k| (x_of(*k) - pos.x).abs() < 7.0) {
+                nv = k;
+            }
+            if (nv - *v).abs() > 1e-6 {
+                *v = nv;
+                changed = true;
+            }
+        }
+    }
+    resp.on_hover_text(format!("Key points: {}. Green: the original drawing. Yellow: a saved shape. Grey: nothing saved yet. Red: where the slider is.", keys.iter().map(|k| format!("{k:.1}")).collect::<Vec<_>>().join(", ")));
+    changed
+}
+
+struct PadAxis<'a> {
+    name: &'a str,
+    lo: f32,
+    hi: f32,
+    def: f32,
+    keys: &'a [f32],
+    /// The key points that have a saved shape.
+    set: &'a [f32],
+}
+
+/// Two sliders joined into one square. The first is the line along the bottom (orange), the second the line up the
+/// left side (blue); the dots are where their key points cross. Drag inside to move both.
+fn pad_widget(ui: &mut Ui, a: &PadAxis, b: &PadAxis, vx: &mut f32, vy: &mut f32) -> (bool, Rect) {
+    let orange = Color32::from_rgb(235, 160, 70);
+    let blue = Color32::from_rgb(90, 170, 255);
+    let (rect, resp) = ui.allocate_exact_size(vec2(300.0, 190.0), Sense::click_and_drag());
+    let area = Rect::from_min_max(pos2(rect.min.x + 26.0, rect.min.y + 6.0), pos2(rect.max.x - 76.0, rect.max.y - 30.0));
+    let (spx, spy) = ((a.hi - a.lo).max(1e-6), (b.hi - b.lo).max(1e-6));
+    let xo = |v: f32| area.min.x + (v - a.lo) / spx * area.width();
+    // the second slider goes up: its high end is at the top
+    let yo = |v: f32| area.max.y - (v - b.lo) / spy * area.height();
+    let p = ui.painter();
+    p.rect_filled(area, 4.0, Color32::from_rgb(20, 28, 24));
+    p.rect_stroke(area, 4.0, Stroke::new(1.0, LINE), egui::StrokeKind::Inside);
+    // the lines of the key points, and the dots where they cross
+    for k in a.keys {
+        p.line_segment([pos2(xo(*k), area.min.y), pos2(xo(*k), area.max.y)], Stroke::new(1.0, orange.gamma_multiply(0.25)));
+    }
+    for k in b.keys {
+        p.line_segment([pos2(area.min.x, yo(*k)), pos2(area.max.x, yo(*k))], Stroke::new(1.0, blue.gamma_multiply(0.25)));
+    }
+    let mut dots: Vec<(f32, f32, Pos2)> = Vec::new();
+    for kx in a.keys {
+        for ky in b.keys {
+            let at = pos2(xo(*kx), yo(*ky));
+            let original = (*kx - a.def).abs() < 1e-4 && (*ky - b.def).abs() < 1e-4;
+            let saved = a.set.iter().any(|s| (s - kx).abs() < 1e-4) || b.set.iter().any(|s| (s - ky).abs() < 1e-4);
+            if original {
+                p.circle_filled(at, 5.5, VENOM);
+            } else if saved {
+                p.circle_filled(at, 4.5, Color32::from_rgb(240, 210, 70));
+            } else {
+                p.circle_stroke(at, 4.0, Stroke::new(1.5, TEXT_DIM));
+            }
+            dots.push((*kx, *ky, at));
+        }
+    }
+    // the two lines: along the bottom and up the left side, with their own key marks
+    let bottom = area.max.y + 14.0;
+    p.line_segment([pos2(area.min.x, bottom), pos2(area.max.x, bottom)], Stroke::new(3.0, orange));
+    for k in a.keys {
+        p.circle_filled(pos2(xo(*k), bottom), 3.5, if (*k - a.def).abs() < 1e-4 { VENOM } else { orange });
+    }
+    let left = area.min.x - 14.0;
+    p.line_segment([pos2(left, area.min.y), pos2(left, area.max.y)], Stroke::new(3.0, blue));
+    for k in b.keys {
+        p.circle_filled(pos2(left, yo(*k)), 3.5, if (*k - b.def).abs() < 1e-4 { VENOM } else { blue });
+    }
+    p.text(pos2(area.center().x, bottom + 8.0), egui::Align2::CENTER_TOP, format!("{} (the orange line)", a.name), egui::FontId::proportional(11.0), orange);
+    p.text(pos2(area.max.x + 8.0, area.min.y), egui::Align2::LEFT_TOP, b.name, egui::FontId::proportional(11.0), blue);
+    p.text(pos2(area.max.x + 8.0, area.min.y + 14.0), egui::Align2::LEFT_TOP, "(the blue line)", egui::FontId::proportional(9.5), TEXT_DIM);
+    // where both sliders are now
+    let now = pos2(xo((*vx).clamp(a.lo, a.hi)), yo((*vy).clamp(b.lo, b.hi)));
+    p.line_segment([pos2(now.x, area.min.y), pos2(now.x, area.max.y)], Stroke::new(1.0, orange));
+    p.line_segment([pos2(area.min.x, now.y), pos2(area.max.x, now.y)], Stroke::new(1.0, blue));
+    p.circle_filled(now, 4.5, Color32::from_rgb(235, 80, 90));
+    let mut changed = false;
+    if resp.dragged() || resp.clicked() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let mut nx = (a.lo + (pos.x - area.min.x) / area.width().max(1.0) * spx).clamp(a.lo, a.hi);
+            let mut ny = (b.lo + (area.max.y - pos.y) / area.height().max(1.0) * spy).clamp(b.lo, b.hi);
+            // near a crossing: land exactly on it
+            if let Some((kx, ky, _)) = dots.iter().find(|(_, _, at)| (at.x - pos.x).hypot(at.y - pos.y) < 9.0) {
+                nx = *kx;
+                ny = *ky;
+            }
+            if (nx - *vx).abs() > 1e-6 || (ny - *vy).abs() > 1e-6 {
+                *vx = nx;
+                *vy = ny;
+                changed = true;
+            }
+        }
+    }
+    (changed, area)
+}
+
+/// The heading a slider is listed under (like the groups of the parameter palettes in Live2D and Inochi2D).
+fn slider_group(name: &str) -> &'static str {
+    if name.starts_with("Angle") {
+        "Head angles"
+    } else if name.starts_with("Eyeball") {
+        "Eyeballs"
+    } else if name.starts_with("Eye") {
+        "Eyes"
+    } else if name.starts_with("Brow") {
+        "Brows"
+    } else if name.starts_with("Mouth") {
+        "Mouth"
+    } else if name.starts_with("Body") || name.starts_with("Breath") {
+        "Body"
+    } else if name.starts_with("Arm") || name.starts_with("Hand") || name.starts_with("Leg") {
+        "Arms and legs"
+    } else if name.starts_with("Hair") {
+        "Hair"
+    } else {
+        "Other"
+    }
 }

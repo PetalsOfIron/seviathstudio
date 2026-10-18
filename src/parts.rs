@@ -19,6 +19,8 @@ pub enum Part {
     Face,
     EyeL,
     EyeR,
+    EyeballL,
+    EyeballR,
     BrowL,
     BrowR,
     Nose,
@@ -77,10 +79,12 @@ impl Group {
 }
 
 impl Part {
-    pub const ALL: [Part; 25] = [
+    pub const ALL: [Part; 27] = [
         Part::Face,
         Part::EyeL,
         Part::EyeR,
+        Part::EyeballL,
+        Part::EyeballR,
         Part::BrowL,
         Part::BrowR,
         Part::Nose,
@@ -109,6 +113,8 @@ impl Part {
         match self {
             Part::Face => "Face base",
             Part::EyeL => "Eye L",
+            Part::EyeballL => "Eyeball L",
+            Part::EyeballR => "Eyeball R",
             Part::EyeR => "Eye R",
             Part::BrowL => "Brow L",
             Part::BrowR => "Brow R",
@@ -137,7 +143,7 @@ impl Part {
 
     pub fn group(self) -> Group {
         match self {
-            Part::Face | Part::EyeL | Part::EyeR | Part::BrowL | Part::BrowR | Part::Nose | Part::Mouth | Part::MouthInside | Part::EarL | Part::EarR | Part::Blush => Group::Face,
+            Part::Face | Part::EyeL | Part::EyeR | Part::EyeballL | Part::EyeballR | Part::BrowL | Part::BrowR | Part::Nose | Part::Mouth | Part::MouthInside | Part::EarL | Part::EarR | Part::Blush => Group::Face,
             Part::HairFront | Part::HairSideL | Part::HairSideR | Part::HairBack => Group::Hair,
             Part::Neck | Part::Torso | Part::ArmL | Part::ArmR | Part::HandL | Part::HandR | Part::LegL | Part::LegR => Group::Body,
             Part::Clothing => Group::Clothing,
@@ -150,6 +156,8 @@ impl Part {
         Some(match self {
             Part::EyeL => Part::EyeR,
             Part::EyeR => Part::EyeL,
+            Part::EyeballL => Part::EyeballR,
+            Part::EyeballR => Part::EyeballL,
             Part::BrowL => Part::BrowR,
             Part::BrowR => Part::BrowL,
             Part::EarL => Part::EarR,
@@ -167,7 +175,7 @@ impl Part {
     }
 
     pub fn is_left(self) -> bool {
-        matches!(self, Part::EyeL | Part::BrowL | Part::EarL | Part::HairSideL | Part::ArmL | Part::HandL | Part::LegL)
+        matches!(self, Part::EyeL | Part::EyeballL | Part::BrowL | Part::EarL | Part::HairSideL | Part::ArmL | Part::HandL | Part::LegL)
     }
 
     /// The color code on the model: one color per group, the right half a little darker.
@@ -261,7 +269,10 @@ fn from_name(name: &str) -> Option<(NamePart, f32)> {
     if has(&toks, &["eyebrow", "eyebrows", "brow", "brows", "uzacs", "uzacis"]) {
         return pair(Part::BrowL, Part::BrowR);
     }
-    if has(&toks, &["eye", "eyes", "eyeball", "iris", "pupil", "eyelash", "eyelid", "acs", "acis"]) {
+    if has(&toks, &["eyeball", "eyeballs", "iris", "irises", "pupil", "pupils"]) {
+        return pair(Part::EyeballL, Part::EyeballR);
+    }
+    if has(&toks, &["eye", "eyes", "eyelash", "eyelid", "acs", "acis"]) {
         return pair(Part::EyeL, Part::EyeR);
     }
     if has(&toks, &["mouth", "lips", "lip", "mute", "lupas"]) {
@@ -663,6 +674,8 @@ mod tests {
         assert_eq!(p("EyeR"), Some(NamePart::One(Part::EyeR)));
         assert_eq!(p("brow_left"), Some(NamePart::One(Part::BrowL)));
         assert_eq!(p("Eye"), Some(NamePart::Pair(Part::EyeL, Part::EyeR)));
+        assert_eq!(p("iris L"), Some(NamePart::One(Part::EyeballL)));
+        assert_eq!(p("eyeball"), Some(NamePart::Pair(Part::EyeballL, Part::EyeballR)));
         assert_eq!(p("hair front"), Some(NamePart::One(Part::HairFront)));
         assert_eq!(p("Back hair"), Some(NamePart::One(Part::HairBack)));
         assert_eq!(p("bangs"), Some(NamePart::One(Part::HairFront)));
