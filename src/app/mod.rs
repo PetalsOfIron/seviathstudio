@@ -620,6 +620,9 @@ impl eframe::App for SeviathApp {
             .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(6, 0)))
             .show(ui, |ui| self.status_bar(ui));
 
+        if self.tab != Tab::Stream {
+            self.stream_release();
+        }
         match (self.workspace, self.tab) {
             (Workspace::Design, _) => self.design_workspace(ui),
             (_, Tab::Draw) => {

@@ -44,7 +44,7 @@
 - Effects/adjustments: `Layer.fx` + `Layer.adjust` (LayerKind::Adjust); drawn in `Document::composite_into`; effect reach is capped at 200 px so a tile only needs its 8 neighbours (`take_dirty` widens by one ring when effects exist); `files::bake` for PSD/ORA.
 
 ## Where the work stands
-- Milestones **1–20b done** (see ROADMAP "Done"). 521 tests pass.
+- Milestones **1–20b done** (see ROADMAP "Done"). 522 tests pass.
 - Plan Part AT core is done (Info screen, PNG credit, README credit). ROADMAP now includes Parts AS (milestone **9a**) and AV (**37a**).
 - Everything up to milestone 30f is done (see ROADMAP "Done"). **Next: better face guess and shapes from real models (user VRMs, CC4 FBX), then the rest of 30c (optional AI, 3D painting)**, then 31. (old note: 30c — rig an uncut character into 3D for games (AI and own rig mixable, VRM engine)** (21 to 24 are dropped, the app is offline), then rigging, animation, streaming, games and AI (26–51).
 - Gotcha: egui `consume_key(Modifiers::NONE, key)` also matches when Alt is held, so check keys with Alt/Ctrl **before** plain tool keys (see the order in `DrawState::ui`). In kittest, hold modifiers for clicks with `Event::ModifiersChanged`.

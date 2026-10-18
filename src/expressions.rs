@@ -32,6 +32,9 @@ pub struct ExprDef {
     pub fade_out: f32,
     pub effects: Vec<Effect>,
     pub own: bool,
+    /// Layers (props, accessories) that show while it is on, and layers that hide.
+    pub show: Vec<u64>,
+    pub hide: Vec<u64>,
 }
 
 /// An expression made in this program: sliders at values.
@@ -42,17 +45,19 @@ pub struct OwnExpr {
     pub values: Vec<(Id, f32)>,
     pub fade_in: f32,
     pub fade_out: f32,
+    pub show: Vec<u64>,
+    pub hide: Vec<u64>,
 }
 
 impl Default for OwnExpr {
     fn default() -> Self {
-        OwnExpr { name: String::new(), values: Vec::new(), fade_in: 0.25, fade_out: 0.25 }
+        OwnExpr { name: String::new(), values: Vec::new(), fade_in: 0.25, fade_out: 0.25, show: Vec::new(), hide: Vec::new() }
     }
 }
 
 /// Every expression of the rig: the own ones first, then the ones of a Live2D model (sliders found by their Live2D id).
 pub fn defs(rig: &Rig) -> Vec<ExprDef> {
-    let mut out: Vec<ExprDef> = rig.own_exprs.iter().map(|e| ExprDef { name: e.name.clone(), fade_in: e.fade_in, fade_out: e.fade_out, effects: e.values.iter().map(|(p, v)| Effect { param: *p, value: *v, blend: Blend::Overwrite }).collect(), own: true }).collect();
+    let mut out: Vec<ExprDef> = rig.own_exprs.iter().map(|e| ExprDef { name: e.name.clone(), fade_in: e.fade_in, fade_out: e.fade_out, effects: e.values.iter().map(|(p, v)| Effect { param: *p, value: *v, blend: Blend::Overwrite }).collect(), own: true, show: e.show.clone(), hide: e.hide.clone() }).collect();
     for e in &rig.expressions {
         let effects: Vec<Effect> = e
             .params
@@ -68,7 +73,7 @@ pub fn defs(rig: &Rig) -> Vec<ExprDef> {
             })
             .collect();
         if !effects.is_empty() && !out.iter().any(|o| o.name == e.name) {
-            out.push(ExprDef { name: e.name.clone(), fade_in: e.fade_in.max(0.0), fade_out: e.fade_out.max(0.0), effects, own: false });
+            out.push(ExprDef { name: e.name.clone(), fade_in: e.fade_in.max(0.0), fade_out: e.fade_out.max(0.0), effects, own: false, show: Vec::new(), hide: Vec::new() });
         }
     }
     out
@@ -115,6 +120,11 @@ impl ExprState {
         }
     }
 
+    /// Did the expressions change any slider that has not been given back?
+    pub fn has_applied(&self) -> bool {
+        !self.applied.is_empty()
+    }
+
     pub fn any(&self) -> bool {
         self.on.values().any(|v| *v) || self.level.values().any(|v| *v > 0.0)
     }
@@ -126,6 +136,27 @@ impl ExprState {
                 values.set(id, base);
             }
         }
+    }
+
+    /// The layers the expressions that are on (or fading) show or hide: for each, whether it is to show and how far (0 to 1).
+    pub fn layer_levels(&self, defs: &[ExprDef]) -> HashMap<u64, (bool, f32)> {
+        let mut out: HashMap<u64, (bool, f32)> = HashMap::new();
+        for d in defs {
+            let l = self.level(&d.name);
+            if l <= 0.0 {
+                continue;
+            }
+            for (ids, show) in [(&d.show, true), (&d.hide, false)] {
+                for id in ids {
+                    let e = out.entry(*id).or_insert((show, 0.0));
+                    // the strongest expression decides
+                    if l > e.1 {
+                        *e = (show, l);
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// The sliders without what the expressions are doing now (to save an expression from).
@@ -202,7 +233,7 @@ mod tests {
     fn an_expression_fades_in_changes_the_sliders_and_gives_them_back() {
         let mut r = rig();
         let (mouth, eyes) = (r.params[0].id, r.params[1].id);
-        r.own_exprs.push(OwnExpr { name: "Happy".into(), values: vec![(mouth, 1.0)], fade_in: 1.0, fade_out: 1.0 });
+        r.own_exprs.push(OwnExpr { name: "Happy".into(), values: vec![(mouth, 1.0)], fade_in: 1.0, fade_out: 1.0, ..Default::default() });
         r.expressions.push(Expression { name: "Squint".into(), fade_in: 0.0, fade_out: 0.0, params: vec![ExpParam { id: "ParamEyeOpen".into(), value: 0.5, blend: "Multiply".into() }] });
         let d = defs(&r);
         let mut st = ExprState::default();
@@ -237,10 +268,33 @@ mod tests {
     }
 
     #[test]
+    fn expressions_show_and_hide_layers_by_how_far_they_have_faded() {
+        let mut r = rig();
+        r.own_exprs.push(OwnExpr { name: "Glasses".into(), fade_in: 1.0, fade_out: 1.0, show: vec![7], hide: vec![8], ..Default::default() });
+        r.own_exprs.push(OwnExpr { name: "Hat".into(), fade_in: 0.0, fade_out: 0.0, show: vec![9], ..Default::default() });
+        let d = defs(&r);
+        let mut st = ExprState::default();
+        let mut v = Values::default();
+        assert!(st.layer_levels(&d).is_empty());
+        st.set("Glasses", true);
+        st.apply(&d, &r, &mut v, 0.5);
+        let l = st.layer_levels(&d);
+        assert_eq!(l[&7], (true, 0.5));
+        assert_eq!(l[&8], (false, 0.5));
+        assert!(!l.contains_key(&9));
+        st.set("Hat", true);
+        st.apply(&d, &r, &mut v, 0.1);
+        assert_eq!(st.layer_levels(&d)[&9], (true, 1.0));
+        st.clear();
+        st.apply(&d, &r, &mut v, 2.0);
+        assert!(st.layer_levels(&d).is_empty(), "back to how the layers are");
+    }
+
+    #[test]
     fn a_slider_changed_by_someone_else_is_not_put_back() {
         let mut r = rig();
         let mouth = r.params[0].id;
-        r.own_exprs.push(OwnExpr { name: "Happy".into(), values: vec![(mouth, 1.0)], fade_in: 0.0, fade_out: 0.0 });
+        r.own_exprs.push(OwnExpr { name: "Happy".into(), values: vec![(mouth, 1.0)], fade_in: 0.0, fade_out: 0.0, ..Default::default() });
         let d = defs(&r);
         let mut st = ExprState::default();
         let mut v = Values::default();
@@ -281,7 +335,7 @@ mod pose_tests {
     fn an_expression_can_be_looked_at_fully_on_without_fading() {
         let mut r = Rig::default();
         let a = r.add_param("Smile", 0.0, 1.0, 0.0);
-        r.own_exprs.push(OwnExpr { name: "Happy".into(), values: vec![(a, 1.0)], fade_in: 5.0, fade_out: 5.0 });
+        r.own_exprs.push(OwnExpr { name: "Happy".into(), values: vec![(a, 1.0)], fade_in: 5.0, fade_out: 5.0, ..Default::default() });
         let d = defs(&r);
         let base = Values::default();
         assert_eq!(pose_with(&d[0], &r, &base).0[&a], 1.0);
