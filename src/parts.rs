@@ -371,6 +371,7 @@ pub fn rule_for<'a>(rules: &'a [NameRule], name: &str) -> Option<&'a NameRule> {
 }
 
 /// Tag layers by your rules (and nothing else). Returns how many layers changed.
+#[cfg(test)]
 pub fn apply_rules(layers: &mut [Layer], rules: &[NameRule], overwrite: bool) -> usize {
     let mut n = 0;
     for l in layers.iter_mut().filter(|l| is_part_layer(l)) {
@@ -416,6 +417,7 @@ pub fn save_rules(rules: &[NameRule]) {
 }
 
 /// Suggest tags for layers that have none. `include_tagged`: also look at layers that already have one.
+#[cfg(test)]
 pub fn suggest(layers: &[Layer], doc_w: u32, doc_h: u32, include_tagged: bool) -> Vec<Suggestion> {
     suggest_with(layers, doc_w, doc_h, include_tagged, &[])
 }

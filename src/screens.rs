@@ -2143,3 +2143,137 @@ fn parts_one_click_button() {
     assert_eq!(crate::parts::load_rules().len(), 1);
     let _ = std::fs::remove_file(std::env::temp_dir().join(format!("seviath_name_rules_{}.json", std::process::id())));
 }
+
+#[test]
+fn rig_tab_more_changers_screens() {
+    use crate::doc::LayerKind;
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 2300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    let (hair, cheek, left, right, head) = {
+        let d = h.state_mut().draw_mut();
+        let (w, h2) = (d.doc.w, d.doc.h);
+        let mut add = |name: &str, img: image::RgbaImage, x: i32, y: i32| {
+            let mut l = d.doc.new_layer(name, LayerKind::Raster);
+            l.tiles = crate::files::tiles_from_rgba(&img, x, y, w, h2);
+            l.rev += 1;
+            let id = l.id;
+            d.doc.layers.insert(0, l);
+            id
+        };
+        let solid = |w: u32, h: u32, c: [u8; 3]| image::RgbaImage::from_pixel(w, h, image::Rgba([c[0], c[1], c[2], 255]));
+        let disc = |r: i32| {
+            let mut img = image::RgbaImage::new(2 * r as u32, 2 * r as u32);
+            for y in 0..2 * r {
+                for x in 0..2 * r {
+                    if (((x - r).pow(2) + (y - r).pow(2)) as f32).sqrt() <= r as f32 {
+                        img.put_pixel(x as u32, y as u32, image::Rgba([240, 190, 160, 255]));
+                    }
+                }
+            }
+            img
+        };
+        let hair = add("Hair", solid(160, 900, [120, 60, 160]), 1400, 600);
+        let cheek = add("Cheek", disc(200), 1000, 1700);
+        let left = add("Left", solid(300, 300, [60, 160, 120]), 1200, 2600);
+        let right = add("Right", solid(300, 300, [60, 120, 200]), 1500, 2600);
+        let head = add("Head", disc(300), 1800, 1700);
+        d.doc.mark_all_dirty();
+        (hair, cheek, left, right, head)
+    };
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(4);
+    h.state_mut().test_rig().selected = vec![hair, cheek, left, right, head];
+    h.run_steps(2);
+    h.get_by_label("Make mesh for the picked parts").click();
+    h.run_steps(4);
+    assert_eq!(h.state().draw_mut_ref().doc.rig.meshes.len(), 5);
+    // a slider for everything, set to its far end while the shapes are made
+    h.get_by_label("Add slider").click();
+    h.run_steps(3);
+    let pid = h.state_mut().test_rig().sel_param.unwrap();
+    h.state_mut().test_rig().values.set(pid, 30.0);
+
+    // Line changer on the hair: the tip swings
+    h.state_mut().test_rig().selected = vec![hair];
+    h.run_steps(2);
+    h.get_by_label("New Line changer").click();
+    h.run_steps(3);
+    h.get_by_label("Edit the shape").click();
+    h.run_steps(3);
+    {
+        let w = h.state_mut().test_rig().test_warp_edit().expect("editing the line");
+        assert_eq!(w.len(), 5);
+        w[4] = [200.0, 0.0];
+        w[3] = [80.0, 0.0];
+    }
+    h.get_by_label("Save the shape at this value").click();
+    h.run_steps(3);
+    assert!(h.state_mut().test_moved(hair) > 100.0, "the strand bends at the end of the slider");
+    h.state_mut().test_rig().values.set(pid, 0.0);
+    h.run_steps(2);
+    assert!(h.state_mut().test_moved(hair) < 1.0, "and is straight in the middle");
+    h.state_mut().test_rig().values.set(pid, 30.0);
+
+    // Soft changer on the cheek: pushed and grown
+    h.state_mut().test_rig().selected = vec![cheek];
+    h.run_steps(2);
+    h.get_by_label("New Soft changer").click();
+    h.run_steps(3);
+    h.get_by_label("Edit the shape").click();
+    h.run_steps(3);
+    {
+        let w = h.state_mut().test_rig().test_warp_edit().expect("editing the soft changer");
+        w[0] = [60.0, 0.0];
+    }
+    h.state_mut().test_rig().soft_grow = 0.3;
+    h.get_by_label("Save the shape at this value").click();
+    h.run_steps(3);
+    assert!(h.state_mut().test_moved(cheek) > 20.0, "the cheek is pushed");
+
+    // glue the two touching parts
+    h.state_mut().test_rig().selected = vec![left, right];
+    h.run_steps(2);
+    h.get_by_label("Glue the two picked parts").click();
+    h.run_steps(3);
+    {
+        let rig = h.state().draw_mut_ref().doc.rig.clone();
+        assert_eq!(rig.glues.len(), 1, "one seam");
+        assert!(rig.glues[0].pairs.len() >= 2, "{} pairs", rig.glues[0].pairs.len());
+    }
+
+    // a second slider and a grid shape for the head
+    h.state_mut().test_rig().new_param = ("Head up".into(), -30.0, 30.0);
+    h.get_by_label("Add slider").click();
+    h.run_steps(3);
+    let pid2 = h.state_mut().test_rig().sel_param.unwrap();
+    assert_ne!(pid, pid2);
+    h.state_mut().test_rig().selected = vec![head];
+    h.run_steps(2);
+    h.get_by_label("New Rotation changer").click();
+    h.run_steps(3);
+    h.state_mut().test_rig().sel_param = Some(pid);
+    h.state_mut().test_rig().sel_param2 = Some(pid2);
+    h.state_mut().test_rig().values.set(pid, 30.0);
+    h.state_mut().test_rig().values.set(pid2, 30.0);
+    h.run_steps(3);
+    h.get_by_label("Set the turn at these two values").click();
+    h.run_steps(3);
+    {
+        let rig = h.state().draw_mut_ref().doc.rig.clone();
+        let b = rig.bindings.iter().find(|b| b.params.len() == 2).expect("a grid binding");
+        assert_eq!(b.params, vec![pid, pid2]);
+    }
+    h.state_mut().test_rig_edit(|r| {
+        if let Some(b) = r.bindings.iter_mut().find(|b| b.params.len() == 2) {
+            b.ease = crate::rig::Ease::Smooth;
+        }
+    });
+    h.run_steps(3);
+    assert!(h.state().draw_mut_ref().doc.rig.bindings.iter().any(|b| b.ease == crate::rig::Ease::Smooth));
+    h.state_mut().test_rig().values = crate::rig::Values::default();
+    h.state_mut().test_rig().values.set(pid, 30.0);
+    h.run_steps(4);
+    save(&mut h, "rig_04_more_changers");
+}

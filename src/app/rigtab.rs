@@ -28,6 +28,23 @@ enum Mode {
 }
 
 impl RigState {
+    /// Show the shape being edited instead of the saved one.
+    fn put_edit(&self, rig: &Rig, pose: &mut rig::Pose) {
+        let Some((id, off)) = &self.warp_edit else { return };
+        match rig.changer(*id).map(|c| &c.kind) {
+            Some(Kind::Warp { .. }) => {
+                pose.warp.insert(*id, off.clone());
+            }
+            Some(Kind::Line { .. }) => {
+                pose.line.insert(*id, off.clone());
+            }
+            Some(Kind::Soft { .. }) => {
+                pose.soft.insert(*id, (off.first().copied().unwrap_or([0.0, 0.0]), self.soft_grow));
+            }
+            _ => {}
+        }
+    }
+
     #[cfg(test)]
     pub fn test_warp_edit(&mut self) -> Option<&mut Vec<[f32; 2]>> {
         self.warp_edit.as_mut().map(|w| &mut w.1)
@@ -46,7 +63,12 @@ pub struct RigState {
     mode: Mode,
     /// A Warp being edited: the changer and its control point shifts as they are on screen now.
     warp_edit: Option<(Id, Vec<[f32; 2]>)>,
-    new_param: (String, f32, f32),
+    /// How much a Soft changer being edited grows.
+    pub soft_grow: f32,
+    /// A second slider: the shape is then saved for the two sliders together (a grid).
+    pub sel_param2: Option<Id>,
+    glue_reach: f32,
+    pub new_param: (String, f32, f32),
     turn_deg: f32,
     cols_rows: (u32, u32),
     tex: HashMap<LayerId, (u64, Option<Arc<LayerTex>>)>,
@@ -114,17 +136,16 @@ impl SeviathApp {
         let rig = self.draw.doc.rig.clone();
         let mut pose = rig.pose(&self.rigs.values);
         // a Warp being edited shows the shape being dragged
-        if let Some((id, off)) = &self.rigs.warp_edit {
-            pose.warp.insert(*id, off.clone());
-        }
+        self.rigs.put_edit(&rig, &mut pose);
+        let all = rig.deformed_all(&pose);
         let ids: Vec<(LayerId, f32)> = self.draw.doc.layers.iter().rev().filter(|l| l.visible && matches!(l.kind, crate::doc::LayerKind::Raster | crate::doc::LayerKind::Vector)).map(|l| (l.id, l.opacity / 100.0)).collect();
         let mut out = Vec::new();
         for (id, op) in ids {
             let Some(tex) = self.layer_tex(id) else { continue };
-            match rig.mesh_of(id) {
-                Some(m) => {
-                    let now = rig.deformed(m, &pose);
-                    out.push((id, tex, m.verts.clone(), now, m.tris.clone(), op));
+            match rig.meshes.iter().position(|m| m.layer == id) {
+                Some(mi) => {
+                    let m = &rig.meshes[mi];
+                    out.push((id, tex, m.verts.clone(), all[mi].clone(), m.tris.clone(), op));
                 }
                 None => {
                     // no mesh: stays where it is
@@ -153,6 +174,7 @@ impl SeviathApp {
             for o in off {
                 key.extend([o[0].to_bits() as u64, o[1].to_bits() as u64]);
             }
+            key.push(self.rigs.soft_grow.to_bits() as u64);
         }
         let key = hash_of(&key);
         if self.rigs.rendered == Some(key) && self.rigs.image.is_some() {
@@ -238,6 +260,7 @@ impl SeviathApp {
             self.rigs.wire = true;
             self.rigs.turn_deg = 30.0;
             self.rigs.cols_rows = (3, 3);
+            self.rigs.glue_reach = 30.0;
             self.rigs.new_param = ("Head tilt".into(), -30.0, 30.0);
             self.rigs.zoom = 1.0;
             self.rigs.inited = true;
@@ -251,6 +274,9 @@ impl SeviathApp {
             }
             if self.rigs.sel_param.is_some_and(|p| rig.param(p).is_none()) {
                 self.rigs.sel_param = None;
+            }
+            if self.rigs.sel_param2.is_some_and(|p| rig.param(p).is_none()) {
+                self.rigs.sel_param2 = None;
             }
         }
         self.rig_render(&ctx);
@@ -357,6 +383,43 @@ impl SeviathApp {
                 }
             }
         });
+        ui.horizontal_wrapped(|ui| {
+            if ui.add_enabled(!sel.is_empty(), egui::Button::new("New Line changer")).on_hover_text("A curve along the picked parts: they bend along it (hair strands, tails, ribbons)").clicked() {
+                if let Some(b) = self.selection_box() {
+                    let x = (b[0] + b[2]) / 2.0;
+                    let pts: Vec<[f32; 2]> = (0..5).map(|i| [x, b[1] + (b[3] - b[1]) * i as f32 / 4.0]).collect();
+                    let width = ((b[2] - b[0]) / 2.0).max(20.0);
+                    let n = self.draw.doc.rig.changers.len() + 1;
+                    let mut new_id = 0;
+                    let selc = sel.clone();
+                    self.rig_edit("New Line changer", now, |r| {
+                        let id = r.add_changer(&format!("Line {n}"), Kind::Line { pts, width }, None);
+                        for m in r.meshes.iter_mut().filter(|m| selc.contains(&m.layer)) {
+                            m.parent = Some(id);
+                        }
+                        new_id = id;
+                    });
+                    self.rigs.sel_changer = Some(new_id);
+                }
+            }
+            if ui.add_enabled(!sel.is_empty(), egui::Button::new("New Soft changer")).on_hover_text("A soft push around a point (cheeks, eyes, belly)").clicked() {
+                if let Some(b) = self.selection_box() {
+                    let center = [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0];
+                    let radius = ((b[2] - b[0]).max(b[3] - b[1]) / 2.0).max(20.0);
+                    let n = self.draw.doc.rig.changers.len() + 1;
+                    let mut new_id = 0;
+                    let selc = sel.clone();
+                    self.rig_edit("New Soft changer", now, |r| {
+                        let id = r.add_changer(&format!("Soft {n}"), Kind::Soft { center, radius }, None);
+                        for m in r.meshes.iter_mut().filter(|m| selc.contains(&m.layer)) {
+                            m.parent = Some(id);
+                        }
+                        new_id = id;
+                    });
+                    self.rigs.sel_changer = Some(new_id);
+                }
+            }
+        });
         ui.horizontal(|ui| {
             ui.label(RichText::new("Warp grid").size(12.0).color(TEXT_DIM));
             ui.add(egui::DragValue::new(&mut self.rigs.cols_rows.0).range(1..=rig::MAX_WARP).suffix(" across"));
@@ -368,7 +431,7 @@ impl SeviathApp {
         for (id, name, is_rot, parent) in &changers {
             let on = self.rigs.sel_changer == Some(*id);
             ui.horizontal(|ui| {
-                if widgets::chip(ui, &format!("{name} ({})", if *is_rot { "rotation" } else { "warp" }), on).clicked() {
+                if widgets::chip(ui, &format!("{name} ({})", kind_word(&self.draw.doc.rig, *id, *is_rot)), on).clicked() {
                     self.rigs.sel_changer = Some(*id);
                     self.rigs.warp_edit = None;
                 }
@@ -445,6 +508,54 @@ impl SeviathApp {
             }
         }
 
+        // ---- glue ----
+        section_title(ui, "Glue");
+        ui.label(RichText::new("Keeps the seam of two parts closed when they move differently.").size(11.5).color(TEXT_DIM));
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Reach").size(12.0).color(TEXT_DIM));
+            ui.add(egui::DragValue::new(&mut self.rigs.glue_reach).speed(1.0).range(2.0..=400.0).suffix(" px"));
+            let two = sel.len() == 2 && sel.iter().all(|l| self.draw.doc.rig.mesh_of(*l).is_some());
+            if ui.add_enabled(two, egui::Button::new("Glue the two picked parts")).on_disabled_hover_text("Pick two parts that have a mesh").clicked() {
+                let ids: Vec<Id> = sel.iter().filter_map(|l| self.draw.doc.rig.mesh_of(*l).map(|m| m.id)).collect();
+                let reach = self.rigs.glue_reach;
+                let mut n = 0;
+                self.rig_edit("Glue parts", now, |r| n = r.make_glue(ids[0], ids[1], reach, 1.0));
+                self.rigs.message = Some(if n == 0 { "The two parts don't touch within that reach.".into() } else { format!("Glued along {n} points.") });
+            }
+        });
+        let glues: Vec<(usize, String, f32)> = self.draw.doc.rig.glues.iter().enumerate().map(|(i, g)| {
+            let name = |id: Id| self.draw.doc.rig.meshes.iter().find(|m| m.id == id).and_then(|m| self.draw.doc.layers.iter().find(|l| l.id == m.layer)).map(|l| l.name.clone()).unwrap_or_else(|| "?".into());
+            (i, format!("{} and {}", name(g.a), name(g.b)), g.weight)
+        }).collect();
+        let mut del_glue: Option<usize> = None;
+        let mut new_weight: Option<(usize, f32)> = None;
+        for (i, label, w) in &glues {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(label).size(12.0));
+                let mut v = *w;
+                if ui.add(egui::Slider::new(&mut v, 0.0..=1.0).show_value(false)).drag_stopped() {
+                    new_weight = Some((*i, v));
+                }
+                if ui.small_button("Delete").clicked() {
+                    del_glue = Some(*i);
+                }
+            });
+        }
+        if let Some((i, v)) = new_weight {
+            self.rig_edit("Glue strength", now, |r| {
+                if let Some(g) = r.glues.get_mut(i) {
+                    g.weight = v;
+                }
+            });
+        }
+        if let Some(i) = del_glue {
+            self.rig_edit("Remove glue", now, |r| {
+                if i < r.glues.len() {
+                    r.glues.remove(i);
+                }
+            });
+        }
+
         // ---- sliders ----
         section_title(ui, "Sliders");
         let params: Vec<(Id, String, f32, f32, f32)> = self.draw.doc.rig.params.iter().map(|p| (p.id, p.name.clone(), p.min, p.max, p.default)).collect();
@@ -499,44 +610,86 @@ impl SeviathApp {
     fn rig_keyforms(&mut self, ui: &mut Ui, now: f64, cid: Id, pid: Id) {
         let rig = self.draw.doc.rig.clone();
         let (Some(c), Some(p)) = (rig.changer(cid).cloned(), rig.param(pid).cloned()) else { return };
-        section_title(ui, &format!("{} and {}", c.name, p.name));
+        let second = self.rigs.sel_param2.filter(|q| *q != pid).and_then(|q| rig.param(q).cloned());
+        section_title(ui, &format!("{} and {}{}", c.name, p.name, second.as_ref().map(|q| format!(" and {}", q.name)).unwrap_or_default()));
+        // a second slider makes the shape depend on both (a grid, like head left-right by up-down)
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("With a second slider").size(12.0).color(TEXT_DIM));
+            egui::ComboBox::from_id_salt("second_param").selected_text(second.as_ref().map(|q| q.name.clone()).unwrap_or_else(|| "none".into())).show_ui(ui, |ui| {
+                if ui.selectable_label(second.is_none(), "none").clicked() {
+                    self.rigs.sel_param2 = None;
+                }
+                for q in rig.params.iter().filter(|q| q.id != pid) {
+                    if ui.selectable_label(second.as_ref().map(|s| s.id) == Some(q.id), &q.name).clicked() {
+                        self.rigs.sel_param2 = Some(q.id);
+                    }
+                }
+            });
+        });
         let value = rig.value(&self.rigs.values, pid);
-        match c.kind {
+        let value2 = second.as_ref().map(|q| rig.value(&self.rigs.values, q.id));
+        let pid2 = second.as_ref().map(|q| q.id);
+        // saving a shape at the current slider value(s)
+        let save = |this: &mut Self, label: &str, form: Form| {
+            this.rig_edit(label, now, |r| match (pid2, value2) {
+                (Some(q), Some(v2)) => r.set_keyform2(cid, pid, q, value, v2, form),
+                _ => r.set_keyform(cid, pid, value, form),
+            });
+        };
+        match c.kind.clone() {
             Kind::Rotation { .. } => {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Turns by").size(12.0).color(TEXT_DIM));
                     ui.add(egui::DragValue::new(&mut self.rigs.turn_deg).speed(0.5).suffix(" deg"));
                     ui.label(RichText::new("at the slider's end").size(12.0).color(TEXT_DIM));
                 });
-                if ui.button("Bind: turn with the slider").on_hover_text("At the low end it turns the other way, in the middle it doesn't turn").clicked() {
+                if second.is_none() && ui.button("Bind: turn with the slider").on_hover_text("At the low end it turns the other way, in the middle it doesn't turn").clicked() {
                     let deg = self.rigs.turn_deg;
                     self.rig_edit("Bind rotation to slider", now, |r| {
                         r.bindings.retain(|b| !(b.changer == cid && b.params == [pid]));
                         r.bind_rotation(cid, pid, deg);
                     });
                 }
-                ui.horizontal(|ui| {
-                    if ui.button("Set the turn at this value").on_hover_text("Adds one keyform at the slider's value now").clicked() {
-                        let deg = self.rigs.turn_deg;
-                        self.rig_edit("Rotation keyform", now, |r| r.set_keyform(cid, pid, value, Form::Rot { deg }));
-                    }
-                });
+                if ui.button(if second.is_some() { "Set the turn at these two values" } else { "Set the turn at this value" }).on_hover_text("Adds one keyform at the slider value(s) now").clicked() {
+                    let deg = self.rigs.turn_deg;
+                    save(self, "Rotation keyform", Form::Rot { deg });
+                }
             }
-            Kind::Warp { cols, rows, .. } => {
+            Kind::Warp { .. } | Kind::Line { .. } | Kind::Soft { .. } => {
                 let editing = self.rigs.warp_edit.as_ref().is_some_and(|w| w.0 == cid);
-                ui.label(RichText::new("Drag the grid points on the picture, then save the shape at this slider value.").size(11.5).color(TEXT_DIM));
+                let is_soft = matches!(c.kind, Kind::Soft { .. });
+                ui.label(RichText::new(if is_soft { "Drag the dot on the picture, set how much it grows, then save the shape." } else { "Drag the points on the picture, then save the shape at this slider value." }).size(11.5).color(TEXT_DIM));
+                if editing && is_soft {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Grows by").size(12.0).color(TEXT_DIM));
+                        ui.add(egui::DragValue::new(&mut self.rigs.soft_grow).speed(0.01).range(-0.9..=3.0).fixed_decimals(2));
+                    });
+                }
                 ui.horizontal(|ui| {
                     if !editing {
                         if ui.button("Edit the shape").clicked() {
                             // start from what is on screen now
                             let pose = rig.pose(&self.rigs.values);
-                            let off = pose.warp.get(&cid).cloned().unwrap_or_else(|| vec![[0.0, 0.0]; ((cols + 1) * (rows + 1)) as usize]);
+                            let off: Vec<[f32; 2]> = match &c.kind {
+                                Kind::Warp { cols, rows, .. } => pose.warp.get(&cid).cloned().unwrap_or_else(|| vec![[0.0, 0.0]; ((cols + 1) * (rows + 1)) as usize]),
+                                Kind::Line { pts, .. } => pose.line.get(&cid).cloned().unwrap_or_else(|| vec![[0.0, 0.0]; pts.len()]),
+                                _ => {
+                                    let (o, g) = pose.soft.get(&cid).copied().unwrap_or(([0.0, 0.0], 0.0));
+                                    self.rigs.soft_grow = g;
+                                    vec![o]
+                                }
+                            };
                             self.rigs.warp_edit = Some((cid, off));
                         }
                     } else {
                         if ui.button(RichText::new("Save the shape at this value").strong()).clicked() {
                             if let Some((_, off)) = self.rigs.warp_edit.take() {
-                                self.rig_edit("Warp keyform", now, |r| r.set_keyform(cid, pid, value, Form::Warp { offsets: off }));
+                                let form = match &c.kind {
+                                    Kind::Warp { .. } => Form::Warp { offsets: off },
+                                    Kind::Line { .. } => Form::Line { offsets: off },
+                                    _ => Form::Soft { offset: off.first().copied().unwrap_or([0.0, 0.0]), grow: self.rigs.soft_grow },
+                                };
+                                save(self, "Keyform", form);
                             }
                         }
                         if ui.button("Cancel").clicked() {
@@ -546,10 +699,29 @@ impl SeviathApp {
                 });
             }
         }
-        if let Some(b) = rig.bindings.iter().find(|b| b.changer == cid && b.params == [pid]) {
-            ui.label(RichText::new(format!("Keyforms at: {}", b.keys[0].iter().map(|k| format!("{k:.1}")).collect::<Vec<_>>().join(", "))).size(11.5).color(TEXT_DIM));
+        let keys_for: Vec<Id> = match pid2 {
+            Some(q) => vec![pid, q],
+            None => vec![pid],
+        };
+        if let Some(b) = rig.bindings.iter().find(|b| b.changer == cid && b.params == keys_for) {
+            let label: Vec<String> = b.keys.iter().map(|k| k.iter().map(|v| format!("{v:.0}")).collect::<Vec<_>>().join(", ")).collect();
+            ui.label(RichText::new(format!("Keyforms at: {}", label.join("  by  "))).size(11.5).color(TEXT_DIM));
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Between keys").size(12.0).color(TEXT_DIM));
+                for e in rig::Ease::ALL {
+                    if widgets::chip(ui, e.label(), b.ease == e).clicked() {
+                        let ks = keys_for.clone();
+                        self.rig_edit("Easing", now, |r| {
+                            if let Some(x) = r.bindings.iter_mut().find(|x| x.changer == cid && x.params == ks) {
+                                x.ease = e;
+                            }
+                        });
+                    }
+                }
+            });
             if ui.small_button("Remove these keyforms").clicked() {
-                self.rig_edit("Remove keyforms", now, |r| r.bindings.retain(|x| !(x.changer == cid && x.params == [pid])));
+                let ks = keys_for.clone();
+                self.rig_edit("Remove keyforms", now, |r| r.bindings.retain(|x| !(x.changer == cid && x.params == ks)));
             }
         }
     }
@@ -583,16 +755,15 @@ impl SeviathApp {
         let to_page = |s: Pos2| [(s.x - page.min.x) / sc, (s.y - page.min.y) / sc];
         let rig = self.draw.doc.rig.clone();
         let mut pose = rig.pose(&self.rigs.values);
-        if let Some((id, off)) = &self.rigs.warp_edit {
-            pose.warp.insert(*id, off.clone());
-        }
+        self.rigs.put_edit(&rig, &mut pose);
+        let all = rig.deformed_all(&pose);
         // triangles of the picked parts
         if self.rigs.wire {
-            for m in &rig.meshes {
+            for (mi, m) in rig.meshes.iter().enumerate() {
                 if !self.rigs.selected.contains(&m.layer) {
                     continue;
                 }
-                let now_v = rig.deformed(m, &pose);
+                let now_v = &all[mi];
                 let stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(40, 200, 120, 170));
                 for t in &m.tris {
                     let (a, b, c) = (to_screen(now_v[t[0] as usize]), to_screen(now_v[t[1] as usize]), to_screen(now_v[t[2] as usize]));
@@ -637,6 +808,44 @@ impl SeviathApp {
                             if r.dragged() {
                                 drag_handle = Some((i, r.drag_delta() / sc));
                             }
+                        }
+                    }
+                }
+                Kind::Line { pts, width } => {
+                    let off = pose.line.get(&c.id).cloned().unwrap_or_else(|| vec![[0.0, 0.0]; pts.len()]);
+                    let editing = self.rigs.warp_edit.as_ref().is_some_and(|w| w.0 == c.id);
+                    let moved: Vec<[f32; 2]> = pts.iter().zip(&off).map(|(a, o)| [a[0] + o[0], a[1] + o[1]]).collect();
+                    let curve: Vec<Pos2> = rig::curve_samples(&moved, 8).iter().map(|v| to_screen(rig.deform_point(&pose, c.parent, *v))).collect();
+                    for w in curve.windows(2) {
+                        p.line_segment([w[0], w[1]], Stroke::new(2.0, Color32::from_rgb(255, 200, 60)));
+                    }
+                    // how far from the curve the picture follows it
+                    if let Some(first) = curve.first() {
+                        p.circle_stroke(*first, width * sc, Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 200, 60, 80)));
+                    }
+                    for (i, v) in moved.iter().enumerate() {
+                        let a = to_screen(rig.deform_point(&pose, c.parent, *v));
+                        let hr = Rect::from_center_size(a, vec2(12.0, 12.0));
+                        p.rect_filled(hr, 6.0, if editing { Color32::from_rgb(255, 200, 60) } else { Color32::from_rgb(120, 110, 60) });
+                        if editing {
+                            let r = ui.interact(hr, egui::Id::new(("line_handle", c.id, i)), Sense::drag());
+                            if r.dragged() {
+                                drag_handle = Some((i, r.drag_delta() / sc));
+                            }
+                        }
+                    }
+                }
+                Kind::Soft { center, radius } => {
+                    let (o, _) = pose.soft.get(&c.id).copied().unwrap_or(([0.0, 0.0], 0.0));
+                    let editing = self.rigs.warp_edit.as_ref().is_some_and(|w| w.0 == c.id);
+                    let at = to_screen(rig.deform_point(&pose, c.parent, [center[0] + o[0], center[1] + o[1]]));
+                    p.circle_stroke(to_screen(rig.deform_point(&pose, c.parent, *center)), radius * sc, Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 200, 60, 120)));
+                    let hr = Rect::from_center_size(at, vec2(14.0, 14.0));
+                    p.circle_filled(at, 7.0, if editing { Color32::from_rgb(255, 200, 60) } else { Color32::from_rgb(120, 110, 60) });
+                    if editing {
+                        let r = ui.interact(hr, egui::Id::new(("soft_handle", c.id)), Sense::drag());
+                        if r.dragged() {
+                            drag_handle = Some((0, r.drag_delta() / sc));
                         }
                     }
                 }
@@ -706,5 +915,18 @@ impl SeviathApp {
             }
         }
         None
+    }
+}
+
+/// "rotation", "warp", "line" or "soft".
+fn kind_word(rig: &Rig, id: Id, is_rot: bool) -> &'static str {
+    if is_rot {
+        return "rotation";
+    }
+    match rig.changer(id).map(|c| &c.kind) {
+        Some(Kind::Warp { .. }) => "warp",
+        Some(Kind::Line { .. }) => "line",
+        Some(Kind::Soft { .. }) => "soft",
+        _ => "rotation",
     }
 }

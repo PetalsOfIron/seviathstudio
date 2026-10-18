@@ -34,6 +34,11 @@ pub enum Kind {
     Rotation { pivot: [f32; 2] },
     /// A grid of control points over a rectangle (x0, y0, x1, y1); moving a point bends the picture.
     Warp { rect: [f32; 4], cols: u32, rows: u32 },
+    /// A curve with control points; the picture near it bends along the curve (hair strands, tails, ribbons).
+    /// `width`: how far from the curve the picture follows it fully; it fades out over the same distance again.
+    Line { pts: Vec<[f32; 2]>, width: f32 },
+    /// A soft push: everything within `radius` of the centre moves, most in the middle (cheeks, eyes, belly).
+    Soft { center: [f32; 2], radius: f32 },
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -60,6 +65,47 @@ pub struct Param {
 pub enum Form {
     Rot { deg: f32 },
     Warp { offsets: Vec<[f32; 2]> },
+    /// How far each control point of a Line moved.
+    Line { offsets: Vec<[f32; 2]> },
+    /// How far a Soft changer pushes, and how much it grows (0.2 = 20% bigger in the middle).
+    Soft { offset: [f32; 2], grow: f32 },
+}
+
+/// How a value moves between two keys.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ease {
+    #[default]
+    Linear,
+    /// Slow at both ends.
+    Smooth,
+    /// Slow to start.
+    In,
+    /// Slow to finish.
+    Out,
+}
+
+impl Ease {
+    pub const ALL: [Ease; 4] = [Ease::Linear, Ease::Smooth, Ease::In, Ease::Out];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Ease::Linear => "Even",
+            Ease::Smooth => "Smooth",
+            Ease::In => "Slow start",
+            Ease::Out => "Slow finish",
+        }
+    }
+
+    pub fn apply(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            Ease::Linear => t,
+            Ease::Smooth => t * t * (3.0 - 2.0 * t),
+            Ease::In => t * t,
+            Ease::Out => 1.0 - (1.0 - t) * (1.0 - t),
+        }
+    }
 }
 
 /// A changer's shapes at chosen values of one parameter (or of two, as a grid).
@@ -70,6 +116,19 @@ pub struct Binding {
     pub params: Vec<Id>,
     pub keys: Vec<Vec<f32>>,
     pub forms: Vec<Form>,
+    #[serde(default)]
+    pub ease: Ease,
+}
+
+/// A seam: vertices of two meshes that sit together at rest are pulled together when the meshes move apart.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Glue {
+    pub a: Id,
+    pub b: Id,
+    /// (vertex of a, vertex of b)
+    pub pairs: Vec<[u32; 2]>,
+    /// 0 = loose, 1 = fully joined
+    pub weight: f32,
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
@@ -79,6 +138,7 @@ pub struct Rig {
     pub changers: Vec<Changer>,
     pub params: Vec<Param>,
     pub bindings: Vec<Binding>,
+    pub glues: Vec<Glue>,
     next_id: Id,
 }
 
@@ -91,9 +151,12 @@ pub struct Values(pub HashMap<Id, f32>);
 pub struct Pose {
     pub rot: HashMap<Id, f32>,
     pub warp: HashMap<Id, Vec<[f32; 2]>>,
+    pub line: HashMap<Id, Vec<[f32; 2]>>,
+    pub soft: HashMap<Id, ([f32; 2], f32)>,
 }
 
 pub const MAX_WARP: u32 = 24;
+pub const MAX_LINE_POINTS: usize = 24;
 const MAX_DEPTH: usize = 16;
 
 /// Where a value falls between sorted keys: (lower, upper, share of the upper).
@@ -117,8 +180,73 @@ fn lerp_form(a: &Form, b: &Form, t: f32) -> Form {
     match (a, b) {
         (Form::Rot { deg: x }, Form::Rot { deg: y }) => Form::Rot { deg: x + (y - x) * t },
         (Form::Warp { offsets: x }, Form::Warp { offsets: y }) if x.len() == y.len() => Form::Warp { offsets: x.iter().zip(y).map(|(p, q)| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]).collect() },
+        (Form::Line { offsets: x }, Form::Line { offsets: y }) if x.len() == y.len() => Form::Line { offsets: x.iter().zip(y).map(|(p, q)| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]).collect() },
+        (Form::Soft { offset: a, grow: g }, Form::Soft { offset: b, grow: h }) => Form::Soft { offset: [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t], grow: g + (h - g) * t },
         _ => a.clone(),
     }
+}
+
+/// A smooth curve through the control points (Catmull-Rom), `per` samples between neighbours.
+pub fn curve_samples(pts: &[[f32; 2]], per: usize) -> Vec<[f32; 2]> {
+    let n = pts.len();
+    if n < 2 {
+        return pts.to_vec();
+    }
+    let at = |i: isize| pts[i.clamp(0, n as isize - 1) as usize];
+    let mut out = Vec::with_capacity((n - 1) * per + 1);
+    for i in 0..n - 1 {
+        let (p0, p1, p2, p3) = (at(i as isize - 1), at(i as isize), at(i as isize + 1), at(i as isize + 2));
+        for k in 0..per {
+            let t = k as f32 / per as f32;
+            let (t2, t3) = (t * t, t * t * t);
+            let f = |a: f32, b: f32, c: f32, d: f32| 0.5 * ((2.0 * b) + (-a + c) * t + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2 + (-a + 3.0 * b - 3.0 * c + d) * t3);
+            out.push([f(p0[0], p1[0], p2[0], p3[0]), f(p0[1], p1[1], p2[1], p3[1])]);
+        }
+    }
+    out.push(pts[n - 1]);
+    out
+}
+
+/// Move a point along with a bent curve: it keeps its place along the curve and its distance to the side.
+fn bend_along(rest: &[[f32; 2]], offsets: &[[f32; 2]], width: f32, p: [f32; 2]) -> [f32; 2] {
+    if rest.len() < 2 || offsets.len() != rest.len() {
+        return p;
+    }
+    let moved: Vec<[f32; 2]> = rest.iter().zip(offsets).map(|(a, o)| [a[0] + o[0], a[1] + o[1]]).collect();
+    let (r, d) = (curve_samples(rest, 8), curve_samples(&moved, 8));
+    // the nearest place on the rest curve
+    let (mut best, mut best_i, mut best_u) = (f32::MAX, 0usize, 0.0f32);
+    for i in 0..r.len() - 1 {
+        let (a, b) = (r[i], r[i + 1]);
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len2 = (dx * dx + dy * dy).max(1e-9);
+        let u = (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2).clamp(0.0, 1.0);
+        let dist = (p[0] - (a[0] + dx * u)).hypot(p[1] - (a[1] + dy * u));
+        if dist < best {
+            best = dist;
+            best_i = i;
+            best_u = u;
+        }
+    }
+    let (a, b) = (r[best_i], r[best_i + 1]);
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+    // which side of the curve the point is on (the normal is the tangent turned a quarter)
+    let side = ((p[0] - (a[0] + dx * best_u)) * (-dy / len) + (p[1] - (a[1] + dy * best_u)) * (dx / len)).signum() * best;
+    let (da, db) = (d[best_i], d[best_i + 1]);
+    let along = [da[0] + (db[0] - da[0]) * best_u, da[1] + (db[1] - da[1]) * best_u];
+    let (tx, ty) = (db[0] - da[0], db[1] - da[1]);
+    let tl = (tx * tx + ty * ty).sqrt().max(1e-6);
+    let new = [along[0] + (-ty / tl) * side, along[1] + (tx / tl) * side];
+    // full strength close to the curve, fading out beyond `width`
+    let w = width.max(1.0);
+    let fade = if best <= w {
+        1.0
+    } else {
+        let t = ((best - w) / w).min(1.0);
+        1.0 - t * t * (3.0 - 2.0 * t)
+    };
+    [p[0] + (new[0] - p[0]) * fade, p[1] + (new[1] - p[1]) * fade]
 }
 
 impl Values {
@@ -181,6 +309,8 @@ impl Rig {
         Some(match &self.changer(changer)?.kind {
             Kind::Rotation { .. } => Form::Rot { deg: 0.0 },
             Kind::Warp { cols, rows, .. } => Form::Warp { offsets: vec![[0.0, 0.0]; ((cols + 1) * (rows + 1)) as usize] },
+            Kind::Line { pts, .. } => Form::Line { offsets: vec![[0.0, 0.0]; pts.len()] },
+            Kind::Soft { .. } => Form::Soft { offset: [0.0, 0.0], grow: 0.0 },
         })
     }
 
@@ -194,7 +324,7 @@ impl Rig {
         let mut keys = vec![lo, mid, hi];
         keys.dedup();
         let forms = keys.iter().map(|k| Form::Rot { deg: deg_at_max * share(*k) }).collect();
-        self.bindings.push(Binding { changer, params: vec![param], keys: vec![keys], forms });
+        self.bindings.push(Binding { changer, params: vec![param], keys: vec![keys], forms, ease: Ease::Linear });
     }
 
     /// Add the shape of a changer at the current value of a parameter as a keyform (replacing one at the same value).
@@ -206,7 +336,7 @@ impl Rig {
             Some(i) => i,
             None => {
                 let keys = if (p.default - at).abs() < 1e-4 { vec![p.default] } else { vec![p.default] };
-                self.bindings.push(Binding { changer, params: vec![param], keys: vec![keys], forms: vec![rest.clone()] });
+                self.bindings.push(Binding { changer, params: vec![param], keys: vec![keys], forms: vec![rest.clone()], ease: Ease::Linear });
                 self.bindings.len() - 1
             }
         };
@@ -224,12 +354,15 @@ impl Rig {
         match b.params.len() {
             1 => {
                 let (i0, i1, t) = axis_weights(&b.keys[0], self.value(vals, b.params[0]));
+                let t = b.ease.apply(t);
                 Some(lerp_form(b.forms.get(i0)?, b.forms.get(i1)?, t))
             }
             2 => {
                 let nx = b.keys[0].len();
                 let (x0, x1, tx) = axis_weights(&b.keys[0], self.value(vals, b.params[0]));
+                let tx = b.ease.apply(tx);
                 let (y0, y1, ty) = axis_weights(&b.keys[1], self.value(vals, b.params[1]));
+                let ty = b.ease.apply(ty);
                 let at = |x: usize, y: usize| b.forms.get(y * nx + x);
                 let top = lerp_form(at(x0, y0)?, at(x1, y0)?, tx);
                 let bottom = lerp_form(at(x0, y1)?, at(x1, y1)?, tx);
@@ -254,6 +387,21 @@ impl Rig {
                             a[1] += o[1];
                         }
                     }
+                }
+                Form::Line { offsets } => {
+                    let e = pose.line.entry(b.changer).or_insert_with(|| vec![[0.0, 0.0]; offsets.len()]);
+                    if e.len() == offsets.len() {
+                        for (a, o) in e.iter_mut().zip(&offsets) {
+                            a[0] += o[0];
+                            a[1] += o[1];
+                        }
+                    }
+                }
+                Form::Soft { offset, grow } => {
+                    let e = pose.soft.entry(b.changer).or_insert(([0.0, 0.0], 0.0));
+                    e.0[0] += offset[0];
+                    e.0[1] += offset[1];
+                    e.1 += grow;
                 }
             }
         }
@@ -285,6 +433,16 @@ impl Rig {
                 let mix = |k: usize| (a[k] * (1.0 - fu) + b2[k] * fu) * (1.0 - fv) + (c3[k] * (1.0 - fu) + d[k] * fu) * fv;
                 [p[0] + mix(0), p[1] + mix(1)]
             }
+            Kind::Line { pts, width } => {
+                let Some(off) = pose.line.get(&c.id) else { return p };
+                bend_along(pts, off, *width, p)
+            }
+            Kind::Soft { center, radius } => {
+                let Some((offset, grow)) = pose.soft.get(&c.id) else { return p };
+                let d = ((p[0] - center[0]).hypot(p[1] - center[1]) / radius.max(1e-3)).min(1.0);
+                let f = 0.5 * (1.0 + (std::f32::consts::PI * d).cos());
+                [p[0] + offset[0] * f + (p[0] - center[0]) * grow * f, p[1] + offset[1] * f + (p[1] - center[1]) * grow * f]
+            }
         }
     }
 
@@ -308,6 +466,99 @@ impl Rig {
         mesh.verts.iter().map(|v| self.deform_point(pose, mesh.parent, *v)).collect()
     }
 
+    /// Every mesh moved by its changers, then the seams pulled together. Same order as `meshes`.
+    pub fn deformed_all(&self, pose: &Pose) -> Vec<Vec<[f32; 2]>> {
+        let mut all: Vec<Vec<[f32; 2]>> = self.meshes.iter().map(|m| self.deformed(m, pose)).collect();
+        for g in &self.glues {
+            let (Some(ia), Some(ib)) = (self.meshes.iter().position(|m| m.id == g.a), self.meshes.iter().position(|m| m.id == g.b)) else { continue };
+            if ia == ib {
+                continue;
+            }
+            for pr in &g.pairs {
+                let (pa, pb) = (all[ia].get(pr[0] as usize).copied(), all[ib].get(pr[1] as usize).copied());
+                if let (Some(pa), Some(pb)) = (pa, pb) {
+                    let mid = [(pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0];
+                    let k = g.weight.clamp(0.0, 1.0);
+                    all[ia][pr[0] as usize] = [pa[0] + (mid[0] - pa[0]) * k, pa[1] + (mid[1] - pa[1]) * k];
+                    all[ib][pr[1] as usize] = [pb[0] + (mid[0] - pb[0]) * k, pb[1] + (mid[1] - pb[1]) * k];
+                }
+            }
+        }
+        all
+    }
+
+    /// Glue two meshes along the places where their vertices are within `reach` of each other at rest.
+    /// Returns how many vertex pairs were joined (0 = the meshes don't touch).
+    pub fn make_glue(&mut self, a: Id, b: Id, reach: f32, weight: f32) -> usize {
+        let (Some(ma), Some(mb)) = (self.meshes.iter().find(|m| m.id == a), self.meshes.iter().find(|m| m.id == b)) else { return 0 };
+        let mut pairs = Vec::new();
+        for (i, va) in ma.verts.iter().enumerate() {
+            let near = mb.verts.iter().enumerate().map(|(j, vb)| (j, (va[0] - vb[0]).hypot(va[1] - vb[1]))).filter(|(_, d)| *d <= reach).min_by(|x, y| x.1.total_cmp(&y.1));
+            if let Some((j, _)) = near {
+                pairs.push([i as u32, j as u32]);
+            }
+        }
+        if pairs.is_empty() {
+            return 0;
+        }
+        let n = pairs.len();
+        self.glues.retain(|g| !((g.a == a && g.b == b) || (g.a == b && g.b == a)));
+        self.glues.push(Glue { a, b, pairs, weight: weight.clamp(0.0, 1.0) });
+        n
+    }
+
+    /// Put a new key into a binding's axis. The forms around it are blended, so nothing on screen changes.
+    fn insert_axis_key(&mut self, bi: usize, axis: usize, v: f32) {
+        let b = &mut self.bindings[bi];
+        if b.keys[axis].iter().any(|k| (k - v).abs() < 1e-4) {
+            return;
+        }
+        let nx = b.keys[0].len();
+        let ny = if b.keys.len() > 1 { b.keys[1].len() } else { 1 };
+        let (i0, i1, t) = axis_weights(&b.keys[axis], v);
+        let at = if v <= b.keys[axis][0] { 0 } else if v >= *b.keys[axis].last().unwrap() { b.keys[axis].len() } else { i1 };
+        let get = |forms: &[Form], x: usize, y: usize| forms[y * nx + x].clone();
+        let mut out: Vec<Form> = Vec::new();
+        let (nnx, nny) = if axis == 0 { (nx + 1, ny) } else { (nx, ny + 1) };
+        for y in 0..nny {
+            for x in 0..nnx {
+                let (sx, sy) = (x, y);
+                let cell = if axis == 0 {
+                    if x < at { get(&b.forms, sx, sy) } else if x == at { lerp_form(&get(&b.forms, i0.min(nx - 1), sy), &get(&b.forms, i1.min(nx - 1), sy), t) } else { get(&b.forms, sx - 1, sy) }
+                } else if y < at {
+                    get(&b.forms, sx, sy)
+                } else if y == at {
+                    lerp_form(&get(&b.forms, sx, i0.min(ny - 1)), &get(&b.forms, sx, i1.min(ny - 1)), t)
+                } else {
+                    get(&b.forms, sx, sy - 1)
+                };
+                out.push(cell);
+            }
+        }
+        b.keys[axis].insert(at, v);
+        b.forms = out;
+    }
+
+    /// The shape of a changer when two sliders have these values (a grid of shapes, like head left-right by up-down).
+    pub fn set_keyform2(&mut self, changer: Id, px: Id, py: Id, vx: f32, vy: f32, form: Form) {
+        let (Some(a), Some(b)) = (self.param(px).cloned(), self.param(py).cloned()) else { return };
+        let Some(rest) = self.rest_form(changer) else { return };
+        let bi = match self.bindings.iter().position(|x| x.changer == changer && x.params == [px, py]) {
+            Some(i) => i,
+            None => {
+                let (kx, ky) = (vec![a.default], vec![b.default]);
+                self.bindings.push(Binding { changer, params: vec![px, py], keys: vec![kx, ky], forms: vec![rest], ease: Ease::Linear });
+                self.bindings.len() - 1
+            }
+        };
+        self.insert_axis_key(bi, 0, vx);
+        self.insert_axis_key(bi, 1, vy);
+        let bd = &mut self.bindings[bi];
+        let nx = bd.keys[0].len();
+        let (ix, iy) = (bd.keys[0].iter().position(|k| (k - vx).abs() < 1e-4).unwrap_or(0), bd.keys[1].iter().position(|k| (k - vy).abs() < 1e-4).unwrap_or(0));
+        bd.forms[iy * nx + ix] = form;
+    }
+
     /// Project files come from outside: drop what points nowhere and bound every size.
     pub fn sanitized(mut self) -> Self {
         let fin = |v: f32| v.is_finite();
@@ -326,6 +577,15 @@ impl Rig {
                 *cols = (*cols).clamp(1, MAX_WARP);
                 *rows = (*rows).clamp(1, MAX_WARP);
                 rect.iter().all(|v| fin(*v)) && rect[2] > rect[0] && rect[3] > rect[1]
+            }
+            Kind::Line { pts, width } => {
+                pts.truncate(MAX_LINE_POINTS);
+                *width = if fin(*width) { width.clamp(1.0, 5000.0) } else { 50.0 };
+                pts.len() >= 2 && pts.iter().all(|p| fin(p[0]) && fin(p[1]))
+            }
+            Kind::Soft { center, radius } => {
+                *radius = if fin(*radius) { radius.clamp(1.0, 10000.0) } else { 100.0 };
+                center.iter().all(|v| fin(*v))
             }
         });
         let ids: HashSet<Id> = self.changers.iter().map(|c| c.id).collect();
@@ -381,8 +641,19 @@ impl Rig {
             b.forms.iter().all(|f| match (f, &kinds[*ci]) {
                 (Form::Rot { deg }, Kind::Rotation { .. }) => fin(*deg),
                 (Form::Warp { offsets }, Kind::Warp { cols, rows, .. }) => offsets.len() == ((cols + 1) * (rows + 1)) as usize && offsets.iter().all(|o| fin(o[0]) && fin(o[1])),
+                (Form::Line { offsets }, Kind::Line { pts, .. }) => offsets.len() == pts.len() && offsets.iter().all(|o| fin(o[0]) && fin(o[1])),
+                (Form::Soft { offset, grow }, Kind::Soft { .. }) => fin(offset[0]) && fin(offset[1]) && fin(*grow),
                 _ => false,
             })
+        });
+        let counts: HashMap<Id, usize> = self.meshes.iter().map(|m| (m.id, m.verts.len())).collect();
+        self.glues.truncate(2000);
+        self.glues.retain_mut(|g| {
+            let (Some(na), Some(nb)) = (counts.get(&g.a).copied(), counts.get(&g.b).copied()) else { return false };
+            g.weight = if g.weight.is_finite() { g.weight.clamp(0.0, 1.0) } else { 1.0 };
+            g.pairs.retain(|p| (p[0] as usize) < na && (p[1] as usize) < nb);
+            g.pairs.truncate(100_000);
+            g.a != g.b && !g.pairs.is_empty()
         });
         let top = self.meshes.iter().map(|m| m.id).chain(self.changers.iter().map(|c| c.id)).chain(self.params.iter().map(|p| p.id)).max().unwrap_or(0);
         self.next_id = self.next_id.max(top);
@@ -473,7 +744,7 @@ mod tests {
         let x = r.add_param("Angle X", -1.0, 1.0, 0.0);
         let y = r.add_param("Angle Y", -1.0, 1.0, 0.0);
         // corners: (-1,-1)=-40, (1,-1)=-20, (-1,1)=20, (1,1)=40 (keys at -1 and 1 only)
-        r.bindings.push(Binding { changer: c, params: vec![x, y], keys: vec![vec![-1.0, 1.0], vec![-1.0, 1.0]], forms: vec![Form::Rot { deg: -40.0 }, Form::Rot { deg: -20.0 }, Form::Rot { deg: 20.0 }, Form::Rot { deg: 40.0 }] });
+        r.bindings.push(Binding { changer: c, params: vec![x, y], keys: vec![vec![-1.0, 1.0], vec![-1.0, 1.0]], forms: vec![Form::Rot { deg: -40.0 }, Form::Rot { deg: -20.0 }, Form::Rot { deg: 20.0 }, Form::Rot { deg: 40.0 }], ease: Ease::Linear });
         let mut v = Values::default();
         v.set(x, 1.0);
         v.set(y, 1.0);
@@ -516,10 +787,10 @@ mod tests {
         let b = r.add_changer("B", Kind::Rotation { pivot: [0.0, 0.0] }, Some(a));
         r.changers.iter_mut().find(|c| c.id == a).unwrap().parent = Some(b);
         let lost = r.add_changer("Lost", Kind::Rotation { pivot: [0.0, 0.0] }, Some(9999));
-        r.bindings.push(Binding { changer: 777, params: vec![tilt], keys: vec![vec![0.0]], forms: vec![Form::Rot { deg: 1.0 }] });
-        r.bindings.push(Binding { changer: head, params: vec![tilt], keys: vec![vec![0.0, 1.0]], forms: vec![Form::Rot { deg: 1.0 }] });
-        r.bindings.push(Binding { changer: head, params: vec![tilt], keys: vec![vec![0.0]], forms: vec![Form::Warp { offsets: vec![] }] });
-        r.bindings.push(Binding { changer: head, params: vec![tilt], keys: vec![vec![f32::NAN]], forms: vec![Form::Rot { deg: 1.0 }] });
+        r.bindings.push(Binding { changer: 777, params: vec![tilt], keys: vec![vec![0.0]], forms: vec![Form::Rot { deg: 1.0 }], ease: Ease::Linear });
+        r.bindings.push(Binding { changer: head, params: vec![tilt], keys: vec![vec![0.0, 1.0]], forms: vec![Form::Rot { deg: 1.0 }], ease: Ease::Linear });
+        r.bindings.push(Binding { changer: head, params: vec![tilt], keys: vec![vec![0.0]], forms: vec![Form::Warp { offsets: vec![] }], ease: Ease::Linear });
+        r.bindings.push(Binding { changer: head, params: vec![tilt], keys: vec![vec![f32::NAN]], forms: vec![Form::Rot { deg: 1.0 }], ease: Ease::Linear });
         r.meshes.push(ArtMesh { id: 50, layer: 1, verts: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], tris: vec![[0, 1, 2], [0, 1, 9]], parent: Some(5555) });
         r.changers.push(Changer { id: 60, name: "Huge".into(), kind: Kind::Warp { rect: [0.0, 0.0, 10.0, 10.0], cols: 9999, rows: 0 }, parent: None });
         let s = r.sanitized();
@@ -540,5 +811,164 @@ mod tests {
         let back: Rig = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         assert_eq!(back, r);
         assert_eq!(back.sanitized(), r.clone().sanitized());
+    }
+
+    #[test]
+    fn a_line_changer_bends_the_picture_along_its_curve() {
+        let mut r = Rig::default();
+        // a vertical strand from (100,0) to (100,300) with 4 control points
+        let pts = vec![[100.0, 0.0], [100.0, 100.0], [100.0, 200.0], [100.0, 300.0]];
+        let line = r.add_changer("Strand", Kind::Line { pts: pts.clone(), width: 40.0 }, None);
+        let p = r.add_param("Sway", 0.0, 1.0, 0.0);
+        // the tip (last point) swings 60 to the right, the middle points a little
+        r.set_keyform(line, p, 1.0, Form::Line { offsets: vec![[0.0, 0.0], [5.0, 0.0], [25.0, 0.0], [60.0, 0.0]] });
+        let mut v = Values::default();
+        let at_rest = r.deform_point(&r.pose(&v), Some(line), [110.0, 300.0]);
+        assert!((at_rest[0] - 110.0).abs() < 0.01 && (at_rest[1] - 300.0).abs() < 0.01);
+        v.set(p, 1.0);
+        let pose = r.pose(&v);
+        // a point on the strand follows the curve
+        let tip = r.deform_point(&pose, Some(line), [100.0, 300.0]);
+        assert!((tip[0] - 160.0).abs() < 0.5 && (tip[1] - 300.0).abs() < 1.0, "{tip:?}");
+        // a point 10 to the side of the tip keeps its side distance
+        let side = r.deform_point(&pose, Some(line), [110.0, 300.0]);
+        assert!((side[0] - tip[0] - 10.0).abs() < 1.0, "{side:?} {tip:?}");
+        // the root does not move
+        let root = r.deform_point(&pose, Some(line), [100.0, 0.0]);
+        assert!((root[0] - 100.0).abs() < 0.5);
+        // far from the strand (more than twice the width) nothing follows
+        let far = r.deform_point(&pose, Some(line), [300.0, 300.0]);
+        assert!((far[0] - 300.0).abs() < 0.01, "{far:?}");
+        // half way between near and far it follows a part of the way
+        let mid = r.deform_point(&pose, Some(line), [160.0, 300.0]);
+        assert!(mid[0] > 160.0 && mid[0] < 160.0 + 60.0, "{mid:?}");
+        // the curve is smooth: samples pass through the control points
+        let cs = curve_samples(&pts, 8);
+        assert_eq!(cs.len(), 3 * 8 + 1);
+        assert!(cs.iter().any(|c| (c[1] - 100.0).abs() < 0.01));
+    }
+
+    #[test]
+    fn a_soft_changer_pushes_and_grows_most_in_the_middle() {
+        let mut r = Rig::default();
+        let soft = r.add_changer("Cheek", Kind::Soft { center: [100.0, 100.0], radius: 50.0 }, None);
+        let p = r.add_param("Puff", 0.0, 1.0, 0.0);
+        r.set_keyform(soft, p, 1.0, Form::Soft { offset: [10.0, 0.0], grow: 0.2 });
+        let mut v = Values::default();
+        v.set(p, 1.0);
+        let pose = r.pose(&v);
+        let mid = r.deform_point(&pose, Some(soft), [100.0, 100.0]);
+        assert!((mid[0] - 110.0).abs() < 0.01 && (mid[1] - 100.0).abs() < 0.01, "the centre is pushed by the offset: {mid:?}");
+        let edge = r.deform_point(&pose, Some(soft), [150.0, 100.0]);
+        assert!((edge[0] - 150.0).abs() < 0.01, "outside the radius nothing moves: {edge:?}");
+        let half = r.deform_point(&pose, Some(soft), [125.0, 100.0]);
+        assert!(half[0] > 125.0 && half[0] < 150.0, "in between it is soft: {half:?}");
+        // it grows: points near the centre move away from it
+        let grown = r.deform_point(&pose, Some(soft), [110.0, 100.0]);
+        assert!(grown[0] - 110.0 > 10.0 * 0.9, "{grown:?}");
+    }
+
+    #[test]
+    fn glue_pulls_the_seam_of_two_meshes_together() {
+        let mut r = Rig::default();
+        // two squares that touch along x = 100
+        let sq = |id, layer, x0: f32| ArtMesh { id, layer, verts: vec![[x0, 0.0], [x0 + 100.0, 0.0], [x0 + 100.0, 100.0], [x0, 100.0]], tris: vec![[0, 1, 2], [0, 2, 3]], parent: None };
+        r.meshes.push(sq(1, 1, 0.0));
+        r.meshes.push(sq(2, 2, 100.0));
+        let c = r.add_changer("Turn", Kind::Rotation { pivot: [0.0, 0.0] }, None);
+        r.meshes[1].parent = Some(c);
+        let p = r.add_param("Turn", 0.0, 90.0, 0.0);
+        r.bind_rotation(c, p, 90.0);
+        let mut v = Values::default();
+        v.set(p, 10.0);
+        let pose = r.pose(&v);
+        let loose = r.deformed_all(&pose);
+        // the seam: mesh 1's vertices 1 and 2 against mesh 2's vertices 0 and 3
+        let gap = |m: &Vec<Vec<[f32; 2]>>| (m[0][2][0] - m[1][3][0]).hypot(m[0][2][1] - m[1][3][1]);
+        assert!(gap(&loose) > 10.0, "without glue the seam opens: {}", gap(&loose));
+        assert_eq!(r.make_glue(1, 2, 5.0, 1.0), 2, "the two vertices on the seam are paired");
+        let glued = r.deformed_all(&pose);
+        assert!(gap(&glued) < 0.01, "glued: {}", gap(&glued));
+        r.glues[0].weight = 0.5;
+        let half = r.deformed_all(&pose);
+        assert!((gap(&half) - gap(&loose) / 2.0).abs() < 0.1, "half glued is half open");
+        // meshes that don't touch make no glue
+        r.meshes[1].verts.iter_mut().for_each(|v| v[0] += 500.0);
+        assert_eq!(r.make_glue(1, 2, 5.0, 1.0), 0);
+        // a glue to a missing mesh is dropped when cleaning
+        r.glues.push(Glue { a: 1, b: 99, pairs: vec![[0, 0]], weight: 1.0 });
+        let s = r.sanitized();
+        assert!(s.glues.iter().all(|g| g.b != 99));
+    }
+
+    #[test]
+    fn easing_changes_the_way_between_keys_and_two_slider_grids_grow_key_by_key() {
+        assert_eq!(Ease::Linear.apply(0.5), 0.5);
+        assert_eq!(Ease::Smooth.apply(0.5), 0.5);
+        assert!(Ease::Smooth.apply(0.25) < 0.25 && Ease::Smooth.apply(0.75) > 0.75);
+        assert!(Ease::In.apply(0.5) < 0.5 && Ease::Out.apply(0.5) > 0.5);
+        let (mut r, head, tilt) = rot_rig();
+        let mut v = Values::default();
+        v.set(tilt, 15.0);
+        let even = r.pose(&v).rot[&head];
+        r.bindings[0].ease = Ease::In;
+        assert!(r.pose(&v).rot[&head] < even, "slow start: {} vs {even}", r.pose(&v).rot[&head]);
+        // a grid of two sliders: put keys in one at a time
+        let mut g = Rig::default();
+        let c = g.add_changer("Head", Kind::Rotation { pivot: [0.0, 0.0] }, None);
+        let x = g.add_param("X", -30.0, 30.0, 0.0);
+        let y = g.add_param("Y", -30.0, 30.0, 0.0);
+        g.set_keyform2(c, x, y, 30.0, 0.0, Form::Rot { deg: 20.0 });
+        g.set_keyform2(c, x, y, 0.0, 30.0, Form::Rot { deg: 10.0 });
+        g.set_keyform2(c, x, y, 30.0, 30.0, Form::Rot { deg: 40.0 });
+        let b = &g.bindings[0];
+        assert_eq!(b.keys[0], [0.0, 30.0]);
+        assert_eq!(b.keys[1], [0.0, 30.0]);
+        assert_eq!(b.forms.len(), 4);
+        let mut vals = Values::default();
+        vals.set(x, 30.0);
+        vals.set(y, 30.0);
+        assert_eq!(g.pose(&vals).rot[&c], 40.0);
+        vals.set(y, 0.0);
+        assert_eq!(g.pose(&vals).rot[&c], 20.0);
+        vals.set(x, 0.0);
+        vals.set(y, 30.0);
+        assert_eq!(g.pose(&vals).rot[&c], 10.0);
+        vals.set(x, 15.0);
+        vals.set(y, 15.0);
+        assert!((g.pose(&vals).rot[&c] - (0.0 + 20.0 + 10.0 + 40.0) / 4.0).abs() < 1e-4, "the middle blends all four");
+        // adding a key in the middle keeps what was on screen
+        g.set_keyform2(c, x, y, 15.0, 15.0, Form::Rot { deg: 50.0 });
+        assert_eq!(g.bindings[0].keys[0], [0.0, 15.0, 30.0]);
+        vals.set(x, 30.0);
+        vals.set(y, 30.0);
+        assert_eq!(g.pose(&vals).rot[&c], 40.0, "the corners are unchanged");
+        vals.set(x, 15.0);
+        vals.set(y, 15.0);
+        assert_eq!(g.pose(&vals).rot[&c], 50.0);
+    }
+
+    #[test]
+    fn the_new_changers_survive_json_and_cleaning() {
+        let mut r = Rig::default();
+        let l = r.add_changer("Strand", Kind::Line { pts: vec![[0.0, 0.0], [0.0, 50.0], [0.0, 100.0]], width: 20.0 }, None);
+        let s = r.add_changer("Cheek", Kind::Soft { center: [5.0, 5.0], radius: 30.0 }, None);
+        let p = r.add_param("A", 0.0, 1.0, 0.0);
+        r.set_keyform(l, p, 1.0, Form::Line { offsets: vec![[1.0, 0.0]; 3] });
+        r.set_keyform(s, p, 1.0, Form::Soft { offset: [2.0, 1.0], grow: 0.1 });
+        r.bindings[0].ease = Ease::Smooth;
+        let back: Rig = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(back, r);
+        assert_eq!(back.clone().sanitized(), r.clone().sanitized());
+        assert_eq!(back.bindings[0].ease, Ease::Smooth);
+        // a line with a wrong number of offsets and a soft with nan are dropped
+        let mut bad = r.clone();
+        bad.bindings.push(Binding { changer: l, params: vec![p], keys: vec![vec![0.0]], forms: vec![Form::Line { offsets: vec![[0.0, 0.0]] }], ease: Ease::Linear });
+        bad.bindings.push(Binding { changer: s, params: vec![p], keys: vec![vec![0.0]], forms: vec![Form::Soft { offset: [f32::NAN, 0.0], grow: 0.0 }], ease: Ease::Linear });
+        assert_eq!(bad.sanitized().bindings.len(), 2);
+        // old project files (a binding without an easing) still open
+        let old = r#"{"changer":1,"params":[2],"keys":[[0.0]],"forms":[{"type":"rot","deg":0.0}]}"#;
+        let b: Binding = serde_json::from_str(old).unwrap();
+        assert_eq!(b.ease, Ease::Linear);
     }
 }
