@@ -95,6 +95,9 @@ pub struct RigState {
     bone_chain: bool,
     pub wtool: WTool,
     pub face_opts: rig::autorig::FaceOptions,
+    pub body_opts: rig::autorig::BodyOptions,
+    pub issues: Vec<rig::check::Issue>,
+    checked: bool,
     pub pro: bool,
     play: bool,
     wopts: rig::skin::BrushOpts,
@@ -408,6 +411,7 @@ impl SeviathApp {
             self.rigs.bone_chain = true;
             self.rigs.wopts = rig::skin::BrushOpts::default();
             self.rigs.face_opts = rig::autorig::FaceOptions::default();
+            self.rigs.body_opts = rig::autorig::BodyOptions::default();
             self.rigs.feather = 60.0;
             self.rigs.mirror_axis = self.draw.doc.w as f32 / 2.0;
             self.rigs.tag_pick = Some(parts::Part::ArmL);
@@ -489,6 +493,7 @@ impl SeviathApp {
             }
         });
         self.rig_auto_section(ui, now);
+        self.rig_quality_section(ui, now);
         if self.rigs.pro {
             self.rig_pro_sections(ui, now);
         }
@@ -512,6 +517,15 @@ impl SeviathApp {
                     self.rigs.values = Values::default();
                 }
             }
+        });
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Rig the body").on_hover_text("Torso tilt and breathing, arms and legs that swing, hands that reach. Do the face first so the head leans with the body.").clicked() {
+                self.rig_the_body(now);
+            }
+            if ui.button("Hair sway").on_hover_text("Curves down the hair parts and one slider").clicked() {
+                self.rig_the_hair(now);
+            }
+            ui.checkbox(&mut self.rigs.body_opts.ik, "Hands reach (IK)");
         });
         let o = &mut self.rigs.face_opts;
         ui.horizontal(|ui| {
@@ -542,6 +556,107 @@ impl SeviathApp {
                 }
             }
         }
+    }
+
+    /// The quality checker: moves every slider to its ends and lists what goes wrong, with Fix buttons.
+    fn rig_quality_section(&mut self, ui: &mut Ui, now: f64) {
+        section_title(ui, "Quality check");
+        ui.horizontal(|ui| {
+            if ui.button("Check the rig").on_hover_text("Moves every slider to its ends and looks for gaps, folds, parts without a mesh and sliders that do nothing").clicked() {
+                self.run_check();
+            }
+            if self.rigs.checked && self.rigs.issues.is_empty() {
+                ui.label(RichText::new("Nothing found.").color(VENOM));
+            }
+        });
+        let issues = self.rigs.issues.clone();
+        if issues.iter().filter(|i| i.fix.is_some()).count() > 1 && ui.button("Fix everything that can be fixed").clicked() {
+            let (layers, w, h) = (self.draw.doc.layers.clone(), self.draw.doc.w, self.draw.doc.h);
+            self.rig_edit("Fix the rig problems", now, |r| {
+                for i in issues.iter().filter(|i| i.fix.is_some()) {
+                    rig::check::fix(r, i, &layers, w, h);
+                }
+            });
+            self.run_check();
+        }
+        let mut fix: Option<usize> = None;
+        for (i, is) in issues.iter().enumerate() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(&is.text).size(12.0));
+                if let Some(label) = is.fix {
+                    if ui.small_button(label).clicked() {
+                        fix = Some(i);
+                    }
+                }
+            });
+        }
+        if let Some(i) = fix {
+            let (layers, w, h) = (self.draw.doc.layers.clone(), self.draw.doc.w, self.draw.doc.h);
+            let issue = issues[i].clone();
+            self.rig_edit("Fix a rig problem", now, |r| {
+                rig::check::fix(r, &issue, &layers, w, h);
+            });
+            self.run_check();
+        }
+    }
+
+    fn run_check(&mut self) {
+        let d = &self.draw.doc;
+        self.rigs.issues = rig::check::check(&d.rig, &d.layers, d.w);
+        self.rigs.checked = true;
+    }
+
+    #[cfg(test)]
+    pub fn test_check(&mut self) -> usize {
+        self.run_check();
+        self.rigs.issues.len()
+    }
+
+    fn rig_the_body(&mut self, now: f64) {
+        let (layers, w, h, o) = (self.draw.doc.layers.clone(), self.draw.doc.w, self.draw.doc.h, self.rigs.body_opts);
+        let mut result: Option<Result<rig::autorig::Report, String>> = None;
+        self.rig_edit("Rig the body", now, |r| {
+            let mut tmp = r.clone();
+            let res = rig::autorig::rig_body(&mut tmp, &layers, w, h, &o);
+            if res.is_ok() {
+                *r = tmp;
+            }
+            result = Some(res);
+        });
+        self.rigs.values = Values::default();
+        self.rigs.message = Some(match result {
+            Some(Ok(rep)) => format!("Body rigged: {} meshes, {} changers, {} sliders. {}", rep.meshes, rep.changers, rep.params, rep.notes.join(" ")),
+            Some(Err(e)) => e,
+            None => String::new(),
+        });
+    }
+
+    fn rig_the_hair(&mut self, now: f64) {
+        let (layers, w, h) = (self.draw.doc.layers.clone(), self.draw.doc.w, self.draw.doc.h);
+        let mut result: Option<Result<rig::autorig::Report, String>> = None;
+        self.rig_edit("Rig the hair", now, |r| {
+            let mut tmp = r.clone();
+            let res = rig::autorig::rig_hair(&mut tmp, &layers, w, h);
+            if res.is_ok() {
+                *r = tmp;
+            }
+            result = Some(res);
+        });
+        self.rigs.message = Some(match result {
+            Some(Ok(rep)) => format!("Hair rigged: {} changers. Run the face first if you want the hair to turn with the head.", rep.changers),
+            Some(Err(e)) => e,
+            None => String::new(),
+        });
+    }
+
+    #[cfg(test)]
+    pub fn test_rig_body(&mut self) {
+        self.rig_the_body(0.0);
+    }
+
+    #[cfg(test)]
+    pub fn test_rig_hair(&mut self) {
+        self.rig_the_hair(0.0);
     }
 
     fn rig_the_face(&mut self, now: f64) {
@@ -848,6 +963,19 @@ impl SeviathApp {
         }
         // move parts into the selected changer
         if let Some(cid) = self.rigs.sel_changer {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Copy to the other side, line at x").size(12.0).color(TEXT_DIM));
+                ui.add(egui::DragValue::new(&mut self.rigs.mirror_axis).speed(2.0));
+                if ui.button("Copy").on_hover_text("A copy on the other side that turns and bends the other way, moved by the same sliders").clicked() {
+                    let axis = self.rigs.mirror_axis;
+                    let name = self.draw.doc.rig.changer(cid).map(|c| format!("{} (other side)", c.name)).unwrap_or_default();
+                    let mut new_id = None;
+                    self.rig_edit("Copy a changer to the other side", now, |r| new_id = r.mirror_changer(cid, axis, &name));
+                    if new_id.is_some() {
+                        self.rigs.sel_changer = new_id;
+                    }
+                }
+            });
             if ui.add_enabled(!sel.is_empty(), egui::Button::new("Put the picked parts into this changer")).clicked() {
                 let selc = sel.clone();
                 self.rig_edit("Parts into changer", now, |r| {

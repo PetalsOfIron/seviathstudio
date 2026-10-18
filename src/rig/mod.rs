@@ -5,6 +5,7 @@
 // (raster.rs) draws the layers through the moved meshes.
 
 pub mod autorig;
+pub mod check;
 pub mod mesh;
 pub mod raster;
 pub mod skin;
@@ -122,6 +123,54 @@ pub struct Binding {
     pub ease: Ease,
 }
 
+/// Two-bone inverse kinematics: sliders for where the tip (a hand, a foot) should be, and the two Rotation changers
+/// (upper and lower, the lower one inside the upper) turn so the tip gets there, as far as the bones reach.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Ik {
+    pub upper: Id,
+    pub lower: Id,
+    /// Rest positions: the root (shoulder), the joint (elbow) and the tip (hand).
+    pub root: [f32; 2],
+    pub joint: [f32; 2],
+    pub tip: [f32; 2],
+    /// Sliders: how far the tip is moved to the right and down, in page pixels.
+    pub px: Id,
+    pub py: Id,
+}
+
+/// The turns (degrees, on top of the rest) that bring the tip of a two-bone arm to `target`.
+pub fn solve_two_bone(root: [f32; 2], joint: [f32; 2], tip: [f32; 2], target: [f32; 2]) -> (f32, f32) {
+    let v1 = [joint[0] - root[0], joint[1] - root[1]];
+    let v2 = [tip[0] - joint[0], tip[1] - joint[1]];
+    let (l1, l2) = (v1[0].hypot(v1[1]).max(1e-3), v2[0].hypot(v2[1]).max(1e-3));
+    let rest1 = v1[1].atan2(v1[0]);
+    let rest_rel = v2[1].atan2(v2[0]) - rest1;
+    // which way the elbow bends
+    let s = if v1[0] * v2[1] - v1[1] * v2[0] >= 0.0 { 1.0 } else { -1.0 };
+    let t = [target[0] - root[0], target[1] - root[1]];
+    let t_len = t[0].hypot(t[1]);
+    let straight = t_len >= l1 + l2 - 1e-3;
+    let dist = t_len.clamp((l1 - l2).abs() + 1e-3, l1 + l2 - 1e-3);
+    let ang_t = t[1].atan2(t[0]);
+    let cos_a = ((l1 * l1 + dist * dist - l2 * l2) / (2.0 * l1 * dist)).clamp(-1.0, 1.0);
+    let alpha = if straight { 0.0 } else { cos_a.acos() };
+    let th1 = ang_t - s * alpha;
+    let elbow = [root[0] + l1 * th1.cos(), root[1] + l1 * th1.sin()];
+    let reach = [root[0] + dist * ang_t.cos(), root[1] + dist * ang_t.sin()];
+    let th2 = (reach[1] - elbow[1]).atan2(reach[0] - elbow[0]);
+    let wrap = |a: f32| {
+        let mut a = a;
+        while a > std::f32::consts::PI {
+            a -= std::f32::consts::TAU;
+        }
+        while a < -std::f32::consts::PI {
+            a += std::f32::consts::TAU;
+        }
+        a
+    };
+    (wrap(th1 - rest1).to_degrees(), wrap((th2 - th1) - rest_rel).to_degrees())
+}
+
 /// A seam: vertices of two meshes that sit together at rest are pulled together when the meshes move apart.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Glue {
@@ -141,6 +190,7 @@ pub struct Rig {
     pub params: Vec<Param>,
     pub bindings: Vec<Binding>,
     pub glues: Vec<Glue>,
+    pub iks: Vec<Ik>,
     /// The uncut mode: one mesh over a group of layers, moved by bones with painted weights.
     pub skin: Option<skin::Skin>,
     /// What the automatic rigging made (and what you locked).
@@ -263,7 +313,7 @@ impl Values {
 
 impl Rig {
     pub fn is_empty(&self) -> bool {
-        self.meshes.is_empty() && self.changers.is_empty() && self.params.is_empty() && self.skin.is_none() && self.auto.is_none()
+        self.meshes.is_empty() && self.changers.is_empty() && self.params.is_empty() && self.skin.is_none() && self.auto.is_none() && self.iks.is_empty()
     }
 
     pub fn fresh_id(&mut self) -> Id {
@@ -411,7 +461,51 @@ impl Rig {
                 }
             }
         }
+        for ik in &self.iks {
+            let target = [ik.tip[0] + self.value(vals, ik.px), ik.tip[1] + self.value(vals, ik.py)];
+            let (a, b) = solve_two_bone(ik.root, ik.joint, ik.tip, target);
+            *pose.rot.entry(ik.upper).or_insert(0.0) += a;
+            *pose.rot.entry(ik.lower).or_insert(0.0) += b;
+        }
         pose
+    }
+
+    /// A copy of a changer on the other side of the vertical line x = `axis_x`, moved by the same sliders
+    /// (turns the other way, bends the other way). Returns its id.
+    pub fn mirror_changer(&mut self, id: Id, axis_x: f32, name: &str) -> Option<Id> {
+        let c = self.changer(id)?.clone();
+        let flip = |p: [f32; 2]| [2.0 * axis_x - p[0], p[1]];
+        let kind = match &c.kind {
+            Kind::Rotation { pivot } => Kind::Rotation { pivot: flip(*pivot) },
+            Kind::Warp { rect, cols, rows } => Kind::Warp { rect: [2.0 * axis_x - rect[2], rect[1], 2.0 * axis_x - rect[0], rect[3]], cols: *cols, rows: *rows },
+            Kind::Line { pts, width } => Kind::Line { pts: pts.iter().map(|p| flip(*p)).collect(), width: *width },
+            Kind::Soft { center, radius } => Kind::Soft { center: flip(*center), radius: *radius },
+        };
+        let new = self.add_changer(name, kind.clone(), c.parent);
+        let copies: Vec<Binding> = self.bindings.iter().filter(|b| b.changer == id).cloned().collect();
+        for mut b in copies {
+            b.changer = new;
+            for f in &mut b.forms {
+                match (f, &kind) {
+                    (Form::Rot { deg }, _) => *deg = -*deg,
+                    (Form::Warp { offsets }, Kind::Warp { cols, rows, .. }) => {
+                        let cols = *cols as usize;
+                        let old = offsets.clone();
+                        for r in 0..=*rows as usize {
+                            for col in 0..=cols {
+                                let o = old[r * (cols + 1) + (cols - col)];
+                                offsets[r * (cols + 1) + col] = [-o[0], o[1]];
+                            }
+                        }
+                    }
+                    (Form::Line { offsets }, _) => offsets.iter_mut().for_each(|o| o[0] = -o[0]),
+                    (Form::Soft { offset, .. }, _) => offset[0] = -offset[0],
+                    _ => {}
+                }
+            }
+            self.bindings.push(b);
+        }
+        Some(new)
     }
 
     /// Move a point by one changer (not its parents).
@@ -677,6 +771,12 @@ impl Rig {
             g.pairs.truncate(100_000);
             g.a != g.b && !g.pairs.is_empty()
         });
+        {
+            let rot_ids: HashSet<Id> = self.changers.iter().filter(|c| matches!(c.kind, Kind::Rotation { .. })).map(|c| c.id).collect();
+            let pids: HashSet<Id> = self.params.iter().map(|p| p.id).collect();
+            self.iks.truncate(64);
+            self.iks.retain(|k| rot_ids.contains(&k.upper) && rot_ids.contains(&k.lower) && k.upper != k.lower && pids.contains(&k.px) && pids.contains(&k.py) && [k.root, k.joint, k.tip].iter().all(|p| p[0].is_finite() && p[1].is_finite()));
+        }
         if let Some(a) = self.auto.as_mut() {
             let cids: HashSet<Id> = self.changers.iter().map(|c| c.id).collect();
             let pids: HashSet<Id> = self.params.iter().map(|p| p.id).collect();
@@ -999,5 +1099,90 @@ mod tests {
         let old = r#"{"changer":1,"params":[2],"keys":[[0.0]],"forms":[{"type":"rot","deg":0.0}]}"#;
         let b: Binding = serde_json::from_str(old).unwrap();
         assert_eq!(b.ease, Ease::Linear);
+    }
+
+    #[test]
+    fn two_bone_ik_brings_the_tip_to_the_target() {
+        let (root, joint, tip) = ([100.0, 100.0], [100.0, 200.0], [100.0, 300.0]);
+        // at rest nothing turns
+        let (a, b) = solve_two_bone(root, joint, tip, tip);
+        assert!(a.abs() < 0.01 && b.abs() < 0.01, "{a} {b}");
+        // build the arm as changers and check where the tip really goes, for several targets
+        let mut r = Rig::default();
+        let upper = r.add_changer("Upper", Kind::Rotation { pivot: root }, None);
+        let lower = r.add_changer("Lower", Kind::Rotation { pivot: joint }, Some(upper));
+        let px = r.add_param("X", -300.0, 300.0, 0.0);
+        let py = r.add_param("Y", -300.0, 300.0, 0.0);
+        r.iks.push(Ik { upper, lower, root, joint, tip, px, py });
+        for (dx, dy) in [(80.0, -60.0), (-120.0, -100.0), (0.0, -150.0), (100.0, -120.0), (-50.0, -40.0)] {
+            let mut v = Values::default();
+            v.set(px, dx);
+            v.set(py, dy);
+            let pose = r.pose(&v);
+            let got = r.deform_point(&pose, Some(lower), tip);
+            let want = [tip[0] + dx, tip[1] + dy];
+            assert!((got[0] - want[0]).abs() < 0.5 && (got[1] - want[1]).abs() < 0.5, "target {want:?}, got {got:?}");
+            // the elbow stays one bone length from the shoulder
+            let elbow = r.deform_point(&pose, Some(upper), joint);
+            assert!(((elbow[0] - root[0]).hypot(elbow[1] - root[1]) - 100.0).abs() < 0.1);
+        }
+        // a target that is too far: the arm stretches out straight toward it
+        let mut v = Values::default();
+        v.set(px, 300.0);
+        v.set(py, -300.0);
+        let pose = r.pose(&v);
+        let got = r.deform_point(&pose, Some(lower), tip);
+        let reach = ((got[0] - root[0]).hypot(got[1] - root[1])).round();
+        assert!((reach - 200.0).abs() <= 1.0, "reaches as far as the arm is long: {reach}");
+        // the elbow bends the same way as at rest (no flipping through the shoulder)
+        let near = {
+            let mut w = Values::default();
+            w.set(px, 10.0);
+            w.set(py, -100.0);
+            let p = r.pose(&w);
+            r.deform_point(&p, Some(upper), joint)
+        };
+        assert!(near[0].is_finite());
+        // cleaning keeps a good IK and drops one that points at nothing
+        let mut bad = r.clone();
+        bad.iks.push(Ik { upper, lower: 9999, root, joint, tip, px, py });
+        assert_eq!(bad.sanitized().iks.len(), 1);
+    }
+
+    #[test]
+    fn a_changer_can_be_copied_to_the_other_side_and_turns_the_other_way() {
+        let mut r = Rig::default();
+        let arm = r.add_changer("Arm L", Kind::Rotation { pivot: [700.0, 300.0] }, None);
+        let p = r.add_param("Wave", -1.0, 1.0, 0.0);
+        r.bind_rotation(arm, p, 40.0);
+        let other = r.mirror_changer(arm, 500.0, "Arm R").unwrap();
+        match r.changer(other).unwrap().kind {
+            Kind::Rotation { pivot } => assert_eq!(pivot, [300.0, 300.0]),
+            _ => panic!(),
+        }
+        let mut v = Values::default();
+        v.set(p, 1.0);
+        let pose = r.pose(&v);
+        // the left arm's hand (to the right of the pivot, going down when turned clockwise) and the mirror image
+        let l = r.deform_point(&pose, Some(arm), [800.0, 300.0]);
+        let rr = r.deform_point(&pose, Some(other), [200.0, 300.0]);
+        assert!((l[0] - 500.0 - (500.0 - rr[0])).abs() < 0.01 && (l[1] - rr[1]).abs() < 0.01, "{l:?} {rr:?}");
+        // a warp is mirrored with its points (and the shape too)
+        let w = r.add_changer("Cheek L", Kind::Warp { rect: [600.0, 400.0, 800.0, 500.0], cols: 2, rows: 1 }, None);
+        let mut off = vec![[0.0, 0.0]; 6];
+        off[2] = [30.0, 5.0]; // the top right point moves right and down
+        r.set_keyform(w, p, 1.0, Form::Warp { offsets: off });
+        let w2 = r.mirror_changer(w, 500.0, "Cheek R").unwrap();
+        match &r.changer(w2).unwrap().kind {
+            Kind::Warp { rect, .. } => assert_eq!(*rect, [200.0, 400.0, 400.0, 500.0]),
+            _ => panic!(),
+        }
+        let b = r.bindings.iter().find(|b| b.changer == w2).unwrap();
+        match &b.forms[b.forms.len() - 1] {
+            Form::Warp { offsets } => assert_eq!(offsets[0], [-30.0, 5.0], "the top left point moves left and down"),
+            _ => panic!(),
+        }
+        // nothing to copy: None
+        assert!(r.mirror_changer(9999, 500.0, "x").is_none());
     }
 }
