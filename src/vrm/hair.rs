@@ -5,8 +5,10 @@
 
 use image::RgbaImage;
 
+use super::hairedit::{HairChain, HairDab, HairEdit};
 use super::model::{Collider, Model3d, Part3d, Spring};
 
+#[derive(Clone)]
 pub struct HairMask {
     x0: i32,
     y0: i32,
@@ -19,6 +21,34 @@ impl HairMask {
     pub fn at(&self, x: f32, y: f32) -> bool {
         let (ix, iy) = (x.round() as i32 - self.x0, y.round() as i32 - self.y0);
         ix >= 0 && iy >= 0 && ix < self.w && iy < self.h && self.bits[(iy * self.w + ix) as usize]
+    }
+
+    /// Correct the hair with the dabs of the hair brush: they add to it or take away from it, in order.
+    pub fn apply_dabs(&mut self, dabs: &[HairDab]) {
+        for d in dabs {
+            let r = d.radius.max(1.0);
+            for y in ((d.at[1] - r).floor() as i32)..=((d.at[1] + r).ceil() as i32) {
+                for x in ((d.at[0] - r).floor() as i32)..=((d.at[0] + r).ceil() as i32) {
+                    let (ix, iy) = (x - self.x0, y - self.y0);
+                    if ix >= 0 && iy >= 0 && ix < self.w && iy < self.h && ((x as f32 - d.at[0]).powi(2) + (y as f32 - d.at[1]).powi(2)).sqrt() <= r {
+                        self.bits[(iy * self.w + ix) as usize] = d.add;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The hair as a picture of its own (green, a little see-through), and where its top left is on the page.
+    pub fn to_image(&self) -> (RgbaImage, [i32; 2]) {
+        let mut img = RgbaImage::new(self.w as u32, self.h as u32);
+        for y in 0..self.h {
+            for x in 0..self.w {
+                if self.bits[(y * self.w + x) as usize] {
+                    img.put_pixel(x as u32, y as u32, image::Rgba([40, 220, 120, 90]));
+                }
+            }
+        }
+        (img, [self.x0, self.y0])
     }
 
     pub fn count(&self) -> usize {
@@ -88,20 +118,68 @@ pub fn hair_mask(page: &RgbaImage, head: [f32; 4]) -> Option<HairMask> {
     (mask.count() as f32 > 0.02 * (hh * hh)).then_some(mask)
 }
 
-struct Chain {
-    x: f32,
-    z: f32,
-    top: f32,
-    len: f32,
-    bones: [usize; 3],
-}
-
 const COLUMNS: usize = 6;
 const REACH: [f32; 4] = [0.0, 0.33, 0.66, 1.0];
 
-/// Make the hair of a model a part of its own with bone chains. `page_of` gives the place on the picture of a point of the
-/// body (page pixels).
-pub fn add_hair(model: &mut Model3d, mask: &HairMask, page_of: impl Fn(&[f32; 3]) -> [f32; 2]) -> bool {
+/// The distance from a point to a chain of joints (3D), and how far along the chain the nearest place is: a number from 0 (the scalp)
+/// to the number of joints minus one (the tip).
+fn along_chain(p: [f32; 3], joints: &[[f32; 3]]) -> (f32, f32) {
+    let (mut best, mut at) = (f32::MAX, 0.0f32);
+    for i in 0..joints.len().saturating_sub(1) {
+        let (a, b) = (joints[i], joints[i + 1]);
+        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let ap = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
+        let len2 = (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]).max(1e-12);
+        let t = ((ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / len2).clamp(0.0, 1.0);
+        let q = [a[0] + ab[0] * t - p[0], a[1] + ab[1] * t - p[1], a[2] + ab[2] * t - p[2]];
+        let d = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt();
+        if d < best {
+            best = d;
+            at = i as f32 + t;
+        }
+    }
+    (best, at)
+}
+
+/// The strands the app makes by itself for the hair found on the drawing: a few columns across it, in front and behind. The joints
+/// are in page pixels (`frame` brings the model to the page: the middle of the figure, its bottom, metres per pixel).
+pub fn auto_chains(used: &[[f32; 3]], frame: (f32, f32, f32)) -> Vec<HairChain> {
+    let (xc, bottom, scale) = frame;
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for v in used {
+        for k in 0..3 {
+            lo[k] = lo[k].min(v[k]);
+            hi[k] = hi[k].max(v[k]);
+        }
+    }
+    let colw = (hi[0] - lo[0]) / COLUMNS as f32;
+    let top = hi[1];
+    let mut chains = Vec::new();
+    if colw < 1e-4 {
+        return chains;
+    }
+    for layer in [1.0f32, -1.0] {
+        if !used.iter().any(|v| v[2] * layer > 0.0) {
+            continue;
+        }
+        for c in 0..COLUMNS {
+            let x = lo[0] + (c as f32 + 0.5) * colw;
+            let low = used.iter().filter(|v| (v[0] - x).abs() <= colw * 0.5 && v[2] * layer > 0.0).map(|v| v[1]).fold(f32::MAX, f32::min);
+            if low == f32::MAX || top - low < 0.05 {
+                continue;
+            }
+            let len = top - low;
+            let joints: Vec<[f32; 2]> = REACH.iter().map(|f| [x / scale + xc, bottom - (top - len * f) / scale]).collect();
+            chains.push(HairChain { joints, layer, ..Default::default() });
+        }
+    }
+    chains
+}
+
+/// Make the hair of a model a part of its own with bone chains. `page_of` gives the place on the picture of a point of the body (page
+/// pixels). `edit` has the strands the user made (when it has none the app makes them, and they are returned in `model.hair_chains`
+/// for the user to start from). `frame` is (the middle of the figure on the page, its bottom, metres per pixel).
+pub fn add_hair(model: &mut Model3d, mask: &HairMask, page_of: impl Fn(&[f32; 3]) -> [f32; 2], edit: &HairEdit, frame: (f32, f32, f32)) -> bool {
     let Some(head) = model.bone("head") else { return false };
     // the points and triangles of the body and the face together (the face carries the blend shapes, the hair covers both)
     let (mut b_verts, mut b_normals, mut b_uvs, mut b_tris): (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<[u32; 3]>) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -118,64 +196,37 @@ pub fn add_hair(model: &mut Model3d, mask: &HairMask, page_of: impl Fn(&[f32; 3]
     if tris.len() < 50 {
         return false;
     }
-    // the hair vertices that are used, and the bounds of the hair
     let mut used: Vec<u32> = tris.iter().flatten().copied().collect();
     used.sort_unstable();
     used.dedup();
-    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
-    for i in &used {
-        let v = b_verts[*i as usize];
-        for k in 0..3 {
-            lo[k] = lo[k].min(v[k]);
-            hi[k] = hi[k].max(v[k]);
-        }
-    }
-    let top = hi[1];
-    // the chains: a few columns across the hair, in front and behind
-    let mut chains: Vec<Chain> = Vec::new();
-    let colw = (hi[0] - lo[0]) / COLUMNS as f32;
-    if colw < 1e-4 {
-        return false;
-    }
-    for layer in [1.0f32, -1.0] {
-        let layer_z: Vec<f32> = used.iter().map(|i| b_verts[*i as usize]).filter(|v| v[2] * layer > 0.0).map(|v| v[2]).collect();
-        if layer_z.is_empty() {
-            continue;
-        }
-        let zmean = layer_z.iter().sum::<f32>() / layer_z.len() as f32 * 0.6;
-        for c in 0..COLUMNS {
-            let xc = lo[0] + (c as f32 + 0.5) * colw;
-            let bottom = used
-                .iter()
-                .map(|i| b_verts[*i as usize])
-                .filter(|v| (v[0] - xc).abs() <= colw * 0.5 && v[2] * layer > 0.0)
-                .map(|v| v[1])
-                .fold(f32::MAX, f32::min);
-            if bottom == f32::MAX || top - bottom < 0.05 {
-                continue;
-            }
-            chains.push(Chain { x: xc, z: zmean, top, len: top - bottom, bones: [0; 3] });
-        }
-    }
+    let used_verts: Vec<[f32; 3]> = used.iter().map(|i| b_verts[*i as usize]).collect();
+    let zext = used_verts.iter().map(|v| v[2].abs()).fold(0.0f32, f32::max);
+    let top = used_verts.iter().map(|v| v[1]).fold(f32::MIN, f32::max);
+    // the strands: the user's, or the app's own
+    let chains: Vec<HairChain> = if edit.chains.is_empty() { auto_chains(&used_verts, frame) } else { edit.chains.clone() };
+    let chains: Vec<HairChain> = chains.into_iter().filter(|c| c.joints.len() >= 2).collect();
     if chains.is_empty() {
         return false;
     }
-    // the bones, and the springs that swing them
-    let head_pos = model.bones[head].pos;
-    for (ci, ch) in chains.iter_mut().enumerate() {
+    model.hair_chains = chains.clone();
+    let (xc, bottom, scale) = frame;
+    // the joints of every strand in the model (the depth by how far to the front or back it hangs)
+    let to_model = |p: [f32; 2], layer: f32| [(p[0] - xc) * scale, (bottom - p[1]) * scale, layer.clamp(-1.0, 1.0) * zext * 0.6];
+    let joints3: Vec<Vec<[f32; 3]>> = chains.iter().map(|c| c.joints.iter().map(|j| to_model(*j, c.layer)).collect()).collect();
+    // the bones, and the springs that swing them: one bone for every joint after the first (the first is on the scalp)
+    let mut bone_of: Vec<Vec<usize>> = Vec::new();
+    for (ci, (c, js)) in chains.iter().zip(&joints3).enumerate() {
         let mut parent = head;
         let mut idx = Vec::new();
-        for k in 1..=3 {
-            let pos = [ch.x, ch.top - ch.len * REACH[k], ch.z];
-            let next = [ch.x, ch.top - ch.len * REACH.get(k + 1).copied().unwrap_or(REACH[3] + 0.25).min(REACH[3] + 0.25), ch.z];
-            model.bones.push(super::model::Bone { name: format!("hair{ci}_{k}"), humanoid: false, parent: Some(parent), pos, tip: next });
+        for k in 1..js.len() {
+            let tip = if k + 1 < js.len() { js[k + 1] } else { [js[k][0] + (js[k][0] - js[k - 1][0]) * 0.5, js[k][1] + (js[k][1] - js[k - 1][1]) * 0.5, js[k][2] + (js[k][2] - js[k - 1][2]) * 0.5] };
+            model.bones.push(super::model::Bone { name: format!("hair{ci}_{k}"), humanoid: false, parent: Some(parent), pos: js[k], tip });
             parent = model.bones.len() - 1;
             idx.push(parent);
         }
-        ch.bones = [idx[0], idx[1], idx[2]];
-        model.springs.push(Spring { name: format!("hair{ci}"), joints: idx.clone(), hit_radius: 0.012, stiffness: 0.55, gravity: 0.08, drag: 0.35 });
+        model.springs.push(Spring { name: format!("hair{ci}"), joints: idx.clone(), hit_radius: 0.012, stiffness: c.stiffness, gravity: c.gravity, drag: c.drag });
+        bone_of.push(idx);
     }
-    let _ = head_pos;
     // a ball for the head, which the hair does not go through
     let hp = model.bones[head].pos;
     model.colliders.push(Collider { bone: head, offset: [0.0, (top - hp[1]) * 0.5, 0.0], radius: ((top - hp[1]) * 0.55).max(0.07) });
@@ -190,21 +241,20 @@ pub fn add_hair(model: &mut Model3d, mask: &HairMask, page_of: impl Fn(&[f32; 3]
             o[k] = *remap.entry(i).or_insert_with(|| {
                 let (v, n) = (b_verts[i as usize], b_normals[i as usize]);
                 let p = [v[0] + n[0] * 0.003, v[1] + n[1] * 0.003, v[2] + n[2] * 0.003];
-                // the two nearest chains share the point; along the chain the bones share it by how far down it is
-                let mut near: Vec<(usize, f32)> = chains.iter().enumerate().map(|(ci, c)| (ci, (p[0] - c.x).powi(2) + (p[2] - c.z).powi(2))).collect();
+                // the two nearest strands share the point; along a strand the two bones next to the place share it
+                let mut near: Vec<(usize, f32, f32)> = joints3.iter().enumerate().map(|(ci, js)| { let (d, at) = along_chain(p, js); (ci, d, at) }).collect();
                 near.sort_by(|a, b| a.1.total_cmp(&b.1));
                 near.truncate(2);
+                let total: f32 = near.iter().map(|n| 1.0 / (n.1 * n.1 + 1e-4)).sum();
                 let mut acc: Vec<(usize, f32)> = Vec::new();
-                let total: f32 = near.iter().map(|n| 1.0 / (n.1 + 1e-4)).sum();
-                for (ci, d2) in near {
-                    let c = &chains[ci];
-                    let share = 1.0 / (d2 + 1e-4) / total;
-                    let f = ((c.top - p[1]) / c.len).clamp(0.0, 1.0);
-                    let slot = (0..3).find(|k| f <= REACH[k + 1]).unwrap_or(2);
-                    let t = ((f - REACH[slot]) / (REACH[slot + 1] - REACH[slot])).clamp(0.0, 1.0);
-                    let lower = c.bones[slot];
-                    let upper = if slot == 0 { head } else { c.bones[slot - 1] };
-                    // a point between two bones follows the upper one less and the lower one more as it goes down
+                for (ci, d, at) in near {
+                    let share = 1.0 / (d * d + 1e-4) / total;
+                    let last = bone_of[ci].len();
+                    let seg = (at.floor() as usize).min(last.saturating_sub(1));
+                    let t = (at - seg as f32).clamp(0.0, 1.0);
+                    // joint `seg` is the bone before (the head for the first), joint `seg + 1` the bone after
+                    let upper = if seg == 0 { head } else { bone_of[ci][seg - 1] };
+                    let lower = bone_of[ci][seg.min(last - 1)];
                     for (b, w) in [(upper, 1.0 - t), (lower, t)] {
                         match acc.iter_mut().find(|a| a.0 == b) {
                             Some(a) => a.1 += w * share,

@@ -931,3 +931,48 @@ fn painting_on_the_3d_character_is_kept_with_the_project_and_survives_making_it_
     let distinct: std::collections::HashSet<[u8; 4]> = plain.parts[0].image.pixels().map(|p| p.0).collect();
     assert!(distinct.len() < 40, "a plain texture has hardly any colours: {}", distinct.len());
 }
+
+/// The hair editing on the real Midlander (when the AI files are on this computer): strands moved, added and deleted, and the hair
+/// corrected with the hair brush.
+#[test]
+fn hair_strands_and_the_hair_brush_edit_the_hair_of_the_midlander() {
+    use super::hairedit::{HairChain, HairDab};
+    use super::model::build_any;
+    use super::shape::Shape;
+    let dir = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("SeviathAI/jobs/midlander");
+    let (Ok(png), Ok(glb)) = (std::fs::read(dir.join("original.png")), std::fs::read(dir.join("shape.glb"))) else { return };
+    let img = image::load_from_memory(&png).unwrap().to_rgba8();
+    let mut d = uncut_doc(&img);
+    let ids: Vec<crate::doc::LayerId> = d.layers.iter().map(|l| l.id).collect();
+    let mut rig = Rig::default();
+    crate::rig::uncut::auto_rig(&mut rig, &d, &ids, 0.5).unwrap();
+    d.rig = std::sync::Arc::new(rig);
+    let opt = Options { max_texture: 1024, shape: Some(std::sync::Arc::new(Shape::from_glb(&glb).unwrap())), ..Default::default() };
+    let first = build_any(&d, &opt).unwrap();
+    let hair_tris = |m: &super::model::Model3d| m.parts.iter().find(|p| p.name == "Hair").map(|p| p.tris.len()).unwrap_or(0);
+    assert!(first.hair_chains.len() >= 6, "the app made strands: {}", first.hair_chains.len());
+    let n0 = first.springs.len();
+    assert_eq!(n0, first.hair_chains.len());
+    // start from the app's strands, move one joint of the first strand, add a strand and delete another
+    let mut chains = first.hair_chains.clone();
+    let moved_from = chains[0].joints[2];
+    chains[0].joints[2][0] += 40.0;
+    let removed = chains.remove(1);
+    chains.push(HairChain { joints: vec![[removed.joints[0][0], removed.joints[0][1]], [removed.joints[0][0], removed.joints[0][1] + 60.0], [removed.joints[0][0], removed.joints[0][1] + 140.0]], layer: 1.0, stiffness: 0.9, ..Default::default() });
+    std::sync::Arc::make_mut(&mut d.rig).skin.as_mut().unwrap().hair.chains = chains.clone();
+    let edited = build_any(&d, &opt).unwrap();
+    assert_eq!(edited.springs.len(), chains.len(), "one spring for every strand");
+    assert!(edited.springs.iter().any(|s| (s.stiffness - 0.9).abs() < 1e-6), "the stiffness of the new strand");
+    // the bone of the moved joint is where it was put
+    let b = edited.bones.iter().find(|b| b.name == "hair0_2").unwrap();
+    let plain = first.bones.iter().find(|b| b.name == "hair0_2").unwrap();
+    assert!(b.pos[0] > plain.pos[0] + 0.01, "the joint moved to the right: {:?} {:?} (was at page {:?})", b.pos, plain.pos, moved_from);
+    validate(&export(&edited, Format::Vrm1).unwrap()).unwrap();
+    // the hair brush: take away hair over a patch on the top of the head, and the hair part has fewer triangles
+    std::sync::Arc::make_mut(&mut d.rig).skin.as_mut().unwrap().hair.chains.clear();
+    let top = first.hair_chains.iter().flat_map(|c| c.joints.iter()).map(|j| j[1]).fold(f32::MAX, f32::min);
+    let mid = first.hair_chains.iter().flat_map(|c| c.joints.iter()).map(|j| j[0]).sum::<f32>() / first.hair_chains.iter().map(|c| c.joints.len()).sum::<usize>() as f32;
+    std::sync::Arc::make_mut(&mut d.rig).skin.as_mut().unwrap().hair.dabs.push(HairDab { at: [mid, top + 60.0], radius: 90.0, add: false });
+    let trimmed = build_any(&d, &opt).unwrap();
+    assert!(hair_tris(&trimmed) < hair_tris(&first), "{} {}", hair_tris(&trimmed), hair_tris(&first));
+}

@@ -5,6 +5,7 @@
 
 mod actions;
 mod ai;
+mod aisetup;
 mod app;
 mod blend;
 mod brush;

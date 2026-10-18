@@ -3284,3 +3284,62 @@ fn uncut_joints_screens() {
     h.run_steps(5);
     save(&mut h, "rig_joints");
 }
+
+/// The hair editor and the texture parts on the real Midlander (when the AI files are on this computer).
+#[test]
+fn hair_and_texture_parts_screens() {
+    use egui_kittest::kittest::Queryable;
+    let dir = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("SeviathAI/jobs/midlander");
+    let (Ok(png), Ok(glb)) = (std::fs::read(dir.join("original.png")), std::fs::read(dir.join("shape.glb"))) else { return };
+    let _gpu = lock_gpu();
+    let img = image::load_from_memory(&png).unwrap().to_rgba8();
+    let mut doc = crate::vrm::tests_build::uncut_doc(&img);
+    let ids: Vec<crate::doc::LayerId> = doc.layers.iter().map(|l| l.id).collect();
+    let mut rig = crate::rig::Rig::default();
+    crate::rig::uncut::auto_rig(&mut rig, &doc, &ids, 0.5).unwrap();
+    doc.rig = std::sync::Arc::new(rig);
+    let mut h = Harness::builder().with_size([1440.0, 2600.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    h.state_mut().test_game().shape = Some(std::sync::Arc::new(crate::vrm::shape::Shape::from_glb(&glb).unwrap()));
+    h.state_mut().test_game_make();
+    h.run_steps(6);
+    let msg = h.state_mut().test_game().message.clone();
+    assert!(h.state_mut().test_game().model.is_some(), "{msg:?}");
+    h.state_mut().test_game().guides = true;
+    h.state_mut().test_hair_edit(true);
+    h.run_steps(6);
+    save(&mut h, "game_4_hair_and_texture_parts");
+    let strands = h.state().draw_mut_ref().doc.rig.skin.as_ref().unwrap().hair.chains.len();
+    assert!(strands >= 6, "the strands of the app are the start: {strands}");
+}
+
+/// With the AI files missing the panel says so and offers the download; the AI buttons wait.
+#[test]
+fn missing_ai_files_show_the_download_button_screens() {
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let empty = std::env::temp_dir().join(format!("seviath_noai_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&empty);
+    crate::aisetup::TEST_ROOT.with(|r| *r.borrow_mut() = Some(empty.clone()));
+    let img = crate::rig::uncut::tests::figure_image();
+    let mut doc = crate::vrm::tests_build::uncut_doc(&img);
+    let ids: Vec<crate::doc::LayerId> = doc.layers.iter().map(|l| l.id).collect();
+    let mut rig = crate::rig::Rig::default();
+    crate::rig::uncut::auto_rig(&mut rig, &doc, &ids, 0.6).unwrap();
+    doc.rig = std::sync::Arc::new(rig);
+    let mut h = Harness::builder().with_size([1440.0, 2300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    // the card is there and the download button waits for the licences
+    h.get_by_label("The AI files are missing");
+    h.get_by_label("Download the AI files");
+    assert!(!h.state_mut().test_game().setup_agree);
+    save(&mut h, "game_5_ai_files_missing");
+    crate::aisetup::TEST_ROOT.with(|r| *r.borrow_mut() = None);
+    let _ = std::fs::remove_dir_all(&empty);
+}

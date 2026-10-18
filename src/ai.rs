@@ -89,7 +89,7 @@ pub fn find_face(python: &str, page: &RgbaImage, crop: [f32; 4], backend: &str) 
 
 /// Where the Hunyuan3D code is: next to the Python environment, in the SeviathAI folder.
 pub fn hunyuan_folder() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join("SeviathAI").join("Hunyuan3D-2")
+    crate::aisetup::root().join("Hunyuan3D-2")
 }
 
 /// Make the shape of the character from the picture with Hunyuan3D 2 mini: the bytes of a GLB with the points and triangles.

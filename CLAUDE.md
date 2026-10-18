@@ -57,3 +57,5 @@ The app is **offline for now**: no accounts, no online library, no shop, no chat
 
 ## Computer limits
 The user's PC has 8 GB VRAM and can't do several heavy things at once. Screenshot tests take one GPU lock (`lock_gpu()` in `src/screens.rs`): never run GPU jobs in parallel. The whole test run takes about 3 to 4 minutes for that reason.
+
+- **FEEDBACK.md**: the user tests the app and writes bugs and ideas there. Read it at the start of every session: fix the bugs first, do the ideas that fit (a better solution than the one written is welcome, say what was done), and move handled items to its Done part.

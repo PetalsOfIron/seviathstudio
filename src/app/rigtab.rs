@@ -120,6 +120,17 @@ pub struct RigState {
     joint_before: Option<crate::history::DocState>,
     /// Clicking the face points one after the other: 0 off, 1 first eye, 2 second eye, 3 mouth (with the first eye kept here).
     pub(super) face_click: u8,
+    /// Editing the hair: on or off, the tool (0 move joints, 1 add a strand, 2 add hair with the brush, 3 take hair away), the picked
+    /// strand, the joints of the strand being made, the radius of the hair brush, the picture of the hair on the canvas, the hair the
+    /// app found (before corrections) and a change waiting to be built.
+    pub(super) hair_edit: bool,
+    pub(super) hair_tool: u8,
+    pub(super) hair_sel: Option<usize>,
+    pub(super) hair_new: Vec<[f32; 2]>,
+    pub(super) hair_r: f32,
+    pub(super) hair_tex: Option<(usize, egui::TextureHandle, [i32; 2])>,
+    pub(super) hair_base: Option<crate::vrm::hair::HairMask>,
+    pub(super) hair_dirty: bool,
     /// Picking a part of the texture again: which part, and where the circle was started on the page.
     pub(super) pick_part: Option<crate::vrm::texedit::Part>,
     pub(super) pick_from: Option<[f32; 2]>,
@@ -2489,6 +2500,10 @@ impl SeviathApp {
                     }
                 }
             }
+        }
+        // the hair: its strands and its brush
+        if self.rigs.hair_edit {
+            self.hair_canvas(ui, &resp, &p, &to_screen, &to_page, sc);
         }
         // the pieces picked again for the texture parts (drawn as amber circles), and the guide lines at the features
         if let Some(sk) = &rig.skin {

@@ -115,6 +115,8 @@ pub struct Model3d {
     /// Named places on the model (the eyes, the nose, the mouth of the texture, the nose and the chin of the shape), for the guide
     /// lines of the preview.
     pub landmarks: Vec<(String, [f32; 3])>,
+    /// The strands of the hair as the app made them (page pixels), for the user to start from when editing the hair.
+    pub hair_chains: Vec<super::hairedit::HairChain>,
 }
 
 /// The VRM humanoid bones we make: (name, parent, the bone its piece runs to).
@@ -606,7 +608,7 @@ pub fn build(doc: &Document, opt: &Options) -> Option<Model3d> {
         }
     }
     // the swinging joints and balls are in the middle of the depth too
-    let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts, bones, expressions: Vec::new(), springs, colliders, scale, landmarks: Vec::new() };
+    let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts, bones, expressions: Vec::new(), springs, colliders, scale, landmarks: Vec::new(), hair_chains: Vec::new() };
     make_expressions(&mut model, rig, &index_of_mesh, scale);
     Some(model)
 }
@@ -868,7 +870,7 @@ pub fn build_uncut(doc: &Document, opt: &Options) -> Option<Model3d> {
         weights.push(o);
     }
     let part = Part3d { name: "Body".to_string(), layer: sk.layers.first().copied().unwrap_or(0), verts, normals, uvs, tris, joints, weights, image, morphs: Vec::new() };
-    let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts: vec![part], bones, expressions: Vec::new(), springs: Vec::new(), colliders: Vec::new(), scale, landmarks: Vec::new() };
+    let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts: vec![part], bones, expressions: Vec::new(), springs: Vec::new(), colliders: Vec::new(), scale, landmarks: Vec::new(), hair_chains: Vec::new() };
     if let Some(m) = &marks {
         add_face(&mut model, m, xc, vb[3], opt.template.as_deref(), false, 0, &super::texedit::TexEdit::default());
     }
