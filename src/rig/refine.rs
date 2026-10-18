@@ -150,6 +150,39 @@ pub fn subdivide_by(verts: &[[f32; 2]], tris: &[[u32; 3]], max_edge: &dyn Fn([f3
     (v, t)
 }
 
+/// The same for points in 3D: an edge is cut in two when its length across the picture (x and y) is more than `max_edge` at its
+/// middle; the new point is half way between the two ends in all three directions.
+pub fn subdivide_xyz(verts: &[[f32; 3]], tris: &[[u32; 3]], max_edge: &dyn Fn([f32; 2]) -> f32, max_verts: usize) -> (Vec<[f32; 3]>, Vec<[u32; 3]>) {
+    let (mut v, mut t) = (verts.to_vec(), tris.to_vec());
+    for _ in 0..10 {
+        let mut cut: HashMap<(u32, u32), u32> = HashMap::new();
+        let mut order: Vec<(u32, u32)> = Vec::new();
+        for tri in &t {
+            for k in 0..3 {
+                let (a, b) = (tri[k], tri[(k + 1) % 3]);
+                let key = (a.min(b), a.max(b));
+                if cut.contains_key(&key) {
+                    continue;
+                }
+                let (pa, pb) = (v[a as usize], v[b as usize]);
+                if (pa[0] - pb[0]).hypot(pa[1] - pb[1]) > max_edge([(pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0]) && v.len() + order.len() < max_verts {
+                    cut.insert(key, (v.len() + order.len()) as u32);
+                    order.push(key);
+                }
+            }
+        }
+        if order.is_empty() {
+            break;
+        }
+        for (a, b) in &order {
+            let (pa, pb) = (v[*a as usize], v[*b as usize]);
+            v.push([(pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0, (pa[2] + pb[2]) / 2.0]);
+        }
+        t = split_tris(&t, &cut);
+    }
+    (v, t)
+}
+
 pub struct Refined {
     pub rest: Vec<[f32; 2]>,
     pub now: Vec<[f32; 2]>,

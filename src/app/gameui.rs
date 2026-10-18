@@ -28,6 +28,9 @@ pub struct GameUi {
     pub ai_python: String,
     pub ai_backend: usize,
     ai_job: Option<std::sync::mpsc::Receiver<Result<crate::vrm::face::FaceMarks, String>>>,
+    /// The shape an AI made of the picture (the character is built on it), and the job that makes it.
+    pub shape: Option<std::sync::Arc<crate::vrm::shape::Shape>>,
+    shape_job: Option<std::sync::mpsc::Receiver<Result<Vec<u8>, String>>>,
     tex: Option<((i32, Option<String>, u64), egui::TextureHandle)>,
     /// How many times the model was made (so the preview picture knows to change).
     made: u64,
@@ -35,7 +38,7 @@ pub struct GameUi {
 
 impl Default for GameUi {
     fn default() -> Self {
-        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, expr: None, model: None, message: None, template: None, ai_python: default_python(), ai_backend: 0, ai_job: None, tex: None, made: 0 }
+        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, expr: None, model: None, message: None, template: None, ai_python: default_python(), ai_backend: 0, ai_job: None, shape: None, shape_job: None, tex: None, made: 0 }
     }
 }
 
@@ -43,7 +46,7 @@ impl SeviathApp {
     fn game_options(&self) -> Options {
         let g = &self.rigs.game;
         let name = if g.name.trim().is_empty() { self.files.name.clone() } else { g.name.clone() };
-        Options { name, author: if g.author.trim().is_empty() { "Unknown".into() } else { g.author.clone() }, height_m: g.height_m, puff: g.puff, template: g.template.as_ref().map(|t| t.1.clone()), ..Default::default() }
+        Options { name, author: if g.author.trim().is_empty() { "Unknown".into() } else { g.author.clone() }, height_m: g.height_m, puff: g.puff, template: g.template.as_ref().map(|t| t.1.clone()), shape: g.shape.clone(), ..Default::default() }
     }
 
     /// Make the 3D character from the document and its rig.
@@ -102,6 +105,56 @@ impl SeviathApp {
                 Err(e) => format!("Could not save the file: {e}"),
             });
         }
+    }
+
+    /// Make the 3D shape of the character with an AI helper (Hunyuan3D 2 mini), in the background. The character is then built on
+    /// that shape (the drawing is laid on it) instead of on a card.
+    fn shape_ai_row(&mut self, ui: &mut Ui) {
+        if let Some(rx) = &self.rigs.game.shape_job {
+            match rx.try_recv() {
+                Ok(Ok(bytes)) => {
+                    self.rigs.game.shape_job = None;
+                    self.rigs.game.message = Some(match crate::vrm::shape::Shape::from_glb(&bytes) {
+                        Ok(sh) => {
+                            let (v, t) = (sh.verts.len(), sh.tris.len());
+                            self.rigs.game.shape = Some(std::sync::Arc::new(sh));
+                            self.rigs.game.model = None;
+                            format!("The AI made a 3D shape ({v} points, {t} triangles). Make the 3D character to put your drawing on it.")
+                        }
+                        Err(e) => format!("The AI's shape could not be read: {e}"),
+                    });
+                }
+                Ok(Err(e)) => {
+                    self.rigs.game.shape_job = None;
+                    self.rigs.game.message = Some(format!("The AI could not make the shape: {e}"));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(500)),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.rigs.game.shape_job = None,
+            }
+        }
+        let busy = self.rigs.game.shape_job.is_some();
+        ui.horizontal_wrapped(|ui| {
+            let label = if busy { "Making the shape..." } else { "Make the 3D shape with AI" };
+            if ui.add_enabled(!busy, egui::Button::new(label)).on_hover_text("Hunyuan3D 2 mini makes a 3D shape of the whole character from the picture (about a minute or two on the graphics card, one job at a time). Your drawing is then laid on it. It needs the AI packages (see the README).").clicked() {
+                let page = self.draw.doc.rig.skin.as_ref().and_then(|sk| crate::rig::uncut::composite(&self.draw.doc, &sk.layers)).map(|p| crate::rig::uncut::cut_out_background(&p));
+                match page {
+                    Some(page) => {
+                        let python = self.rigs.game.ai_python.clone();
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(crate::ai::make_shape(&python, &page, true));
+                        });
+                        self.rigs.game.shape_job = Some(rx);
+                        self.rigs.game.message = Some("The AI is making the 3D shape. The first run downloads the model; after that it takes a minute or two.".into());
+                    }
+                    None => self.rigs.game.message = Some("Rig the whole picture first (Auto-rig), then the shape can be made.".into()),
+                }
+            }
+            if self.rigs.game.shape.is_some() && ui.small_button("Use the card instead").on_hover_text("Forget the AI shape: the character is a round card made from the drawing").clicked() {
+                self.rigs.game.shape = None;
+                self.rigs.game.model = None;
+            }
+        });
     }
 
     /// Find the face with an AI helper (MediaPipe for real faces, Grounding DINO for drawings), in the background.
@@ -183,6 +236,7 @@ impl SeviathApp {
             });
         }
         if self.draw.doc.rig.skin.is_some() {
+            self.shape_ai_row(ui);
             self.face_ai_row(ui);
             ui.horizontal_wrapped(|ui| {
                 if widgets::chip(ui, "Set the face", self.rigs.face_edit).on_hover_text("Shows the eyes and the mouth on the picture: drag them into place so the blink, the smile and the mouth move the right parts").clicked() {

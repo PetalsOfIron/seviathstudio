@@ -32,11 +32,13 @@ pub struct Options {
     pub face: bool,
     /// Face shapes taken from a real model (see `template.rs`); the built-in shapes fill in what it does not give.
     pub template: Option<std::sync::Arc<super::template::Template>>,
+    /// A shape an AI made of the drawing: the character is built on it instead of on a card (see `shape.rs`).
+    pub shape: Option<std::sync::Arc<super::shape::Shape>>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { name: "Character".into(), author: "Unknown".into(), height_m: 1.6, puff: 1.0, layer_gap: 0.003, max_texture: 2048, fingers: true, face: true, template: None }
+        Self { name: "Character".into(), author: "Unknown".into(), height_m: 1.6, puff: 1.0, layer_gap: 0.003, max_texture: 2048, fingers: true, face: true, template: None, shape: None }
     }
 }
 
@@ -248,7 +250,7 @@ impl HeightMap {
     }
 }
 
-fn seg_dist(p: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
+pub(super) fn seg_dist(p: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
     let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
     let l2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
     let t = if l2 < 1e-12 { 0.0 } else { (((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1] + (p[2] - a[2]) * ab[2]) / l2).clamp(0.0, 1.0) };
@@ -307,7 +309,7 @@ fn edge_distance(verts: &[[f32; 2]], tris: &[[u32; 3]]) -> Vec<f32> {
 }
 
 /// Smooth normals from the triangles.
-fn normals_of(verts: &[[f32; 3]], tris: &[[u32; 3]]) -> Vec<[f32; 3]> {
+pub(super) fn normals_of(verts: &[[f32; 3]], tris: &[[u32; 3]]) -> Vec<[f32; 3]> {
     let mut n = vec![[0.0f32; 3]; verts.len()];
     for t in tris {
         let (a, b, c) = (verts[t[0] as usize], verts[t[1] as usize], verts[t[2] as usize]);
@@ -608,6 +610,8 @@ pub fn build_any(doc: &Document, opt: &Options) -> Option<Model3d> {
     let uncut = doc.rig.skin.as_ref().is_some_and(|s| s.bones.len() >= 5 && !s.verts.is_empty());
     if cut {
         build(doc, opt)
+    } else if uncut && opt.shape.is_some() {
+        super::shape::build_from_shape(doc, opt.shape.as_ref().unwrap(), opt)
     } else if uncut {
         build_uncut(doc, opt)
     } else {
@@ -615,9 +619,20 @@ pub fn build_any(doc: &Document, opt: &Options) -> Option<Model3d> {
     }
 }
 
-/// A 3D character from the uncut picture: its mesh is one round card, the bones of the skin are the skeleton, and the
-/// painted weights are the skin weights.
-pub fn build_uncut(doc: &Document, opt: &Options) -> Option<Model3d> {
+/// What the skeleton of an uncut figure gives, for a mesh made from the drawing or one made by an AI: the cut-out page, the
+/// size of the figure on it, and the bones (with the fingers) in the model's space.
+pub struct UncutSetup {
+    pub page: RgbaImage,
+    pub vb: [f32; 4],
+    pub height_px: f32,
+    pub scale: f32,
+    pub xc: f32,
+    pub bones: Vec<Bone>,
+    pub slot: HashMap<String, usize>,
+    pub frames: [Option<super::hands::Frame>; 2],
+}
+
+pub fn uncut_setup(doc: &Document, opt: &Options) -> Option<UncutSetup> {
     let rig = &*doc.rig;
     let sk = rig.skin.as_ref()?;
     let page = crate::rig::uncut::cut_out_background(&crate::rig::uncut::composite(doc, &sk.layers)?);
@@ -698,6 +713,16 @@ pub fn build_uncut(doc: &Document, opt: &Options) -> Option<Model3d> {
             _ => [bones[i].pos[0], bones[i].pos[1] - 0.02, bones[i].pos[2]],
         };
     }
+    Some(UncutSetup { page, vb, height_px, scale, xc, bones, slot, frames })
+}
+
+/// A 3D character from the uncut picture: its mesh is one round card, the bones of the skin are the skeleton, and the
+/// painted weights are the skin weights.
+pub fn build_uncut(doc: &Document, opt: &Options) -> Option<Model3d> {
+    let UncutSetup { page, vb, height_px, scale, xc, bones, slot, frames } = uncut_setup(doc, opt)?;
+    let rig = &*doc.rig;
+    let sk = rig.skin.as_ref()?;
+    let to3 = |p: [f32; 2], z: f32| -> [f32; 3] { [(p[0] - xc) * scale, (vb[3] - p[1]) * scale, z] };
     // the picture: the part of the page the mesh covers
     let (cx0, cy0) = ((vb[0].floor() as i64 - 2).max(0) as u32, (vb[1].floor() as i64 - 2).max(0) as u32);
     let (cx1, cy1) = (((vb[2].ceil() as u32) + 2).min(page.width()), ((vb[3].ceil() as u32) + 2).min(page.height()));
@@ -748,44 +773,7 @@ pub fn build_uncut(doc: &Document, opt: &Options) -> Option<Model3d> {
         .collect();
     let mut raw: Vec<Vec<(usize, f32)>> = Vec::with_capacity(verts.len());
     for (v, p3) in mesh_v.iter().zip(&verts) {
-        let w = sk.weights_at(v[0], v[1]);
-        let mut acc: Vec<(usize, f32)> = Vec::new();
-        for (sb, wb) in w.iter().enumerate() {
-            if *wb > 0.001 {
-                if let Some(mb) = ix_of[sb] {
-                    match acc.iter_mut().find(|a| a.0 == mb) {
-                        Some(a) => a.1 += wb,
-                        None => acc.push((mb, *wb)),
-                    }
-                }
-            }
-        }
-        let sum: f32 = acc.iter().map(|a| a.1).sum();
-        if sum < 0.999 {
-            let near = (0..bones.len()).min_by(|a, b| seg_dist(*p3, bones[*a].pos, bones[*a].tip).total_cmp(&seg_dist(*p3, bones[*b].pos, bones[*b].tip))).unwrap_or(0);
-            match acc.iter_mut().find(|a| a.0 == near) {
-                Some(a) => a.1 += 1.0 - sum,
-                None => acc.push((near, 1.0 - sum)),
-            }
-        }
-        // a hand's weight is shared between the palm and the fingers
-        for (si, left) in [true, false].iter().enumerate() {
-            let hand = if *left { "leftHand" } else { "rightHand" };
-            if let (Some(fr), Some(&hi)) = (&frames[si], slot.get(hand)) {
-                if let Some(pos) = acc.iter().position(|a| a.0 == hi) {
-                    let wh = acc[pos].1;
-                    acc.remove(pos);
-                    for (n, share) in fr.split([p3[0], p3[1]], *left) {
-                        if let Some(&bi) = slot.get(n.as_str()) {
-                            match acc.iter_mut().find(|a| a.0 == bi) {
-                                Some(a) => a.1 += wh * share,
-                                None => acc.push((bi, wh * share)),
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let acc = point_weights(rig, sk, &bones, &slot, &frames, &ix_of, *v, *p3);
         raw.push(acc);
     }
     // The figure is one picture, so an arm and the chest next to it are one piece of mesh and would stretch across the seam
@@ -875,7 +863,7 @@ pub fn build_uncut(doc: &Document, opt: &Options) -> Option<Model3d> {
     let part = Part3d { name: "Body".to_string(), layer: sk.layers.first().copied().unwrap_or(0), verts, normals, uvs, tris, joints, weights, image, morphs: Vec::new() };
     let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts: vec![part], bones, expressions: Vec::new(), springs: Vec::new(), colliders: Vec::new(), scale };
     if let Some(m) = &marks {
-        add_face(&mut model, m, xc, vb[3], opt.template.as_deref());
+        add_face(&mut model, m, xc, vb[3], opt.template.as_deref(), false);
     }
     normalize_to_t_pose(&mut model);
     Some(model)
@@ -915,11 +903,13 @@ pub fn head_box(rig: &Rig) -> Option<[f32; 4]> {
 /// Give a figure's face its blend shapes: every expression of `face::recipes` as a shape of the body, and a dark shape inside
 /// the mouth (a part of its own, flat until a vowel opens it). The page maps to the model by `x = (px - xc) * scale`,
 /// `y = (bottom - py) * scale`.
-fn add_face(model: &mut Model3d, m: &super::face::FaceMarks, xc: f32, bottom: f32, template: Option<&super::template::Template>) {
+pub(super) fn add_face(model: &mut Model3d, m: &super::face::FaceMarks, xc: f32, bottom: f32, template: Option<&super::template::Template>, front_only: bool) {
     use super::face;
     let s = model.scale;
     let to3 = |p: [f32; 2]| -> [f32; 3] { [(p[0] - xc) * s, (bottom - p[1]) * s, 0.0] };
     let body: Vec<[f32; 2]> = model.parts[0].verts.iter().map(|v| [v[0] / s + xc, bottom - v[1] / s]).collect();
+    // on a 3D shape only the front of the face moves, not the back of the head behind it
+    let facing: Vec<bool> = model.parts[0].normals.iter().map(|n| !front_only || n[2] > 0.25).collect();
     // what a real model's face does to every point of the picture, for all its shapes at once
     let fields: Vec<Option<Vec<[f32; 2]>>> = match template {
         Some(t) => body.iter().map(|p| t.field(m, *p)).collect(),
@@ -945,6 +935,7 @@ fn add_face(model: &mut Model3d, m: &super::face::FaceMarks, xc: f32, bottom: f3
                     .collect()
             }
         };
+        let deltas: Vec<[f32; 3]> = deltas.into_iter().zip(&facing).map(|(d, f)| if *f { d } else { [0.0; 3] }).collect();
         if deltas.iter().all(|d| d[0] == 0.0 && d[1] == 0.0) {
             continue;
         }
@@ -995,8 +986,54 @@ fn add_face(model: &mut Model3d, m: &super::face::FaceMarks, xc: f32, bottom: f3
     model.parts.push(mouth);
 }
 
+/// The skin weights of one point of the model: `v` is where it is on the picture (page pixels), `p3` where it is in the model.
+/// The weights painted on the skin are put on the bones of the model; what no bone claims goes to the nearest bone; a hand's
+/// weight is shared between the palm and the fingers.
+pub fn point_weights(rig: &Rig, sk: &crate::rig::skin::Skin, bones: &[Bone], slot: &HashMap<String, usize>, frames: &[Option<super::hands::Frame>; 2], ix_of: &[Option<usize>], v: [f32; 2], p3: [f32; 3]) -> Vec<(usize, f32)> {
+    let _ = rig;
+    let w = sk.weights_at(v[0], v[1]);
+        let mut acc: Vec<(usize, f32)> = Vec::new();
+        for (sb, wb) in w.iter().enumerate() {
+            if *wb > 0.001 {
+                if let Some(mb) = ix_of[sb] {
+                    match acc.iter_mut().find(|a| a.0 == mb) {
+                        Some(a) => a.1 += wb,
+                        None => acc.push((mb, *wb)),
+                    }
+                }
+            }
+        }
+        let sum: f32 = acc.iter().map(|a| a.1).sum();
+        if sum < 0.999 {
+            let near = (0..bones.len()).min_by(|a, b| seg_dist(p3, bones[*a].pos, bones[*a].tip).total_cmp(&seg_dist(p3, bones[*b].pos, bones[*b].tip))).unwrap_or(0);
+            match acc.iter_mut().find(|a| a.0 == near) {
+                Some(a) => a.1 += 1.0 - sum,
+                None => acc.push((near, 1.0 - sum)),
+            }
+        }
+        // a hand's weight is shared between the palm and the fingers
+        for (si, left) in [true, false].iter().enumerate() {
+            let hand = if *left { "leftHand" } else { "rightHand" };
+            if let (Some(fr), Some(&hi)) = (&frames[si], slot.get(hand)) {
+                if let Some(pos) = acc.iter().position(|a| a.0 == hi) {
+                    let wh = acc[pos].1;
+                    acc.remove(pos);
+                    for (n, share) in fr.split([p3[0], p3[1]], *left) {
+                        if let Some(&bi) = slot.get(n.as_str()) {
+                            match acc.iter_mut().find(|a| a.0 == bi) {
+                                Some(a) => a.1 += wh * share,
+                                None => acc.push((bi, wh * share)),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    acc
+}
+
 /// Which piece of the body a bone belongs to: 0 the body, 1 the left arm, 2 the right arm, 3 the left leg, 4 the right leg.
-fn limb_group(name: &str) -> usize {
+pub(super) fn limb_group(name: &str) -> usize {
     let finger = ["Thumb", "Index", "Middle", "Ring", "Little"].iter().any(|f| name.contains(f));
     if finger {
         return if name.starts_with("left") { 1 } else { 2 };

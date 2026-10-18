@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::vrm::face::FaceMarks;
 
 const FACE_SCRIPT: &str = include_str!("../tools/ai/face_points.py");
+const SHAPE_SCRIPT: &str = include_str!("../tools/ai/shape3d.py");
 
 /// Only one helper at a time.
 static BUSY: Mutex<()> = Mutex::new(());
@@ -84,6 +85,34 @@ pub fn find_face(python: &str, page: &RgbaImage, crop: [f32; 4], backend: &str) 
     ];
     let v = run_json(python, &script, &args)?;
     parse_face(&v)
+}
+
+/// Where the Hunyuan3D code is: next to the Python environment, in the SeviathAI folder.
+pub fn hunyuan_folder() -> PathBuf {
+    dirs::home_dir().unwrap_or_default().join("SeviathAI").join("Hunyuan3D-2")
+}
+
+/// Make the shape of the character from the picture with Hunyuan3D 2 mini: the bytes of a GLB with the points and triangles.
+/// It takes a minute or two on the graphics card, and the first time it downloads the model.
+pub fn make_shape(python: &str, page: &RgbaImage, turbo: bool) -> Result<Vec<u8>, String> {
+    let repo = hunyuan_folder();
+    if !repo.join("hy3dgen").exists() {
+        return Err(format!("The Hunyuan3D code is not in {} (clone https://github.com/Tencent/Hunyuan3D-2 there).", repo.display()));
+    }
+    let dir = helper_folder();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Could not make the helper folder: {e}"))?;
+    let script = dir.join("shape3d.py");
+    std::fs::write(&script, SHAPE_SCRIPT).map_err(|e| format!("Could not write the helper: {e}"))?;
+    let png = dir.join("shape_input.png");
+    page.save(&png).map_err(|e| format!("Could not write the picture: {e}"))?;
+    let out = dir.join("shape.glb");
+    let _ = std::fs::remove_file(&out);
+    let mut args = vec!["--image".to_string(), png.to_string_lossy().to_string(), "--out".to_string(), out.to_string_lossy().to_string(), "--repo".to_string(), repo.to_string_lossy().to_string()];
+    if turbo {
+        args.push("--turbo".into());
+    }
+    run_json(python, &script, &args)?;
+    std::fs::read(&out).map_err(|e| format!("The shape file was not made: {e}"))
 }
 
 #[cfg(test)]
