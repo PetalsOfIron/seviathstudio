@@ -9,6 +9,7 @@ pub mod check;
 pub mod gizmo;
 pub mod mesh;
 pub mod physics;
+pub mod refine;
 pub mod raster;
 pub mod skin;
 
@@ -244,6 +245,8 @@ pub struct Rig {
     pub physics: Vec<physics::PhysChain>,
     pub colliders: Vec<physics::Collider>,
     pub world: physics::World,
+    /// Warp changers that bend smoothly (a curve through the control points) instead of in straight cells.
+    pub smooth: Vec<Id>,
     next_id: Id,
 }
 
@@ -652,6 +655,10 @@ impl Rig {
                 let v = ((p[1] - rect[1]) / h * *rows as f32).clamp(0.0, *rows as f32);
                 let (i, j) = ((u.floor() as u32).min(cols - 1), (v.floor() as u32).min(rows - 1));
                 let (fu, fv) = (u - i as f32, v - j as f32);
+                if self.smooth.contains(&c.id) && off.len() == ((cols + 1) * (rows + 1)) as usize {
+                    let d = refine::smooth_shift(off, *cols, *rows, u, v);
+                    return [p[0] + d[0], p[1] + d[1]];
+                }
                 let idx = |c2: u32, r2: u32| (r2 * (cols + 1) + c2) as usize;
                 let (a, b2, c3, d) = (off[idx(i, j)], off[idx(i + 1, j)], off[idx(i, j + 1)], off[idx(i + 1, j + 1)]);
                 let mix = |k: usize| (a[k] * (1.0 - fu) + b2[k] * fu) * (1.0 - fv) + (c3[k] * (1.0 - fu) + d[k] * fu) * fv;
@@ -921,6 +928,12 @@ impl Rig {
                 }
                 c.name = c.name.chars().filter(|c| !c.is_control()).take(40).collect();
             }
+        }
+        {
+            let warps: HashSet<Id> = self.changers.iter().filter(|c| matches!(c.kind, Kind::Warp { .. })).map(|c| c.id).collect();
+            self.smooth.retain(|id| warps.contains(id));
+            self.smooth.sort_unstable();
+            self.smooth.dedup();
         }
         {
             let lines: HashSet<Id> = self.changers.iter().filter(|c| matches!(c.kind, Kind::Line { .. })).map(|c| c.id).collect();

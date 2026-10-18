@@ -75,6 +75,10 @@ impl RigState {
 
 #[derive(Default)]
 pub struct RigState {
+    /// Add triangles where a mesh bends, so the picture stays sharp.
+    pub hq: bool,
+    /// Where the picture is being pulled (page position of the grab).
+    pull: Option<[f32; 2]>,
     pub phys: super::physicsui::PhysUi,
     pub selected: Vec<LayerId>,
     anchor: Option<LayerId>,
@@ -203,6 +207,12 @@ impl SeviathApp {
         self.rig_edit("Rig edit", 0.0, f);
     }
 
+    /// How many triangles a layer is drawn with now (for the tests).
+    #[cfg(test)]
+    pub fn test_tris(&mut self, layer: LayerId) -> usize {
+        self.rig_items().iter().find(|i| i.0 == layer).map(|i| i.4.len()).unwrap_or(0)
+    }
+
     /// How far the first mesh's vertices are from where they were (page pixels), for the tests.
     #[cfg(test)]
     pub fn test_moved(&mut self, layer: LayerId) -> f32 {
@@ -271,7 +281,12 @@ impl SeviathApp {
             match rig.meshes.iter().position(|m| m.layer == id) {
                 Some(mi) => {
                     let m = &rig.meshes[mi];
-                    out.push((id, tex, m.verts.clone(), all[mi].clone(), m.tris.clone(), op));
+                    if self.rigs.hq && rig::refine::bends(&rig, m) {
+                        let r = rig::refine::refine(&rig, m, &all[mi], &pose, 0.35, 5.0);
+                        out.push((id, tex, r.rest, r.now, r.tris, op));
+                    } else {
+                        out.push((id, tex, m.verts.clone(), all[mi].clone(), m.tris.clone(), op));
+                    }
                 }
                 None => {
                     // no mesh: stays where it is
@@ -292,6 +307,7 @@ impl SeviathApp {
         }
         key.push(self.rigs.weight_gen);
         key.push((self.rigs.mode == Mode::Weight) as u64);
+        key.push(self.rigs.hq as u64);
         let mut vals: Vec<(Id, u32)> = self.rigs.values.0.iter().map(|(k, v)| (*k, v.to_bits())).collect();
         vals.sort();
         for (k, v) in vals {
@@ -454,6 +470,7 @@ impl SeviathApp {
             self.rigs.tag_pick = Some(parts::Part::ArmL);
             self.rigs.new_param = ("Head tilt".into(), -30.0, 30.0);
             self.rigs.zoom = 1.0;
+            self.rigs.hq = true;
             self.rigs.inited = true;
         }
     }
@@ -598,6 +615,7 @@ impl SeviathApp {
                 self.rigs.pro = true;
             }
         });
+        ui.checkbox(&mut self.rigs.hq, "Sharp curves").on_hover_text("Adds triangles where a part bends, so the picture stays sharp. Turn it off if the picture is slow to move.");
         self.rig_auto_section(ui, now);
         self.rig_quality_section(ui, now);
         self.rig_pose_section(ui, now);
@@ -1111,6 +1129,7 @@ impl SeviathApp {
                     let selc = sel.clone();
                     self.rig_edit("New Warp changer", now, |r| {
                         let id = r.add_changer(&format!("Warp {n}"), Kind::Warp { rect: b, cols, rows }, None);
+                        r.smooth.push(id);
                         for m in r.meshes.iter_mut().filter(|m| selc.contains(&m.layer)) {
                             m.parent = Some(id);
                         }
@@ -1711,7 +1730,18 @@ impl SeviathApp {
             Kind::Warp { .. } | Kind::Line { .. } | Kind::Soft { .. } => {
                 let editing = self.rigs.warp_edit.as_ref().is_some_and(|w| w.0 == cid);
                 let is_soft = matches!(c.kind, Kind::Soft { .. });
-                ui.label(RichText::new(if is_soft { "Drag the dot on the picture, set how much it grows, then save the shape." } else { "Drag the points on the picture, then save the shape at this slider value." }).size(11.5).color(TEXT_DIM));
+                if matches!(c.kind, Kind::Warp { .. }) {
+                    let mut smooth = rig.smooth.contains(&cid);
+                    if ui.checkbox(&mut smooth, "Smooth curves").on_hover_text("Bends in a smooth curve through the points instead of straight cells. Live2D models are opened with this off, so they look like the original.").changed() {
+                        self.rig_edit("Smooth curves", now, |r| {
+                            r.smooth.retain(|x| *x != cid);
+                            if smooth {
+                                r.smooth.push(cid);
+                            }
+                        });
+                    }
+                }
+                ui.label(RichText::new(if is_soft { "Drag the dot on the picture, set how much it grows, then save the shape." } else { "Drag the points, or the picture itself, then save the shape at this slider value." }).size(11.5).color(TEXT_DIM));
                 if editing && is_soft {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Grows by").size(12.0).color(TEXT_DIM));
@@ -1915,6 +1945,28 @@ impl SeviathApp {
             if let Some(o) = off.get_mut(i) {
                 o[0] += d.x;
                 o[1] += d.y;
+            }
+        }
+        // drag the picture itself while a warp shape is being edited
+        if drag_handle.is_none() && self.rigs.mode == Mode::Look && self.rigs.gdrag.is_none() {
+            let warp = self.rigs.warp_edit.as_ref().and_then(|w| match rig.changer(w.0).map(|c| &c.kind) {
+                Some(Kind::Warp { rect, cols, rows }) => Some((*rect, *cols, *rows)),
+                _ => None,
+            });
+            if let Some((rect, cols, rows)) = warp {
+                if resp.drag_started_by(egui::PointerButton::Primary) {
+                    self.rigs.pull = ui.input(|i| i.pointer.press_origin()).filter(|q| page.contains(*q)).map(to_page);
+                }
+                if resp.dragged_by(egui::PointerButton::Primary) {
+                    if let (Some(at), Some((_, off))) = (self.rigs.pull, self.rigs.warp_edit.as_mut()) {
+                        let d = resp.drag_delta() / sc;
+                        rig::refine::pull_warp(rect, cols, rows, off, at, [d.x, d.y]);
+                        self.rigs.pull = Some([at[0] + d.x, at[1] + d.y]);
+                    }
+                }
+                if resp.drag_stopped() {
+                    self.rigs.pull = None;
+                }
             }
         }
         // the turn rings
