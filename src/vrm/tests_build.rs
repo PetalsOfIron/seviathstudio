@@ -667,3 +667,133 @@ fn face_guess_sheet() {
     let _ = std::fs::create_dir_all("target/screens");
     sheet.save(if std::env::var("SEVIATH_AI_PYTHON").is_ok() { "target/screens/face_guess_ai.png" } else { "target/screens/face_guess.png" }).unwrap();
 }
+
+/// A shape that an AI made, stood in for by the mesh of the picture with a depth.
+#[test]
+fn a_character_is_built_on_an_ai_shape_with_texture_weights_and_face_shapes() {
+    use super::model::build_any;
+    use super::shape::Shape;
+    let img = crate::rig::uncut::tests::figure_image();
+    let mut d = uncut_doc(&img);
+    let ids: Vec<crate::doc::LayerId> = d.layers.iter().map(|l| l.id).collect();
+    let mut rig = Rig::default();
+    crate::rig::uncut::auto_rig(&mut rig, &d, &ids, 0.6).unwrap();
+    d.rig = std::sync::Arc::new(rig);
+    // the stand-in: the mesh of the picture itself, given a depth, in other coordinates and size as an AI would give them
+    let sk = d.rig.skin.as_ref().unwrap();
+    let (sv, st) = crate::rig::refine::subdivide(&sk.verts, &sk.tris, 12.0, 60_000);
+    let mut verts: Vec<[f32; 3]> = Vec::new();
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    for (side, z) in [(0u32, 0.05f32), (1, -0.05)] {
+        let base = verts.len() as u32;
+        verts.extend(sv.iter().map(|v| [v[0] * 0.002 + 0.3, -v[1] * 0.002 + 1.1, z]));
+        tris.extend(st.iter().map(|t| if side == 0 { [base + t[0], base + t[2], base + t[1]] } else { [base + t[0], base + t[1], base + t[2]] }));
+    }
+    let shape = Shape { verts, tris };
+    let m = build_any(&d, &Options { name: "OnShape".into(), author: "Me".into(), shape: Some(std::sync::Arc::new(shape)), ..Default::default() }).unwrap();
+    assert_eq!(m.parts.len(), 2, "the body and the inside of the mouth");
+    let body = &m.parts[0];
+    // the same size as the character, standing on the floor
+    let top = body.verts.iter().map(|v| v[1]).fold(0.0f32, f32::max);
+    let bottom = body.verts.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
+    assert!((top - bottom - 1.6).abs() < 0.03 && bottom.abs() < 0.03, "{bottom} {top}");
+    // the texture holds the front and the mirrored back; every UV is inside it
+    assert_eq!(body.image.width() % 2, 0);
+    assert!(body.uvs.iter().all(|u| u[0] >= -0.01 && u[0] <= 1.01 && u[1] >= -0.01 && u[1] <= 1.01));
+    assert!(body.uvs.iter().any(|u| u[0] < 0.5) && body.uvs.iter().any(|u| u[0] > 0.5), "front and back");
+    assert!(body.image.pixels().all(|p| p.0[3] == 255), "no holes in the texture");
+    // weights add up to one and the arm follows the arm
+    assert!(body.weights.iter().all(|w| (w.iter().sum::<f32>() - 1.0).abs() < 1e-3));
+    let hand = m.bones.iter().position(|b| b.name == "leftHand").unwrap();
+    let hp = m.bones[hand].pos;
+    let nearest = (0..body.verts.len()).min_by(|a, b| {
+        let da = (body.verts[*a][0] - hp[0]).hypot(body.verts[*a][1] - hp[1]);
+        let db = (body.verts[*b][0] - hp[0]).hypot(body.verts[*b][1] - hp[1]);
+        da.total_cmp(&db)
+    }).unwrap();
+    let on_arm = |j: u16| m.bones[j as usize].name.starts_with("left") && ["Arm", "Hand", "Thumb", "Index", "Middle", "Ring", "Little", "Shoulder"].iter().any(|k| m.bones[j as usize].name.contains(k));
+    assert!(body.joints[nearest].iter().zip(&body.weights[nearest]).any(|(j, w)| on_arm(*j) && *w > 0.4), "{:?} {:?}", body.joints[nearest], body.weights[nearest]);
+    // the face shapes exist and only move the front
+    assert!(m.expressions.iter().any(|e| e.name == "blink") && m.expressions.iter().any(|e| e.name == "aa"));
+    let blink = m.expressions.iter().find(|e| e.name == "blink").unwrap();
+    let (pi, mi, _) = blink.binds[0];
+    assert_eq!(pi, 0);
+    let moved = (0..body.verts.len()).filter(|i| body.morphs[mi].deltas[*i][1].abs() > 1e-5).count();
+    assert!(moved > 0);
+    assert!((0..body.verts.len()).filter(|i| body.morphs[mi].deltas[*i][1].abs() > 1e-5).all(|i| body.normals[i][2] > 0.2), "the back of the head stays");
+    // saved in all three ways
+    for f in [Format::Vrm1, Format::Vrm0, Format::Glb] {
+        let bytes = export(&m, f).unwrap();
+        validate(&bytes).unwrap_or_else(|e| panic!("{f:?}: {e}"));
+    }
+}
+
+/// The real thing, when the AI files are on this computer: the Midlander drawing and the shape Hunyuan3D made of it.
+#[test]
+fn the_ai_shape_of_the_midlander_becomes_a_textured_rigged_character() {
+    use super::model::build_any;
+    use super::shape::Shape;
+    let dir = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("SeviathAI/jobs/midlander");
+    let (Ok(png), Ok(glb)) = (std::fs::read(dir.join("original.png")), std::fs::read(dir.join("shape.glb"))) else { return };
+    let img = image::load_from_memory(&png).unwrap().to_rgba8();
+    let shape = Shape::from_glb(&glb).unwrap();
+    let mut d = uncut_doc(&img);
+    let ids: Vec<crate::doc::LayerId> = d.layers.iter().map(|l| l.id).collect();
+    let mut rig = Rig::default();
+    crate::rig::uncut::auto_rig(&mut rig, &d, &ids, 0.5).unwrap();
+    if let Some(sk) = std::sync::Arc::make_mut(&mut d.rig).skin.as_mut() {
+        let _ = sk;
+    }
+    d.rig = std::sync::Arc::new(rig);
+    let emi = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Downloads/art/Finished2D3D/vrmemi/Emi1.0.vrm");
+    let template = std::fs::read(emi).ok().and_then(|b| super::template::Template::from_vrm(&b).ok()).map(std::sync::Arc::new);
+    let t0 = std::time::Instant::now();
+    let m = build_any(&d, &Options { name: "Midlander".into(), author: "test".into(), max_texture: 2048, shape: Some(std::sync::Arc::new(shape)), template, ..Default::default() }).unwrap();
+    eprintln!("built in {:?}: {} vertices, {} triangles, {} expressions", t0.elapsed(), m.parts[0].verts.len(), m.parts[0].tris.len(), m.expressions.len());
+    let out = std::path::Path::new("target/vrm/ai");
+    let _ = std::fs::create_dir_all(out);
+    for (f, name) in [(Format::Vrm1, "Midlander_ai.vrm"), (Format::Vrm0, "Midlander_ai_vrm0.vrm"), (Format::Glb, "Midlander_ai.glb")] {
+        let bytes = export(&m, f).unwrap();
+        validate(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+        std::fs::write(out.join(name), &bytes).unwrap();
+    }
+    {
+        // how clean are the weights out on the arm? points far from the body should follow one arm bone almost alone
+        let body = &m.parts[0];
+        let ua = m.bones[m.bone("rightUpperArm").unwrap()].pos;
+        let far: Vec<usize> = (0..body.verts.len()).filter(|i| body.verts[*i][0] < ua[0] - 0.25 && (body.verts[*i][1] - ua[1]).abs() < 0.12).collect();
+        let mixed = far.iter().filter(|i| body.weights[**i][0] < 0.9).count();
+        let names: std::collections::BTreeMap<String, usize> = far.iter().fold(Default::default(), |mut a, i| { *a.entry(m.bones[body.joints[*i][0] as usize].name.clone()).or_default() += 1; a });
+        eprintln!("far arm points {} mixed {} main bones {:?}", far.len(), mixed, names);
+        let arm_side = |j: u16| { let n = &m.bones[j as usize].name; n.starts_with("right") && (n.contains("Arm") || n.contains("Hand") || ["Thumb", "Index", "Middle", "Ring", "Little"].iter().any(|k| n.contains(k))) };
+        let bad: Vec<usize> = far.iter().copied().filter(|i| { let off: f32 = body.joints[*i].iter().zip(&body.weights[*i]).filter(|(j, _)| !arm_side(**j)).map(|(_, w)| *w).sum(); off > 0.1 }).collect();
+        eprintln!("far arm points that follow something other than the arm by more than 10%: {} of {}", bad.len(), far.len());
+        if let Some(i) = bad.first() { eprintln!("example {:?} {:?} -> {:?}", body.verts[*i], body.joints[*i].iter().map(|j| m.bones[*j as usize].name.clone()).collect::<Vec<_>>(), body.weights[*i]); }
+    }
+    let (w, h) = (500u32, 1000u32);
+    let mut sheet = image::RgbaImage::new(w * 4, h);
+    for (k, (yaw, pose)) in [(0.0f32, vec![]), (40.0, vec![]), (180.0, vec![]), (0.0, vec![("leftUpperArm", -70.0f32), ("rightUpperArm", 70.0), ("leftUpperLeg", -15.0), ("head", 10.0)])].iter().enumerate() {
+        let view = super::preview::render_posed(&m, *yaw, w, h, &[], pose);
+        image::imageops::replace(&mut sheet, &view, (k as u32 * w) as i64, 0);
+    }
+    sheet.save("target/screens/ai_midlander.png").unwrap();
+    // the head close up, turned
+    {
+        let (hw, hh, bw, bh) = (400u32, 480u32, 1400u32, 2800u32);
+        let top = m.parts[0].verts.iter().map(|v| v[1]).fold(0.0f32, f32::max);
+        let scale = bh as f32 * 0.9 / top;
+        let hp = m.bones[m.bone("head").unwrap()].pos;
+        let mut heads = image::RgbaImage::new(hw * 4, hh);
+        for (k, yaw) in [0.0f32, 35.0, 65.0, 90.0].iter().enumerate() {
+            let full = super::preview::render(&m, *yaw, bw, bh, &[]);
+            let (c, s2) = ((yaw.to_radians()).cos(), (yaw.to_radians()).sin());
+            let cx = bw as f32 / 2.0 + (hp[0] * c + hp[2] * s2) * scale;
+            let cy = bh as f32 * 0.95 - hp[1] * scale;
+            let x0 = ((cx - hw as f32 / 2.0).max(0.0) as u32).min(bw - hw);
+            let y0 = ((cy - hh as f32 * 0.78).max(0.0) as u32).min(bh - hh);
+            let crop = image::imageops::crop_imm(&full, x0, y0, hw, hh).to_image();
+            image::imageops::replace(&mut heads, &crop, (k as u32 * hw) as i64, 0);
+        }
+        heads.save("target/screens/ai_midlander_head.png").unwrap();
+    }
+}

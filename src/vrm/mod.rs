@@ -7,6 +7,7 @@ pub mod face;
 pub mod hands;
 pub mod model;
 pub mod preview;
+pub mod shape;
 pub mod template;
 
 #[cfg(test)]

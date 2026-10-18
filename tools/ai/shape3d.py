@@ -21,6 +21,7 @@ def main():
     ap.add_argument("--repo", required=True, help="the folder of the Hunyuan3D-2 code")
     ap.add_argument("--turbo", action="store_true", help="the faster model (fewer steps)")
     ap.add_argument("--steps", type=int, default=0)
+    ap.add_argument("--faces", type=int, default=60000, help="fewer triangles than this are kept (0 keeps all)")
     args = ap.parse_args()
     sys.path.insert(0, args.repo)
     try:
@@ -47,6 +48,17 @@ def main():
         mesh = pipe(**kw)[0]
     except Exception as e:  # out of memory, a missing download, ...
         fail("%s: %s" % (type(e).__name__, str(e)[:300]))
+    if args.faces and len(mesh.faces) > args.faces:
+        try:
+            import pymeshlab
+            ms = pymeshlab.MeshSet()
+            ms.add_mesh(pymeshlab.Mesh(vertex_matrix=mesh.vertices, face_matrix=mesh.faces))
+            ms.meshing_decimation_quadric_edge_collapse(targetfacenum=args.faces, preservenormal=True)
+            m = ms.current_mesh()
+            import trimesh
+            mesh = trimesh.Trimesh(vertices=m.vertex_matrix(), faces=m.face_matrix(), process=False)
+        except Exception as e:  # keep the full mesh when the decimation is not possible
+            sys.stderr.write("decimation skipped: %s\n" % e)
     mesh.export(args.out)
     print(json.dumps({"mesh": args.out, "vertices": int(len(mesh.vertices)), "faces": int(len(mesh.faces))}))
 
