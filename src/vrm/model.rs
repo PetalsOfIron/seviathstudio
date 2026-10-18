@@ -54,8 +54,10 @@ pub struct Part3d {
 }
 
 pub struct Bone {
-    /// The VRM humanoid name ("hips", "leftUpperArm"…).
-    pub name: &'static str,
+    /// The VRM humanoid name ("hips", "leftUpperArm"…), or the name of a joint of a swinging chain.
+    pub name: String,
+    /// Is it one of the humanoid bones (not a joint of hair or cloth)?
+    pub humanoid: bool,
     pub parent: Option<usize>,
     /// Where it is, in the model's space.
     pub pos: [f32; 3],
@@ -70,12 +72,32 @@ pub struct Expression {
     pub binds: Vec<(usize, usize, f32)>,
 }
 
+/// A chain of joints that swings by itself in a game (hair, cloth, a tail): the physics of the Physics tab.
+pub struct Spring {
+    pub name: String,
+    /// The bones of the chain, from the root out.
+    pub joints: Vec<usize>,
+    pub hit_radius: f32,
+    pub stiffness: f32,
+    pub gravity: f32,
+    pub drag: f32,
+}
+
+/// A ball on a bone that swinging chains do not go through.
+pub struct Collider {
+    pub bone: usize,
+    pub offset: [f32; 3],
+    pub radius: f32,
+}
+
 pub struct Model3d {
     pub name: String,
     pub author: String,
     pub parts: Vec<Part3d>,
     pub bones: Vec<Bone>,
     pub expressions: Vec<Expression>,
+    pub springs: Vec<Spring>,
+    pub colliders: Vec<Collider>,
     /// Metres per page pixel.
     pub scale: f32,
 }
@@ -412,11 +434,11 @@ pub fn build(doc: &Document, opt: &Options) -> Option<Model3d> {
         let p2 = joints.get(name).copied().unwrap_or(hips2);
         // the face is the middle of the depth, so the skeleton sits there
         let z = if name.ends_with("Toes") { 0.04 } else { 0.0 };
-        bones.push(Bone { name, parent: parent.and_then(|p| BONES.iter().position(|b| b.0 == p)), pos: to3(p2, z), tip: to3(p2, z) });
+        bones.push(Bone { name: name.to_string(), humanoid: true, parent: parent.and_then(|p| BONES.iter().position(|b| b.0 == p)), pos: to3(p2, z), tip: to3(p2, z) });
     }
     for i in 0..bones.len() {
         let next = BONES[i].2.and_then(|n| BONES.iter().position(|b| b.0 == n));
-        bones[i].tip = match (next, tips.get(bones[i].name)) {
+        bones[i].tip = match (next, tips.get(bones[i].name.as_str())) {
             (Some(n), _) => bones[n].pos,
             (None, Some(t)) => to3(*t, 0.0),
             // eyes and fingertips-less bones: a short piece forward
@@ -424,6 +446,48 @@ pub fn build(doc: &Document, opt: &Options) -> Option<Model3d> {
         };
     }
     let sigma = 0.035 * opt.height_m / 1.6;
+    // swinging chains from the physics, and the balls they do not go through
+    let rest_pose = rig.pose(&Values::default());
+    let mut springs: Vec<Spring> = Vec::new();
+    let mut spring_of_changer: HashMap<crate::rig::Id, Vec<usize>> = HashMap::new();
+    let humanoid_count = bones.len();
+    for pc in rig.physics.iter().filter(|c| c.enabled && c.kind != crate::rig::physics::Kind::Solid) {
+        let Some(ch) = rig.changer(pc.changer) else { continue };
+        let (pts, width) = match &ch.kind {
+            crate::rig::Kind::Line { pts, width } => (pts.clone(), *width),
+            crate::rig::Kind::Paths { paths } => match paths.get(pc.path) {
+                Some(sp) => (sp.pts.clone(), sp.width),
+                None => continue,
+            },
+            _ => continue,
+        };
+        if pts.len() < 2 || springs.len() >= 120 {
+            continue;
+        }
+        let world: Vec<[f32; 2]> = pts.iter().map(|p| rig.deform_point(&rest_pose, Some(ch.id), *p)).collect();
+        // fixed to the humanoid bone that is nearest to its root
+        let root3 = to3(world[0], 0.0);
+        let attach = (0..humanoid_count).min_by(|a, b| seg_dist(root3, bones[*a].pos, bones[*a].tip).total_cmp(&seg_dist(root3, bones[*b].pos, bones[*b].tip))).unwrap_or(0);
+        let tag: String = pc.name.chars().filter(|c| c.is_ascii_alphanumeric()).take(16).collect();
+        let first = bones.len();
+        for (i, p) in world.iter().enumerate() {
+            let here = to3(*p, 0.0);
+            let next = to3(world[(i + 1).min(world.len() - 1)], 0.0);
+            bones.push(Bone { name: format!("J_Sec_{}_{}_{}", tag, springs.len(), i), humanoid: false, parent: Some(if i == 0 { attach } else { first + i - 1 }), pos: here, tip: if i + 1 < world.len() { next } else { [here[0], here[1] - 0.02, here[2]] } });
+        }
+        let mean = (pc.stiff_root + pc.stiff_tip) / 2.0;
+        spring_of_changer.entry(pc.changer).or_default().push(springs.len());
+        springs.push(Spring { name: format!("{} {}", pc.name, springs.len() + 1), joints: (first..bones.len()).collect(), hit_radius: (width * scale * 0.4).clamp(0.01, 0.08), stiffness: 0.3 + 2.0 * mean, gravity: (pc.gravity * 0.4).clamp(0.0, 2.0), drag: pc.damping.clamp(0.05, 0.9) });
+    }
+    let mut colliders: Vec<Collider> = Vec::new();
+    for c in rig.colliders.iter().take(32) {
+        let at = to3(rig.deform_point(&rest_pose, c.changer, c.center), 0.0);
+        // a ball sits on the joint it is nearest to (the head for a face, the chest for a body)
+        let near = |b: usize| (bones[b].pos[0] - at[0]).powi(2) + (bones[b].pos[1] - at[1]).powi(2) + (bones[b].pos[2] - at[2]).powi(2);
+        let bone = (0..humanoid_count).filter(|b| !bones[*b].name.ends_with("Eye")).min_by(|a, b| near(*a).total_cmp(&near(*b))).unwrap_or(0);
+        let p = bones[bone].pos;
+        colliders.push(Collider { bone, offset: [at[0] - p[0], at[1] - p[1], 0.0], radius: (c.radius * scale).clamp(0.01, 1.0) });
+    }
     let bone_ix = |n: &str| bones.iter().position(|b| b.name == n).unwrap_or(0);
     // the parts
     let mut heights = HeightMap::new(all, (height_px / 700.0).max(1.0));
@@ -463,8 +527,26 @@ pub fn build(doc: &Document, opt: &Options) -> Option<Model3d> {
         }
         let normals = normals_of(&verts, &tris);
         let uvs: Vec<[f32; 2]> = m.verts.iter().map(|p| [(p[0] - tex.x0 as f32) / tex.w as f32, (p[1] - tex.y0 as f32) / tex.h as f32]).collect();
+        // a part that hangs from a swinging chain follows the joints of that chain
+        let chain_joints: Vec<usize> = {
+            let mut v = Vec::new();
+            let (mut cur, mut depth) = (m.parent, 0);
+            while let Some(id) = cur {
+                if let Some(sp) = spring_of_changer.get(&id) {
+                    for s in sp {
+                        v.extend(springs[*s].joints.iter().copied());
+                    }
+                }
+                cur = rig.changer(id).and_then(|c| c.parent);
+                depth += 1;
+                if depth > 16 {
+                    break;
+                }
+            }
+            v
+        };
         // which bones the part follows
-        let cands: Vec<usize> = match cat {
+        let cands: Vec<usize> = if !chain_joints.is_empty() { chain_joints.clone() } else { match cat {
             Cat::Head => vec![bone_ix("head")],
             Cat::Neck => vec![bone_ix("chest"), bone_ix("neck"), bone_ix("head")],
             Cat::Torso => vec![bone_ix("hips"), bone_ix("spine"), bone_ix("chest"), bone_ix("neck")],
@@ -480,11 +562,11 @@ pub fn build(doc: &Document, opt: &Options) -> Option<Model3d> {
                 let p = if l { "left" } else { "right" };
                 vec![bone_ix("hips"), bone_ix(&format!("{p}UpperLeg")), bone_ix(&format!("{p}LowerLeg")), bone_ix(&format!("{p}Foot"))]
             }
-            Cat::Any => (0..bones.len()).filter(|i| !bones[*i].name.ends_with("Eye")).collect(),
-        };
+            Cat::Any => (0..humanoid_count).filter(|i| !bones[*i].name.ends_with("Eye")).collect(),
+        } };
         let (mut joints_v, mut weights_v) = (Vec::with_capacity(verts.len()), Vec::with_capacity(verts.len()));
         for v in &verts {
-            let (j, w) = weights_for(*v, &cands, &bones, sigma);
+            let (j, w) = weights_for(*v, &cands, &bones, if chain_joints.is_empty() { sigma } else { sigma * 0.6 });
             joints_v.push(j);
             weights_v.push(w);
         }
@@ -505,9 +587,165 @@ pub fn build(doc: &Document, opt: &Options) -> Option<Model3d> {
             v[2] -= centre;
         }
     }
-    let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts, bones, expressions: Vec::new(), scale };
+    // the swinging joints and balls are in the middle of the depth too
+    let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts, bones, expressions: Vec::new(), springs, colliders, scale };
     make_expressions(&mut model, rig, &index_of_mesh, scale);
     Some(model)
+}
+
+/// Build from either: the cut parts when the rig has meshes, or the one uncut picture with its skeleton.
+pub fn build_any(doc: &Document, opt: &Options) -> Option<Model3d> {
+    let cut = doc.rig.meshes.iter().any(|m| doc.layers.iter().any(|l| l.id == m.layer && l.visible));
+    let uncut = doc.rig.skin.as_ref().is_some_and(|s| s.bones.len() >= 5 && !s.verts.is_empty());
+    if cut {
+        build(doc, opt)
+    } else if uncut {
+        build_uncut(doc, opt)
+    } else {
+        None
+    }
+}
+
+/// A 3D character from the uncut picture: its mesh is one round card, the bones of the skin are the skeleton, and the
+/// painted weights are the skin weights.
+pub fn build_uncut(doc: &Document, opt: &Options) -> Option<Model3d> {
+    let rig = &*doc.rig;
+    let sk = rig.skin.as_ref()?;
+    let page = crate::rig::uncut::cut_out_background(&crate::rig::uncut::composite(doc, &sk.layers)?);
+    // the bones by their humanoid names
+    let named: HashMap<String, (usize, [f32; 2], [f32; 2])> = sk
+        .bones
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| {
+            let c = rig.changer(b.changer)?;
+            match c.kind {
+                crate::rig::Kind::Rotation { pivot } => Some((c.name.clone(), (i, pivot, b.tail))),
+                _ => None,
+            }
+        })
+        .collect();
+    if !["hips", "head"].iter().all(|n| named.contains_key(*n)) {
+        return None;
+    }
+    let vb = bbox(&sk.verts);
+    let height_px = (vb[3] - vb[1]).max(1.0);
+    let scale = opt.height_m / height_px;
+    let xc = (vb[0] + vb[2]) / 2.0;
+    let to3 = |p: [f32; 2], z: f32| -> [f32; 3] { [(p[0] - xc) * scale, (vb[3] - p[1]) * scale, z] };
+    // the bones that exist
+    let mut bones: Vec<Bone> = Vec::new();
+    let mut slot: HashMap<&str, usize> = HashMap::new();
+    for (name, parent, _) in BONES {
+        let pos2 = match (named.get(name), name) {
+            (Some(b), _) => b.1,
+            (None, "leftToes") => match named.get("leftFoot") {
+                Some(f) => f.2,
+                None => continue,
+            },
+            (None, "rightToes") => match named.get("rightFoot") {
+                Some(f) => f.2,
+                None => continue,
+            },
+            (None, n) if n.ends_with("Eye") => continue,
+            // a missing limb bone sits where its parent is
+            (None, _) => match parent.and_then(|p| slot.get(p)).map(|i| bones[*i].pos) {
+                Some(p) => {
+                    slot.insert(name, bones.len());
+                    bones.push(Bone { name: name.to_string(), humanoid: true, parent: parent.and_then(|p| slot.get(p).copied()), pos: p, tip: p });
+                    continue;
+                }
+                None => continue,
+            },
+        };
+        let z = if name.ends_with("Toes") { 0.03 } else { 0.0 };
+        let p3 = to3(pos2, z);
+        slot.insert(name, bones.len());
+        bones.push(Bone { name: name.to_string(), humanoid: true, parent: parent.and_then(|p| slot.get(p).copied()), pos: p3, tip: p3 });
+    }
+    for i in 0..bones.len() {
+        let next = BONES.iter().find(|b| b.0 == bones[i].name).and_then(|b| b.2).and_then(|n| slot.get(n).copied());
+        let own = named.get(bones[i].name.as_str()).map(|b| b.2);
+        bones[i].tip = match (next, own) {
+            (Some(n), _) => bones[n].pos,
+            (None, Some(t)) => to3(t, 0.0),
+            _ => [bones[i].pos[0], bones[i].pos[1] - 0.02, bones[i].pos[2]],
+        };
+    }
+    // the picture: the part of the page the mesh covers
+    let (cx0, cy0) = ((vb[0].floor() as i64 - 2).max(0) as u32, (vb[1].floor() as i64 - 2).max(0) as u32);
+    let (cx1, cy1) = (((vb[2].ceil() as u32) + 2).min(page.width()), ((vb[3].ceil() as u32) + 2).min(page.height()));
+    if cx1 <= cx0 + 2 || cy1 <= cy0 + 2 {
+        return None;
+    }
+    let crop = image::imageops::crop_imm(&page, cx0, cy0, cx1 - cx0, cy1 - cy0).to_image();
+    let (tw, th) = (crop.width() as f32, crop.height() as f32);
+    let big = crop.width().max(crop.height());
+    let image = if big > opt.max_texture {
+        let k = opt.max_texture as f32 / big as f32;
+        image::imageops::resize(&crop, ((tw * k).round() as u32).max(1), ((th * k).round() as u32).max(1), image::imageops::FilterType::Triangle)
+    } else {
+        crop
+    };
+    // a finer mesh, so it bends smoothly in a game
+    let (mesh_v, mesh_t) = crate::rig::refine::subdivide(&sk.verts, &sk.tris, (0.012 * height_px).max(3.0), 40_000);
+    // depth: round inside the outline, the edge flat
+    let d = edge_distance(&mesh_v, &mesh_t);
+    let reach = (0.045 * height_px).max(4.0);
+    let round = (opt.puff * 0.03 * opt.height_m / 1.6).clamp(0.0, 0.05);
+    let mut verts: Vec<[f32; 3]> = mesh_v.iter().zip(&d).map(|(p, d)| to3(*p, round * (1.0 - (1.0 - (d / reach).min(1.0)).powi(2)).max(0.0).sqrt())).collect();
+    let mut tris = mesh_t.clone();
+    for t in &mut tris {
+        let (a, b, c) = (verts[t[0] as usize], verts[t[1] as usize], verts[t[2] as usize]);
+        if (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]) < 0.0 {
+            t.swap(1, 2);
+        }
+    }
+    let normals = normals_of(&verts, &tris);
+    let uvs: Vec<[f32; 2]> = mesh_v.iter().map(|p| [(p[0] - cx0 as f32) / tw, (p[1] - cy0 as f32) / th]).collect();
+    // the weights painted on the skin, on the bones of the model; what no bone claims goes to the nearest bone
+    let ix_of: Vec<Option<usize>> = sk
+        .bones
+        .iter()
+        .map(|b| rig.changer(b.changer).and_then(|c| slot.get(c.name.as_str()).copied()))
+        .collect();
+    let (mut joints, mut weights) = (Vec::with_capacity(verts.len()), Vec::with_capacity(verts.len()));
+    for (v, p3) in mesh_v.iter().zip(&verts) {
+        let w = sk.weights_at(v[0], v[1]);
+        let mut acc: Vec<(usize, f32)> = Vec::new();
+        for (sb, wb) in w.iter().enumerate() {
+            if *wb > 0.001 {
+                if let Some(mb) = ix_of[sb] {
+                    match acc.iter_mut().find(|a| a.0 == mb) {
+                        Some(a) => a.1 += wb,
+                        None => acc.push((mb, *wb)),
+                    }
+                }
+            }
+        }
+        let sum: f32 = acc.iter().map(|a| a.1).sum();
+        if sum < 0.999 {
+            let near = (0..bones.len()).min_by(|a, b| seg_dist(*p3, bones[*a].pos, bones[*a].tip).total_cmp(&seg_dist(*p3, bones[*b].pos, bones[*b].tip))).unwrap_or(0);
+            match acc.iter_mut().find(|a| a.0 == near) {
+                Some(a) => a.1 += 1.0 - sum,
+                None => acc.push((near, 1.0 - sum)),
+            }
+        }
+        acc.sort_by(|a, b| b.1.total_cmp(&a.1));
+        acc.truncate(4);
+        let total: f32 = acc.iter().map(|a| a.1).sum::<f32>().max(1e-6);
+        let (mut j, mut o) = ([0u16; 4], [0.0f32; 4]);
+        for (i, (b, x)) in acc.iter().enumerate() {
+            j[i] = *b as u16;
+            o[i] = x / total;
+        }
+        joints.push(j);
+        weights.push(o);
+    }
+    verts.shrink_to_fit();
+    let name = "Body".to_string();
+    let part = Part3d { name, layer: sk.layers.first().copied().unwrap_or(0), verts, normals, uvs, tris, joints, weights, image, morphs: Vec::new() };
+    Some(Model3d { name: opt.name.clone(), author: opt.author.clone(), parts: vec![part], bones, expressions: Vec::new(), springs: Vec::new(), colliders: Vec::new(), scale })
 }
 
 /// What an expression sets: (words that find the slider, "far" = the end away from the default, or a fraction of that).

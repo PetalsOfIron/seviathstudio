@@ -73,6 +73,78 @@ pub fn pull_warp(rect: [f32; 4], cols: u32, rows: u32, off: &mut [[f32; 2]], at:
     }
 }
 
+/// Cut the triangles at the new points on their edges (`cut`: edge to the new point), so neighbours stay joined.
+pub fn split_tris(tris: &[[u32; 3]], cut: &HashMap<(u32, u32), u32>) -> Vec<[u32; 3]> {
+        let mut out: Vec<[u32; 3]> = Vec::with_capacity(tris.len() * 2);
+        for t in tris {
+            let m = |a: u32, b: u32| cut.get(&(a.min(b), a.max(b))).copied();
+            let mids = [m(t[0], t[1]), m(t[1], t[2]), m(t[2], t[0])];
+            let count = mids.iter().flatten().count();
+            // turn the triangle so the pattern is the standard one
+            let rot = match count {
+                1 => mids.iter().position(|x| x.is_some()).unwrap(),
+                2 => mids.iter().position(|x| x.is_none()).map(|u| (u + 1) % 3).unwrap(),
+                _ => 0,
+            };
+            let (v0, v1, v2) = (t[rot], t[(rot + 1) % 3], t[(rot + 2) % 3]);
+            let (m0, m1, m2) = (mids[rot], mids[(rot + 1) % 3], mids[(rot + 2) % 3]);
+            match count {
+                0 => out.push(*t),
+                1 => {
+                    let m0 = m0.unwrap();
+                    out.push([v0, m0, v2]);
+                    out.push([m0, v1, v2]);
+                }
+                2 => {
+                    let (m0, m1) = (m0.unwrap(), m1.unwrap());
+                    out.push([m0, v1, m1]);
+                    out.push([v0, m0, m1]);
+                    out.push([v0, m1, v2]);
+                }
+                _ => {
+                    let (m0, m1, m2) = (m0.unwrap(), m1.unwrap(), m2.unwrap());
+                    out.push([v0, m0, m2]);
+                    out.push([m0, v1, m1]);
+                    out.push([m2, m1, v2]);
+                    out.push([m0, m1, m2]);
+                }
+            }
+        }
+    out
+}
+
+/// More triangles everywhere: every edge longer than `max_edge` is cut in two, again and again.
+pub fn subdivide(verts: &[[f32; 2]], tris: &[[u32; 3]], max_edge: f32, max_verts: usize) -> (Vec<[f32; 2]>, Vec<[u32; 3]>) {
+    let (mut v, mut t) = (verts.to_vec(), tris.to_vec());
+    for _ in 0..8 {
+        let mut cut: HashMap<(u32, u32), u32> = HashMap::new();
+        let mut order: Vec<(u32, u32)> = Vec::new();
+        for tri in &t {
+            for k in 0..3 {
+                let (a, b) = (tri[k], tri[(k + 1) % 3]);
+                let key = (a.min(b), a.max(b));
+                if cut.contains_key(&key) {
+                    continue;
+                }
+                let (pa, pb) = (v[a as usize], v[b as usize]);
+                if (pa[0] - pb[0]).hypot(pa[1] - pb[1]) > max_edge && v.len() + order.len() < max_verts {
+                    cut.insert(key, (v.len() + order.len()) as u32);
+                    order.push(key);
+                }
+            }
+        }
+        if order.is_empty() {
+            break;
+        }
+        for (a, b) in &order {
+            let (pa, pb) = (v[*a as usize], v[*b as usize]);
+            v.push([(pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0]);
+        }
+        t = split_tris(&t, &cut);
+    }
+    (v, t)
+}
+
 pub struct Refined {
     pub rest: Vec<[f32; 2]>,
     pub now: Vec<[f32; 2]>,
@@ -150,42 +222,7 @@ pub fn refine(rig: &Rig, mesh: &ArtMesh, now0: &[[f32; 2]], pose: &Pose, tol: f3
             rest.push(mid);
             now.push(rig.deform_point(pose, mesh.parent, mid));
         }
-        let mut out: Vec<[u32; 3]> = Vec::with_capacity(tris.len() * 2);
-        for t in &tris {
-            let m = |a: u32, b: u32| cut.get(&(a.min(b), a.max(b))).copied();
-            let mids = [m(t[0], t[1]), m(t[1], t[2]), m(t[2], t[0])];
-            let count = mids.iter().flatten().count();
-            // turn the triangle so the pattern is the standard one
-            let rot = match count {
-                1 => mids.iter().position(|x| x.is_some()).unwrap(),
-                2 => mids.iter().position(|x| x.is_none()).map(|u| (u + 1) % 3).unwrap(),
-                _ => 0,
-            };
-            let (v0, v1, v2) = (t[rot], t[(rot + 1) % 3], t[(rot + 2) % 3]);
-            let (m0, m1, m2) = (mids[rot], mids[(rot + 1) % 3], mids[(rot + 2) % 3]);
-            match count {
-                0 => out.push(*t),
-                1 => {
-                    let m0 = m0.unwrap();
-                    out.push([v0, m0, v2]);
-                    out.push([m0, v1, v2]);
-                }
-                2 => {
-                    let (m0, m1) = (m0.unwrap(), m1.unwrap());
-                    out.push([m0, v1, m1]);
-                    out.push([v0, m0, m1]);
-                    out.push([v0, m1, v2]);
-                }
-                _ => {
-                    let (m0, m1, m2) = (m0.unwrap(), m1.unwrap(), m2.unwrap());
-                    out.push([v0, m0, m2]);
-                    out.push([m0, v1, m1]);
-                    out.push([m2, m1, v2]);
-                    out.push([m0, m1, m2]);
-                }
-            }
-        }
-        tris = out;
+        tris = split_tris(&tris, &cut);
     }
     Refined { rest, now, tris }
 }
@@ -288,6 +325,20 @@ mod tests {
         assert!(off[11][1] > 5.0 && off[11][1] < 40.0, "its neighbours follow less: {}", off[11][1]);
         assert!(off[0][1].abs() < 0.5 && off[24][1].abs() < 0.5, "the corners stay");
         assert!(off.iter().all(|o| o[0] == 0.0), "only the way it was pulled");
+    }
+
+    #[test]
+    fn subdividing_keeps_the_shape_and_makes_small_triangles() {
+        let verts = [[0.0, 0.0], [200.0, 0.0], [200.0, 100.0], [0.0, 100.0]];
+        let tris = [[0, 1, 2], [0, 2, 3]];
+        let (v, t) = subdivide(&verts, &tris, 30.0, 10_000);
+        assert!(v.len() > 40 && t.len() > 60, "{} {}", v.len(), t.len());
+        assert!((area(&v, &t) - 20_000.0).abs() < 1.0, "the same area, covered once: {}", area(&v, &t));
+        let longest = t.iter().flat_map(|t| (0..3).map(move |k| (t[k], t[(k + 1) % 3]))).map(|(a, b)| (v[a as usize][0] - v[b as usize][0]).hypot(v[a as usize][1] - v[b as usize][1])).fold(0.0f32, f32::max);
+        assert!(longest <= 30.0 * 1.001 + 1.0, "{longest}");
+        // a limit on the number of points is kept
+        let (v2, _) = subdivide(&verts, &tris, 1.0, 500);
+        assert!(v2.len() <= 500 + 4);
     }
 
     #[test]

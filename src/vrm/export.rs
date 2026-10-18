@@ -124,8 +124,8 @@ pub fn export(model: &Model3d, fmt: Format) -> Result<Vec<u8>, String> {
         Format::Vrm1 => {
             b.extensions_used = vec!["KHR_materials_unlit".into(), "VRMC_vrm".into(), "VRMC_materials_mtoon".into()];
             let mut human = serde_json::Map::new();
-            for bone in &model.bones {
-                human.insert(bone.name.into(), json!({ "node": hb(bone.name).unwrap() }));
+            for bone in model.bones.iter().filter(|b| b.humanoid) {
+                human.insert(bone.name.clone(), json!({ "node": hb(&bone.name).unwrap() }));
             }
             let binds = |e: &super::model::Expression| -> Vec<Value> { e.binds.iter().map(|(p, m, w)| json!({ "node": mesh_node(*p), "index": m, "weight": w })).collect() };
             let expr_json = |e: &super::model::Expression| json!({ "morphTargetBinds": binds(e), "isBinary": false, "overrideBlink": "none", "overrideLookAt": "none", "overrideMouth": "none" });
@@ -163,10 +163,28 @@ pub fn export(model: &Model3d, fmt: Format) -> Result<Vec<u8>, String> {
                     "rangeMapVerticalDown": { "inputMaxValue": 90, "outputScale": 10 }, "rangeMapVerticalUp": { "inputMaxValue": 90, "outputScale": 10 } });
             }
             b.extensions.insert("VRMC_vrm".into(), vrm);
+            if !model.springs.is_empty() || !model.colliders.is_empty() {
+                b.extensions_used.push("VRMC_springBone".into());
+                let colliders: Vec<Value> = model.colliders.iter().map(|c| {
+                    let o = conv(fmt, c.offset);
+                    json!({ "node": bone_node(c.bone), "shape": { "sphere": { "offset": o, "radius": c.radius } } })
+                }).collect();
+                let groups: Vec<Value> = if model.colliders.is_empty() { Vec::new() } else { vec![json!({ "name": "body", "colliders": (0..model.colliders.len()).collect::<Vec<_>>() })] };
+                let springs: Vec<Value> = model.springs.iter().map(|s| {
+                    let mut joints: Vec<Value> = s.joints.iter().take(s.joints.len().saturating_sub(1)).map(|j| json!({ "node": bone_node(*j), "hitRadius": s.hit_radius, "stiffness": s.stiffness, "gravityPower": s.gravity, "gravityDir": [0, -1, 0], "dragForce": s.drag })).collect();
+                    joints.push(json!({ "node": bone_node(*s.joints.last().unwrap()) }));
+                    let mut sp = json!({ "name": s.name, "joints": joints });
+                    if !groups.is_empty() {
+                        sp["colliderGroups"] = json!([0]);
+                    }
+                    sp
+                }).collect();
+                b.extensions.insert("VRMC_springBone".into(), json!({ "specVersion": "1.0", "colliders": colliders, "colliderGroups": groups, "springs": springs }));
+            }
         }
         Format::Vrm0 => {
             b.extensions_used = vec!["KHR_materials_unlit".into(), "VRM".into()];
-            let bones: Vec<Value> = model.bones.iter().map(|bone| json!({ "bone": bone.name, "node": hb(bone.name).unwrap(), "useDefaultValues": true })).collect();
+            let bones: Vec<Value> = model.bones.iter().filter(|b| b.humanoid).map(|bone| json!({ "bone": bone.name, "node": hb(&bone.name).unwrap(), "useDefaultValues": true })).collect();
             let mut groups = vec![json!({ "name": "Neutral", "presetName": "neutral", "binds": [], "isBinary": false, "materialValues": [] })];
             for e in &model.expressions {
                 let preset = PRESETS0.iter().find(|p| p.0 == e.name).map(|p| p.1).unwrap_or("unknown");
@@ -198,7 +216,10 @@ pub fn export(model: &Model3d, fmt: Format) -> Result<Vec<u8>, String> {
                     "lookAtHorizontalInner": { "curve": curve, "xRange": 90, "yRange": 8 }, "lookAtHorizontalOuter": { "curve": curve, "xRange": 90, "yRange": 12 },
                     "lookAtVerticalDown": { "curve": curve, "xRange": 90, "yRange": 10 }, "lookAtVerticalUp": { "curve": curve, "xRange": 90, "yRange": 10 } },
                 "blendShapeMaster": { "blendShapeGroups": groups },
-                "secondaryAnimation": { "boneGroups": [], "colliderGroups": [] },
+                "secondaryAnimation": { "boneGroups": model.springs.iter().map(|s| json!({
+                        "comment": s.name, "stiffiness": s.stiffness, "gravityPower": s.gravity, "gravityDir": { "x": 0, "y": -1, "z": 0 }, "dragForce": s.drag,
+                        "center": -1, "hitRadius": s.hit_radius, "bones": [bone_node(s.joints[0])], "colliderGroups": (0..model.colliders.len().min(1)).collect::<Vec<_>>() })).collect::<Vec<_>>(),
+                    "colliderGroups": model.colliders.iter().map(|c| { let o = conv(fmt, c.offset); json!({ "node": bone_node(c.bone), "colliders": [{ "offset": { "x": o[0], "y": o[1], "z": o[2] }, "radius": c.radius }] }) }).collect::<Vec<_>>() },
                 "materialProperties": mat_props,
             }));
         }
@@ -214,6 +235,8 @@ pub struct Summary {
     pub parts: usize,
     pub vertices: usize,
     pub expressions: usize,
+    /// Joints of swinging chains (hair, cloth).
+    pub springs: usize,
 }
 
 /// Read a VRM back and check it the way a loader would: the humanoid has what games need, every index points at
@@ -301,5 +324,26 @@ pub fn validate(bytes: &[u8]) -> Result<Summary, String> {
             }
         }
     }
-    Ok(Summary { version, bones: bones.len(), parts: meshes.len(), vertices, expressions })
+    // swinging chains and the balls they avoid
+    let spring_nodes: Vec<&Value> = if version == 1 {
+        let sb = &ext["VRMC_springBone"];
+        let n_col = sb["colliders"].as_array().map(|a| a.len()).unwrap_or(0);
+        for c in sb["colliders"].as_array().unwrap_or(&Vec::new()) {
+            if !node_ok(&c["node"]) || c["shape"]["sphere"]["radius"].as_f64().is_none_or(|r| !(r > 0.0)) {
+                return Err("A collider is not on a node or has no size.".into());
+            }
+        }
+        for gr in sb["colliderGroups"].as_array().unwrap_or(&Vec::new()) {
+            if gr["colliders"].as_array().is_some_and(|a| a.iter().any(|i| i.as_u64().is_none_or(|i| i as usize >= n_col))) {
+                return Err("A collider group points at a collider that is not there.".into());
+            }
+        }
+        sb["springs"].as_array().into_iter().flatten().flat_map(|s| s["joints"].as_array().into_iter().flatten().map(|j| &j["node"])).collect()
+    } else {
+        ext["VRM"]["secondaryAnimation"]["boneGroups"].as_array().into_iter().flatten().flat_map(|g| g["bones"].as_array().into_iter().flatten()).collect()
+    };
+    if spring_nodes.iter().any(|n| !node_ok(n)) {
+        return Err("A swinging chain has a joint that is not a node.".into());
+    }
+    Ok(Summary { version, bones: bones.len(), parts: meshes.len(), vertices, expressions, springs: spring_nodes.len() })
 }

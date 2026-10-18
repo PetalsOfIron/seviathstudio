@@ -8,6 +8,31 @@ use super::model::Model3d;
 
 /// Draw the character turned `yaw_deg` degrees round the up axis. `active` are expression shapes by name and amount.
 pub fn render(model: &Model3d, yaw_deg: f32, w: u32, h: u32, active: &[(&str, f32)]) -> RgbaImage {
+    render_posed(model, yaw_deg, w, h, active, &[])
+}
+
+/// Where a point goes when the bones are turned: `pose` are bone names with an angle in degrees (counter-clockwise seen
+/// from the front), every bone turning about its own joint together with the bones above it.
+fn pose_point(model: &Model3d, bone: usize, turn: &[f32], p: [f32; 3]) -> [f32; 3] {
+    let b = &model.bones[bone];
+    let a = turn[bone].to_radians();
+    let (s, c) = a.sin_cos();
+    let (x, y) = (p[0] - b.pos[0], p[1] - b.pos[1]);
+    let q = [b.pos[0] + x * c - y * s, b.pos[1] + x * s + y * c, p[2]];
+    match b.parent {
+        Some(par) => pose_point(model, par, turn, q),
+        None => q,
+    }
+}
+
+/// The same picture with the skeleton posed (the skin weights move the parts).
+pub fn render_posed(model: &Model3d, yaw_deg: f32, w: u32, h: u32, active: &[(&str, f32)], pose: &[(&str, f32)]) -> RgbaImage {
+    let mut turn = vec![0.0f32; model.bones.len()];
+    for (n, a) in pose {
+        if let Some(i) = model.bone(n) {
+            turn[i] = *a;
+        }
+    }
     let mut img = RgbaImage::from_pixel(w, h, Rgba([244, 242, 236, 255]));
     let mut depth = vec![f32::MIN; (w * h) as usize];
     let (s, c) = yaw_deg.to_radians().sin_cos();
@@ -23,6 +48,23 @@ pub fn render(model: &Model3d, yaw_deg: f32, w: u32, h: u32, active: &[(&str, f3
                         v[k] += d[k] * wt;
                     }
                 }
+            }
+        }
+        // the skeleton's pose moves the vertices by their skin weights
+        if turn.iter().any(|t| *t != 0.0) {
+            let rest = verts.clone();
+            for (i, v) in verts.iter_mut().enumerate() {
+                let mut acc = [0.0f32; 3];
+                for k in 0..4 {
+                    let wt = part.weights[i][k];
+                    if wt > 0.0 {
+                        let q = pose_point(model, part.joints[i][k] as usize, &turn, rest[i]);
+                        for a in 0..3 {
+                            acc[a] += q[a] * wt;
+                        }
+                    }
+                }
+                *v = acc;
             }
         }
         // turned, then onto the picture: x across, y up, z towards the viewer

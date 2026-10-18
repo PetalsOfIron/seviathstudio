@@ -8,7 +8,7 @@ use eframe::egui::{self, RichText, TextureOptions, Ui, vec2};
 use super::SeviathApp;
 use crate::theme::*;
 use crate::vrm::export::{Format, Summary, export, validate};
-use crate::vrm::model::{Model3d, Options, build};
+use crate::vrm::model::{Model3d, Options, build_any};
 use crate::vrm::preview;
 use crate::widgets::{self, section_title};
 
@@ -43,7 +43,7 @@ impl SeviathApp {
     /// Make the 3D character from the document and its rig.
     pub fn game_make(&mut self) {
         let opt = self.game_options();
-        match build(&self.draw.doc, &opt) {
+        match build_any(&self.draw.doc, &opt) {
             Some(m) => {
                 let expr = m.expressions.len();
                 let (parts, bones) = (m.parts.len(), m.bones.len());
