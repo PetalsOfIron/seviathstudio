@@ -8,6 +8,7 @@ pub mod autorig;
 pub mod check;
 pub mod gizmo;
 pub mod mesh;
+pub mod physics;
 pub mod raster;
 pub mod skin;
 
@@ -239,6 +240,10 @@ pub struct Rig {
     pub skin: Option<skin::Skin>,
     /// What the automatic rigging made (and what you locked).
     pub auto: Option<autorig::AutoRig>,
+    /// Things that swing and lag (hair, cloth, chains), each moving one Line changer.
+    pub physics: Vec<physics::PhysChain>,
+    pub colliders: Vec<physics::Collider>,
+    pub world: physics::World,
     next_id: Id,
 }
 
@@ -357,7 +362,7 @@ impl Values {
 
 impl Rig {
     pub fn is_empty(&self) -> bool {
-        self.meshes.is_empty() && self.changers.is_empty() && self.params.is_empty() && self.skin.is_none() && self.auto.is_none() && self.iks.is_empty() && self.poses.is_empty() && self.clips.is_empty() && self.pads.is_empty()
+        self.meshes.is_empty() && self.changers.is_empty() && self.params.is_empty() && self.skin.is_none() && self.auto.is_none() && self.iks.is_empty() && self.poses.is_empty() && self.clips.is_empty() && self.pads.is_empty() && self.physics.is_empty() && self.colliders.is_empty()
     }
 
     pub fn fresh_id(&mut self) -> Id {
@@ -916,6 +921,36 @@ impl Rig {
                 }
                 c.name = c.name.chars().filter(|c| !c.is_control()).take(40).collect();
             }
+        }
+        {
+            let lines: HashSet<Id> = self.changers.iter().filter(|c| matches!(c.kind, Kind::Line { .. })).map(|c| c.id).collect();
+            self.physics.truncate(500);
+            self.physics.retain(|p| lines.contains(&p.changer));
+            for p in &mut self.physics {
+                let d = physics::PhysChain::new("", p.kind, p.material, p.changer);
+                let fix = |v: &mut f32, lo: f32, hi: f32, dflt: f32| *v = if v.is_finite() { v.clamp(lo, hi) } else { dflt };
+                fix(&mut p.stiff_root, 0.0, 1.0, d.stiff_root);
+                fix(&mut p.stiff_tip, 0.0, 1.0, d.stiff_tip);
+                fix(&mut p.damping, 0.0, 0.98, d.damping);
+                fix(&mut p.gravity, -2.0, 4.0, d.gravity);
+                fix(&mut p.wind, 0.0, 4.0, d.wind);
+                p.name = p.name.chars().filter(|c| !c.is_control()).take(40).collect();
+            }
+            let all: HashSet<Id> = self.changers.iter().map(|c| c.id).collect();
+            self.colliders.truncate(64);
+            self.colliders.retain_mut(|c| {
+                c.name = c.name.chars().filter(|c| !c.is_control()).take(40).collect();
+                if c.changer.is_some_and(|i| !all.contains(&i)) {
+                    c.changer = None;
+                }
+                c.center.iter().all(|v| v.is_finite()) && c.radius.is_finite() && c.radius > 0.0
+            });
+            let w = &mut self.world;
+            w.gravity = if w.gravity.is_finite() { w.gravity.clamp(0.0, 20000.0) } else { 2400.0 };
+            if w.gravity <= 0.0 {
+                w.gravity = 2400.0;
+            }
+            w.wind_dir = if w.wind_dir.is_finite() { w.wind_dir.clamp(-1.0, 1.0) } else { 1.0 };
         }
         {
             let pids: HashSet<Id> = self.params.iter().map(|p| p.id).collect();
