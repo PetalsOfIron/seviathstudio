@@ -25,6 +25,7 @@ openh264 = "0.9.9"
 minimp4 = "0.1.2"
 sha2 = "0.10"
 spade = "2.15.1"
+rodio = { version = "0.20.1", default-features = false, features = ["symphonia-all"] }
 
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["wgpu", "snapshot", "eframe"] }

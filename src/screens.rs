@@ -3395,6 +3395,8 @@ fn animate_tab_screens() {
     h.state_mut().test_rig_edit(|r| {
         r.anim.length = 24;
         r.anim.fps = 12.0;
+        r.anim.set_marker(0, "Idle");
+        r.anim.set_marker(12, "Walk");
         for (id, name, lo, hi) in params.iter().take(2) {
             let t = r.anim.track_for(Target::Param(*id), name);
             r.anim.tracks[t].set_key(0.0, *lo, Ease::InOut);
@@ -3588,4 +3590,53 @@ fn stream_tab_follows_a_sent_face_and_serves_the_picture() {
     h.state_mut().test_stream_source(1, false);
     h.run_steps(2);
     assert!(h.state_mut().test_stream().sources[1].rx.is_none());
+}
+
+/// A sound on the timeline: it is read, drawn above the tracks, and the mouth is made from how loud it is.
+#[test]
+fn animate_tab_sound_waveform_and_mouth() {
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    let path = std::env::temp_dir().join(format!("seviath_sound_{}.wav", std::process::id()));
+    std::fs::write(&path, crate::audio::tests::wav(2.0, 8000)).unwrap();
+    let (id, lo, hi) = {
+        let p = h.state().draw_mut_ref().doc.rig.params.iter().find(|p| p.name == "Mouth open").cloned().expect("a mouth slider");
+        (p.id, p.min, p.max)
+    };
+    let p2 = path.to_string_lossy().to_string();
+    h.state_mut().test_rig_edit(|r| {
+        r.anim.length = 48;
+        r.anim.fps = 24.0;
+        r.anim.audio = Some(crate::anim::AudioRef { path: p2, offset: 0.0 });
+    });
+    h.state_mut().test_run_action_now("tab.5");
+    h.run_steps(6);
+    assert!(h.state_mut().test_anim().audio.is_some(), "the sound was read: {:?}", h.state_mut().test_anim().message);
+    // the mouth from the sound: open in the loud first second (24 frames), shut in the quiet second
+    let au = h.state_mut().test_anim().audio.clone().unwrap().1;
+    let curve = au.mouth_open(24.0, 0.0, 48);
+    h.state_mut().test_rig_edit(|r| {
+        r.anim.set_from_curve(id, "Mouth open", &curve, lo, hi);
+    });
+    let a = h.state().draw_mut_ref().doc.rig.anim.clone();
+    let t = &a.tracks[a.track(crate::anim::Target::Param(id)).unwrap()];
+    assert!(t.value_at(10.0).unwrap() > hi * 0.7, "open while loud: {:?}", t.value_at(10.0));
+    assert!(t.value_at(40.0).unwrap() < lo + (hi - lo) * 0.1, "shut while quiet");
+    assert!(t.keys.len() < 40, "only the keys that matter: {}", t.keys.len());
+    h.run_steps(4);
+    save(&mut h, "animate_2_sound");
+    // playing starts the sound player (silent when there is no sound card) and stopping cuts it
+    h.state_mut().test_anim().playing = true;
+    for _ in 0..5 {
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    assert!(h.state_mut().test_anim().test_audio_playing());
+    h.state_mut().test_anim().playing = false;
+    h.run_steps(3);
+    assert!(!h.state_mut().test_anim().test_audio_playing());
+    let _ = std::fs::remove_file(&path);
 }
