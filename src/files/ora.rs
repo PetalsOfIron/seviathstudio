@@ -217,6 +217,7 @@ pub fn read(path: &std::path::Path) -> Result<Document, String> {
                         lightfx: None,
                         solid: false,
                         text: None,
+                        part: None,
                         rev: 1,
                     });
                     if is_empty {
@@ -258,6 +259,7 @@ pub fn read(path: &std::path::Path) -> Result<Document, String> {
                     lightfx: None,
                     solid: false,
                     text: None,
+                    part: None,
                     rev: 1,
                 });
                 pending_png.push((id, src, get("x").parse().unwrap_or(0), get("y").parse().unwrap_or(0)));
@@ -315,6 +317,7 @@ pub fn read(path: &std::path::Path) -> Result<Document, String> {
         lightfx: None,
         solid: false,
         text: None,
+        part: None,
         rev: 1,
     });
     let mut doc = Document::from_parts(w, h, pc, layers);

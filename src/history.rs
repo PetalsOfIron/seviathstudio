@@ -92,6 +92,7 @@ fn meta_same(a: &Layer, b: &Layer) -> bool {
         && a.lightfx == b.lightfx
         && a.solid == b.solid
         && a.text == b.text
+        && a.part == b.part
 }
 
 fn tiles_same(a: &Layer, b: &Layer) -> bool {
@@ -178,6 +179,8 @@ pub fn describe(before: &DocState, after: &DocState) -> String {
             "Blocks light"
         } else if a.text != b.text {
             "Text"
+        } else if a.part != b.part {
+            "Part tag"
         } else if a.blend != b.blend {
             "Blend mode"
         } else if a.clip != b.clip {

@@ -32,6 +32,7 @@ mod lightfx;
 mod material;
 mod meta;
 mod oklab;
+mod parts;
 mod pigment;
 mod processlog;
 mod settings;

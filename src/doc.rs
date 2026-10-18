@@ -169,6 +169,8 @@ pub struct Layer {
     pub solid: bool,
     /// A text layer: the words and how they look (its shapes are in `vector`).
     pub text: Option<crate::text::TextData>,
+    /// What this layer is for rigging (left eye, front hair…); see parts.rs.
+    pub part: Option<crate::parts::Part>,
     pub opacity: f32,   // 0..100
     pub blend: Blend,
     pub tiles: HashMap<TileKey, TileData>,
@@ -291,6 +293,7 @@ impl Document {
             lightfx: None,
             solid: false,
             text: None,
+            part: None,
             rev: 0,
         }
     }

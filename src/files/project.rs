@@ -69,6 +69,8 @@ struct LayerJson {
     solid: bool,
     #[serde(default)]
     text: Option<crate::text::TextData>,
+    #[serde(default)]
+    part: Option<crate::parts::Part>,
     opacity: f32,
     blend: String,
     tiles: Vec<[i32; 2]>,
@@ -198,6 +200,7 @@ pub fn save_full(w: u32, h: u32, paper: Color32, layers: &[Layer], presets: &[Pr
                     lightfx: l.lightfx.clone(),
                     solid: l.solid,
                     text: l.text.clone(),
+                    part: l.part,
                     opacity: l.opacity,
                     blend: blend_name(l.blend).into(),
                     tiles,
@@ -328,6 +331,7 @@ pub fn load(path: &Path) -> Result<Document, String> {
             lightfx: l.lightfx.map(|x| x.sanitized()),
             solid: l.solid,
             text: l.text.map(|t| t.sanitized()),
+            part: l.part,
             opacity: l.opacity.clamp(0.0, 100.0),
             blend: blend_from_name(&l.blend),
             tiles: tiles.remove(&l.id).unwrap_or_default(),
