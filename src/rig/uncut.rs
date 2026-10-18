@@ -805,6 +805,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_joint_can_be_moved_and_the_bones_on_both_sides_follow() {
+        let img = figure_image();
+        let mut d = crate::vrm::tests_build::uncut_doc(&img);
+        let ids: Vec<crate::doc::LayerId> = d.layers.iter().map(|l| l.id).collect();
+        let mut rig = Rig::default();
+        auto_rig(&mut rig, &d, &ids, 0.6).unwrap();
+        d.rig = std::sync::Arc::new(rig);
+        let mut rig = (*d.rig).clone();
+        let joints = crate::rig::skin::joints(&rig);
+        assert!(joints.len() >= 18, "{} joints", joints.len());
+        // the elbow joins the tail of the upper arm and the head of the forearm: one handle with both
+        let elbow = joints.iter().find(|j| j.1.iter().any(|n| n == "leftLowerArm head")).unwrap().clone();
+        assert!(elbow.1.iter().any(|n| n == "leftUpperArm tail"), "{:?}", elbow.1);
+        let wrist_before = joints.iter().find(|j| j.1.iter().any(|n| n == "leftHand head")).unwrap().0;
+        let to = [elbow.0[0] + 25.0, elbow.0[1] + 15.0];
+        assert!(crate::rig::skin::move_joint(&mut rig, elbow.0, to));
+        let pivot = |rig: &Rig, n: &str| match rig.changers.iter().find(|c| c.name == n).unwrap().kind {
+            crate::rig::Kind::Rotation { pivot } => pivot,
+            _ => panic!(),
+        };
+        assert_eq!(pivot(&rig, "leftLowerArm"), to, "the forearm starts at the new place");
+        let tail = rig.skin.as_ref().unwrap().bones.iter().find(|b| rig.changer(b.changer).unwrap().name == "leftUpperArm").unwrap().tail;
+        assert_eq!(tail, to, "the upper arm ends at the new place");
+        assert_eq!(pivot(&rig, "leftHand"), wrist_before, "the wrist stays where it is");
+        // nothing there: nothing moves
+        assert!(!crate::rig::skin::move_joint(&mut rig, [-500.0, -500.0], [0.0, 0.0]));
+    }
+
+    #[test]
     fn a_standing_figure_gets_a_sensible_skeleton() {
         let img = figure_image();
         let f = detect(&img).unwrap();

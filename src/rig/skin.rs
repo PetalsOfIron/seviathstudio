@@ -485,10 +485,62 @@ pub fn dist_to_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     (p[0] - (a[0] + dx * t)).hypot(p[1] - (a[1] + dy * t))
 }
 
+use super::Kind;
+
+/// How close two ends of bones must be to count as one joint (page pixels).
+pub const JOINT_JOIN: f32 = 2.5;
+
+/// The joints of a skeleton: the head of every bone and the tail of every bone, where several meet in one place they are one
+/// joint. Each is a place on the page and the names of the bone ends there ("leftLowerArm head", "leftUpperArm tail").
+pub fn joints(rig: &Rig) -> Vec<([f32; 2], Vec<String>)> {
+    let Some(sk) = rig.skin.as_ref() else { return Vec::new() };
+    let mut out: Vec<([f32; 2], Vec<String>)> = Vec::new();
+    let mut put = |p: [f32; 2], label: String| match out.iter_mut().find(|j| (j.0[0] - p[0]).hypot(j.0[1] - p[1]) <= JOINT_JOIN) {
+        Some(j) => j.1.push(label),
+        None => out.push((p, vec![label])),
+    };
+    for b in &sk.bones {
+        let Some(c) = rig.changer(b.changer) else { continue };
+        if let Kind::Rotation { pivot } = c.kind {
+            put(pivot, format!("{} head", c.name));
+        }
+        put(b.tail, format!("{} tail", c.name));
+    }
+    out
+}
+
+/// Move the joint at `from` to `to`: every bone head and every bone tail that sits there goes along. The bones that hang
+/// from the joint keep their own lengths only by the other end staying where it is, so the bones on both sides change.
+pub fn move_joint(rig: &mut Rig, from: [f32; 2], to: [f32; 2]) -> bool {
+    let near = |p: [f32; 2]| (p[0] - from[0]).hypot(p[1] - from[1]) <= JOINT_JOIN;
+    let ids: Vec<(Id, [f32; 2])> = match rig.skin.as_ref() {
+        Some(sk) => sk.bones.iter().map(|b| (b.changer, b.tail)).collect(),
+        None => return false,
+    };
+    let mut moved = false;
+    for (id, tail) in &ids {
+        if let Some(c) = rig.changers.iter_mut().find(|c| c.id == *id) {
+            if let Kind::Rotation { pivot } = c.kind {
+                if near(pivot) {
+                    c.kind = Kind::Rotation { pivot: to };
+                    moved = true;
+                }
+            }
+        }
+        if near(*tail) {
+            if let Some(b) = rig.skin.as_mut().and_then(|s| s.bones.iter_mut().find(|b| b.changer == *id)) {
+                b.tail = to;
+                moved = true;
+            }
+        }
+    }
+    moved
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rig::{Kind, Values};
+    use crate::rig::Values;
 
     /// A 400 x 400 page with a column mesh (two triangles) and two bones along it: a spine bone (top half) and an arm bone.
     fn setup() -> (Rig, Skin, Id, Id, Id) {

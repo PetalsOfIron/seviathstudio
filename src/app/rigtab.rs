@@ -115,6 +115,9 @@ pub struct RigState {
     turn_edit: Option<Vec<f32>>,
     /// The eyes and the mouth of an uncut figure are shown on the picture to be dragged.
     pub(super) face_edit: bool,
+    /// The joints of the skeleton are shown on the picture to be dragged, and the picture of the doc from before a drag.
+    pub(super) joint_edit: bool,
+    joint_before: Option<crate::history::DocState>,
     /// Clicking the face points one after the other: 0 off, 1 first eye, 2 second eye, 3 mouth (with the first eye kept here).
     pub(super) face_click: u8,
     pub(super) face_first: [f32; 2],
@@ -257,6 +260,11 @@ impl SeviathApp {
         self.log_step(label, now);
         let tab = if self.tab == Tab::Physics { Tab::Physics } else { Tab::Rig };
         self.history.push(label.to_owned(), tab, before, after, now);
+    }
+
+    #[cfg(test)]
+    pub fn test_joint_edit(&mut self, on: bool) {
+        self.rigs.joint_edit = on;
     }
 
     #[cfg(test)]
@@ -851,6 +859,21 @@ impl SeviathApp {
             }
             ui.checkbox(&mut self.rigs.body_opts.ik, "Hands reach (IK)");
         });
+        if self.draw.doc.rig.skin.as_ref().is_some_and(|s| !s.bones.is_empty()) {
+            ui.horizontal_wrapped(|ui| {
+                if widgets::chip(ui, "Move the joints", self.rigs.joint_edit).on_hover_text("Shows every joint of the skeleton on the picture: drag one where it should be. The bones on both sides follow. Then press Redo the bending if the bending should follow too.").clicked() {
+                    self.rigs.joint_edit = !self.rigs.joint_edit;
+                }
+                if ui.button("Redo the bending").on_hover_text("Weights from the bones: close to a bone it follows that bone, fading out with distance").clicked() {
+                    self.rig_edit("Automatic weights", now, |r| {
+                        let rc = r.clone();
+                        if let Some(s) = r.skin.as_mut() {
+                            s.auto_weights(&rc);
+                        }
+                    });
+                }
+            });
+        }
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
             use rig::uncut::Hold;
@@ -2594,6 +2617,44 @@ impl SeviathApp {
         // the turn rings
         if self.rigs.gizmo && self.rigs.mode == Mode::Look {
             self.gizmo_input(ui, &resp, &p, &to_screen, sc);
+        }
+        // the joints of the skeleton, to be dragged: every bone end that sits in one place is one handle
+        if self.rigs.joint_edit {
+            let joints = rig::skin::joints(&rig);
+            let mut drag: Option<([f32; 2], [f32; 2])> = None;
+            let mut stopped = false;
+            for (k, (at, names)) in joints.iter().enumerate() {
+                let s = to_screen(*at);
+                let r = ui.interact(Rect::from_center_size(s, vec2(18.0, 18.0)), egui::Id::new(("joint", k)), Sense::drag());
+                let hot = r.hovered() || r.dragged();
+                p.circle_filled(s, if hot { 8.0 } else { 6.0 }, if hot { Color32::from_rgb(255, 200, 60) } else { Color32::from_rgb(60, 220, 200) });
+                p.circle_stroke(s, if hot { 8.0 } else { 6.0 }, Stroke::new(1.5, Color32::BLACK));
+                if r.hovered() || r.dragged() {
+                    p.text(s + vec2(10.0, -10.0), egui::Align2::LEFT_BOTTOM, names.join(", "), egui::FontId::proportional(11.0), Color32::WHITE);
+                }
+                if r.drag_started() {
+                    self.rigs.joint_before = Some(self.draw.doc.snapshot());
+                }
+                if r.dragged() {
+                    if let Some(pp) = r.interact_pointer_pos() {
+                        drag = Some((*at, to_page(pp)));
+                    }
+                }
+                if r.drag_stopped() {
+                    stopped = true;
+                }
+            }
+            if let Some((from, to)) = drag {
+                rig::skin::move_joint(Arc::make_mut(&mut self.draw.doc.rig), from, to);
+            }
+            if stopped {
+                if let Some(before) = self.rigs.joint_before.take() {
+                    if !self.draw.doc.same_as(&before) {
+                        let after = self.draw.doc.snapshot();
+                        self.history.push("Move a joint".to_owned(), Tab::Rig, before, after, now);
+                    }
+                }
+            }
         }
         // the bones of the skin
         if let Some(sk) = &rig.skin {
