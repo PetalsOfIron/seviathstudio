@@ -3674,3 +3674,73 @@ fn animate_tab_sound_waveform_and_mouth() {
     assert!(!h.state_mut().test_anim().test_audio_playing());
     let _ = std::fs::remove_file(&path);
 }
+
+/// Frame by frame: a cel track with two drawings, the drawings show at their frames, the preview and the saved pictures follow.
+#[test]
+fn animate_tab_cels_show_by_frame_and_save() {
+    use crate::doc::Document;
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(Document::new(400, 300));
+    h.state_mut().test_run_action_now("tab.5");
+    h.run_steps(3);
+    h.state_mut().test_rig_edit(|r| {
+        r.anim.length = 6;
+        r.anim.fps = 6.0;
+    });
+    // a red square on the first drawing, a blue one on the second (from frame 3)
+    let square = |col: [u8; 4], x: i32, y: i32| {
+        let mut img = image::RgbaImage::new(60, 60);
+        for p in img.pixels_mut() {
+            *p = image::Rgba(col);
+        }
+        crate::files::tiles_from_rgba(&img, x, y, 400, 300)
+    };
+    h.state_mut().test_cel_new_track();
+    let cel1 = h.state().draw_mut_ref().doc.rig.anim.cel_tracks[0].cels[0];
+    h.state_mut().test_anim().frame = 3.0;
+    h.state_mut().test_cel_new_cel(0);
+    let cel2 = h.state().draw_mut_ref().doc.rig.anim.cel_tracks[0].cels[1];
+    for (id, tiles) in [(cel1, square([220, 30, 30, 255], 50, 50)), (cel2, square([30, 30, 220, 255], 250, 150))] {
+        let d = &mut h.state_mut().draw_mut().doc;
+        let l = d.layers.iter_mut().find(|l| l.id == id).unwrap();
+        l.tiles = tiles;
+        l.rev += 1;
+    }
+    let a = h.state().draw_mut_ref().doc.rig.anim.clone();
+    assert_eq!((a.cel_tracks[0].shown_at(0), a.cel_tracks[0].shown_at(2), a.cel_tracks[0].shown_at(3), a.cel_tracks[0].shown_at(5)), (Some(cel1), Some(cel1), Some(cel2), Some(cel2)));
+    // the layers follow the playhead
+    let vis = |h: &mut Harness<'_, SeviathApp>, id: u64| h.state().draw_mut_ref().doc.layers.iter().find(|l| l.id == id).unwrap().visible;
+    h.state_mut().test_anim().frame = 1.0;
+    h.run_steps(3);
+    assert!(vis(&mut h, cel1) && !vis(&mut h, cel2), "the first drawing shows at frame 1");
+    save(&mut h, "animate_3_cels");
+    h.state_mut().test_anim().frame = 4.0;
+    h.run_steps(3);
+    assert!(!vis(&mut h, cel1) && vis(&mut h, cel2), "the second shows at frame 4");
+    // the pictures put together: red at frame 1, blue at frame 4, see-through around
+    let ctx = h.ctx.clone();
+    let red = h.state_mut().test_cel_preview_picture(&ctx, 1).unwrap();
+    let blue = h.state_mut().test_cel_preview_picture(&ctx, 4).unwrap();
+    assert_ne!(red.id(), blue.id(), "two different pictures");
+    // saved as pictures: six frames, red in the first three and blue in the last three, on white paper
+    let dir = std::env::temp_dir().join(format!("seviath_cels_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    h.state_mut().test_anim_export_png(dir.clone(), 400);
+    for _ in 0..200 {
+        h.run_steps(1);
+        if !h.state_mut().test_anim_busy() {
+            break;
+        }
+    }
+    assert_eq!(std::fs::read_dir(&dir).unwrap().flatten().count(), 6, "{:?}", h.state_mut().test_anim().message);
+    let f1 = image::open(dir.join("frame_0002.png")).unwrap().to_rgba8();
+    let f5 = image::open(dir.join("frame_0005.png")).unwrap().to_rgba8();
+    assert_eq!(f1.get_pixel(80, 80).0, [220, 30, 30, 255], "the red square at frame 2");
+    assert_eq!(f1.get_pixel(280, 180).0, [255, 255, 255, 255], "the blue one is not there yet: white paper");
+    assert_eq!(f5.get_pixel(280, 180).0, [30, 30, 220, 255], "the blue square at frame 5");
+    assert_eq!(f5.get_pixel(80, 80).0, [255, 255, 255, 255]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

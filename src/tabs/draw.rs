@@ -469,7 +469,6 @@ impl DrawState {
         self.active
     }
 
-    #[cfg(test)]
     pub fn set_active(&mut self, id: LayerId) {
         self.active = id;
     }

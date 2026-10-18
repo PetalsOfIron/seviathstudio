@@ -134,6 +134,102 @@ impl Track {
     }
 }
 
+/// From this frame on a track shows this drawing (a layer) until the next exposure; None shows nothing (a blank frame).
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Exposure {
+    pub frame: u32,
+    pub cel: Option<u64>,
+}
+
+/// Frame by frame animation: a folder of layers, each layer one drawing (a cel), and which of them shows at every frame.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CelTrack {
+    pub id: u32,
+    pub name: String,
+    /// The folder layer the drawings are in.
+    pub folder: u64,
+    /// The drawings (layer ids), in the order they were made: their numbers are the positions here, from 1.
+    pub cels: Vec<u64>,
+    pub exposures: Vec<Exposure>,
+    pub muted: bool,
+}
+
+impl CelTrack {
+    /// The exposure in force at `frame` (the last one that started at or before it).
+    pub fn exposure_at(&self, frame: u32) -> Option<usize> {
+        self.exposures.partition_point(|e| e.frame <= frame).checked_sub(1)
+    }
+
+    pub fn shown_at(&self, frame: u32) -> Option<u64> {
+        self.exposure_at(frame).and_then(|i| self.exposures[i].cel)
+    }
+
+    /// From `frame` on show `cel` (an exposure that starts there is replaced).
+    pub fn set_exposure(&mut self, frame: u32, cel: Option<u64>) {
+        match self.exposures.iter().position(|e| e.frame == frame) {
+            Some(i) => self.exposures[i].cel = cel,
+            None => {
+                self.exposures.push(Exposure { frame, cel });
+                self.exposures.sort_by_key(|e| e.frame);
+            }
+        }
+    }
+
+    pub fn remove_exposure(&mut self, frame: u32) -> bool {
+        let n = self.exposures.len();
+        self.exposures.retain(|e| e.frame != frame);
+        self.exposures.len() != n
+    }
+
+    /// Make room for `by` frames at `frame` (everything from there moves later), or take `-by` frames away there (what was inside the
+    /// taken part is gone, what was after it moves earlier).
+    pub fn shift(&mut self, frame: u32, by: i32) {
+        if by >= 0 {
+            for e in &mut self.exposures {
+                if e.frame >= frame {
+                    e.frame += by as u32;
+                }
+            }
+        } else {
+            let cut = by.unsigned_abs();
+            // what the first exposure inside the taken part would have shown carries on at the start of the gap
+            let carry = self.shown_at(frame.saturating_add(cut).saturating_sub(1));
+            self.exposures.retain(|e| e.frame < frame || e.frame >= frame + cut);
+            for e in &mut self.exposures {
+                if e.frame >= frame + cut {
+                    e.frame -= cut;
+                }
+            }
+            if self.shown_at(frame) != carry && !self.exposures.iter().any(|e| e.frame == frame) {
+                self.exposures.push(Exposure { frame, cel: carry });
+                self.exposures.sort_by_key(|e| e.frame);
+            }
+        }
+    }
+
+    /// The number (from 1) a drawing has in this track.
+    pub fn number_of(&self, cel: u64) -> Option<usize> {
+        self.cels.iter().position(|c| *c == cel).map(|i| i + 1)
+    }
+}
+
+/// Onion skin: the drawings before and after the frame, faintly, while drawing and scrubbing.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Onion {
+    pub on: bool,
+    pub before: u8,
+    pub after: u8,
+    pub opacity: f32,
+}
+
+impl Default for Onion {
+    fn default() -> Self {
+        Onion { on: true, before: 2, after: 1, opacity: 0.4 }
+    }
+}
+
 /// A named place on the timeline (the start of a walk, the moment of a hit...). Markers cut the animation into parts that can be
 /// played and saved on their own.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
@@ -165,12 +261,14 @@ pub struct Animation {
     pub tracks: Vec<Track>,
     pub markers: Vec<Marker>,
     pub audio: Option<AudioRef>,
+    pub cel_tracks: Vec<CelTrack>,
+    pub onion: Onion,
     next_id: u32,
 }
 
 impl Default for Animation {
     fn default() -> Self {
-        Animation { fps: 24.0, length: 120, range: None, looping: true, ping_pong: false, tracks: Vec::new(), markers: Vec::new(), audio: None, next_id: 1 }
+        Animation { fps: 24.0, length: 120, range: None, looping: true, ping_pong: false, tracks: Vec::new(), markers: Vec::new(), audio: None, cel_tracks: Vec::new(), onion: Onion::default(), next_id: 1 }
     }
 }
 
@@ -248,6 +346,24 @@ impl Animation {
             self.tracks[t].set_key(f, v, Ease::Linear);
         }
         self.tracks[t].keys.len()
+    }
+
+    /// A new frame by frame track on a folder with its first drawing, shown from frame 0. Returns its index.
+    pub fn add_cel_track(&mut self, name: &str, folder: u64, first: u64) -> usize {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.cel_tracks.push(CelTrack { id, name: name.to_string(), folder, cels: vec![first], exposures: vec![Exposure { frame: 0, cel: Some(first) }], muted: false });
+        self.cel_tracks.len() - 1
+    }
+
+    /// For every drawing of every track that is on: whether it shows at `frame`.
+    pub fn cel_visibility(&self, frame: u32) -> Vec<(u64, bool)> {
+        let mut out = Vec::new();
+        for t in self.cel_tracks.iter().filter(|t| !t.muted) {
+            let shown = t.shown_at(frame);
+            out.extend(t.cels.iter().map(|c| (*c, shown == Some(*c))));
+        }
+        out
     }
 
     pub fn track(&self, target: Target) -> Option<usize> {
@@ -338,6 +454,67 @@ pub fn simplify(samples: &[(f32, f32)], tol: f32) -> Vec<(f32, f32)> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_cel_track_shows_the_drawing_of_the_exposure_in_force() {
+        let mut a = Animation::default();
+        let t = a.add_cel_track("Walk", 100, 11);
+        a.cel_tracks[t].cels.extend([12, 13]);
+        a.cel_tracks[t].set_exposure(4, Some(12));
+        a.cel_tracks[t].set_exposure(8, None);
+        a.cel_tracks[t].set_exposure(10, Some(13));
+        let tr = &a.cel_tracks[0];
+        assert_eq!((tr.shown_at(0), tr.shown_at(3), tr.shown_at(4), tr.shown_at(7), tr.shown_at(8), tr.shown_at(9), tr.shown_at(10), tr.shown_at(500)), (Some(11), Some(11), Some(12), Some(12), None, None, Some(13), Some(13)));
+        assert_eq!(tr.number_of(13), Some(3));
+        assert_eq!(tr.number_of(99), None);
+        // which drawings are on at a frame
+        assert_eq!(a.cel_visibility(5), [(11, false), (12, true), (13, false)]);
+        assert_eq!(a.cel_visibility(8), [(11, false), (12, false), (13, false)], "a blank frame shows none");
+        a.cel_tracks[0].muted = true;
+        assert!(a.cel_visibility(5).is_empty(), "a muted track leaves the layers alone");
+        a.cel_tracks[0].muted = false;
+        // a second drawing at the same frame replaces the first, and one can be taken away
+        a.cel_tracks[0].set_exposure(4, Some(13));
+        assert_eq!(a.cel_tracks[0].shown_at(5), Some(13));
+        assert!(a.cel_tracks[0].remove_exposure(4));
+        assert!(!a.cel_tracks[0].remove_exposure(4));
+        assert_eq!(a.cel_tracks[0].shown_at(5), Some(11));
+        // before the first exposure nothing shows
+        let mut late = CelTrack::default();
+        late.set_exposure(5, Some(1));
+        assert_eq!((late.shown_at(2), late.shown_at(5)), (None, Some(1)));
+    }
+
+    #[test]
+    fn frames_can_be_made_room_for_and_taken_away() {
+        let mut t = CelTrack::default();
+        t.cels = vec![1, 2, 3];
+        for (f, c) in [(0, 1), (3, 2), (6, 3)] {
+            t.set_exposure(f, Some(c));
+        }
+        // two frames of room at frame 3: the second drawing starts at 5
+        t.shift(3, 2);
+        assert_eq!(t.exposures.iter().map(|e| e.frame).collect::<Vec<_>>(), [0, 5, 8]);
+        assert_eq!((t.shown_at(4), t.shown_at(5)), (Some(1), Some(2)), "the first drawing is held longer");
+        // taking two frames away at frame 3 is the other way round
+        t.shift(3, -2);
+        assert_eq!(t.exposures.iter().map(|e| e.frame).collect::<Vec<_>>(), [0, 3, 6]);
+        // taking away a part that holds a drawing start: what was shown at the end of the part goes on
+        t.shift(2, -2);
+        assert_eq!((t.shown_at(1), t.shown_at(2), t.shown_at(4)), (Some(1), Some(2), Some(3)), "{:?}", t.exposures);
+    }
+
+    #[test]
+    fn onion_skin_and_cel_tracks_are_saved_and_old_files_still_load() {
+        let mut a = Animation::default();
+        a.add_cel_track("A", 5, 6);
+        a.onion.before = 3;
+        let back: Animation = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        assert_eq!(back.cel_tracks, a.cel_tracks);
+        assert_eq!(back.onion.before, 3);
+        let old: Animation = serde_json::from_str("{\"fps\":12.0}").unwrap();
+        assert!(old.cel_tracks.is_empty() && old.onion.on);
+    }
 
     #[test]
     fn markers_cut_the_animation_into_parts() {
