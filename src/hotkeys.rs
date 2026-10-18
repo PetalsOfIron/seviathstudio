@@ -18,6 +18,8 @@ pub enum Input {
     Midi { channel: u8, note: u8 },
     /// A button of a game pad, by its name ("South", "LeftTrigger"...).
     Pad { button: String },
+    /// Something another program asked for through Seviath Link (a Stream Deck button, a game event).
+    Link { name: String },
 }
 
 impl Input {
@@ -34,6 +36,7 @@ impl Input {
             }
             Input::Midi { channel, note } => format!("MIDI note {} ({}), channel {channel}", note, note_name(*note)),
             Input::Pad { button } => format!("Pad {button}"),
+            Input::Link { name } => format!("Link {name}"),
         }
     }
 }
@@ -185,6 +188,8 @@ pub struct Hub {
     /// Waiting for the next press to be taken as an input (to bind it).
     pub learn: bool,
     pub learned: Option<Input>,
+    /// The web address other programs call (Seviath Link), while it is on.
+    pub link: Option<crate::link::LinkServer>,
     /// Look at the keyboard (off in tests, where a key held by the person at the computer would get in).
     pub keyboard: bool,
 }
@@ -222,7 +227,7 @@ impl Hub {
                 }
             });
         }
-        let mut hub = Hub { queue, midi: None, midi_name: None, midi_ports: Vec::new(), pad_names, stop, held_keys: HashSet::new(), pressed_scan: HashSet::new(), learn: false, learned: None, keyboard: true };
+        let mut hub = Hub { queue, midi: None, midi_name: None, midi_ports: Vec::new(), pad_names, stop, held_keys: HashSet::new(), pressed_scan: HashSet::new(), learn: false, learned: None, link: None, keyboard: true };
         hub.refresh_midi_ports();
         hub
     }
@@ -254,6 +259,15 @@ impl Hub {
             .map_err(|e| format!("Could not open the MIDI device: {e}"))?;
         self.midi = Some(conn);
         self.midi_name = Some(name.to_string());
+        Ok(())
+    }
+
+    /// Switch Seviath Link on at a port (on this computer only) or off.
+    pub fn set_link(&mut self, port: Option<u16>) -> Result<(), String> {
+        self.link = None;
+        if let Some(p) = port {
+            self.link = Some(crate::link::LinkServer::start(p, self.queue.clone())?);
+        }
         Ok(())
     }
 
@@ -346,6 +360,7 @@ mod tests {
         assert_eq!(key(0x20).label(), "Space");
         assert_eq!(Input::Midi { channel: 1, note: 60 }.label(), "MIDI note 60 (C4), channel 1");
         assert_eq!(Input::Pad { button: "South".into() }.label(), "Pad South");
+        assert_eq!(Input::Link { name: "cs2.kill".into() }.label(), "Link cs2.kill");
         assert_eq!(note_name(21), "A0");
         assert_eq!(Action::Hold("Blush".into()).label(), "Blush while held");
         assert_eq!(Action::ObsScene("Main".into()).label(), "OBS scene Main");

@@ -57,6 +57,12 @@ pub struct StreamUi {
     pub emote_sizes: [bool; 5],
     /// OBS Studio remote control: where it is, the connection, and the scene a new hotkey would switch to.
     pub obs: Option<crate::obs::Obs>,
+    pub link_port: u16,
+    pub link_on: bool,
+    /// Sending the face and expressions to VRChat over OSC.
+    pub vrc: Option<crate::vrchat::VrChat>,
+    pub vrc_host: String,
+    pub vrc_port: u16,
     pub obs_host: String,
     pub obs_port: u16,
     pub obs_password: String,
@@ -96,6 +102,11 @@ impl Default for StreamUi {
             emote_face: true,
             emote_sizes: [true, true, true, false, false],
             obs: None,
+            link_port: 39560,
+            link_on: false,
+            vrc: None,
+            vrc_host: "127.0.0.1".into(),
+            vrc_port: 9000,
             obs_host: "localhost".into(),
             obs_port: 4455,
             obs_password: String::new(),
@@ -206,6 +217,14 @@ impl SeviathApp {
         let defs = crate::expressions::defs(&rig);
         self.rigs.stream.expr.apply(&defs, &rig, &mut self.rigs.values, dt);
         self.rigs.expr_layers = self.rigs.stream.expr.layer_levels(&defs);
+        if self.rigs.stream.vrc.is_some() {
+            let levels: Vec<(String, f32)> = defs.iter().map(|d| (d.name.clone(), self.rigs.stream.expr.level(&d.name))).collect();
+            let st = &mut self.rigs.stream;
+            let (inputs, tracked) = (st.inputs.clone(), st.tracked);
+            if let Some(v) = st.vrc.as_mut() {
+                v.send_frame(&inputs, &levels, tracked);
+            }
+        }
         if !rig.hotkeys.is_empty() || self.rigs.stream.hub.as_ref().is_some_and(|h| h.learn) {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
@@ -327,6 +346,8 @@ impl SeviathApp {
 
         self.stream_expr_ui(ui);
         self.stream_obs_ui(ui);
+        self.stream_link_ui(ui);
+        self.stream_vrchat_ui(ui);
         self.stream_hotkeys_ui(ui);
 
         section_title(ui, "What the face does now");
@@ -443,6 +464,67 @@ impl SeviathApp {
         });
         if ui.small_button("All expressions off").clicked() {
             self.rigs.stream.expr.clear();
+        }
+    }
+
+    fn stream_vrchat_ui(&mut self, ui: &mut Ui) {
+        section_title(ui, "VRChat");
+        ui.label(RichText::new("Sends the face and the expressions to VRChat (OSC). An avatar with parameters named like the inputs (FaceAngleX, EyeOpenLeft, MouthOpen...) and Expr_<expression> follows them. In VRChat switch OSC on in the radial menu, Options, OSC.").size(11.5).color(TEXT_DIM));
+        let on = self.rigs.stream.vrc.is_some();
+        ui.horizontal_wrapped(|ui| {
+            if widgets::chip(ui, "Send to VRChat", on).clicked() {
+                if on {
+                    self.rigs.stream.vrc = None;
+                } else {
+                    match crate::vrchat::VrChat::new(&self.rigs.stream.vrc_host, self.rigs.stream.vrc_port) {
+                        Ok(v) => self.rigs.stream.vrc = Some(v),
+                        Err(e) => self.rigs.stream.message = Some(e),
+                    }
+                }
+            }
+            ui.add_enabled(!on, egui::TextEdit::singleline(&mut self.rigs.stream.vrc_host).desired_width(100.0));
+            ui.add_enabled(!on, egui::DragValue::new(&mut self.rigs.stream.vrc_port).range(1..=65535));
+            if let Some(v) = &self.rigs.stream.vrc {
+                ui.label(RichText::new(format!("{} messages sent", v.sent)).size(11.0).color(TEXT_DIM));
+            }
+        });
+    }
+
+    fn stream_link_ui(&mut self, ui: &mut Ui) {
+        section_title(ui, "Link");
+        ui.label(RichText::new("Lets other programs on this computer press inputs here: a Stream Deck or Touch Portal button that opens a web address, a game that sends its state. Then bind them to expressions and OBS actions below (Learn an input, then call the address).").size(11.5).color(TEXT_DIM));
+        let on = self.rigs.stream.link_on;
+        ui.horizontal_wrapped(|ui| {
+            if widgets::chip(ui, "Link", on).clicked() {
+                let port = self.rigs.stream.link_port;
+                let want = !on;
+                if let Some(h) = self.rigs.stream.hub.as_mut() {
+                    match h.set_link(want.then_some(port)) {
+                        Ok(()) => self.rigs.stream.link_on = want,
+                        Err(e) => {
+                            self.rigs.stream.message = Some(e);
+                            self.rigs.stream.link_on = false;
+                        }
+                    }
+                }
+            }
+            ui.label(RichText::new("Port").size(11.5).color(TEXT_DIM));
+            ui.add_enabled(!on, egui::DragValue::new(&mut self.rigs.stream.link_port).range(1024..=65535));
+        });
+        if on {
+            let port = self.rigs.stream.link_port;
+            ui.label(RichText::new(format!("http://127.0.0.1:{port}/trigger/<name>")).monospace().size(11.5).color(VENOM));
+            if let Some(l) = self.rigs.stream.hub.as_ref().and_then(|h| h.link.as_ref()).and_then(|l| l.last.lock().ok().and_then(|g| g.clone())) {
+                ui.label(RichText::new(format!("Last heard: {l}")).size(11.5).color(TEXT_DIM));
+            }
+            egui::CollapsingHeader::new(RichText::new("Counter-Strike 2").size(11.5).color(TEXT_DIM)).id_salt("link_cs2").show(ui, |ui| {
+                ui.label(RichText::new("Save this as gamestate_integration_seviath.cfg in the cfg folder of the game (steamapps/common/Counter-Strike Global Offensive/game/csgo/cfg). Events: cs2.kill, cs2.death, cs2.round_live, cs2.round_freezetime, cs2.round_over, cs2.bomb_planted.").size(11.0).color(TEXT_DIM));
+                let cfg = crate::link::cs2_config(port);
+                ui.add(egui::TextEdit::multiline(&mut cfg.clone()).font(egui::TextStyle::Monospace).desired_rows(8).desired_width(f32::INFINITY));
+                if ui.small_button("Copy").clicked() {
+                    ui.ctx().copy_text(cfg);
+                }
+            });
         }
     }
 

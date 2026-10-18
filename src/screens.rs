@@ -3630,6 +3630,31 @@ fn stream_tab_follows_a_sent_face_and_serves_the_picture() {
     assert_eq!(image::open(dir.join("Happy_28.png")).unwrap().to_rgba8().dimensions(), (28, 28));
     assert!((h.state_mut().test_rig().values.0.get(&e_id).copied().unwrap_or(e_def) - e_hi).abs() < 1e-3, "the sliders are as they were");
     let _ = std::fs::remove_dir_all(&dir);
+    // Seviath Link: a web address call presses an input that clears the expressions
+    assert!(h.state_mut().test_stream().expr.is_on("Happy"), "Happy is still on from the pad");
+    let link_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    h.state_mut().test_stream().hub.as_mut().unwrap().set_link(Some(link_port)).unwrap();
+    h.state_mut().test_rig_edit(|r| r.hotkeys.push(crate::hotkeys::Binding { input: crate::hotkeys::Input::Link { name: "clear".into() }, action: crate::hotkeys::Action::Clear }));
+    {
+        use std::io::{Read, Write};
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", link_port)).unwrap();
+        s.write_all(b"GET /trigger/clear HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+    }
+    h.run_steps(4);
+    assert!(!h.state_mut().test_stream().expr.is_on("Happy"), "the call cleared the expressions");
+    h.state_mut().test_stream().hub.as_mut().unwrap().set_link(None).unwrap();
+    // VRChat: the face goes out over OSC
+    let vrc_rx = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    vrc_rx.set_read_timeout(Some(std::time::Duration::from_millis(1500))).unwrap();
+    h.state_mut().test_stream().vrc = Some(crate::vrchat::VrChat::new("127.0.0.1", vrc_rx.local_addr().unwrap().port()).unwrap());
+    h.run_steps(3);
+    let mut pkt = [0u8; 1024];
+    let n = vrc_rx.recv(&mut pkt).expect("a message reached the port");
+    assert!(crate::track::net::parse_osc(&pkt[..n]).iter().any(|(a, _)| a.starts_with("/avatar/parameters/")));
+    h.state_mut().test_stream().vrc = None;
     // OBS is not running here: the panel says so in words
     let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     h.state_mut().test_stream().obs = Some(crate::obs::Obs::connect("127.0.0.1", free, ""));
