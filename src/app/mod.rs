@@ -19,6 +19,7 @@ mod layoutmenu;
 mod fontmaker;
 mod newproject;
 mod partstab;
+mod prerigui;
 mod recording;
 mod worklog;
 mod signs;
@@ -55,6 +56,7 @@ pub struct SeviathApp {
     work: worklog::WorkClock,
     palette: commands::Palette,
     parts: partstab::PartsState,
+    prerig: prerigui::PreRig,
     layout_name: String,
 }
 
@@ -100,6 +102,7 @@ impl SeviathApp {
             work: Default::default(),
             palette: Default::default(),
             parts: Default::default(),
+            prerig: Default::default(),
             layout_name: String::new(),
         }
     }
@@ -633,6 +636,7 @@ impl eframe::App for SeviathApp {
         self.signatures_window(&ctx);
         self.font_maker_window(&ctx);
         self.recorder_window(&ctx);
+        self.prerig_window(&ctx);
         self.palette_window(&ctx);
         self.recorder_tick(&ctx);
         self.work_history_window(&ctx);

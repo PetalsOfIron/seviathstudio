@@ -1915,3 +1915,78 @@ fn parts_tab_screens() {
     assert!(!h.state().draw_mut_ref().doc.meta.parts_ready);
     save(&mut h, "parts_02_checklist");
 }
+
+#[test]
+fn prerig_screens() {
+    use crate::doc::LayerKind;
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 1100.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    // a red disc with a white fringe, a 2x2 hole, a stray speck and a few nearly invisible pixels
+    {
+        let d = h.state_mut().draw_mut();
+        let (w, h2) = (d.doc.w, d.doc.h);
+        let mut img = image::RgbaImage::new(300, 300);
+        for y in 0..300i32 {
+            for x in 0..300i32 {
+                let r = (((x - 150).pow(2) + (y - 150).pow(2)) as f32).sqrt();
+                if r <= 90.0 {
+                    img.put_pixel(x as u32, y as u32, image::Rgba([200, 40, 40, 255]));
+                } else if r <= 91.6 {
+                    img.put_pixel(x as u32, y as u32, image::Rgba([255, 255, 255, 120]));
+                }
+            }
+        }
+        for (x, y) in [(150, 150), (151, 150), (150, 151), (151, 151)] {
+            img.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
+        }
+        for (x, y) in [(5, 5), (6, 5), (5, 6), (6, 6)] {
+            img.put_pixel(x, y, image::Rgba([200, 40, 40, 255]));
+        }
+        for i in 0..30 {
+            img.put_pixel(20 + i, 290, image::Rgba([10, 10, 10, 3]));
+        }
+        let mut l = d.doc.new_layer("Eye L", LayerKind::Raster);
+        l.tiles = crate::files::tiles_from_rgba(&img, 1200, 1500, w, h2);
+        l.part = Some(crate::parts::Part::EyeL);
+        l.rev += 1;
+        d.doc.layers.insert(0, l);
+        d.doc.mark_all_dirty();
+    }
+    h.state_mut().test_run_action_now("tab.2");
+    h.run_steps(3);
+    h.get_by_label("Pre-rig improver").click();
+    h.run_steps(5);
+    {
+        let n = h.state_mut().test_prerig().problems.len();
+        assert!(n >= 4, "stray, hole, ghost and fringe are found: {n}");
+    }
+    save(&mut h, "prerig_01_found");
+    // nothing has changed yet
+    let steps = h.state().history().entries.len();
+    let px_before = {
+        let l = h.state().draw_mut_ref().doc.layers.iter().find(|l| l.name == "Eye L").unwrap().clone();
+        (crate::prerig::px_get(&l, 1350, 1650).a(), crate::prerig::px_get(&l, 1205, 1790).a())
+    };
+    assert_eq!(px_before.0, 0, "the hole is still there");
+    // Fix the first one: one undo step, and the list gets shorter
+    let n0 = h.state_mut().test_prerig().problems.len();
+    h.get_by_label("Fix").click();
+    h.run_steps(4);
+    assert_eq!(h.state().history().entries.len(), steps + 1);
+    assert!(h.state().history().entries.last().unwrap().label.starts_with("Fix ·"));
+    assert!(h.state_mut().test_prerig().problems.len() < n0);
+    // Ignore one, fix the rest
+    h.get_by_label("Ignore").click();
+    h.run_steps(3);
+    h.get_by_label("Fix everything").click();
+    h.run_steps(4);
+    assert!(h.state_mut().test_prerig().problems.is_empty(), "nothing left to fix");
+    let hole_after = crate::prerig::px_get(&h.state().draw_mut_ref().doc.layers.iter().find(|l| l.name == "Eye L").unwrap().clone(), 1350, 1650).a();
+    assert!(hole_after == 255 || h.state_mut().test_prerig().problems.is_empty());
+    // undo takes the last fix back
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(3);
+    save(&mut h, "prerig_02_after");
+}

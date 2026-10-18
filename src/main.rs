@@ -34,6 +34,7 @@ mod meta;
 mod oklab;
 mod parts;
 mod pigment;
+mod prerig;
 mod processlog;
 mod settings;
 mod signature;

@@ -451,6 +451,13 @@ impl DrawState {
         shown.then(|| self.refs.current().map(|r| r.name.clone())).flatten()
     }
 
+    /// Show a place on the page up close, with a layer selected (the pre-rig improver uses this).
+    pub fn look_at(&mut self, layer: LayerId, x: f32, y: f32, zoom: f32) {
+        self.focus_layer(layer);
+        self.view.set_zoom(zoom);
+        self.view.center = egui::pos2(x, y);
+    }
+
     /// Make a layer the one being drawn on (the Parts tab uses this).
     pub fn focus_layer(&mut self, id: LayerId) {
         if self.doc.index_of(id).is_some() {

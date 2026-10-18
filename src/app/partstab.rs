@@ -88,7 +88,7 @@ fn overlay_image(d: &Document, scale: f32, w: u32, h: u32) -> egui::ColorImage {
 
 impl SeviathApp {
     /// Change the document from the Parts tab as one undo step.
-    fn parts_edit(&mut self, label: &str, now: f64, f: impl FnOnce(&mut Document)) {
+    pub(super) fn parts_edit(&mut self, label: &str, now: f64, f: impl FnOnce(&mut Document)) {
         let before: DocState = self.draw.doc.snapshot();
         f(&mut self.draw.doc);
         if self.draw.doc.same_as(&before) {
@@ -405,7 +405,13 @@ impl SeviathApp {
             self.parts.message = Some(format!("{n} layers tagged from “{}”.", t.name));
         }
 
-        // 6. ready
+        // 6. the improver
+        section_title(ui, "Before rigging");
+        if ui.button("Pre-rig improver").on_hover_text("Finds stray pixels, tiny holes, nearly invisible pixels and light or dark edges. Nothing changes until you say so.").clicked() {
+            self.open_prerig();
+        }
+
+        // 7. ready
         ui.add_space(8.0);
         let must = checks.iter().any(|c| c.level == Level::Needs);
         let ready = self.draw.doc.meta.parts_ready;

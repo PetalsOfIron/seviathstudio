@@ -85,6 +85,7 @@ pub const ACTIONS: &[ActionDef] = &[
     a("win.signatures", "Signatures", "Windows", ""),
     a("win.fonts", "Font from my drawings", "Windows", ""),
     a("win.work", "Work history", "Windows", ""),
+    a("win.prerig", "Pre-rig improver", "Windows", ""),
     // panels and workspaces
     a("panel.brush", "Show or hide the brush panel", "Panels", ""),
     a("panel.color", "Show or hide the color panel", "Panels", ""),
