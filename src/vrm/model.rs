@@ -26,11 +26,13 @@ pub struct Options {
     pub layer_gap: f32,
     /// Largest side of a texture in pixels (bigger pictures are made smaller).
     pub max_texture: u32,
+    /// Make finger bones (a thumb and four fingers of three bones on each hand).
+    pub fingers: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { name: "Character".into(), author: "Unknown".into(), height_m: 1.6, puff: 1.0, layer_gap: 0.003, max_texture: 2048 }
+        Self { name: "Character".into(), author: "Unknown".into(), height_m: 1.6, puff: 1.0, layer_gap: 0.003, max_texture: 2048, fingers: true }
     }
 }
 
@@ -103,7 +105,7 @@ pub struct Model3d {
 }
 
 /// The VRM humanoid bones we make: (name, parent, the bone its piece runs to).
-const BONES: [(&str, Option<&str>, Option<&str>); 21] = [
+const BONES: [(&str, Option<&str>, Option<&str>); 23] = [
     ("hips", None, Some("spine")),
     ("spine", Some("hips"), Some("chest")),
     ("chest", Some("spine"), Some("neck")),
@@ -111,10 +113,12 @@ const BONES: [(&str, Option<&str>, Option<&str>); 21] = [
     ("head", Some("neck"), None),
     ("leftEye", Some("head"), None),
     ("rightEye", Some("head"), None),
-    ("leftUpperArm", Some("chest"), Some("leftLowerArm")),
+    ("leftShoulder", Some("chest"), Some("leftUpperArm")),
+    ("leftUpperArm", Some("leftShoulder"), Some("leftLowerArm")),
     ("leftLowerArm", Some("leftUpperArm"), Some("leftHand")),
     ("leftHand", Some("leftLowerArm"), None),
-    ("rightUpperArm", Some("chest"), Some("rightLowerArm")),
+    ("rightShoulder", Some("chest"), Some("rightUpperArm")),
+    ("rightUpperArm", Some("rightShoulder"), Some("rightLowerArm")),
     ("rightLowerArm", Some("rightUpperArm"), Some("rightHand")),
     ("rightHand", Some("rightLowerArm"), None),
     ("leftUpperLeg", Some("hips"), Some("leftLowerLeg")),
@@ -401,7 +405,8 @@ pub fn build(doc: &Document, opt: &Options) -> Option<Model3d> {
             _ => [shoulder[0] + sgn * 0.02 * height_px, ybottom - 0.45 * height_px],
         };
         let tip = hand.map(|h| [(h[0] + h[2]) / 2.0, h[3]]).unwrap_or([wrist[0], wrist[1] + 0.07 * height_px]);
-        let elbow = [lerp(shoulder[0], wrist[0], 0.5), lerp(shoulder[1], wrist[1], 0.5)];
+        let elbow = [lerp(shoulder[0], wrist[0], 0.45), lerp(shoulder[1], wrist[1], 0.45)];
+        joints.insert(n("Shoulder"), [xc + sgn * half * 0.4, shoulder[1] - 0.01 * th]);
         joints.insert(n("UpperArm"), shoulder);
         joints.insert(n("LowerArm"), elbow);
         joints.insert(n("Hand"), wrist);
@@ -412,7 +417,7 @@ pub fn build(doc: &Document, opt: &Options) -> Option<Model3d> {
             Some(l) => [(l[0] + l[2]) / 2.0, l[3] - 0.04 * height_px],
             None => [hip[0], ybottom - 0.04 * height_px],
         };
-        let knee = [lerp(hip[0], ankle[0], 0.5), lerp(hip[1], ankle[1], 0.5)];
+        let knee = [lerp(hip[0], ankle[0], 0.40), lerp(hip[1], ankle[1], 0.40)];
         joints.insert(n("UpperLeg"), hip);
         joints.insert(n("LowerLeg"), knee);
         joints.insert(n("Foot"), ankle);
@@ -635,7 +640,7 @@ pub fn build_uncut(doc: &Document, opt: &Options) -> Option<Model3d> {
     let to3 = |p: [f32; 2], z: f32| -> [f32; 3] { [(p[0] - xc) * scale, (vb[3] - p[1]) * scale, z] };
     // the bones that exist
     let mut bones: Vec<Bone> = Vec::new();
-    let mut slot: HashMap<&str, usize> = HashMap::new();
+    let mut slot: HashMap<String, usize> = HashMap::new();
     for (name, parent, _) in BONES {
         let pos2 = match (named.get(name), name) {
             (Some(b), _) => b.1,
@@ -651,7 +656,7 @@ pub fn build_uncut(doc: &Document, opt: &Options) -> Option<Model3d> {
             // a missing limb bone sits where its parent is
             (None, _) => match parent.and_then(|p| slot.get(p)).map(|i| bones[*i].pos) {
                 Some(p) => {
-                    slot.insert(name, bones.len());
+                    slot.insert(name.to_string(), bones.len());
                     bones.push(Bone { name: name.to_string(), humanoid: true, parent: parent.and_then(|p| slot.get(p).copied()), pos: p, tip: p });
                     continue;
                 }
@@ -660,11 +665,28 @@ pub fn build_uncut(doc: &Document, opt: &Options) -> Option<Model3d> {
         };
         let z = if name.ends_with("Toes") { 0.03 } else { 0.0 };
         let p3 = to3(pos2, z);
-        slot.insert(name, bones.len());
+        slot.insert(name.to_string(), bones.len());
         bones.push(Bone { name: name.to_string(), humanoid: true, parent: parent.and_then(|p| slot.get(p).copied()), pos: p3, tip: p3 });
     }
+    // fingers: a thumb and four fingers of three bones along each hand
+    let mut frames: [Option<super::hands::Frame>; 2] = [None, None];
+    if opt.fingers {
+        for (si, left) in [true, false].iter().enumerate() {
+            let hand = if *left { "leftHand" } else { "rightHand" };
+            let (Some(&hi), Some(h)) = (slot.get(hand), named.get(hand)) else { continue };
+            let (wrist, tip) = (bones[hi].pos, to3(h.2, 0.0));
+            let fr = super::hands::frame(wrist, tip, *left);
+            for (mut b, (_, parent)) in fr.bones(*left).into_iter().zip(super::hands::finger_names(*left)) {
+                b.parent = slot.get(parent.as_str()).copied();
+                slot.insert(b.name.clone(), bones.len());
+                bones.push(b);
+            }
+            frames[si] = Some(fr);
+        }
+    }
     for i in 0..bones.len() {
-        let next = BONES.iter().find(|b| b.0 == bones[i].name).and_then(|b| b.2).and_then(|n| slot.get(n).copied());
+        let Some(def) = BONES.iter().find(|b| b.0 == bones[i].name) else { continue };
+        let next = def.2.and_then(|n| slot.get(n).copied());
         let own = named.get(bones[i].name.as_str()).map(|b| b.2);
         bones[i].tip = match (next, own) {
             (Some(n), _) => bones[n].pos,
@@ -709,7 +731,7 @@ pub fn build_uncut(doc: &Document, opt: &Options) -> Option<Model3d> {
         .iter()
         .map(|b| rig.changer(b.changer).and_then(|c| slot.get(c.name.as_str()).copied()))
         .collect();
-    let (mut joints, mut weights) = (Vec::with_capacity(verts.len()), Vec::with_capacity(verts.len()));
+    let mut raw: Vec<Vec<(usize, f32)>> = Vec::with_capacity(verts.len());
     for (v, p3) in mesh_v.iter().zip(&verts) {
         let w = sk.weights_at(v[0], v[1]);
         let mut acc: Vec<(usize, f32)> = Vec::new();
@@ -731,6 +753,80 @@ pub fn build_uncut(doc: &Document, opt: &Options) -> Option<Model3d> {
                 None => acc.push((near, 1.0 - sum)),
             }
         }
+        // a hand's weight is shared between the palm and the fingers
+        for (si, left) in [true, false].iter().enumerate() {
+            let hand = if *left { "leftHand" } else { "rightHand" };
+            if let (Some(fr), Some(&hi)) = (&frames[si], slot.get(hand)) {
+                if let Some(pos) = acc.iter().position(|a| a.0 == hi) {
+                    let wh = acc[pos].1;
+                    acc.remove(pos);
+                    for (n, share) in fr.split([p3[0], p3[1]], *left) {
+                        if let Some(&bi) = slot.get(n.as_str()) {
+                            match acc.iter_mut().find(|a| a.0 == bi) {
+                                Some(a) => a.1 += wh * share,
+                                None => acc.push((bi, wh * share)),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        raw.push(acc);
+    }
+    // The figure is one picture, so an arm and the chest next to it are one piece of mesh and would stretch across the seam
+    // when the arm swings. Cut the mesh into pieces by the bones: every triangle belongs to the arm, leg or body it mostly
+    // follows, and each piece gets its own copy of the points on the seam (the same place at rest, so no crack, but free to
+    // move apart).
+    let bone_group: Vec<usize> = bones.iter().map(|b| limb_group(&b.name)).collect();
+    let share: Vec<[f32; 5]> = raw
+        .iter()
+        .map(|acc| {
+            let mut g = [0.0f32; 5];
+            for (b, x) in acc {
+                g[bone_group[*b]] += x;
+            }
+            g
+        })
+        .collect();
+    let tri_group: Vec<usize> = tris
+        .iter()
+        .map(|t| {
+            let mut g = [0.0f32; 5];
+            for i in t {
+                for k in 0..5 {
+                    g[k] += share[*i as usize][k];
+                }
+            }
+            (0..5).max_by(|a, b| g[*a].total_cmp(&g[*b])).unwrap_or(0)
+        })
+        .collect();
+    let mut copy_of: HashMap<(u32, usize), u32> = HashMap::new();
+    let mut piece_verts: Vec<(u32, usize)> = Vec::new();
+    let mut piece_tris: Vec<[u32; 3]> = Vec::new();
+    for (t, g) in tris.iter().zip(&tri_group) {
+        let mut n = [0u32; 3];
+        for k in 0..3 {
+            n[k] = *copy_of.entry((t[k], *g)).or_insert_with(|| {
+                piece_verts.push((t[k], *g));
+                (piece_verts.len() - 1) as u32
+            });
+        }
+        piece_tris.push(n);
+    }
+    let (verts, uvs, normals): (Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<[f32; 3]>) = (
+        piece_verts.iter().map(|(i, _)| verts[*i as usize]).collect(),
+        piece_verts.iter().map(|(i, _)| uvs[*i as usize]).collect(),
+        piece_verts.iter().map(|(i, _)| normals[*i as usize]).collect(),
+    );
+    let tris = piece_tris;
+    let (mut joints, mut weights) = (Vec::with_capacity(verts.len()), Vec::with_capacity(verts.len()));
+    for (orig, group) in &piece_verts {
+        // only the bones of the piece (the arm bones for an arm, the body bones for the body)
+        let mut acc: Vec<(usize, f32)> = raw[*orig as usize].iter().filter(|(b, _)| bone_group[*b] == *group).cloned().collect();
+        if acc.iter().map(|a| a.1).sum::<f32>() < 0.001 {
+            let first = (0..bones.len()).find(|b| bone_group[*b] == *group).unwrap_or(0);
+            acc = vec![(first, 1.0)];
+        }
         acc.sort_by(|a, b| b.1.total_cmp(&a.1));
         acc.truncate(4);
         let total: f32 = acc.iter().map(|a| a.1).sum::<f32>().max(1e-6);
@@ -742,10 +838,107 @@ pub fn build_uncut(doc: &Document, opt: &Options) -> Option<Model3d> {
         joints.push(j);
         weights.push(o);
     }
-    verts.shrink_to_fit();
-    let name = "Body".to_string();
-    let part = Part3d { name, layer: sk.layers.first().copied().unwrap_or(0), verts, normals, uvs, tris, joints, weights, image, morphs: Vec::new() };
-    Some(Model3d { name: opt.name.clone(), author: opt.author.clone(), parts: vec![part], bones, expressions: Vec::new(), springs: Vec::new(), colliders: Vec::new(), scale })
+    let part = Part3d { name: "Body".to_string(), layer: sk.layers.first().copied().unwrap_or(0), verts, normals, uvs, tris, joints, weights, image, morphs: Vec::new() };
+    let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts: vec![part], bones, expressions: Vec::new(), springs: Vec::new(), colliders: Vec::new(), scale };
+    normalize_to_t_pose(&mut model);
+    Some(model)
+}
+
+/// Which piece of the body a bone belongs to: 0 the body, 1 the left arm, 2 the right arm, 3 the left leg, 4 the right leg.
+fn limb_group(name: &str) -> usize {
+    let finger = ["Thumb", "Index", "Middle", "Ring", "Little"].iter().any(|f| name.contains(f));
+    if finger {
+        return if name.starts_with("left") { 1 } else { 2 };
+    }
+    match name {
+        "leftUpperArm" | "leftLowerArm" | "leftHand" => 1,
+        "rightUpperArm" | "rightLowerArm" | "rightHand" => 2,
+        "leftUpperLeg" | "leftLowerLeg" | "leftFoot" | "leftToes" => 3,
+        "rightUpperLeg" | "rightLowerLeg" | "rightFoot" | "rightToes" => 4,
+        _ => 0,
+    }
+}
+
+/// Games and VRM apps expect the rest pose to be a T pose: arms straight out sideways, legs straight down. Whatever way the
+/// figure was drawn, turn the arm bones about the shoulders and the leg bones about the hips into that pose, and carry the
+/// parts that follow them (by their skin weights). A pose from tracking or an idle animation then starts from where the
+/// app thinks it does, so arms do not come out raised or folded.
+pub fn normalize_to_t_pose(m: &mut Model3d) {
+    // (the bones turned, the joint they turn about, the joint that should end up in the target direction, the direction)
+    let jobs: [(&[&str], &str, &str, [f32; 2]); 4] = [
+        (&["leftUpperArm", "leftLowerArm", "leftHand", "@leftfingers"], "leftUpperArm", "leftHand", [1.0, 0.0]),
+        (&["rightUpperArm", "rightLowerArm", "rightHand", "@rightfingers"], "rightUpperArm", "rightHand", [-1.0, 0.0]),
+        (&["leftUpperLeg", "leftLowerLeg", "leftFoot", "leftToes"], "leftUpperLeg", "leftFoot", [0.0, -1.0]),
+        (&["rightUpperLeg", "rightLowerLeg", "rightFoot", "rightToes"], "rightUpperLeg", "rightFoot", [0.0, -1.0]),
+    ];
+    // for every bone: the turn (angle, about which point), or none
+    let mut turn: Vec<Option<(f32, [f32; 3])>> = vec![None; m.bones.len()];
+    for (names, about, to, dir) in jobs {
+        let (Some(a), Some(b)) = (m.bone(about), m.bone(to)) else { continue };
+        let (pa, pb) = (m.bones[a].pos, m.bones[b].pos);
+        let v = [pb[0] - pa[0], pb[1] - pa[1]];
+        if v[0].hypot(v[1]) < 1e-4 {
+            continue;
+        }
+        let ang = dir[1].atan2(dir[0]) - v[1].atan2(v[0]);
+        let ang = (ang + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        if ang.abs() < 1e-3 {
+            continue;
+        }
+        for n in names {
+            if let Some(side) = n.strip_prefix('@').and_then(|s| s.strip_suffix("fingers")) {
+                for (i, b) in m.bones.iter().enumerate() {
+                    if b.name.starts_with(side) && ["Thumb", "Index", "Middle", "Ring", "Little"].iter().any(|f| b.name.contains(f)) {
+                        turn[i] = Some((ang, pa));
+                    }
+                }
+            } else if let Some(i) = m.bone(n) {
+                turn[i] = Some((ang, pa));
+            }
+        }
+    }
+    if turn.iter().all(|t| t.is_none()) {
+        return;
+    }
+    let rot = |t: &(f32, [f32; 3]), p: [f32; 3]| -> [f32; 3] {
+        let (s, c) = t.0.sin_cos();
+        let (x, y) = (p[0] - t.1[0], p[1] - t.1[1]);
+        [t.1[0] + x * c - y * s, t.1[1] + x * s + y * c, p[2]]
+    };
+    for part in &mut m.parts {
+        for i in 0..part.verts.len() {
+            let v = part.verts[i];
+            let mut acc = [0.0f32; 3];
+            for k in 0..4 {
+                let w = part.weights[i][k];
+                if w <= 0.0 {
+                    continue;
+                }
+                let q = match &turn[part.joints[i][k] as usize] {
+                    Some(t) => rot(t, v),
+                    None => v,
+                };
+                for a in 0..3 {
+                    acc[a] += q[a] * w;
+                }
+            }
+            part.verts[i] = acc;
+            // the normals turn the same way (by the main bone)
+            let main = (0..4).max_by(|a, b| part.weights[i][*a].total_cmp(&part.weights[i][*b])).unwrap_or(0);
+            if let Some((ang, _)) = &turn[part.joints[i][main] as usize] {
+                let (s, c) = ang.sin_cos();
+                let n = part.normals[i];
+                part.normals[i] = [n[0] * c - n[1] * s, n[0] * s + n[1] * c, n[2]];
+            }
+        }
+    }
+    for i in 0..m.bones.len() {
+        if let Some(t) = &turn[i] {
+            let (p, q) = (m.bones[i].pos, m.bones[i].tip);
+            m.bones[i].pos = rot(t, p);
+            m.bones[i].tip = rot(t, q);
+        }
+    }
 }
 
 /// What an expression sets: (words that find the slider, "far" = the end away from the default, or a fraction of that).
