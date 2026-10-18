@@ -2983,3 +2983,53 @@ fn live2d_import_and_layer_eye_screens() {
     assert!(h.state().draw_mut_ref().doc.layers.iter().find(|l| l.id == layer).unwrap().visible);
     assert!(h.state_mut().test_moved(layer) > 5.0);
 }
+
+#[test]
+fn sharp_curves_and_smooth_warp_screens() {
+    use crate::doc::LayerKind;
+    use crate::rig::{Form, Kind};
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 1300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    let layer;
+    {
+        let d = h.state_mut().draw_mut();
+        let (w, h2) = (d.doc.w, d.doc.h);
+        let img = image::RgbaImage::from_fn(600, 600, |x, y| if (x / 50 + y / 50) % 2 == 0 { image::Rgba([220, 60, 80, 255]) } else { image::Rgba([40, 90, 200, 255]) });
+        let mut l = d.doc.new_layer("cloth", LayerKind::Raster);
+        l.tiles = crate::files::tiles_from_rgba(&img, 700, 700, w, h2);
+        l.rev += 1;
+        layer = l.id;
+        d.doc.layers.insert(0, l);
+        d.doc.mark_all_dirty();
+    }
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    // a mesh with a few big triangles, in a warp that is pushed hard in the middle
+    h.state_mut().test_rig_edit(|r| {
+        let id = r.fresh_id();
+        r.meshes.push(crate::rig::ArtMesh { id, layer, verts: vec![[700.0, 700.0], [1300.0, 700.0], [1300.0, 1300.0], [700.0, 1300.0]], tris: vec![[0, 1, 2], [0, 2, 3]], parent: None });
+        let w = r.add_changer("Bend", Kind::Warp { rect: [700.0, 700.0, 1300.0, 1300.0], cols: 4, rows: 4 }, None);
+        r.smooth.push(w);
+        let p = r.add_param("Bend", 0.0, 1.0, 0.0);
+        let mut off = vec![[0.0, 0.0]; 25];
+        off[12] = [0.0, 160.0];
+        off[11] = [0.0, 60.0];
+        off[13] = [0.0, 60.0];
+        r.set_keyform(w, p, 1.0, Form::Warp { offsets: off });
+        r.meshes.last_mut().unwrap().parent = Some(w);
+    });
+    h.run_steps(3);
+    let p = h.state().draw_mut_ref().doc.rig.params.iter().find(|p| p.name == "Bend").unwrap().id;
+    // at rest: two triangles. bent: many, so the picture follows the curve
+    assert_eq!(h.state_mut().test_tris(layer), 2);
+    h.state_mut().test_rig().values.set(p, 1.0);
+    h.run_steps(3);
+    let sharp = h.state_mut().test_tris(layer);
+    assert!(sharp > 30, "triangles added where it bends: {sharp}");
+    save(&mut h, "warp_1_sharp");
+    h.state_mut().test_rig().hq = false;
+    h.run_steps(3);
+    assert_eq!(h.state_mut().test_tris(layer), 2, "off: only the mesh it has");
+    save(&mut h, "warp_2_plain");
+}
