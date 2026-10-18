@@ -1006,7 +1006,20 @@ impl SeviathApp {
     pub(super) fn anim_picture(&mut self, size: (u32, u32), paper: Option<Color32>, frame: f32) -> Option<image::RgbaImage> {
         let cam = self.draw.doc.rig.anim.camera_at(frame);
         let cel = self.cel_mode();
-        let draw = |s: &mut Self, p: Option<Color32>| if cel { Some(s.cel_picture(size, p)) } else { s.rig_still(size, p) };
+        let rigged = self.has_rig();
+        let draw = |s: &mut Self, p: Option<Color32>| -> Option<image::RgbaImage> {
+            if !cel {
+                return s.rig_still(size, p);
+            }
+            if !rigged {
+                return Some(s.cel_picture(size, p));
+            }
+            // a rigged character with drawings: the drawings are over the posed character
+            let mut base = s.rig_still(size, p)?;
+            let drawings = s.cel_picture(size, None);
+            super::celtab::composite_over(&mut base, &drawings);
+            Some(base)
+        };
         if cam.is_default() {
             return draw(self, paper);
         }

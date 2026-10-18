@@ -3995,3 +3995,49 @@ fn ai_helper_makes_a_brush_and_colours_from_words() {
     h.run_steps(3);
     save(&mut h, "ai_helper");
 }
+
+/// A rigged character and frame by frame drawings together: the drawings are over the posed character.
+#[test]
+fn animate_tab_rig_and_cels_together() {
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    h.state_mut().test_run_action_now("tab.5");
+    h.run_steps(3);
+    h.state_mut().test_rig_edit(|r| r.anim.length = 2);
+    h.state_mut().test_cel_new_track();
+    let cel = h.state().draw_mut_ref().doc.rig.anim.cel_tracks[0].cels[0];
+    let mut img = image::RgbaImage::new(200, 200);
+    for p in img.pixels_mut() {
+        *p = image::Rgba([220, 30, 30, 255]);
+    }
+    {
+        let d = &mut h.state_mut().draw_mut().doc;
+        let l = d.layers.iter_mut().find(|l| l.id == cel).unwrap();
+        l.tiles = crate::files::tiles_from_rgba(&img, 100, 100, 2000, 3000);
+        l.rev += 1;
+    }
+    h.run_steps(3);
+    let dir = std::env::temp_dir().join(format!("seviath_rigcel_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    h.state_mut().test_anim_export_png(dir.clone(), 400);
+    for _ in 0..200 {
+        h.run_steps(1);
+        if !h.state_mut().test_anim_busy() {
+            break;
+        }
+    }
+    let f = image::open(dir.join("frame_0001.png")).unwrap().to_rgba8();
+    assert_eq!(f.dimensions(), (267, 400));
+    // doc (100..300, 100..300) is about (13..40) at this size: red, the drawing
+    assert_eq!(f.get_pixel(25, 25).0, [220, 30, 30, 255], "the drawing is in the picture");
+    // the middle of the body is the rigged character, not white paper and not red
+    let body = f.get_pixel(133, 220).0;
+    assert!(body != [255, 255, 255, 255] && body[0] != 220, "the character is in the picture: {body:?}");
+    h.run_steps(2);
+    save(&mut h, "animate_8_rig_and_cels");
+    let _ = std::fs::remove_dir_all(&dir);
+}
