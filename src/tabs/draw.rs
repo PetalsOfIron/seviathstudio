@@ -156,6 +156,9 @@ pub struct DrawState {
     canvas_rect: Rect,
     cursor_doc: Option<Pos2>,
     notice: Option<&'static str>,
+    /// Onion skin of a frame by frame animation: the pictures of the frames around the one being drawn, and how each is tinted. The app
+    /// puts them in before the canvas is drawn.
+    pub onion: Vec<(egui::TextureHandle, Color32)>,
     /// App settings (copied in by the app when they change).
     pub set: Settings,
     /// Reference pictures (Sub view → References).
@@ -236,6 +239,7 @@ impl Default for DrawState {
             canvas_rect: Rect::NOTHING,
             cursor_doc: None,
             notice: None,
+            onion: Vec::new(),
             set: Settings::default(),
             refs: RefStore::in_memory(),
             ref_popout: false,
@@ -959,6 +963,19 @@ impl DrawState {
             p.add(Shape::convex_polygon(shadow, Color32::from_black_alpha(90), Stroke::NONE));
         }
         self.renderer.paint(&p, &self.view, &self.doc);
+        if !self.onion.is_empty() {
+            let corners = [pos2(0.0, 0.0), pos2(self.doc.w as f32, 0.0), pos2(self.doc.w as f32, self.doc.h as f32), pos2(0.0, self.doc.h as f32)].map(|c| self.view.doc_to_screen(c));
+            let uvs = [pos2(0.0, 0.0), pos2(1.0, 0.0), pos2(1.0, 1.0), pos2(0.0, 1.0)];
+            for (tex, tint) in &self.onion {
+                let mut m = egui::Mesh::with_texture(tex.id());
+                for (pos, uv) in corners.iter().zip(uvs) {
+                    m.vertices.push(egui::epaint::Vertex { pos: *pos, uv, color: *tint });
+                }
+                m.add_triangle(0, 1, 2);
+                m.add_triangle(0, 2, 3);
+                p.add(Shape::mesh(m));
+            }
+        }
         self.reference_overlay(&p);
         self.text_overlay(&p);
         if self.set.pixel_grid && self.view.zoom >= self.set.pixel_grid_from {

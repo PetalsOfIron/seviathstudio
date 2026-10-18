@@ -56,7 +56,9 @@ impl SeviathApp {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for l in &self.draw.doc.layers {
             let shown = vis.iter().find(|(id, _)| *id == l.id).map(|(_, v)| *v).unwrap_or(l.visible);
-            (l.id, shown, l.opacity.to_bits(), l.rev, l.kind as u8, l.parent).hash(&mut h);
+            // a layer that is not shown does not matter, so drawing on one drawing leaves the pictures of the other frames as they are
+            let rev = if shown { l.rev } else { 0 };
+            (l.id, shown, l.opacity.to_bits(), rev, l.kind as u8, l.parent).hash(&mut h);
         }
         (self.draw.doc.w, self.draw.doc.h).hash(&mut h);
         h.finish()
@@ -143,6 +145,75 @@ impl SeviathApp {
         }
         if let Some(t) = self.cel_texture(&ctx, frame) {
             p.image(t.id(), page, uv, Color32::WHITE);
+        }
+    }
+
+    /// The Draw tab shows the frames around the playhead faintly, to draw the next drawing by.
+    pub(super) fn cel_onion_for_draw(&mut self, ctx: &egui::Context) {
+        self.draw.onion.clear();
+        let o = self.draw.doc.rig.anim.onion;
+        if !self.cel_mode() || !o.on {
+            return;
+        }
+        let frame = self.rigs.anim.frame.round().max(0.0) as u32;
+        let here = self.cel_key(&self.cel_vis(frame));
+        let mut seen = vec![here];
+        for (n, dir, tint) in [(o.before, -1i64, (255u8, 110u8, 110u8)), (o.after, 1, (90, 200, 120))] {
+            for k in 1..=n as i64 {
+                let f = frame as i64 + dir * k;
+                if f < 0 || f >= self.draw.doc.rig.anim.length as i64 {
+                    continue;
+                }
+                // a frame that looks like one that is already there (a held drawing) is not put again
+                let key = self.cel_key(&self.cel_vis(f as u32));
+                if seen.contains(&key) {
+                    continue;
+                }
+                seen.push(key);
+                let alpha = (o.opacity * (1.0 - (k - 1) as f32 / (n as f32 + 0.5)) * 255.0).clamp(0.0, 255.0) as u8;
+                if let Some(t) = self.cel_texture(ctx, f as u32) {
+                    self.draw.onion.push((t, Color32::from_rgba_unmultiplied(tint.0, tint.1, tint.2, alpha)));
+                }
+            }
+        }
+    }
+
+    /// A small bar over the Draw tab canvas: which frame it is, and buttons to go to the one before or after (the drawing that shows
+    /// there is picked to draw on).
+    pub(super) fn cel_frame_bar(&mut self, ctx: &egui::Context) {
+        if !self.cel_mode() {
+            return;
+        }
+        let frame = self.rigs.anim.frame.round().max(0.0) as i64;
+        let last = self.draw.doc.rig.anim.length as i64 - 1;
+        let mut go: Option<i64> = None;
+        let mut onion = self.draw.doc.rig.anim.onion.on;
+        egui::Area::new(egui::Id::new("cel_frame_bar")).anchor(egui::Align2::CENTER_TOP, vec2(0.0, 64.0)).order(egui::Order::Foreground).show(ctx, |ui| {
+            egui::Frame::new().fill(PANEL.gamma_multiply(0.94)).corner_radius(8).inner_margin(egui::Margin::symmetric(8, 4)).stroke(Stroke::new(1.0, Color32::from_gray(60))).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Frame before").on_hover_text("Go to the frame before and pick its drawing").clicked() {
+                        go = Some((frame - 1).max(0));
+                    }
+                    ui.label(RichText::new(format!("Frame {} of {}", frame + 1, last + 1)).monospace().size(12.5));
+                    if ui.button("Frame after").on_hover_text("Go to the frame after and pick its drawing").clicked() {
+                        go = Some((frame + 1).min(last));
+                    }
+                    ui.checkbox(&mut onion, "Onion skin");
+                });
+            });
+        });
+        if onion != self.draw.doc.rig.anim.onion.on {
+            self.anim_mut("Onion skin").onion.on = onion;
+        }
+        if let Some(f) = go {
+            self.rigs.anim.frame = f as f32;
+            self.rigs.anim.playing = false;
+            self.cel_apply(f as f32);
+            // the drawing that shows in the first track is the one to draw on
+            let pick = self.draw.doc.rig.anim.cel_tracks.iter().find(|t| !t.muted).and_then(|t| t.shown_at(f as u32));
+            if let Some(c) = pick {
+                self.draw.set_active(c);
+            }
         }
     }
 
