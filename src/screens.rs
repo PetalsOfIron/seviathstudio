@@ -3266,3 +3266,21 @@ fn uncut_face_points_screens() {
     let msg = h.state_mut().test_game().message.clone().unwrap();
     assert!(msg.contains("Install Python"), "{msg}");
 }
+
+#[test]
+fn uncut_joints_screens() {
+    let _gpu = lock_gpu();
+    let img = crate::rig::uncut::tests::figure_image();
+    let mut doc = crate::vrm::tests_build::uncut_doc(&img);
+    let ids: Vec<crate::doc::LayerId> = doc.layers.iter().map(|l| l.id).collect();
+    let mut rig = crate::rig::Rig::default();
+    crate::rig::uncut::auto_rig(&mut rig, &doc, &ids, 0.6).unwrap();
+    doc.rig = std::sync::Arc::new(rig);
+    let mut h = Harness::builder().with_size([1440.0, 1900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    h.state_mut().test_run_action_now("tab.3");
+    h.state_mut().test_joint_edit(true);
+    h.run_steps(5);
+    save(&mut h, "rig_joints");
+}
