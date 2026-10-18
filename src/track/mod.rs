@@ -48,6 +48,23 @@ fn avg(f: &Frame, names: &[&str]) -> Option<f32> {
     (!v.is_empty()).then(|| v.iter().sum::<f32>() / v.len() as f32)
 }
 
+/// A name that lives for the whole run, for the inputs that come from devices (a stick, a knob): the list of them is short.
+pub fn intern(name: &str) -> &'static str {
+    use std::sync::{Mutex, OnceLock};
+    static NAMES: OnceLock<Mutex<std::collections::HashSet<&'static str>>> = OnceLock::new();
+    let mut set = NAMES.get_or_init(|| Mutex::new(Default::default())).lock().unwrap();
+    if let Some(s) = set.get(name) {
+        return s;
+    }
+    if set.len() > 512 {
+        // a program that sends endless different names does not fill the memory
+        return "Overflow";
+    }
+    let s: &'static str = Box::leak(name.to_string().into_boxed_str());
+    set.insert(s);
+    s
+}
+
 /// The named inputs of one reading of the face.
 pub fn channels(f: &Frame) -> HashMap<&'static str, f32> {
     let mut c: HashMap<&'static str, f32> = HashMap::new();

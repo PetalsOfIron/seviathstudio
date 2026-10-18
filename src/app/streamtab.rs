@@ -55,6 +55,10 @@ pub struct StreamUi {
     /// Emotes: cut to the face, and which sizes.
     pub emote_face: bool,
     pub emote_sizes: [bool; 5],
+    /// The test of how the model looks to viewers: the side of the picture, how hard it is squeezed (0 to 2), the result and its size.
+    pub test_side: u32,
+    pub test_quality: u8,
+    pub test_pic: Option<(egui::TextureHandle, usize)>,
     /// OBS Studio remote control: where it is, the connection, and the scene a new hotkey would switch to.
     pub obs: Option<crate::obs::Obs>,
     /// A clip being recorded of the model: the video, its size, the time of the last picture and how many there are.
@@ -104,6 +108,9 @@ impl Default for StreamUi {
             hk_input: None,
             emote_face: true,
             emote_sizes: [true, true, true, false, false],
+            test_side: 720,
+            test_quality: 1,
+            test_pic: None,
             obs: None,
             rec: None,
             rec_path: std::path::PathBuf::new(),
@@ -176,6 +183,11 @@ impl SeviathApp {
         let frame = self.rigs.stream.sources.iter().filter(|s| s.enabled).find_map(|s| s.rx.as_ref().and_then(|r| r.latest(FRESH)));
         self.rigs.stream.tracked = frame.is_some();
         let mut ch = frame.as_ref().map(channels).unwrap_or_default();
+        // sticks, triggers and knobs of the pads and MIDI devices are inputs too
+        let device_axes = self.rigs.stream.hub.as_ref().map(|h| h.axis_values()).unwrap_or_default();
+        for (name, v) in &device_axes {
+            ch.insert(crate::track::intern(name), *v);
+        }
         let rig = self.draw.doc.rig.clone();
         let map = &rig.tracking;
         let mouse = ctx.input(|i| i.pointer.hover_pos()).map(|p| {
@@ -751,12 +763,20 @@ impl SeviathApp {
             ui.label(RichText::new("None yet. Press Make the mapping, or add one below.").size(11.5).color(TEXT_DIM));
         }
         let mut remove: Option<usize> = None;
+        let device_inputs: Vec<(String, f32)> = self.rigs.stream.hub.as_ref().map(|h| h.axis_values()).unwrap_or_default();
         for (i, mp) in m.maps.iter_mut().enumerate() {
             let name = rig.param(mp.param).map(|p| p.name.clone()).unwrap_or_else(|| "(gone)".into());
             egui::CollapsingHeader::new(RichText::new(format!("{name}  from  {}", mp.input)).size(12.0)).id_salt(("map", i)).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Input").size(11.5).color(TEXT_DIM));
                     egui::ComboBox::from_id_salt(("map_in", i)).selected_text(mp.input.clone()).width(150.0).show_ui(ui, |ui| {
+                        for (name, _) in &device_inputs {
+                            if ui.selectable_label(mp.input == *name, format!("{name}  (device)")).clicked() {
+                                mp.input = name.clone();
+                                let sticky = name.starts_with("Pad ") && !name.contains("Trigger") && !name.contains("Z");
+                                (mp.in_lo, mp.in_hi) = if sticky { (-1.0, 1.0) } else { (0.0, 1.0) };
+                            }
+                        }
                         for c in CHANNELS {
                             if ui.selectable_label(mp.input == c.0, format!("{}  ({})", c.0, c.1)).clicked() {
                                 mp.input = c.0.to_string();
@@ -807,18 +827,27 @@ impl SeviathApp {
                 }
             });
             ui.label(RichText::new("from").size(11.5).color(TEXT_DIM));
-            let ci = self.rigs.stream.add_input.min(CHANNELS.len() - 1);
-            egui::ComboBox::from_id_salt("map_add_input").selected_text(CHANNELS[ci].0).width(130.0).show_ui(ui, |ui| {
-                for (i, c) in CHANNELS.iter().enumerate() {
-                    if ui.selectable_label(ci == i, c.0).clicked() {
+            // the face inputs first, then the sticks and knobs that have moved
+            let total = CHANNELS.len() + device_inputs.len();
+            let ci = self.rigs.stream.add_input.min(total - 1);
+            let label_of = |i: usize| -> String { if i < CHANNELS.len() { CHANNELS[i].0.to_string() } else { device_inputs[i - CHANNELS.len()].0.clone() } };
+            egui::ComboBox::from_id_salt("map_add_input").selected_text(label_of(ci)).width(130.0).show_ui(ui, |ui| {
+                for i in 0..total {
+                    if ui.selectable_label(ci == i, label_of(i)).clicked() {
                         self.rigs.stream.add_input = i;
                     }
                 }
             });
             if ui.add_enabled(sel.is_some(), egui::Button::new("Add")).clicked() {
                 if let Some((id, _, lo, hi)) = sel.and_then(|id| names.iter().find(|n| n.0 == id)).cloned() {
-                    let c = CHANNELS[ci];
-                    m.maps.push(Map { param: id, input: c.0.to_string(), in_lo: c.2, in_hi: c.3, out_lo: lo, out_hi: hi, clamp: true, smoothing: 8.0, invert: false });
+                    let (input, in_lo, in_hi) = if ci < CHANNELS.len() {
+                        (CHANNELS[ci].0.to_string(), CHANNELS[ci].2, CHANNELS[ci].3)
+                    } else {
+                        let n = label_of(ci);
+                        let sticky = n.starts_with("Pad ") && !n.contains("Trigger") && !n.contains("Z");
+                        (n, if sticky { -1.0 } else { 0.0 }, 1.0)
+                    };
+                    m.maps.push(Map { param: id, input, in_lo, in_hi, out_lo: lo, out_hi: hi, clamp: true, smoothing: 8.0, invert: false });
                 }
             }
         });
@@ -830,8 +859,90 @@ impl SeviathApp {
             ui.label(RichText::new(msg).size(11.5).color(TEXT_DIM));
         }
         self.stream_output_ui(ui);
+        self.stream_ready_ui(ui);
+        self.stream_test_ui(ui);
         self.stream_clip_ui(ui);
         self.stream_emotes_ui(ui);
+    }
+
+    /// What is ready for going live and what is not.
+    pub(super) fn stream_checklist(&self) -> Vec<(bool, String)> {
+        let rig = &self.draw.doc.rig;
+        let st = &self.rigs.stream;
+        let mut v = vec![
+            (!rig.meshes.is_empty(), "The character has parts that move (Rig tab)".to_string()),
+            (st.sources.iter().any(|s| s.enabled), "A tracking source is on".to_string()),
+            (st.tracked, "A face is being followed right now".to_string()),
+            (!rig.tracking.maps.is_empty(), "The face moves sliders (the mapping is made)".to_string()),
+            (!rig.tracking.neutral.is_empty(), "The face is calibrated".to_string()),
+            (st.server.is_some() || st.window, "The model goes out: the OBS browser source or the model window is on".to_string()),
+        ];
+        let obs = st.obs.as_ref().map(|o| o.snapshot().status);
+        v.push((obs == Some(crate::obs::Status::Connected), "OBS Studio is connected (only needed for scene switching and the stream buttons)".to_string()));
+        v.push((!crate::expressions::defs(rig).is_empty(), "There are expressions to switch".to_string()));
+        v.push((!rig.hotkeys.is_empty(), "There are hotkeys for them".to_string()));
+        v
+    }
+
+    fn stream_ready_ui(&mut self, ui: &mut Ui) {
+        section_title(ui, "Ready to go live?");
+        let list = self.stream_checklist();
+        let done = list.iter().filter(|(ok, _)| *ok).count();
+        for (ok, text) in &list {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(if *ok { "Yes" } else { "Not yet" }).size(11.5).color(if *ok { VENOM } else { GOLD }));
+                ui.label(RichText::new(text).size(11.5).color(if *ok { TEXT } else { TEXT_DIM }));
+            });
+        }
+        ui.label(RichText::new(format!("{done} of {} ready.", list.len())).size(11.5).color(TEXT_DIM));
+    }
+
+    /// Make the picture of the model the way viewers get it: a smaller size and squeezed, so what a bad connection does can be seen.
+    pub(super) fn stream_test_picture(&mut self, ctx: &egui::Context) -> Option<usize> {
+        let (w, h) = (self.draw.doc.w, self.draw.doc.h);
+        let side = self.rigs.stream.test_side.clamp(120, 2160);
+        let k = (side as f32 / w.max(h) as f32).min(1.0);
+        let size = (((w as f32 * k).round() as u32).max(8), ((h as f32 * k).round() as u32).max(8));
+        let bg = self.stream_bg();
+        let img = self.rig_still(size, Some(bg))?;
+        let rgb = image::DynamicImage::ImageRgba8(img).to_rgb8();
+        let quality = [20u8, 45, 75][self.rigs.stream.test_quality.min(2) as usize];
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality).encode_image(&rgb).ok()?;
+        let back = image::load_from_memory(&bytes).ok()?.to_rgba8();
+        let ci = egui::ColorImage::from_rgba_unmultiplied([back.width() as usize, back.height() as usize], back.as_raw());
+        let tex = ctx.load_texture("stream_test", ci, egui::TextureOptions::LINEAR);
+        self.rigs.stream.test_pic = Some((tex, bytes.len()));
+        Some(bytes.len())
+    }
+
+    fn stream_test_ui(&mut self, ui: &mut Ui) {
+        section_title(ui, "Test the look");
+        ui.label(RichText::new("Shows the model smaller and squeezed, as it looks to viewers with a slow connection.").size(11.5).color(TEXT_DIM));
+        ui.horizontal_wrapped(|ui| {
+            for (side, name) in [(480u32, "480p"), (720, "720p"), (1080, "1080p")] {
+                if widgets::chip(ui, name, self.rigs.stream.test_side == side).clicked() {
+                    self.rigs.stream.test_side = side;
+                }
+            }
+            for (i, name) in ["Squeezed hard", "Squeezed", "Good"].iter().enumerate() {
+                if widgets::chip(ui, name, self.rigs.stream.test_quality == i as u8).clicked() {
+                    self.rigs.stream.test_quality = i as u8;
+                }
+            }
+        });
+        if ui.button("Make the test picture").clicked() {
+            let ctx = ui.ctx().clone();
+            if self.stream_test_picture(&ctx).is_none() {
+                self.rigs.stream.message = Some("There is nothing to draw: the rig has no meshes yet.".into());
+            }
+        }
+        if let Some((tex, bytes)) = &self.rigs.stream.test_pic {
+            let w = ui.available_width().min(320.0);
+            let s = tex.size_vec2();
+            ui.image((tex.id(), egui::vec2(w, w * s.y / s.x.max(1.0))));
+            ui.label(RichText::new(format!("{} KB for one picture", bytes / 1024)).size(11.0).color(TEXT_DIM));
+        }
     }
 
     /// Start a clip of the model (video file) at the stream picture rate, or stop the one that is recording.
@@ -1100,6 +1211,16 @@ impl SeviathApp {
     #[cfg(test)]
     pub fn test_stream(&mut self) -> &mut StreamUi {
         &mut self.rigs.stream
+    }
+
+    #[cfg(test)]
+    pub fn test_checklist(&self) -> Vec<(bool, String)> {
+        self.stream_checklist()
+    }
+
+    #[cfg(test)]
+    pub fn test_stream_test_picture(&mut self, ctx: &egui::Context) -> Option<usize> {
+        self.stream_test_picture(ctx)
     }
 
     #[cfg(test)]
