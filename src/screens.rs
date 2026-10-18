@@ -3617,6 +3617,17 @@ fn stream_tab_follows_a_sent_face_and_serves_the_picture() {
     h.state_mut().test_stream().expr.set("NoLayer", false);
     h.run_steps(4);
     assert_eq!(h.state_mut().test_still(300).unwrap().as_raw(), with_layer.as_raw(), "and shown again");
+    // a stick of a game pad moves a slider (here a stand-in for the stick)
+    let (s_id, s_lo, s_hi) = { let p = h.state().draw_mut_ref().doc.rig.params[2].clone(); (p.id, p.min, p.max) };
+    h.state_mut().test_rig_edit(|r| r.tracking.maps.push(crate::track::Map { param: s_id, input: "Pad LeftStickX".into(), in_lo: -1.0, in_hi: 1.0, out_lo: s_lo, out_hi: s_hi, clamp: true, smoothing: 0.0, invert: false }));
+    h.state_mut().test_stream().hub.as_ref().unwrap().set_axis("Pad LeftStickX", 1.0);
+    h.run_steps(4);
+    let v = h.state_mut().test_rig().values.0.get(&s_id).copied().unwrap_or(f32::NAN);
+    assert!((v - s_hi).abs() < (s_hi - s_lo) * 0.05, "the stick pushed all the way moves the slider to its top: {v} of {s_lo}..{s_hi}");
+    h.state_mut().test_stream().hub.as_ref().unwrap().set_axis("Pad LeftStickX", 0.0);
+    h.run_steps(4);
+    let v = h.state_mut().test_rig().values.0.get(&s_id).copied().unwrap_or(f32::NAN);
+    assert!((v - (s_lo + s_hi) / 2.0).abs() < (s_hi - s_lo) * 0.05, "and in the middle it is in the middle: {v}");
     // emotes: the plain face and the expression, at three sizes each, cut to the face
     let dir = std::env::temp_dir().join(format!("seviath_emotes_{}", std::process::id()));
     let n = h.state_mut().test_stream_emotes(&dir).unwrap();
@@ -3646,6 +3657,17 @@ fn stream_tab_follows_a_sent_face_and_serves_the_picture() {
     h.run_steps(4);
     assert!(!h.state_mut().test_stream().expr.is_on("Happy"), "the call cleared the expressions");
     h.state_mut().test_stream().hub.as_mut().unwrap().set_link(None).unwrap();
+    // the checklist for going live knows what is done, and the test picture is squeezed smaller when asked to be
+    let list = h.state_mut().test_checklist();
+    assert!(list.iter().find(|(_, t)| t.contains("parts that move")).unwrap().0 && list.iter().find(|(_, t)| t.contains("tracking source is on")).unwrap().0, "{list:?}");
+    assert!(!list.iter().find(|(_, t)| t.contains("calibrated")).unwrap().0, "not calibrated yet");
+    let ctx = h.ctx.clone();
+    h.state_mut().test_stream().test_side = 720;
+    h.state_mut().test_stream().test_quality = 2;
+    let good = h.state_mut().test_stream_test_picture(&ctx).unwrap();
+    h.state_mut().test_stream().test_quality = 0;
+    let bad = h.state_mut().test_stream_test_picture(&ctx).unwrap();
+    assert!(bad < good, "squeezed hard is smaller: {bad} against {good} bytes");
     // a clip of the model is recorded to an MP4 file
     let clip = std::env::temp_dir().join(format!("seviath_clip_{}.mp4", std::process::id()));
     h.state_mut().test_stream_clip(&clip).unwrap();

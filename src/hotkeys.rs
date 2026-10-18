@@ -130,6 +130,18 @@ pub fn key_name(vk: u32) -> String {
     }
 }
 
+/// A MIDI control change (a knob or a slider of a controller) as a named number from 0 to 1.
+pub fn parse_midi_cc(msg: &[u8]) -> Option<(String, f32)> {
+    let (status, number, value) = (*msg.first()?, *msg.get(1)?, *msg.get(2)?);
+    (status & 0xF0 == 0xB0).then(|| (format!("MIDI knob {number} ch{}", (status & 0x0F) + 1), value as f32 / 127.0))
+}
+
+/// The movement of a game pad stick or trigger, with the small drift of a stick at rest taken away (and the rest stretched to fill 1).
+pub fn pad_axis(value: f32) -> f32 {
+    const DEAD: f32 = 0.12;
+    if value.abs() < DEAD { 0.0 } else { value.signum() * ((value.abs() - DEAD) / (1.0 - DEAD)).min(1.0) }
+}
+
 /// A MIDI message as an event: a note on with a force, or a note off.
 pub fn parse_midi(msg: &[u8]) -> Option<InputEvent> {
     let (status, note, vel) = (*msg.first()?, *msg.get(1)?, msg.get(2).copied().unwrap_or(0));
@@ -182,6 +194,8 @@ pub struct Hub {
     pub midi_name: Option<String>,
     pub midi_ports: Vec<String>,
     pub pad_names: Arc<Mutex<Vec<String>>>,
+    /// The sticks, triggers and knobs: name and where they are now (sticks from -1 to 1, triggers and knobs from 0 to 1).
+    pub axes: Arc<Mutex<std::collections::BTreeMap<String, f32>>>,
     stop: Arc<AtomicBool>,
     held_keys: HashSet<usize>,
     pressed_scan: HashSet<u32>,
@@ -199,8 +213,9 @@ impl Hub {
         let queue: Arc<Mutex<Vec<InputEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let pad_names = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
+        let axes: Arc<Mutex<std::collections::BTreeMap<String, f32>>> = Arc::new(Mutex::new(Default::default()));
         {
-            let (q, names, stop) = (queue.clone(), pad_names.clone(), stop.clone());
+            let (q, names, stop, ax) = (queue.clone(), pad_names.clone(), stop.clone(), axes.clone());
             std::thread::spawn(move || {
                 let Ok(mut g) = gilrs::Gilrs::new() else { return };
                 let mut last_names = std::time::Instant::now() - std::time::Duration::from_secs(10);
@@ -209,6 +224,19 @@ impl Hub {
                         let (button, pressed) = match ev.event {
                             gilrs::EventType::ButtonPressed(b, _) => (b, true),
                             gilrs::EventType::ButtonReleased(b, _) => (b, false),
+                            gilrs::EventType::AxisChanged(a, v, _) => {
+                                if let Ok(mut m) = ax.lock() {
+                                    m.insert(format!("Pad {a:?}"), pad_axis(v));
+                                }
+                                continue;
+                            }
+                            // the analog triggers also report how far they are pressed
+                            gilrs::EventType::ButtonChanged(b, v, _) if format!("{b:?}").contains("Trigger") => {
+                                if let Ok(mut m) = ax.lock() {
+                                    m.insert(format!("Pad {b:?}"), v.clamp(0.0, 1.0));
+                                }
+                                continue;
+                            }
                             _ => continue,
                         };
                         if let Ok(mut q) = q.lock() {
@@ -227,7 +255,7 @@ impl Hub {
                 }
             });
         }
-        let mut hub = Hub { queue, midi: None, midi_name: None, midi_ports: Vec::new(), pad_names, stop, held_keys: HashSet::new(), pressed_scan: HashSet::new(), learn: false, learned: None, link: None, keyboard: true };
+        let mut hub = Hub { queue, midi: None, midi_name: None, midi_ports: Vec::new(), pad_names, axes, stop, held_keys: HashSet::new(), pressed_scan: HashSet::new(), learn: false, learned: None, link: None, keyboard: true };
         hub.refresh_midi_ports();
         hub
     }
@@ -241,11 +269,17 @@ impl Hub {
         let input = midir::MidiInput::new("SeviathStudio").map_err(|e| e.to_string())?;
         let port = input.ports().into_iter().find(|p| input.port_name(p).is_ok_and(|n| n == name)).ok_or("That MIDI device is not there any more.")?;
         let q = self.queue.clone();
+        let axes = self.axes.clone();
         let conn = input
             .connect(
                 &port,
                 "seviath-in",
                 move |_stamp, msg, _| {
+                    if let Some((name, v)) = parse_midi_cc(msg) {
+                        if let Ok(mut m) = axes.lock() {
+                            m.insert(name, v);
+                        }
+                    }
                     if let Some(e) = parse_midi(msg) {
                         if let Ok(mut q) = q.lock() {
                             if q.len() < 256 {
@@ -276,6 +310,18 @@ impl Hub {
             c.close();
         }
         self.midi_name = None;
+    }
+
+    /// Set a stick or knob as if a device moved it.
+    pub fn set_axis(&self, name: &str, value: f32) {
+        if let Ok(mut m) = self.axes.lock() {
+            m.insert(name.to_string(), value);
+        }
+    }
+
+    /// The sticks, triggers and knobs that have moved so far, with where they are.
+    pub fn axis_values(&self) -> Vec<(String, f32)> {
+        self.axes.lock().map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect()).unwrap_or_default()
     }
 
     /// Put an event in as if it came from a device.
@@ -374,6 +420,14 @@ mod tests {
         assert_eq!(parse_midi(&[0xB0, 7, 100]), None, "a control change is not a button");
         assert_eq!(parse_midi(&[]), None);
         assert_eq!(parse_midi(&[0x90]), None);
+        assert_eq!(parse_midi_cc(&[0xB1, 7, 127]), Some(("MIDI knob 7 ch2".to_string(), 1.0)));
+        assert_eq!(parse_midi_cc(&[0xB0, 1, 0]).unwrap().1, 0.0);
+        assert_eq!(parse_midi_cc(&[0x90, 60, 100]), None, "a note is not a knob");
+        // a stick at rest does not drift, and the rest of its way is stretched to 1
+        assert_eq!(pad_axis(0.05), 0.0);
+        assert_eq!(pad_axis(-0.1), 0.0);
+        assert!((pad_axis(1.0) - 1.0).abs() < 1e-6 && (pad_axis(-1.0) + 1.0).abs() < 1e-6);
+        assert!(pad_axis(0.5) > 0.4 && pad_axis(0.5) < 0.5);
     }
 
     #[test]
