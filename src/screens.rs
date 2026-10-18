@@ -1996,7 +1996,7 @@ fn rig_tab_screens() {
     use crate::doc::LayerKind;
     use egui_kittest::kittest::Queryable;
     let _gpu = lock_gpu();
-    let mut h = Harness::builder().with_size([1440.0, 1900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    let mut h = Harness::builder().with_size([1440.0, 2400.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     // a head (a disc) and an arm (a bar) on the 3000 x 4000 page
     let (head, arm) = {
@@ -3195,4 +3195,39 @@ fn path_turns_and_turn_the_whole_shape_screens() {
     let rig = h.state().draw_mut_ref().doc.rig.clone();
     assert!(rig.bindings.iter().any(|b| b.forms.iter().any(|f| matches!(f, crate::rig::Form::Paths { turns, .. } if !turns.is_empty() && turns[0].iter().any(|t| t.abs() > 1.0)))), "turns saved with the shape");
     assert!(h.state_mut().test_moved(layer) > 20.0);
+}
+
+#[test]
+fn rig_for_games_screens() {
+    use crate::vrm::export::Format;
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 2300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    h.state_mut().test_game().author = "Me".into();
+    h.get_by_label("Make the 3D character").click();
+    h.run_steps(4);
+    assert!(h.state_mut().test_game().model.is_some());
+    assert!(h.state_mut().test_game().message.as_deref().unwrap().contains("expressions"));
+    // turn it round and show the blink in the preview
+    h.state_mut().test_game().yaw = 30.0;
+    h.state_mut().test_game().expr = Some("blink".into());
+    h.run_steps(4);
+    save(&mut h, "game_1_preview");
+    // both formats come out checked
+    let (one, s1) = h.state_mut().game_bytes(Format::Vrm1).unwrap();
+    let (zero, s0) = h.state_mut().game_bytes(Format::Vrm0).unwrap();
+    assert_eq!((s1.version, s0.version), (1, 0));
+    assert!(one.len() > 1000 && zero.len() > 1000);
+    // with no meshes there is nothing to build
+    h.state_mut().test_game().model = None;
+    h.state_mut().test_rig_edit(|r| r.meshes.clear());
+    h.get_by_label("Make the 3D character").click();
+    h.run_steps(3);
+    assert!(h.state_mut().test_game().model.is_none());
+    assert!(h.state_mut().test_game().message.as_deref().unwrap().contains("Nothing to build"));
 }

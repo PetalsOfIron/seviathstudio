@@ -57,6 +57,20 @@ impl LayerTex {
         LayerTex { x0: 0, y0: 0, w, h, px }
     }
 
+    /// The picture as ordinary (not premultiplied) pixels.
+    pub fn to_rgba(&self) -> image::RgbaImage {
+        let mut img = image::RgbaImage::new(self.w.max(1) as u32, self.h.max(1) as u32);
+        for (i, p) in self.px.iter().enumerate() {
+            let a = p[3];
+            if a <= 0.0 {
+                continue;
+            }
+            let c = |v: f32| ((v / a).clamp(0.0, 1.0) * 255.0).round() as u8;
+            img.put_pixel((i % self.w) as u32, (i / self.w) as u32, image::Rgba([c(p[0]), c(p[1]), c(p[2]), (a * 255.0).round() as u8]));
+        }
+        img
+    }
+
     /// How solid a texel is (0..1).
     pub fn alpha_at(&self, x: usize, y: usize) -> f32 {
         self.px.get(y * self.w + x).map(|p| p[3]).unwrap_or(0.0)
