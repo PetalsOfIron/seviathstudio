@@ -976,3 +976,24 @@ fn hair_strands_and_the_hair_brush_edit_the_hair_of_the_midlander() {
     let trimmed = build_any(&d, &opt).unwrap();
     assert!(hair_tris(&trimmed) < hair_tris(&first), "{} {}", hair_tris(&trimmed), hair_tris(&first));
 }
+
+#[test]
+fn the_svrm_description_rides_along_in_every_format_and_is_read_back() {
+    use super::export::export_with;
+    let d = character();
+    let m = build(&d, &Options { name: "Test".into(), author: "Me".into(), ..Default::default() }).unwrap();
+    let mut rig = Rig::default();
+    let p = rig.add_param("Mouth open", 0.0, 1.0, 0.0);
+    rig.own_exprs.push(crate::expressions::OwnExpr { name: "Happy".into(), values: vec![(p, 1.0)], ..Default::default() });
+    let svrm = super::svrm::describe(&rig, &|_| None);
+    for fmt in [Format::Vrm1, Format::Vrm0, Format::Glb] {
+        let with = export_with(&m, fmt, Some(&svrm)).unwrap();
+        let s = validate(&with).unwrap();
+        assert_eq!(s.svrm, Some(1), "{fmt:?}");
+        let g = read_glb(&with).unwrap();
+        assert!(g.json["extensionsUsed"].as_array().unwrap().iter().any(|e| e == "SEVIATH_svrm"));
+        assert_eq!(g.json["extensions"]["SEVIATH_svrm"]["expressions"][0]["name"], "Happy");
+        // without it nothing is added
+        assert_eq!(validate(&export(&m, fmt).unwrap()).unwrap().svrm, None);
+    }
+}

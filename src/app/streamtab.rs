@@ -57,6 +57,9 @@ pub struct StreamUi {
     pub emote_sizes: [bool; 5],
     /// OBS Studio remote control: where it is, the connection, and the scene a new hotkey would switch to.
     pub obs: Option<crate::obs::Obs>,
+    /// A clip being recorded of the model: the video, its size, the time of the last picture and how many there are.
+    pub rec: Option<(crate::recorder::Writer, (u32, u32), f64, u64)>,
+    pub rec_path: std::path::PathBuf,
     pub link_port: u16,
     pub link_on: bool,
     /// Sending the face and expressions to VRChat over OSC.
@@ -102,6 +105,8 @@ impl Default for StreamUi {
             emote_face: true,
             emote_sizes: [true, true, true, false, false],
             obs: None,
+            rec: None,
+            rec_path: std::path::PathBuf::new(),
             link_port: 39560,
             link_on: false,
             vrc: None,
@@ -825,7 +830,48 @@ impl SeviathApp {
             ui.label(RichText::new(msg).size(11.5).color(TEXT_DIM));
         }
         self.stream_output_ui(ui);
+        self.stream_clip_ui(ui);
         self.stream_emotes_ui(ui);
+    }
+
+    /// Start a clip of the model (video file) at the stream picture rate, or stop the one that is recording.
+    fn stream_clip_ui(&mut self, ui: &mut Ui) {
+        section_title(ui, "Clip");
+        ui.label(RichText::new("Records the model, as it moves with your face, to a video (MP4) on the background colour chosen above.").size(11.5).color(TEXT_DIM));
+        match self.rigs.stream.rec.as_ref().map(|r| r.3) {
+            Some(n) => {
+                let secs = n as f32 / self.settings.stream_fps.clamp(5, 60) as f32;
+                ui.horizontal(|ui| {
+                    if ui.button("Stop and save").clicked() {
+                        self.stream_stop_clip();
+                    }
+                    ui.label(RichText::new(format!("Recording {secs:.1} s")).size(12.0).color(Color32::from_rgb(255, 120, 100)));
+                });
+            }
+            None => {
+                if ui.button("Record a clip...").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().set_title("Save the clip").set_directory(self.settings.projects_folder()).set_file_name("clip.mp4").add_filter("MP4 video", &["mp4"]).save_file() {
+                        let (w, h) = (self.draw.doc.w, self.draw.doc.h);
+                        let size = crate::recorder::video_size(w, h, self.rigs.stream.server_side.min(1080));
+                        let fps = self.settings.stream_fps.clamp(5, 60);
+                        match crate::recorder::Writer::new(&p, size, fps) {
+                            Ok(wr) => {
+                                self.rigs.stream.rec = Some((wr, size, 0.0, 0));
+                                self.rigs.stream.rec_path = p;
+                            }
+                            Err(e) => self.rigs.stream.message = Some(e),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub(super) fn stream_stop_clip(&mut self) {
+        if let Some((w, _, _, n)) = self.rigs.stream.rec.take() {
+            w.finish();
+            self.rigs.stream.message = Some(format!("Saved the clip ({n} pictures): {}", self.rigs.stream.rec_path.display()));
+        }
     }
 
     fn stream_emotes_ui(&mut self, ui: &mut Ui) {
@@ -974,6 +1020,32 @@ impl SeviathApp {
     /// The model window and the browser source.
     fn stream_outputs(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
+        // a clip of the model
+        if let Some((_, size, last, _)) = self.rigs.stream.rec.as_ref().map(|r| (0, r.1, r.2, 0)) {
+            let fps = self.settings.stream_fps.clamp(5, 60) as f64;
+            if now - last >= 1.0 / fps {
+                let bg = self.stream_bg();
+                if let Some(img) = self.rig_still(size, Some(bg)) {
+                    let mut rgb = Vec::with_capacity((img.width() * img.height() * 3) as usize);
+                    for p in img.pixels() {
+                        rgb.extend_from_slice(&p.0[..3]);
+                    }
+                    let mut stop: Option<String> = None;
+                    if let Some(r) = self.rigs.stream.rec.as_mut() {
+                        r.2 = now;
+                        match r.0.write(rgb) {
+                            Ok(()) => r.3 += 1,
+                            Err(e) => stop = Some(e),
+                        }
+                    }
+                    if let Some(e) = stop {
+                        self.stream_stop_clip();
+                        self.rigs.stream.message = Some(format!("The clip stopped: {e}"));
+                    }
+                }
+            }
+            ctx.request_repaint();
+        }
         // the browser source gets a new picture about 30 times a second
         if self.rigs.stream.server.is_some() && now - self.rigs.stream.last_sent >= 1.0 / self.settings.stream_fps.clamp(1, 120) as f64 {
             self.rigs.stream.last_sent = now;
@@ -1028,6 +1100,21 @@ impl SeviathApp {
     #[cfg(test)]
     pub fn test_stream(&mut self) -> &mut StreamUi {
         &mut self.rigs.stream
+    }
+
+    #[cfg(test)]
+    pub fn test_stop_clip(&mut self) {
+        self.stream_stop_clip();
+    }
+
+    #[cfg(test)]
+    pub fn test_stream_clip(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let (w, h) = (self.draw.doc.w, self.draw.doc.h);
+        let size = crate::recorder::video_size(w, h, 240);
+        let wr = crate::recorder::Writer::new(path, size, 30)?;
+        self.rigs.stream.rec = Some((wr, size, 0.0, 0));
+        self.rigs.stream.rec_path = path.to_path_buf();
+        Ok(())
     }
 
     #[cfg(test)]
