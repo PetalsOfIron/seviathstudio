@@ -3585,6 +3585,27 @@ fn stream_tab_follows_a_sent_face_and_serves_the_picture() {
         assert!(all.starts_with(b"HTTP/1.1 200"), "{}", String::from_utf8_lossy(&all[..all.len().min(80)]));
         assert!(all.windows(4).any(|w| w == b"\x89PNG"));
     }
+    // a pad button switches an expression on and off, on top of the tracked face
+    let (e_id, e_lo, e_hi, e_def) = { let p = h.state().draw_mut_ref().doc.rig.params[1].clone(); (p.id, p.min, p.max, p.default) };
+    h.state_mut().test_rig_edit(|r| {
+        r.own_exprs.push(crate::expressions::OwnExpr { name: "Happy".into(), values: vec![(e_id, e_hi)], fade_in: 0.0, fade_out: 0.0 });
+        r.hotkeys.push(crate::hotkeys::Binding { input: crate::hotkeys::Input::Pad { button: "South".into() }, action: crate::hotkeys::Action::Toggle("Happy".into()) });
+    });
+    let press = crate::hotkeys::InputEvent { input: crate::hotkeys::Input::Pad { button: "South".into() }, pressed: true };
+    let release = crate::hotkeys::InputEvent { input: crate::hotkeys::Input::Pad { button: "South".into() }, pressed: false };
+    let val = |h: &mut Harness<'_, SeviathApp>| h.state_mut().test_rig().values.0.get(&e_id).copied().unwrap_or(e_def);
+    h.state_mut().test_stream().hub.as_ref().unwrap().push(press.clone());
+    h.state_mut().test_stream().hub.as_ref().unwrap().push(release.clone());
+    h.run_steps(4);
+    assert!((val(&mut h) - e_hi).abs() < 1e-3, "the expression is on: {} of {e_lo}..{e_hi}", val(&mut h));
+    assert!(h.state_mut().test_stream().tracked, "the face is still followed");
+    h.state_mut().test_stream().hub.as_ref().unwrap().push(press);
+    h.state_mut().test_stream().hub.as_ref().unwrap().push(release);
+    h.run_steps(4);
+    assert!((val(&mut h) - e_def).abs() < 1e-3, "off again: {}", val(&mut h));
+    h.state_mut().test_stream().hub.as_ref().unwrap().push(crate::hotkeys::InputEvent { input: crate::hotkeys::Input::Pad { button: "South".into() }, pressed: true });
+    h.run_steps(3);
+    save(&mut h, "stream_2_expressions");
     save(&mut h, "stream_1");
     // switched off again
     h.state_mut().test_stream_source(1, false);
