@@ -45,6 +45,13 @@ pub struct StreamUi {
     pub add_param: Option<Id>,
     pub add_input: usize,
     pub bg: u8,
+    /// Where keys, pad buttons and MIDI notes come from, and which expressions are on.
+    pub hub: Option<crate::hotkeys::Hub>,
+    pub expr: crate::expressions::ExprState,
+    pub new_expr: String,
+    pub hk_action: u8,
+    pub hk_expr: String,
+    pub hk_input: Option<crate::hotkeys::Input>,
 }
 
 impl Default for StreamUi {
@@ -71,6 +78,12 @@ impl Default for StreamUi {
             add_param: None,
             add_input: 0,
             bg: 0,
+            hub: None,
+            expr: Default::default(),
+            new_expr: String::new(),
+            hk_action: 0,
+            hk_expr: String::new(),
+            hk_input: None,
         }
     }
 }
@@ -88,6 +101,9 @@ impl SeviathApp {
     pub(super) fn stream_ui(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         self.rig_init();
+        if self.rigs.stream.hub.is_none() {
+            self.rigs.stream.hub = Some(crate::hotkeys::Hub::new());
+        }
         self.stream_drive(&ctx);
         self.phys_tick(&ctx);
         self.rig_render(&ctx);
@@ -136,10 +152,34 @@ impl SeviathApp {
         });
         let mut state = std::mem::take(&mut self.rigs.stream.state);
         state.fill_in(&mut ch, map, now, mouse);
+        // what the expressions did last frame is taken off before the face sets the sliders again
+        self.rigs.stream.expr.undo(&mut self.rigs.values);
         if !map.maps.is_empty() {
             state.apply(map, &ch, &rig, &mut self.rigs.values, dt);
         }
         self.rigs.stream.state = state;
+        // keys, pad buttons and MIDI notes switch expressions
+        let events = match self.rigs.stream.hub.as_mut() {
+            Some(h) => h.poll(&rig.hotkeys),
+            None => Vec::new(),
+        };
+        for (action, pressed) in crate::hotkeys::dispatch(&rig.hotkeys, &events) {
+            let e = &mut self.rigs.stream.expr;
+            match action {
+                crate::hotkeys::Action::Toggle(n) => e.toggle(&n),
+                crate::hotkeys::Action::Show(n) => e.show_only(&n),
+                crate::hotkeys::Action::Hold(n) => e.set(&n, pressed),
+                crate::hotkeys::Action::Clear => e.clear(),
+            }
+        }
+        let defs = crate::expressions::defs(&rig);
+        self.rigs.stream.expr.apply(&defs, &rig, &mut self.rigs.values, dt);
+        if !rig.hotkeys.is_empty() || self.rigs.stream.hub.as_ref().is_some_and(|h| h.learn) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
+        if self.rigs.stream.expr.any() {
+            ctx.request_repaint();
+        }
         let mut inputs: Vec<(&'static str, f32)> = CHANNELS.iter().filter_map(|c| ch.get(c.0).map(|v| (c.0, *v))).collect();
         inputs.truncate(40);
         self.rigs.stream.inputs = inputs;
@@ -243,6 +283,9 @@ impl SeviathApp {
         ui.add_space(6.0);
         ui.label(RichText::new("From a phone: iFacialMocap sends to this computer (give it this computer's address). Waidayo and similar apps send VMC to port 39539. OpenSeeFace sends to 11573.").size(11.0).color(TEXT_DIM));
 
+        self.stream_expr_ui(ui);
+        self.stream_hotkeys_ui(ui);
+
         section_title(ui, "What the face does now");
         let inputs = self.rigs.stream.inputs.clone();
         if inputs.is_empty() {
@@ -260,6 +303,180 @@ impl SeviathApp {
             });
         }
         let _ = Stroke::NONE;
+    }
+
+    fn stream_expr_ui(&mut self, ui: &mut Ui) {
+        section_title(ui, "Expressions");
+        let rig = self.draw.doc.rig.clone();
+        let defs = crate::expressions::defs(&rig);
+        if defs.is_empty() {
+            ui.label(RichText::new("None yet. Pose the sliders (Rig tab, or the Animate tab), give the look a name here and save it. A Live2D model's own expressions show up here too.").size(11.5).color(TEXT_DIM));
+        }
+        let now = ui.ctx().input(|i| i.time);
+        let mut delete: Option<String> = None;
+        let mut fades: Vec<(String, f32)> = Vec::new();
+        for d in &defs {
+            let on = self.rigs.stream.expr.is_on(&d.name);
+            let level = self.rigs.stream.expr.level(&d.name);
+            ui.horizontal(|ui| {
+                if widgets::chip(ui, &d.name, on).on_hover_text("Click to switch it on or off").clicked() {
+                    self.rigs.stream.expr.toggle(&d.name);
+                }
+                let (r, _) = ui.allocate_exact_size(vec2(50.0, 6.0), Sense::hover());
+                ui.painter().rect_filled(r, 3.0, Color32::from_rgb(28, 36, 33));
+                ui.painter().rect_filled(Rect::from_min_size(r.min, vec2(r.width() * level, r.height())), 3.0, VENOM);
+                if d.own {
+                    let mut fade = d.fade_in;
+                    if ui.add(egui::DragValue::new(&mut fade).range(0.0..=5.0).speed(0.02).suffix(" s")).on_hover_text("How long it takes to come and go").changed() {
+                        fades.push((d.name.clone(), fade));
+                    }
+                    if ui.small_button("Delete").clicked() {
+                        delete = Some(d.name.clone());
+                    }
+                }
+            });
+        }
+        if let Some(n) = delete {
+            self.rig_edit("Delete expression", now, |r| r.own_exprs.retain(|e| e.name != n));
+            self.rigs.stream.expr.set(&n, false);
+        }
+        if !fades.is_empty() {
+            self.rig_edit("Expression fade", now, |r| {
+                for (n, f) in &fades {
+                    if let Some(e) = r.own_exprs.iter_mut().find(|e| e.name == *n) {
+                        e.fade_in = *f;
+                        e.fade_out = *f;
+                    }
+                }
+            });
+        }
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.rigs.stream.new_expr).hint_text("Name").desired_width(110.0));
+            let name = self.rigs.stream.new_expr.trim().to_string();
+            if ui.add_enabled(!name.is_empty(), egui::Button::new("Save the sliders as an expression")).on_hover_text("Every slider that is not at its middle value now becomes part of the expression").clicked() {
+                let base = self.rigs.stream.expr.without_effects(&self.rigs.values);
+                let values: Vec<(crate::rig::Id, f32)> = rig.params.iter().filter_map(|p| base.0.get(&p.id).filter(|v| (**v - p.default).abs() > 0.01).map(|v| (p.id, *v))).collect();
+                let n = values.len();
+                self.rig_edit("Save expression", now, |r| {
+                    r.own_exprs.retain(|e| e.name != name);
+                    r.own_exprs.push(crate::expressions::OwnExpr { name: name.clone(), values, ..Default::default() });
+                });
+                self.rigs.stream.message = Some(format!("Saved {name}: {n} sliders."));
+                self.rigs.stream.new_expr.clear();
+            }
+        });
+        if ui.small_button("All expressions off").clicked() {
+            self.rigs.stream.expr.clear();
+        }
+    }
+
+    fn stream_hotkeys_ui(&mut self, ui: &mut Ui) {
+        section_title(ui, "Hotkeys");
+        ui.label(RichText::new("A key, a MIDI note or a pad button switches an expression. Keys work while a game has the focus (Windows). Keep this tab open while streaming.").size(11.5).color(TEXT_DIM));
+        let rig = self.draw.doc.rig.clone();
+        let now = ui.ctx().input(|i| i.time);
+        // devices
+        let (ports, current, pads) = match &self.rigs.stream.hub {
+            Some(h) => (h.midi_ports.clone(), h.midi_name.clone(), h.pad_names.lock().map(|p| p.clone()).unwrap_or_default()),
+            None => (Vec::new(), None, Vec::new()),
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("MIDI device").size(12.0).color(TEXT_DIM));
+            let label = current.clone().unwrap_or_else(|| if ports.is_empty() { "none found".into() } else { "off".into() });
+            egui::ComboBox::from_id_salt("midi_port").selected_text(label).width(160.0).show_ui(ui, |ui| {
+                if ui.selectable_label(current.is_none(), "Off").clicked() {
+                    if let Some(h) = self.rigs.stream.hub.as_mut() {
+                        h.disconnect_midi();
+                    }
+                }
+                for p in &ports {
+                    if ui.selectable_label(current.as_deref() == Some(p.as_str()), p).clicked() {
+                        if let Some(h) = self.rigs.stream.hub.as_mut() {
+                            if let Err(e) = h.connect_midi(p) {
+                                self.rigs.stream.message = Some(e);
+                            }
+                        }
+                    }
+                }
+            });
+            if ui.small_button("Look again").clicked() {
+                if let Some(h) = self.rigs.stream.hub.as_mut() {
+                    h.refresh_midi_ports();
+                }
+            }
+        });
+        ui.label(RichText::new(if pads.is_empty() { "No game pad found (it is looked for every two seconds).".to_string() } else { format!("Game pad: {}", pads.join(", ")) }).size(11.5).color(TEXT_DIM));
+        // what is bound
+        let mut remove: Option<usize> = None;
+        for (i, b) in rig.hotkeys.iter().enumerate() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(b.input.label()).monospace().size(11.5).color(VENOM));
+                ui.label(RichText::new(b.action.label()).size(12.0));
+                if ui.small_button("Delete").clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            self.rig_edit("Delete hotkey", now, |r| {
+                if i < r.hotkeys.len() {
+                    r.hotkeys.remove(i);
+                }
+            });
+        }
+        // a new one
+        let learning = self.rigs.stream.hub.as_ref().is_some_and(|h| h.learn);
+        if let Some(h) = self.rigs.stream.hub.as_mut() {
+            if let Some(i) = h.learned.take() {
+                self.rigs.stream.hk_input = Some(i);
+            }
+        }
+        ui.horizontal_wrapped(|ui| {
+            let label = match (&self.rigs.stream.hk_input, learning) {
+                (_, true) => "Press a key, a pad button or a MIDI note...".to_string(),
+                (Some(i), _) => i.label(),
+                (None, _) => "Learn an input".to_string(),
+            };
+            if widgets::chip(ui, &label, learning).on_hover_text("Click, then press what should switch the expression").clicked() {
+                if let Some(h) = self.rigs.stream.hub.as_mut() {
+                    h.learn = !learning;
+                }
+            }
+        });
+        let names: Vec<String> = crate::expressions::defs(&rig).into_iter().map(|d| d.name).collect();
+        ui.horizontal_wrapped(|ui| {
+            egui::ComboBox::from_id_salt("hk_action").selected_text(["Switch on or off", "Show only", "While held", "All off"][self.rigs.stream.hk_action as usize % 4]).width(120.0).show_ui(ui, |ui| {
+                for (i, n) in ["Switch on or off", "Show only", "While held", "All off"].iter().enumerate() {
+                    if ui.selectable_label(self.rigs.stream.hk_action == i as u8, *n).clicked() {
+                        self.rigs.stream.hk_action = i as u8;
+                    }
+                }
+            });
+            if self.rigs.stream.hk_action != 3 {
+                let sel = if names.contains(&self.rigs.stream.hk_expr) { self.rigs.stream.hk_expr.clone() } else { names.first().cloned().unwrap_or_default() };
+                egui::ComboBox::from_id_salt("hk_expr").selected_text(sel.clone()).width(120.0).show_ui(ui, |ui| {
+                    for n in &names {
+                        if ui.selectable_label(&sel == n, n).clicked() {
+                            self.rigs.stream.hk_expr = n.clone();
+                        }
+                    }
+                });
+                self.rigs.stream.hk_expr = sel;
+            }
+            let ready = self.rigs.stream.hk_input.is_some() && (self.rigs.stream.hk_action == 3 || !self.rigs.stream.hk_expr.is_empty());
+            if ui.add_enabled(ready, egui::Button::new("Add")).clicked() {
+                let n = self.rigs.stream.hk_expr.clone();
+                let action = match self.rigs.stream.hk_action {
+                    0 => crate::hotkeys::Action::Toggle(n),
+                    1 => crate::hotkeys::Action::Show(n),
+                    2 => crate::hotkeys::Action::Hold(n),
+                    _ => crate::hotkeys::Action::Clear,
+                };
+                if let Some(input) = self.rigs.stream.hk_input.take() {
+                    self.rig_edit("Add hotkey", now, |r| r.hotkeys.push(crate::hotkeys::Binding { input, action }));
+                }
+            }
+        });
     }
 
     fn stream_mapping_ui(&mut self, ui: &mut Ui) {

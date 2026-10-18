@@ -295,6 +295,9 @@ pub struct Rig {
     pub anim: crate::anim::Animation,
     /// How tracking (the face from a camera, a phone or a program) moves the sliders (Stream tab).
     pub tracking: crate::track::TrackMapping,
+    /// Expressions made in this program (sliders saved under a name) and the keys, pad buttons and MIDI notes that switch expressions.
+    pub own_exprs: Vec<crate::expressions::OwnExpr>,
+    pub hotkeys: Vec<crate::hotkeys::Binding>,
     next_id: Id,
 }
 
