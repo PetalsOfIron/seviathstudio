@@ -265,7 +265,7 @@ fn an_uncut_figure_is_rigged_and_becomes_a_valid_vrm_in_both_formats() {
     let sk = d.rig.skin.as_ref().unwrap();
     assert!(sk.bones.len() >= 15 && sk.verts.len() > 50);
     let m = build_any(&d, &Options { name: "Uncut".into(), author: "Me".into(), ..Default::default() }).unwrap();
-    assert_eq!(m.parts.len(), 1);
+    assert_eq!(m.parts.len(), 2, "the body and the inside of the mouth");
     for b in ["hips", "spine", "head", "leftUpperArm", "rightHand", "leftFoot", "rightLowerLeg"] {
         assert!(m.bone(b).is_some(), "{b}");
     }
@@ -284,7 +284,7 @@ fn an_uncut_figure_is_rigged_and_becomes_a_valid_vrm_in_both_formats() {
     let (one, zero) = (export(&m, Format::Vrm1).unwrap(), export(&m, Format::Vrm0).unwrap());
     let (s1, s0) = (validate(&one).unwrap(), validate(&zero).unwrap());
     assert_eq!((s1.version, s0.version), (1, 0));
-    assert_eq!(s1.parts, 1);
+    assert_eq!(s2.parts, 1);
     // the preview turns round
     let front = super::preview::render(&m, 0.0, 400, 520, &[]);
     let side = super::preview::render(&m, 50.0, 400, 520, &[]);
@@ -467,4 +467,100 @@ fn the_skeleton_has_clavicles_and_fingers_named_for_both_vrm_formats() {
     sorted.sort();
     sorted.dedup();
     assert_eq!(sorted.len(), names0.len(), "no bone twice");
+}
+
+#[test]
+fn an_uncut_figure_gets_a_face_with_blend_shapes_and_a_mouth_that_opens() {
+    use super::model::build_any;
+    let img = crate::rig::uncut::tests::figure_image();
+    let mut d = uncut_doc(&img);
+    let ids: Vec<crate::doc::LayerId> = d.layers.iter().map(|l| l.id).collect();
+    let mut rig = Rig::default();
+    crate::rig::uncut::auto_rig(&mut rig, &d, &ids, 0.6).unwrap();
+    d.rig = std::sync::Arc::new(rig);
+    let m = build_any(&d, &Options { name: "Face".into(), author: "Me".into(), ..Default::default() }).unwrap();
+    // the body and the inside of the mouth
+    assert_eq!(m.parts.len(), 2);
+    assert_eq!(m.parts[1].name, "Mouth");
+    for e in ["blink", "blinkLeft", "blinkRight", "happy", "sad", "angry", "surprised", "lookLeft", "lookRight", "lookUp", "lookDown", "aa", "ih", "ou", "ee", "oh", "jawOpen", "browInnerUp", "mouthSmile"] {
+        assert!(m.expressions.iter().any(|x| x.name == e), "expression {e}");
+    }
+    // a blink moves points of the body, only near the eyes; the left blink and the right blink move different points
+    let body = &m.parts[0];
+    let blink = |name: &str| -> Vec<usize> {
+        let e = m.expressions.iter().find(|x| x.name == name).unwrap();
+        let (pi, mi, _) = e.binds[0];
+        assert_eq!(pi, 0);
+        (0..body.verts.len()).filter(|i| body.morphs[mi].deltas[*i][1].abs() > 1e-5).collect()
+    };
+    let (l, r) = (blink("blinkLeft"), blink("blinkRight"));
+    assert!(l.len() >= 8 && r.len() >= 8, "{} {}", l.len(), r.len());
+    let mean_x = |v: &[usize]| v.iter().map(|i| body.verts[*i][0]).sum::<f32>() / v.len() as f32;
+    assert!(mean_x(&l) > 0.0 && mean_x(&r) < 0.0, "the character's left is +X");
+    assert!(l.iter().all(|i| body.verts[*i][1] > 1.2), "only the head moves");
+    // the mouth is flat at rest, and a vowel opens it
+    let mouth = &m.parts[1];
+    let area = |verts: &[[f32; 3]]| -> f32 { mouth.tris.iter().map(|t| { let (a, b, c) = (verts[t[0] as usize], verts[t[1] as usize], verts[t[2] as usize]); ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) / 2.0 }).sum() };
+    assert!(area(&mouth.verts).abs() < 1e-9);
+    let aa = m.expressions.iter().find(|x| x.name == "aa").unwrap();
+    let (pi, mi, _) = aa.binds[0];
+    assert_eq!(pi, 1);
+    let open: Vec<[f32; 3]> = mouth.verts.iter().zip(&mouth.morphs[mi].deltas).map(|(v, d)| [v[0] + d[0], v[1] + d[1], v[2]]).collect();
+    assert!(area(&open) > 1e-5, "the mouth shows: {}", area(&open));
+    // both formats carry the shapes and are valid
+    let (one, zero) = (export(&m, Format::Vrm1).unwrap(), export(&m, Format::Vrm0).unwrap());
+    let (s1, s0) = (validate(&one).unwrap(), validate(&zero).unwrap());
+    assert!(s1.expressions >= 19 && s0.expressions >= 19, "{} {}", s1.expressions, s0.expressions);
+    // face off: no shapes
+    let plain = build_any(&d, &Options { face: false, ..Default::default() }).unwrap();
+    assert_eq!(plain.parts.len(), 1);
+    assert!(plain.expressions.is_empty());
+}
+
+/// The user's uncut bases, when they are on this computer: the head with each expression, written to target/screens.
+#[test]
+fn faces_of_real_uncut_characters_move() {
+    use super::model::build_any;
+    let base = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Downloads/Bases/images/races/images");
+    let files = [("female", "PixieBase.png"), ("male", "ghoulbase.png"), ("male", "OgreBase.png")];
+    let looks: [(&str, &[(&str, f32)]); 7] = [("rest", &[]), ("blink", &[("blink", 1.0)]), ("happy", &[("happy", 1.0)]), ("surprised", &[("surprised", 1.0), ("oh", 1.0)]), ("aa", &[("aa", 1.0)]), ("angry", &[("angry", 1.0)]), ("look left", &[("lookLeft", 1.0)])];
+    let (w, h, cw, ch) = (1200u32, 2400u32, 300u32, 420u32);
+    let mut sheet = image::RgbaImage::from_pixel(looks.len() as u32 * cw, files.len() as u32 * ch, image::Rgba([255, 255, 255, 255]));
+    let mut any = false;
+    for (row, (folder, name)) in files.iter().enumerate() {
+        let Ok(bytes) = std::fs::read(base.join(folder).join(name)) else { continue };
+        let img = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        let mut d = uncut_doc(&img);
+        let ids: Vec<crate::doc::LayerId> = d.layers.iter().map(|l| l.id).collect();
+        let mut rig = Rig::default();
+        crate::rig::uncut::auto_rig(&mut rig, &d, &ids, 0.5).unwrap();
+        d.rig = std::sync::Arc::new(rig);
+        let m = build_any(&d, &Options { max_texture: 2048, ..Default::default() }).unwrap();
+        assert!(m.expressions.len() >= 15, "{name}");
+        let (one, zero) = (export(&m, Format::Vrm1).unwrap(), export(&m, Format::Vrm0).unwrap());
+        validate(&one).unwrap_or_else(|e| panic!("{name} 1.0: {e}"));
+        validate(&zero).unwrap_or_else(|e| panic!("{name} 0.x: {e}"));
+        let stem = name.trim_end_matches(".png");
+        let out = std::path::Path::new("target/vrm").join(folder);
+        let _ = std::fs::create_dir_all(&out);
+        std::fs::write(out.join(format!("{stem}.vrm")), &one).unwrap();
+        std::fs::write(out.join(format!("{stem}_vrm0.vrm")), &zero).unwrap();
+        // the head: find it on the picture from the head bone
+        let top = m.parts[0].verts.iter().map(|v| v[1]).fold(0.0f32, f32::max);
+        let scale = h as f32 * 0.9 / top;
+        let hp = m.bones[m.bone("head").unwrap()].pos;
+        let (cx, cy) = (w as f32 / 2.0 + hp[0] * scale, h as f32 * 0.95 - hp[1] * scale);
+        for (k, (_, active)) in looks.iter().enumerate() {
+            let full = super::preview::render(&m, 0.0, w, h, active);
+            let x0 = ((cx - cw as f32 / 2.0).max(0.0) as u32).min(w - cw);
+            let y0 = ((cy - ch as f32 * 0.82).max(0.0) as u32).min(h - ch);
+            let crop = image::imageops::crop_imm(&full, x0, y0, cw, ch).to_image();
+            image::imageops::replace(&mut sheet, &crop, (k as u32 * cw) as i64, (row as u32 * ch) as i64);
+        }
+        any = true;
+    }
+    if any {
+        let _ = std::fs::create_dir_all("target/screens");
+        sheet.save("target/screens/vrm_faces.png").unwrap();
+    }
 }

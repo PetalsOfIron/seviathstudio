@@ -106,6 +106,26 @@ impl SeviathApp {
                 ui.add(egui::Slider::new(&mut g.puff, 0.0..=2.0).show_value(false)).on_hover_text("0 is flat cards, 1 is the usual, 2 is very round");
             });
         }
+        if self.draw.doc.rig.skin.is_some() {
+            ui.horizontal_wrapped(|ui| {
+                if widgets::chip(ui, "Set the face", self.rigs.face_edit).on_hover_text("Shows the eyes and the mouth on the picture: drag them into place so the blink, the smile and the mouth move the right parts").clicked() {
+                    self.rigs.face_edit = !self.rigs.face_edit;
+                }
+                if let Some(mut f) = crate::vrm::model::face_marks(&self.draw.doc.rig) {
+                    let before = f;
+                    ui.label(RichText::new("Eye").size(12.0).color(TEXT_DIM));
+                    ui.add(egui::DragValue::new(&mut f.eye_w).range(4.0..=600.0).speed(0.5));
+                    ui.label(RichText::new("Mouth").size(12.0).color(TEXT_DIM));
+                    ui.add(egui::DragValue::new(&mut f.mouth_w).range(4.0..=800.0).speed(0.5));
+                    if f != before {
+                        if let Some(sk) = std::sync::Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut() {
+                            sk.face = Some(f);
+                        }
+                        self.rigs.game.model = None;
+                    }
+                }
+            });
+        }
         ui.horizontal_wrapped(|ui| {
             if ui.button(RichText::new("Make the 3D character").strong()).on_hover_text("Builds it from the parts with a mesh (the layers' order gives the depth), the Parts tags (the skeleton) and the face sliders (the expressions)").clicked() {
                 self.game_make();
