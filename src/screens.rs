@@ -1852,3 +1852,66 @@ fn panel_and_workspace_screens() {
     assert_eq!(h.state().draw_mut_ref().layouts.working.get(PanelId::Layers).mode, Mode::Docked);
     assert_eq!(h.state().draw_mut_ref().layouts.working.get(PanelId::Color).mode, Mode::Hidden);
 }
+
+#[test]
+fn parts_tab_screens() {
+    use crate::doc::LayerKind;
+    use crate::parts::Part;
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    // a small character sheet: named layers with paint in the right places (the page is 3000 x 4000)
+    {
+        let d = h.state_mut().draw_mut();
+        let (w, h2) = (d.doc.w, d.doc.h);
+        let mut add = |name: &str, x: i32, y: i32, bw: u32, bh: u32, c: [u8; 3]| {
+            let img = image::RgbaImage::from_pixel(bw, bh, image::Rgba([c[0], c[1], c[2], 255]));
+            let mut l = d.doc.new_layer(name, LayerKind::Raster);
+            l.tiles = crate::files::tiles_from_rgba(&img, x, y, w, h2);
+            l.rev += 1;
+            d.doc.layers.insert(0, l);
+        };
+        add("Face", 900, 700, 1200, 1500, [240, 210, 190]);
+        add("Eye L", 1560, 1250, 300, 140, [40, 60, 120]);
+        add("Eye R", 1140, 1250, 300, 140, [40, 60, 120]);
+        add("Mouth", 1350, 1700, 300, 90, [190, 70, 80]);
+        add("Hair front", 800, 500, 1400, 450, [120, 60, 160]);
+        add("Layer 9", 100, 3000, 400, 400, [90, 90, 90]);
+        d.doc.mark_all_dirty();
+    }
+    h.state_mut().test_run_action_now("tab.2");
+    h.run_steps(5);
+    h.get_by_label("Suggest tags").click();
+    h.run_steps(3);
+    let n = h.state_mut().test_parts().suggestions.len();
+    assert!(n >= 5, "names are understood: {n} suggestions");
+    h.get_by_label("Accept the sure ones").click();
+    h.run_steps(4);
+    {
+        let d = h.state().draw_mut_ref();
+        let tag = |n: &str| d.doc.layers.iter().find(|l| l.name == n).and_then(|l| l.part);
+        assert_eq!(tag("Eye L"), Some(Part::EyeL));
+        assert_eq!(tag("Eye R"), Some(Part::EyeR));
+        assert_eq!(tag("Mouth"), Some(Part::Mouth));
+        assert_eq!(tag("Hair front"), Some(Part::HairFront));
+        assert_eq!(tag("Face"), Some(Part::Face));
+        assert_eq!(tag("Layer 9"), None, "an unnamed blob is not tagged by itself");
+    }
+    assert!(h.state().history().entries.last().unwrap().label.contains("suggested"));
+    assert_eq!(h.state().history().entries.last().unwrap().tab, crate::tabs::Tab::Parts);
+    save(&mut h, "parts_01_tagged");
+    // not ready while a layer has no tag
+    assert!(!h.state().draw_mut_ref().doc.meta.parts_ready);
+    let blob = h.state().draw_mut_ref().doc.layers.iter().find(|l| l.name == "Layer 9").unwrap().id;
+    h.state_mut().test_tag(&[blob], Some(Part::Accessory));
+    h.run_steps(4);
+    h.get_by_label("Mark as ready to rig").click();
+    h.run_steps(3);
+    assert!(h.state().draw_mut_ref().doc.meta.parts_ready, "ready to rig");
+    // undo takes the last step back (undo in this tab)
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(3);
+    assert!(!h.state().draw_mut_ref().doc.meta.parts_ready);
+    save(&mut h, "parts_02_checklist");
+}

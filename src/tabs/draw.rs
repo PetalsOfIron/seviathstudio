@@ -451,6 +451,13 @@ impl DrawState {
         shown.then(|| self.refs.current().map(|r| r.name.clone())).flatten()
     }
 
+    /// Make a layer the one being drawn on (the Parts tab uses this).
+    pub fn focus_layer(&mut self, id: LayerId) {
+        if self.doc.index_of(id).is_some() {
+            self.active = id;
+        }
+    }
+
     pub fn active_id(&self) -> LayerId {
         self.active
     }

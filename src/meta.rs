@@ -30,6 +30,8 @@ pub struct ProjectMeta {
     pub intent: String,
     /// Turn the profile into plain sRGB pixels on export instead of embedding it.
     pub export_bake: bool,
+    /// The Parts tab says the drawing is tagged and ready for rigging.
+    pub parts_ready: bool,
     /// Font files kept inside the project (for text layers).
     pub fonts: Vec<crate::fonts::ProjectFont>,
     /// Sign every export (see signature.rs).
@@ -38,7 +40,7 @@ pub struct ProjectMeta {
 
 impl Default for ProjectMeta {
     fn default() -> Self {
-        Self { dpi: 72, notes: String::new(), tags: Vec::new(), autosave_minutes: None, recovery_copies: None, guides: Vec::new(), rgb_profile: "srgb".into(), cmyk_profile: "japan2001".into(), intent: "perceptual".into(), export_bake: false, fonts: Vec::new(), auto_sign: Default::default() }
+        Self { dpi: 72, notes: String::new(), tags: Vec::new(), autosave_minutes: None, recovery_copies: None, guides: Vec::new(), rgb_profile: "srgb".into(), cmyk_profile: "japan2001".into(), intent: "perceptual".into(), export_bake: false, parts_ready: false, fonts: Vec::new(), auto_sign: Default::default() }
     }
 }
 

@@ -18,6 +18,7 @@ mod files;
 mod layoutmenu;
 mod fontmaker;
 mod newproject;
+mod partstab;
 mod recording;
 mod worklog;
 mod signs;
@@ -53,6 +54,7 @@ pub struct SeviathApp {
     rec: recording::RecUi,
     work: worklog::WorkClock,
     palette: commands::Palette,
+    parts: partstab::PartsState,
     layout_name: String,
 }
 
@@ -97,6 +99,7 @@ impl SeviathApp {
             rec: Default::default(),
             work: Default::default(),
             palette: Default::default(),
+            parts: Default::default(),
             layout_name: String::new(),
         }
     }
@@ -609,6 +612,7 @@ impl eframe::App for SeviathApp {
         match (self.workspace, self.tab) {
             (Workspace::Design, _) => self.design_workspace(ui),
             (_, Tab::Draw) => self.draw.ui(ui),
+            (_, Tab::Parts) => self.parts_ui(ui),
             (_, t) => tabs::placeholder::ui(ui, t),
         }
 
