@@ -75,6 +75,7 @@ impl SeviathApp {
             "win.signatures" => self.open_signatures(),
             "win.fonts" => self.open_font_maker(),
             "win.work" => self.open_work_history(),
+            "win.prerig" => self.open_prerig(),
             _ if id.starts_with("tab.") => {
                 if let Some(t) = id[4..].parse::<usize>().ok().and_then(|n| Tab::ALL.get(n.wrapping_sub(1))) {
                     self.tab = *t;
