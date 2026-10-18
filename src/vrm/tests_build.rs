@@ -520,6 +520,15 @@ fn an_uncut_figure_gets_a_face_with_blend_shapes_and_a_mouth_that_opens() {
 /// The user's uncut bases, when they are on this computer: the head with each expression, written to target/screens.
 #[test]
 fn faces_of_real_uncut_characters_move() {
+    face_sheet(None, "vrm_faces");
+    // the same with the shapes of the user's Emi
+    let path = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Downloads/art/Finished2D3D/vrmemi/Emi1.0.vrm");
+    if let Ok(bytes) = std::fs::read(path) {
+        face_sheet(Some(std::sync::Arc::new(super::template::Template::from_vrm(&bytes).unwrap())), "vrm_faces_emi");
+    }
+}
+
+fn face_sheet(template: Option<std::sync::Arc<super::template::Template>>, sheet_name: &str) {
     use super::model::build_any;
     let base = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Downloads/Bases/images/races/images");
     let files = [("female", "PixieBase.png"), ("male", "ghoulbase.png"), ("male", "OgreBase.png")];
@@ -535,7 +544,20 @@ fn faces_of_real_uncut_characters_move() {
         let mut rig = Rig::default();
         crate::rig::uncut::auto_rig(&mut rig, &d, &ids, 0.5).unwrap();
         d.rig = std::sync::Arc::new(rig);
-        let m = build_any(&d, &Options { max_texture: 2048, ..Default::default() }).unwrap();
+        // the ghoul's face points set by hand, as a user would (the guess is thrown off by his hair)
+        if *name == "ghoulbase.png" {
+            let cx = super::model::face_marks(&d.rig).map(|f| f.eye_center()[0]).unwrap_or(0.0);
+            if let Some(sk) = std::sync::Arc::make_mut(&mut d.rig).skin.as_mut() {
+                sk.face = Some(super::face::FaceMarks { eye_l: [cx + 28.0, 178.0], eye_r: [cx - 28.0, 178.0], mouth: [cx, 226.0], eye_w: 34.0, mouth_w: 40.0 });
+            }
+        }
+        if let (Some(sk), Some(f)) = (d.rig.skin.as_ref(), super::model::face_marks(&d.rig)) {
+            let hb = sk.bones.iter().find(|b| d.rig.changer(b.changer).is_some_and(|c| c.name == "head")).unwrap();
+            let pivot = match d.rig.changer(hb.changer).unwrap().kind { crate::rig::Kind::Rotation { pivot } => pivot, _ => [0.0, 0.0] };
+            let (top, bot) = sk.verts.iter().fold((f32::MAX, f32::MIN), |a, v| (a.0.min(v[1]), a.1.max(v[1])));
+            eprintln!("{name}: figure {top:.0}..{bot:.0}, head pivot y {:.0}, head tail y {:.0}, guess eye y {:.0} mouth y {:.0}", pivot[1], hb.tail[1], f.eye_l[1], f.mouth[1]);
+        }
+        let m = build_any(&d, &Options { max_texture: 2048, template: template.clone(), ..Default::default() }).unwrap();
         assert!(m.expressions.len() >= 15, "{name}");
         let (one, zero) = (export(&m, Format::Vrm1).unwrap(), export(&m, Format::Vrm0).unwrap());
         validate(&one).unwrap_or_else(|e| panic!("{name} 1.0: {e}"));
@@ -561,6 +583,6 @@ fn faces_of_real_uncut_characters_move() {
     }
     if any {
         let _ = std::fs::create_dir_all("target/screens");
-        sheet.save("target/screens/vrm_faces.png").unwrap();
+        sheet.save(format!("target/screens/{sheet_name}.png")).unwrap();
     }
 }
