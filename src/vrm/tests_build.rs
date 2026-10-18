@@ -691,7 +691,7 @@ fn a_character_is_built_on_an_ai_shape_with_texture_weights_and_face_shapes() {
     }
     let shape = Shape { verts, tris };
     let m = build_any(&d, &Options { name: "OnShape".into(), author: "Me".into(), shape: Some(std::sync::Arc::new(shape)), ..Default::default() }).unwrap();
-    assert_eq!(m.parts.len(), 2, "the body and the inside of the mouth");
+    assert!(m.parts.iter().any(|p| p.name == "Mouth") && m.parts[0].name == "Body", "the body and the inside of the mouth");
     let body = &m.parts[0];
     // the same size as the character, standing on the floor
     let top = body.verts.iter().map(|v| v[1]).fold(0.0f32, f32::max);
@@ -717,10 +717,13 @@ fn a_character_is_built_on_an_ai_shape_with_texture_weights_and_face_shapes() {
     assert!(m.expressions.iter().any(|e| e.name == "blink") && m.expressions.iter().any(|e| e.name == "aa"));
     let blink = m.expressions.iter().find(|e| e.name == "blink").unwrap();
     let (pi, mi, _) = blink.binds[0];
-    assert_eq!(pi, 0);
-    let moved = (0..body.verts.len()).filter(|i| body.morphs[mi].deltas[*i][1].abs() > 1e-5).count();
+    // the face is a part of its own that carries the shapes; the body has none
+    assert_eq!(m.parts[pi].name, "Face");
+    assert!(body.morphs.is_empty());
+    let face = &m.parts[pi];
+    let moved = (0..face.verts.len()).filter(|i| face.morphs[mi].deltas[*i][1].abs() > 1e-5).count();
     assert!(moved > 0);
-    assert!((0..body.verts.len()).filter(|i| body.morphs[mi].deltas[*i][1].abs() > 1e-5).all(|i| body.normals[i][2] > 0.2), "the back of the head stays");
+    assert!((0..face.verts.len()).filter(|i| face.morphs[mi].deltas[*i][1].abs() > 1e-5).all(|i| face.normals[i][2] > 0.2), "the back of the head stays");
     // saved in all three ways
     for f in [Format::Vrm1, Format::Vrm0, Format::Glb] {
         let bytes = export(&m, f).unwrap();
@@ -749,6 +752,9 @@ fn the_ai_shape_of_the_midlander_becomes_a_textured_rigged_character() {
     let template = std::fs::read(emi).ok().and_then(|b| super::template::Template::from_vrm(&b).ok()).map(std::sync::Arc::new);
     let t0 = std::time::Instant::now();
     let m = build_any(&d, &Options { name: "Midlander".into(), author: "test".into(), max_texture: 2048, shape: Some(std::sync::Arc::new(shape)), template, ..Default::default() }).unwrap();
+    assert!(m.parts.iter().any(|p| p.name == "Hair"), "the hair is a part of its own");
+    assert!(m.springs.len() >= 6 && m.bones.iter().any(|b| b.name.starts_with("hair") && !b.humanoid), "bones and springs for the hair");
+    eprintln!("hair part {} triangles, {} springs, {} colliders", m.parts.iter().find(|p| p.name == "Hair").map(|p| p.tris.len()).unwrap_or(0), m.springs.len(), m.colliders.len());
     eprintln!("built in {:?}: {} vertices, {} triangles, {} expressions", t0.elapsed(), m.parts[0].verts.len(), m.parts[0].tris.len(), m.expressions.len());
     let out = std::path::Path::new("target/vrm/ai");
     let _ = std::fs::create_dir_all(out);
@@ -783,7 +789,7 @@ fn the_ai_shape_of_the_midlander_becomes_a_textured_rigged_character() {
         let top = m.parts[0].verts.iter().map(|v| v[1]).fold(0.0f32, f32::max);
         let scale = bh as f32 * 0.9 / top;
         let hp = m.bones[m.bone("head").unwrap()].pos;
-        let mut heads = image::RgbaImage::new(hw * 4, hh);
+        let mut heads = image::RgbaImage::new(hw * 8, hh);
         for (k, yaw) in [0.0f32, 35.0, 65.0, 90.0].iter().enumerate() {
             let full = super::preview::render(&m, *yaw, bw, bh, &[]);
             let (c, s2) = ((yaw.to_radians()).cos(), (yaw.to_radians()).sin());
@@ -794,6 +800,95 @@ fn the_ai_shape_of_the_midlander_becomes_a_textured_rigged_character() {
             let crop = image::imageops::crop_imm(&full, x0, y0, hw, hh).to_image();
             image::imageops::replace(&mut heads, &crop, (k as u32 * hw) as i64, 0);
         }
+        // the hair swung out (every hair bone turned), seen from the front and from the side
+        let swing: Vec<(String, f32)> = m.bones.iter().filter(|b| b.name.starts_with("hair") && b.name.ends_with("_1")).map(|b| (b.name.clone(), 28.0f32)).collect();
+        let swing: Vec<(&str, f32)> = swing.iter().map(|(n, a)| (n.as_str(), *a)).collect();
+        for (k, yaw) in [0.0f32, 50.0].iter().enumerate() {
+            let full = super::preview::render_posed(&m, *yaw, bw, bh, &[], &swing);
+            let (c, s2) = ((yaw.to_radians()).cos(), (yaw.to_radians()).sin());
+            let cx = bw as f32 / 2.0 + (hp[0] * c + hp[2] * s2) * scale;
+            let cy = bh as f32 * 0.95 - hp[1] * scale;
+            let x0 = ((cx - hw as f32 / 2.0).max(0.0) as u32).min(bw - hw);
+            let y0 = ((cy - hh as f32 * 0.78).max(0.0) as u32).min(bh - hh);
+            let crop = image::imageops::crop_imm(&full, x0, y0, hw, hh).to_image();
+            image::imageops::replace(&mut heads, &crop, ((4 + k as u32) * hw) as i64, 0);
+        }
+        // with the guide lines: the texture features (blue) and the nose and chin of the shape (pink)
+        for (k, yaw) in [65.0f32, 90.0].iter().enumerate() {
+            let full = super::preview::render_guides(&m, *yaw, bw, bh, &[], true);
+            let (c, s2) = ((yaw.to_radians()).cos(), (yaw.to_radians()).sin());
+            let cx = bw as f32 / 2.0 + (hp[0] * c + hp[2] * s2) * scale;
+            let cy = bh as f32 * 0.95 - hp[1] * scale;
+            let x0 = ((cx - hw as f32 / 2.0).max(0.0) as u32).min(bw - hw);
+            let y0 = ((cy - hh as f32 * 0.78).max(0.0) as u32).min(bh - hh);
+            let crop = image::imageops::crop_imm(&full, x0, y0, hw, hh).to_image();
+            image::imageops::replace(&mut heads, &crop, ((6 + k as u32) * hw) as i64, 0);
+        }
         heads.save("target/screens/ai_midlander_head.png").unwrap();
     }
+}
+
+/// The stand-in for an AI shape used by the tests: the mesh of the picture given a depth, in other coordinates and size.
+fn standin_shape(d: &Document) -> super::shape::Shape {
+    let sk = d.rig.skin.as_ref().unwrap();
+    let (sv, st) = crate::rig::refine::subdivide(&sk.verts, &sk.tris, 12.0, 60_000);
+    let (mut verts, mut tris): (Vec<[f32; 3]>, Vec<[u32; 3]>) = (Vec::new(), Vec::new());
+    for (side, z) in [(0u32, 0.05f32), (1, -0.05)] {
+        let base = verts.len() as u32;
+        verts.extend(sv.iter().map(|v| [v[0] * 0.002 + 0.3, -v[1] * 0.002 + 1.1, z]));
+        tris.extend(st.iter().map(|t| if side == 0 { [base + t[0], base + t[2], base + t[1]] } else { [base + t[0], base + t[1], base + t[2]] }));
+    }
+    super::shape::Shape { verts, tris }
+}
+
+#[test]
+fn moved_texture_parts_move_the_picture_the_blend_shapes_and_the_mouth_settings() {
+    use super::model::build_any;
+    let img = crate::rig::uncut::tests::figure_image();
+    let mut d = uncut_doc(&img);
+    let ids: Vec<crate::doc::LayerId> = d.layers.iter().map(|l| l.id).collect();
+    let mut rig = Rig::default();
+    crate::rig::uncut::auto_rig(&mut rig, &d, &ids, 0.6).unwrap();
+    d.rig = std::sync::Arc::new(rig);
+    let shape = std::sync::Arc::new(standin_shape(&d));
+    let opt = Options { shape: Some(shape), ..Default::default() };
+    let plain = build_any(&d, &opt).unwrap();
+    let landmark = |m: &super::model::Model3d, n: &str| m.landmarks.iter().find(|l| l.0 == n).map(|l| l.1).unwrap_or_else(|| panic!("landmark {n}"));
+    for n in ["eye_l", "eye_r", "nose", "mouth", "mesh_nose"] {
+        landmark(&plain, n);
+    }
+    // move the mouth down, the face to the right, and change the inside of the mouth
+    {
+        let sk = std::sync::Arc::make_mut(&mut d.rig).skin.as_mut().unwrap();
+        sk.tex.mouth = [0.0, 12.0];
+        sk.tex.face = [6.0, 0.0];
+        sk.tex.mouth_open = 2.0;
+        sk.tex.mouth_color = [200, 10, 10];
+    }
+    let moved = build_any(&d, &opt).unwrap();
+    // the texture is not the same, and the places of the features follow
+    assert_ne!(plain.parts[0].image.as_raw(), moved.parts[0].image.as_raw());
+    let (a, b) = (landmark(&plain, "mouth"), landmark(&moved, "mouth"));
+    assert!(b[1] < a[1] - 0.005, "the mouth is lower: {a:?} {b:?}");
+    let (ea, eb) = (landmark(&plain, "eye_l"), landmark(&moved, "eye_l"));
+    assert!(eb[0] > ea[0], "the eyes went right with the face");
+    // the shape's own nose does not move
+    assert_eq!(landmark(&plain, "mesh_nose"), landmark(&moved, "mesh_nose"));
+    // the inside of the mouth: its colour and how far it opens
+    let (mp, mq) = (plain.parts.iter().find(|p| p.name == "Mouth").unwrap(), moved.parts.iter().find(|p| p.name == "Mouth").unwrap());
+    assert_eq!(mq.image.get_pixel(0, 0).0, [200, 10, 10, 255]);
+    let reach = |p: &super::model::Part3d| { let aa = p.morphs.iter().find(|m| m.name == "aa").unwrap(); aa.deltas.iter().map(|v| v[1].abs()).fold(0.0f32, f32::max) };
+    assert!(reach(mq) > reach(mp) * 1.5, "open 2: {} {}", reach(mq), reach(mp));
+    // a project saves and loads the edit
+    let text = serde_json::to_string(&d.rig.skin.as_ref().unwrap().tex).unwrap();
+    assert!(text.contains("mouth_open"));
+    // still valid files
+    for f in [Format::Vrm1, Format::Glb] {
+        validate(&export(&moved, f).unwrap()).unwrap_or_else(|e| panic!("{f:?}: {e}"));
+    }
+    // the guide lines draw on the preview and do not when they are off
+    let off = super::preview::render_guides(&moved, 35.0, 300, 480, &[], false);
+    let on = super::preview::render_guides(&moved, 35.0, 300, 480, &[], true);
+    assert_ne!(off.as_raw(), on.as_raw());
+    assert_eq!(off.as_raw(), super::preview::render(&moved, 35.0, 300, 480, &[]).as_raw());
 }

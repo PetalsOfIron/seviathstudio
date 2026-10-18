@@ -65,8 +65,24 @@ pub fn export(model: &Model3d, fmt: Format) -> Result<Vec<u8>, String> {
     let ibm = b.mat4s(&inverse);
     b.skins.push(json!({ "inverseBindMatrices": ibm, "joints": (0..nb).map(bone_node).collect::<Vec<_>>(), "skeleton": bone_node(0), "name": "Armature" }));
     // the parts
+    let mut shared_tex: Vec<(u64, usize)> = Vec::new();
     for (pi, part) in model.parts.iter().enumerate() {
-        let tex = b.png_texture(&png_bytes(&part.image), &part.name);
+        // parts with the same picture (the body, the face and the hair of a character on an AI shape) write it once
+        let hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (part.image.width(), part.image.height()).hash(&mut h);
+            part.image.as_raw().hash(&mut h);
+            h.finish()
+        };
+        let tex = match shared_tex.iter().find(|(k, _)| *k == hash) {
+            Some((_, t)) => *t,
+            None => {
+                let t = b.png_texture(&png_bytes(&part.image), &part.name);
+                shared_tex.push((hash, t));
+                t
+            }
+        };
         let mut material = json!({
             "name": part.name,
             "pbrMetallicRoughness": { "baseColorTexture": { "index": tex }, "baseColorFactor": [1, 1, 1, 1], "metallicFactor": 0.0, "roughnessFactor": 0.9 },

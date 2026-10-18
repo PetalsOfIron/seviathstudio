@@ -49,8 +49,18 @@ impl Shape {
 /// Paint the transparent texels with the colour next to them, so a triangle that leans away from the viewer (the side of an
 /// arm) still finds colour at the edge of the outline instead of a hole.
 fn spread_colour(img: &mut RgbaImage) {
+    let open: Vec<bool> = img.pixels().map(|p| p.0[3] < 128).collect();
+    fill_open(img, open);
+    for p in img.pixels_mut() {
+        p.0[3] = 255;
+    }
+}
+
+/// Fill the places marked `open` with the colours around them: first copied inward from the edge, then smoothed by letting every
+/// filled place take the average of its neighbours again and again, so a gap becomes a soft passage and not blocks and streaks.
+pub(super) fn fill_open(img: &mut RgbaImage, mut open: Vec<bool>) {
     let (w, h) = (img.width() as i32, img.height() as i32);
-    let mut open: Vec<bool> = img.pixels().map(|p| p.0[3] < 128).collect();
+    let was_open = open.clone();
     for _ in 0..24 {
         let mut changed = Vec::new();
         for y in 0..h {
@@ -82,10 +92,44 @@ fn spread_colour(img: &mut RgbaImage) {
             open[(y * w + x) as usize] = false;
         }
     }
-    for p in img.pixels_mut() {
-        p.0[3] = 255;
+    let n = (w * h) as usize;
+    let mut cur: Vec<[f32; 3]> = img.pixels().map(|p| [p.0[0] as f32, p.0[1] as f32, p.0[2] as f32]).collect();
+    let mut next = cur.clone();
+    for _ in 0..40 {
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) as usize;
+                if !was_open[i] {
+                    continue;
+                }
+                let mut sum = [0.0f32; 3];
+                let mut c = 0.0f32;
+                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    let (nx, ny) = (x + dx, y + dy);
+                    if nx >= 0 && ny >= 0 && nx < w && ny < h {
+                        let v = cur[(ny * w + nx) as usize];
+                        sum[0] += v[0];
+                        sum[1] += v[1];
+                        sum[2] += v[2];
+                        c += 1.0;
+                    }
+                }
+                next[i] = [sum[0] / c, sum[1] / c, sum[2] / c];
+            }
+        }
+        std::mem::swap(&mut cur, &mut next);
+    }
+    for i in 0..n {
+        if was_open[i] {
+            let (x, y) = ((i as i32 % w) as u32, (i as i32 / w) as u32);
+            let a = img.get_pixel(x, y).0[3];
+            img.put_pixel(x, y, image::Rgba([cur[i][0] as u8, cur[i][1] as u8, cur[i][2] as u8, a.max(255)]));
+        }
     }
 }
+
+/// How deep the head stays compared with what the AI made (1 is as made).
+const HEAD_DEPTH: f32 = 1.0;
 
 pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<Model3d> {
     let UncutSetup { page, vb, height_px: _, scale, xc, bones, slot, frames } = uncut_setup(doc, opt)?;
@@ -106,9 +150,23 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
     let (kx, ky) = ((vb[2] - vb[0]) / (hi[0] - lo[0]), (vb[3] - vb[1]) / (hi[1] - lo[1]));
     let (kz, zmid) = ((kx + ky) / 2.0, (lo[2] + hi[2]) / 2.0);
     let mut pts: Vec<[f32; 3]> = shape.verts.iter().map(|p| [vb[0] + (p[0] - lo[0]) * kx, vb[1] + (hi[1] - p[1]) * ky, (p[2] - zmid) * kz]).collect();
+    // An AI makes the head deeper than a drawn one (the hair stands out behind it), and then the face looks small and pushed
+    // to the front when the head is turned. The head is made shallower: full depth at the neck, less above the chin.
+    if let Some(hb) = head_box(rig) {
+        let hh = hb[2] / 2.0;
+        let chin = hb[1] + 0.1 * hh + hh;
+        for p in &mut pts {
+            let t = ((chin + 0.35 * hh - p[1]) / (0.35 * hh)).clamp(0.0, 1.0);
+            let t = t * t * (3.0 - 2.0 * t);
+            p[2] *= 1.0 - (1.0 - HEAD_DEPTH) * t;
+        }
+    }
     let mut tris = shape.tris.clone();
     // finer around the eyes and the mouth, so they can close and open
-    let marks = if opt.face { face_marks(rig) } else { None };
+    let marks_drawn = if opt.face { face_marks(rig) } else { None };
+    // the parts of the picture the user has moved: the blend shapes and the mouth follow where the features now are
+    let tex = sk.tex.clone();
+    let marks = marks_drawn.map(|m| tex.effective(&m));
     if let Some(m) = &marks {
         let (c, dist, fine) = (m.eye_center(), m.eye_distance(), (m.eye_w / 4.5).max(1.5));
         let m = *m;
@@ -116,6 +174,62 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
         let (p2, t2) = crate::rig::refine::subdivide_xyz(&pts, &tris, &move |p| if inside(p) { fine } else { f32::MAX }, 600_000);
         pts = p2;
         tris = t2;
+    }
+    // The jaw of the AI's face and the jaw of the drawing end at different heights, and turned to the side the drawn face then sits
+    // too high on the shape. Where the chin of the shape ends (its profile drops away toward the neck) and where the chin of
+    // the drawing ends (the dark line of the chin below the mouth) are measured, and the drawn face is moved down (or up) by the
+    // difference, fading out above the eyes and below the chin. The shape itself stays as it is.
+    let mut face_down: Option<[f32; 4]> = None;
+    let mut mesh_chin: Option<f32> = None;
+    if let Some(m) = &marks_drawn {
+        let (c, dist) = (m.eye_center(), m.eye_distance());
+        let eye_y = (m.eye_l[1] + m.eye_r[1]) / 2.0;
+        let d = (m.mouth[1] - eye_y).max(8.0);
+        // the chin of the drawing: the darkest row under the mouth, in the middle of the face
+        let lum = |x: f32, y: f32| -> Option<f32> {
+            let (xi, yi) = (x as i32, y as i32);
+            if xi < 0 || yi < 0 || xi >= page.width() as i32 || yi >= page.height() as i32 {
+                return None;
+            }
+            let p = page.get_pixel(xi as u32, yi as u32).0;
+            (p[3] >= 128).then(|| 0.3 * p[0] as f32 + 0.59 * p[1] as f32 + 0.11 * p[2] as f32)
+        };
+        let mut rows: Vec<(f32, f32)> = Vec::new();
+        let mut y = m.mouth[1] + 0.35 * d;
+        while y < m.mouth[1] + 1.5 * d {
+            let vals: Vec<f32> = (-4..=4).filter_map(|k| lum(c[0] + k as f32 * dist * 0.06, y)).collect();
+            if vals.len() >= 5 {
+                rows.push((y, vals.iter().sum::<f32>() / vals.len() as f32));
+            }
+            y += 1.0;
+        }
+        let drawn = rows.iter().min_by(|a, b| a.1.total_cmp(&b.1)).copied();
+        let mut sorted: Vec<f32> = rows.iter().map(|r| r.1).collect();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let median = sorted.get(sorted.len() / 2).copied().unwrap_or(0.0);
+        // the chin of the shape: the lowest row of its profile (the front-most points) that is still part of the face
+        let profile = |yy: f32| pts.iter().filter(|p| (p[0] - c[0]).abs() < dist * 0.18 && (p[1] - yy).abs() < 1.5).map(|p| p[2]).fold(f32::MIN, f32::max);
+        let (z_mouth, z_low) = (profile(m.mouth[1]), profile(m.mouth[1] + 2.4 * d));
+        let level = 0.5 * (z_mouth + z_low);
+        let mut shape_chin = None;
+        let mut yy = m.mouth[1];
+        while yy < m.mouth[1] + 2.4 * d {
+            let z = profile(yy);
+            if z != f32::MIN && z >= level {
+                shape_chin = Some(yy);
+            }
+            yy += 1.0;
+        }
+        if let (Some((y_d, dark)), Some(y_g)) = (drawn, shape_chin) {
+            if std::env::var("SEVIATH_DEBUG_FACE").is_ok() {
+                eprintln!("chin of the drawing at y {y_d:.1} (dark {dark:.0}, median {median:.0}), chin of the shape at y {y_g:.1}; eyes {eye_y:.1}, mouth {:.1}", m.mouth[1]);
+            }
+            mesh_chin = Some(y_g);
+            if median - dark > 18.0 {
+                // how far the drawing must move down, where it is whole, and the chin
+                face_down = Some([(y_g - y_d).clamp(-0.8 * d, 0.8 * d), eye_y - 0.5 * d, y_g, d]);
+            }
+        }
     }
     // the triangles must face outward: if most of them face the middle, turn them all round
     let centre = [(vb[0] + vb[2]) / 2.0, (vb[1] + vb[3]) / 2.0, 0.0];
@@ -152,6 +266,11 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
     };
     let mask: Vec<bool> = front.pixels().map(|p| p.0[3] >= 128).collect();
     spread_colour(&mut front);
+    // the parts the user moved: cut out, the skin filled in, put down again
+    if let Some(m0) = &marks_drawn {
+        let k = front.width() as f32 / tw;
+        tex.apply(&mut front, m0, head_box(rig), [cx0 as f32, cy0 as f32], k);
+    }
     let mut back = image::imageops::flip_horizontal(&front);
     // the back of the head is hair (or the top of the head), not the face of the front turned round
     if let Some(hb) = head_box(rig) {
@@ -248,11 +367,25 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
         out_tris.push(o);
     }
     let verts: Vec<[f32; 3]> = made.iter().map(|(i, _, _)| model_pts[*i as usize]).collect();
+    // how far the drawing is moved down at a height of the picture
+    let face_shift = |y: f32| -> f32 {
+        match face_down {
+            Some([dy, top, chin, d]) => {
+                let (fade_in, fade_out) = (1.2 * d, 0.9 * d);
+                let up = ((y - (top - fade_in)) / fade_in).clamp(0.0, 1.0);
+                let down = ((chin + fade_out - y) / fade_out).clamp(0.0, 1.0);
+                let sm = |t: f32| t * t * (3.0 - 2.0 * t);
+                dy * sm(up) * sm(down)
+            }
+            None => 0.0,
+        }
+    };
     let uvs: Vec<[f32; 2]> = made
         .iter()
         .map(|(i, back, side)| {
             let p = pts[*i as usize];
             let sh = side.unwrap_or([0.0, 0.0]);
+            let p = [p[0], p[1] - face_shift(p[1])];
             let (u, v) = (((p[0] + sh[0] - cx0 as f32) / tw).clamp(0.0, 1.0), ((p[1] + sh[1] - cy0 as f32) / th).clamp(0.0, 1.0));
             match (side.is_some(), *back) {
                 (false, false) => [u * fwf / awf, v * fhf / ahf],
@@ -304,9 +437,56 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
     }
     let part = Part3d { name: "Body".to_string(), layer: sk.layers.first().copied().unwrap_or(0), verts, normals, uvs, tris: out_tris, joints, weights, image: atlas, morphs: Vec::new() };
     let bones: Vec<Bone> = bones;
-    let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts: vec![part], bones, expressions: Vec::new(), springs: Vec::new(), colliders: Vec::new(), scale };
+    let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts: vec![part], bones, expressions: Vec::new(), springs: Vec::new(), colliders: Vec::new(), scale, landmarks: Vec::new() };
     if let Some(m) = &marks {
-        add_face(&mut model, m, xc, vb[3], opt.template.as_deref(), true);
+        // The face is a part of its own, as on a VRoid model: only it carries the blend shapes, so the shapes do not have to
+        // be written for every point of the body. Its triangles are the ones that face the front inside the face box.
+        let (c, dist) = (m.eye_center(), m.eye_distance());
+        let m2 = *m;
+        let in_face = move |p: [f32; 2]| (p[0] - c[0]).abs() < dist * 0.9 + m2.eye_w * 1.4 && p[1] > c[1] - 2.2 * m2.eye_w && p[1] < m2.mouth[1] + 1.4 * m2.mouth_w;
+        let (face_part, rest) = split_part(&model.parts[0], |t| {
+            let v = t.iter().map(|i| model.parts[0].verts[*i as usize]).collect::<Vec<_>>();
+            let cen = [(v[0][0] + v[1][0] + v[2][0]) / 3.0 / scale + xc, vb[3] - (v[0][1] + v[1][1] + v[2][1]) / 3.0 / scale];
+            let n = model.parts[0].normals[t[0] as usize];
+            in_face(cen) && n[2] > 0.25
+        });
+        if let Some(face_part) = face_part {
+            model.parts = vec![rest, face_part];
+            add_face(&mut model, m, xc, vb[3], opt.template.as_deref(), true, 1, &tex);
+        } else {
+            add_face(&mut model, m, xc, vb[3], opt.template.as_deref(), true, 0, &tex);
+        }
+    }
+    // the places of the features, for the guide lines of the preview: where the picture puts them, and where the shape has its own
+    // nose and chin
+    if let Some(m) = &marks {
+        let (c, dist) = (m.eye_center(), m.eye_distance());
+        let eye_y = (m.eye_l[1] + m.eye_r[1]) / 2.0;
+        let d = (m.mouth[1] - eye_y).max(8.0);
+        let front_z = |x: f32, y: f32| pts.iter().filter(|p| (p[0] - x).abs() < dist * 0.12 && (p[1] - y).abs() < d * 0.12).map(|p| p[2]).fold(f32::MIN, f32::max);
+        let put = |name: &str, p: [f32; 2], model: &mut Model3d| {
+            let z = front_z(p[0], p[1]);
+            model.landmarks.push((name.to_string(), [(p[0] - xc) * scale, (vb[3] - p[1]) * scale, if z == f32::MIN { 0.0 } else { z * scale }]));
+        };
+        put("eye_l", m.eye_l, &mut model);
+        put("eye_r", m.eye_r, &mut model);
+        put("nose", super::texedit::TexEdit::nose_at(m), &mut model);
+        put("mouth", m.mouth, &mut model);
+        let near = |p: &&[f32; 3]| (p[0] - c[0]).abs() < dist * 0.35 && p[1] > eye_y - 0.2 * d && p[1] < m.mouth[1] + 0.4 * d;
+        if let Some(tip) = pts.iter().filter(near).max_by(|a, b| a[2].total_cmp(&b[2])) {
+            model.landmarks.push(("mesh_nose".to_string(), [(tip[0] - xc) * scale, (vb[3] - tip[1]) * scale, tip[2] * scale]));
+        }
+        if let Some(y) = mesh_chin {
+            put("mesh_chin", [c[0], y], &mut model);
+        }
+    }
+    // the hair: found on the drawing, a part of its own on bones that swing
+    if opt.hair {
+        if let Some(hb) = head_box(rig) {
+            if let Some(mask) = super::hair::hair_mask(&page, hb) {
+                super::hair::add_hair(&mut model, &mask, |v| [v[0] / scale + xc, vb[3] - v[1] / scale]);
+            }
+        }
     }
     normalize_to_t_pose(&mut model);
     Some(model)
@@ -333,4 +513,36 @@ fn dominant_limb(bones: &[Bone], w: &[(usize, f32)]) -> usize {
         g[limb_group(&bones[*b].name)] += x;
     }
     (0..5).max_by(|a, b| g[*a].total_cmp(&g[*b])).unwrap_or(0)
+}
+
+/// Split a part in two by its triangles: the ones `take` says yes to make the first part (None when there are fewer than a few),
+/// the others the second. Points are copied to the part that uses them.
+fn split_part(part: &Part3d, take: impl Fn(&[u32; 3]) -> bool) -> (Option<Part3d>, Part3d) {
+    let mut sides: [(HashMap<u32, u32>, Vec<u32>, Vec<[u32; 3]>); 2] = [(HashMap::new(), Vec::new(), Vec::new()), (HashMap::new(), Vec::new(), Vec::new())];
+    for t in &part.tris {
+        let k = if take(t) { 0 } else { 1 };
+        let (map, order, tris) = &mut sides[k];
+        let mut o = [0u32; 3];
+        for c in 0..3 {
+            o[c] = *map.entry(t[c]).or_insert_with(|| {
+                order.push(t[c]);
+                (order.len() - 1) as u32
+            });
+        }
+        tris.push(o);
+    }
+    let make = |name: &str, (_, order, tris): &(HashMap<u32, u32>, Vec<u32>, Vec<[u32; 3]>)| Part3d {
+        name: name.to_string(),
+        layer: part.layer,
+        verts: order.iter().map(|i| part.verts[*i as usize]).collect(),
+        normals: order.iter().map(|i| part.normals[*i as usize]).collect(),
+        uvs: order.iter().map(|i| part.uvs[*i as usize]).collect(),
+        tris: tris.clone(),
+        joints: order.iter().map(|i| part.joints[*i as usize]).collect(),
+        weights: order.iter().map(|i| part.weights[*i as usize]).collect(),
+        image: part.image.clone(),
+        morphs: Vec::new(),
+    };
+    let face = if sides[0].2.len() >= 20 { Some(make("Face", &sides[0])) } else { None };
+    (face, make("Body", &sides[1]))
 }

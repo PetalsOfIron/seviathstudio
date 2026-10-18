@@ -33,6 +33,8 @@ pub struct Skin {
     pub planes: Vec<Vec<u8>>,
     /// Where the eyes and the mouth are, when the user has set them (else they are guessed from the head).
     pub face: Option<crate::vrm::face::FaceMarks>,
+    /// The parts of the picture on an AI shape that are moved (the head, the face, the eyes, the nose, the mouth) and the settings of the mouth.
+    pub tex: crate::vrm::texedit::TexEdit,
 }
 
 /// Weight planes are written as small grey PNG pictures (as text), so empty or smooth planes cost almost nothing.
@@ -97,7 +99,7 @@ pub const MAX_BONES: usize = 64;
 impl Skin {
     pub fn new(layers: Vec<LayerId>, verts: Vec<[f32; 2]>, tris: Vec<[u32; 3]>, doc_w: u32, doc_h: u32) -> Skin {
         let cell = (doc_w.max(doc_h)).div_ceil(MAX_GRID).max(1);
-        Skin { layers, verts, tris, bones: Vec::new(), cell, gw: doc_w.div_ceil(cell), gh: doc_h.div_ceil(cell), planes: Vec::new(), face: None }
+        Skin { layers, verts, tris, bones: Vec::new(), cell, gw: doc_w.div_ceil(cell), gh: doc_h.div_ceil(cell), planes: Vec::new(), face: None, tex: Default::default() }
     }
 
     pub fn add_bone(&mut self, changer: Id, tail: [f32; 2]) {

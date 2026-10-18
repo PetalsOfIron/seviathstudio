@@ -26,19 +26,22 @@ pub struct GameUi {
     pub template: Option<(String, std::sync::Arc<crate::vrm::template::Template>)>,
     /// The command of Python for the AI helpers, which finder to use (0 auto, 1 MediaPipe, 2 Grounding DINO), and the job that runs.
     pub ai_python: String,
+    /// Guide lines on the preview, and a change of the texture parts waiting to be built (when the mouse is let go).
+    pub guides: bool,
+    tex_dirty: bool,
     pub ai_backend: usize,
     ai_job: Option<std::sync::mpsc::Receiver<Result<crate::vrm::face::FaceMarks, String>>>,
     /// The shape an AI made of the picture (the character is built on it), and the job that makes it.
     pub shape: Option<std::sync::Arc<crate::vrm::shape::Shape>>,
     shape_job: Option<std::sync::mpsc::Receiver<Result<Vec<u8>, String>>>,
-    tex: Option<((i32, Option<String>, u64), egui::TextureHandle)>,
+    tex: Option<((i32, Option<String>, u64, bool), egui::TextureHandle)>,
     /// How many times the model was made (so the preview picture knows to change).
     made: u64,
 }
 
 impl Default for GameUi {
     fn default() -> Self {
-        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, expr: None, model: None, message: None, template: None, ai_python: default_python(), ai_backend: 0, ai_job: None, shape: None, shape_job: None, tex: None, made: 0 }
+        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, expr: None, model: None, message: None, template: None, ai_python: default_python(), guides: false, tex_dirty: false, ai_backend: 0, ai_job: None, shape: None, shape_job: None, tex: None, made: 0 }
     }
 }
 
@@ -104,6 +107,67 @@ impl SeviathApp {
                 Ok(()) => format!("Saved {} ({}): {} parts, {} bones, {} expressions, checked.", path.display(), match summary.version { 1 => "VRM 1.0", 0 => "VRM 0.x", _ => "GLB for games" }, summary.parts, summary.bones, summary.expressions),
                 Err(e) => format!("Could not save the file: {e}"),
             });
+        }
+    }
+
+    /// The parts of the picture on an AI shape, each moved by hand (the head, the face, each eye, the nose, the mouth), how soft their
+    /// edges are, and the settings of the dark inside of the mouth. The preview can show guide lines at the features.
+    fn texture_parts_ui(&mut self, ui: &mut Ui) {
+        if self.rigs.game.shape.is_none() {
+            return;
+        }
+        let Some(mut t) = self.draw.doc.rig.skin.as_ref().map(|s| s.tex.clone()) else { return };
+        let before = t.clone();
+        section_title(ui, "Texture parts");
+        ui.label(RichText::new("Each part of the picture can be moved on the 3D face, in pixels of the drawing (x right, y down). The place it leaves is filled with skin. Guide lines: blue for where the texture has the eyes, nose and mouth, pink for the nose and the chin of the shape itself.").size(11.5).color(TEXT_DIM));
+        ui.horizontal_wrapped(|ui| {
+            if widgets::chip(ui, "Show guide lines", self.rigs.game.guides).on_hover_text("Lines on the preview at the eyes, the nose and the mouth of the texture (blue) and the nose and the chin of the shape (pink)").clicked() {
+                self.rigs.game.guides = !self.rigs.game.guides;
+            }
+            if ui.small_button("Reset all").clicked() {
+                t = crate::vrm::texedit::TexEdit::default();
+            }
+        });
+        let mut row = |ui: &mut Ui, label: &str, v: &mut [f32; 2]| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(label).size(12.0).color(TEXT_DIM));
+                ui.add(egui::DragValue::new(&mut v[0]).range(-300.0..=300.0).speed(0.25).prefix("x ").suffix(" px"));
+                ui.add(egui::DragValue::new(&mut v[1]).range(-300.0..=300.0).speed(0.25).prefix("y ").suffix(" px"));
+                if ui.small_button("0").on_hover_text("Put it back").clicked() {
+                    *v = [0.0, 0.0];
+                }
+            });
+        };
+        row(ui, "Head", &mut t.head);
+        row(ui, "Face", &mut t.face);
+        row(ui, "Left eye", &mut t.eye_l);
+        row(ui, "Right eye", &mut t.eye_r);
+        row(ui, "Nose", &mut t.nose);
+        row(ui, "Mouth", &mut t.mouth);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Soft edges").size(12.0).color(TEXT_DIM));
+            ui.add(egui::Slider::new(&mut t.feather, 0.05..=0.7).show_value(false)).on_hover_text("How softly a moved part blends into the skin around it");
+        });
+        ui.label(RichText::new("The dark inside of the mouth").size(12.0).color(TEXT_DIM));
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Open").size(12.0).color(TEXT_DIM));
+            ui.add(egui::DragValue::new(&mut t.mouth_open).range(0.0..=3.0).speed(0.01));
+            ui.label(RichText::new("Wide").size(12.0).color(TEXT_DIM));
+            ui.add(egui::DragValue::new(&mut t.mouth_width).range(0.1..=3.0).speed(0.01));
+            ui.label(RichText::new("Colour").size(12.0).color(TEXT_DIM));
+            ui.color_edit_button_srgb(&mut t.mouth_color);
+        });
+        row(ui, "Inside moved", &mut t.mouth_move);
+        if t != before {
+            if let Some(sk) = std::sync::Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut() {
+                sk.tex = t;
+            }
+            self.rigs.game.tex_dirty = true;
+        }
+        // the character is made again when the mouse is let go (it takes a moment)
+        if self.rigs.game.tex_dirty && !ui.input(|i| i.pointer.any_down()) {
+            self.rigs.game.tex_dirty = false;
+            self.game_make();
         }
     }
 
@@ -238,6 +302,7 @@ impl SeviathApp {
         if self.draw.doc.rig.skin.is_some() {
             self.shape_ai_row(ui);
             self.face_ai_row(ui);
+            self.texture_parts_ui(ui);
             ui.horizontal_wrapped(|ui| {
                 if widgets::chip(ui, "Set the face", self.rigs.face_edit).on_hover_text("Shows the eyes and the mouth on the picture: drag them into place so the blink, the smile and the mouth move the right parts").clicked() {
                     self.rigs.face_edit = !self.rigs.face_edit;
@@ -323,11 +388,11 @@ impl SeviathApp {
                 }
             }
         });
-        let key = (self.rigs.game.yaw.round() as i32, self.rigs.game.expr.clone(), self.rigs.game.made);
+        let key = (self.rigs.game.yaw.round() as i32, self.rigs.game.expr.clone(), self.rigs.game.made, self.rigs.game.guides);
         if self.rigs.game.tex.as_ref().map(|t| &t.0) != Some(&key) {
             if let Some(m) = &self.rigs.game.model {
                 let active: Vec<(&str, f32)> = self.rigs.game.expr.as_deref().map(|e| vec![(e, 1.0)]).unwrap_or_default();
-                let img = preview::render(m, key.0 as f32, 300, 480, &active);
+                let img = preview::render_guides(m, key.0 as f32, 300, 480, &active, key.3);
                 let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
                 let tex = ui.ctx().load_texture("game_preview", color, TextureOptions::LINEAR);
                 self.rigs.game.tex = Some((key, tex));
