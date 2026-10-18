@@ -39,21 +39,41 @@ fn reach(doc_w: u32) -> f32 {
     (doc_w as f32 * 0.01).max(6.0)
 }
 
-pub fn check(rig: &Rig, layers: &[Layer], doc_w: u32) -> Vec<Issue> {
-    let mut out = Vec::new();
-    let thr = (doc_w as f32 * 0.012).max(10.0);
-    let r = reach(doc_w);
-    // pairs of meshes that touch at rest, with the vertex pairs along the seam
-    let mut seams: Vec<(usize, usize, Vec<(usize, usize, f32)>)> = Vec::new();
+type Seam = (usize, usize, Vec<(usize, usize, f32)>);
+
+/// Pairs of meshes that touch at rest, with the vertex pairs along the seam.
+/// Which vertices of a mesh are on its outline (they belong to an edge that only one triangle has).
+fn outline_vertices(m: &super::ArtMesh) -> Vec<bool> {
+    let mut count: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+    for t in &m.tris {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            *count.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+        }
+    }
+    let mut on = vec![false; m.verts.len()];
+    for ((a, b), n) in count {
+        if n == 1 {
+            on[a as usize] = true;
+            on[b as usize] = true;
+        }
+    }
+    on
+}
+
+fn find_seams(rig: &Rig, r: f32) -> Vec<Seam> {
+    // only the outlines can form a seam: a part that lies on top of another one is not a gap when it moves on its own
+    let outline: Vec<Vec<bool>> = rig.meshes.iter().map(outline_vertices).collect();
+    let mut seams: Vec<Seam> = Vec::new();
     for i in 0..rig.meshes.len() {
         for j in i + 1..rig.meshes.len() {
             let (a, b) = (&rig.meshes[i], &rig.meshes[j]);
+            let (on_a, on_b) = (&outline[i], &outline[j]);
             if a.layer == b.layer || rig.glues.iter().any(|g| ((g.a == a.id && g.b == b.id) || (g.a == b.id && g.b == a.id)) && g.weight >= 0.9) {
                 continue;
             }
             let mut pairs = Vec::new();
-            for (vi, va) in a.verts.iter().enumerate() {
-                for (vj, vb) in b.verts.iter().enumerate() {
+            for (vi, va) in a.verts.iter().enumerate().filter(|(v, _)| on_a[*v]) {
+                for (vj, vb) in b.verts.iter().enumerate().filter(|(v, _)| on_b[*v]) {
                     let d = (va[0] - vb[0]).hypot(va[1] - vb[1]);
                     if d <= r {
                         pairs.push((vi, vj, d));
@@ -65,6 +85,42 @@ pub fn check(rig: &Rig, layers: &[Layer], doc_w: u32) -> Vec<Issue> {
             }
         }
     }
+    seams
+}
+
+/// What is wrong with the pose the sliders are in right now (gaps and folds only), as short sentences.
+pub fn check_at(rig: &Rig, layers: &[Layer], doc_w: u32, vals: &Values) -> Vec<String> {
+    let thr = (doc_w as f32 * 0.012).max(10.0);
+    let seams = find_seams(rig, reach(doc_w));
+    let pose = rig.pose(vals);
+    let all = rig.deformed_all(&pose);
+    let mut out = Vec::new();
+    for (i, j, pairs) in &seams {
+        let gap = pairs.iter().map(|(vi, vj, d0)| {
+            let (a, b) = (all[*i][*vi], all[*j][*vj]);
+            (a[0] - b[0]).hypot(a[1] - b[1]) - d0
+        }).fold(0.0, f32::max);
+        if gap > thr {
+            out.push(format!("A gap of {:.0} px opens between “{}” and “{}”.", gap, layer_name(layers, rig.meshes[*i].layer), layer_name(layers, rig.meshes[*j].layer)));
+        }
+    }
+    for (mi, m) in rig.meshes.iter().enumerate() {
+        let flipped = m.tris.iter().filter(|t| {
+            let (a0, a1) = (area(m.verts[t[0] as usize], m.verts[t[1] as usize], m.verts[t[2] as usize]), area(all[mi][t[0] as usize], all[mi][t[1] as usize], all[mi][t[2] as usize]));
+            a0 * a1 < 0.0 && a1.abs() > 1.0
+        }).count();
+        if flipped as f32 / m.tris.len().max(1) as f32 > 0.03 {
+            out.push(format!("“{}” folds over itself.", layer_name(layers, m.layer)));
+        }
+    }
+    out
+}
+
+pub fn check(rig: &Rig, layers: &[Layer], doc_w: u32) -> Vec<Issue> {
+    let mut out = Vec::new();
+    let thr = (doc_w as f32 * 0.012).max(10.0);
+    let r = reach(doc_w);
+    let seams = find_seams(rig, r);
     let mut gap_worst: Vec<Option<(f32, Id, f32)>> = vec![None; seams.len()];
     let mut fold_worst: Vec<Option<(f32, Id, f32)>> = vec![None; rig.meshes.len()];
     for p in &rig.params {
@@ -279,5 +335,39 @@ mod tests {
         assert!(fix(&mut rig, un, &d.layers, 1000, 1000));
         assert!(rig.mesh_of(id).is_some());
         assert!(!check(&rig, &d.layers, 1000).iter().any(|i| i.kind == IssueKind::Unmeshed(id)));
+    }
+
+    #[test]
+    fn a_part_lying_on_top_of_another_is_not_a_gap() {
+        let mut d = Document::new(1000, 1000);
+        let ids = layers_with_paint(&mut d, &["Face", "Eye"]);
+        let mut rig = Rig::default();
+        // a big face with many vertices, and a small eye on it that slides on its own
+        let mut verts = Vec::new();
+        for r in 0..9 {
+            for c in 0..9 {
+                verts.push([100.0 + c as f32 * 100.0, 100.0 + r as f32 * 100.0]);
+            }
+        }
+        let mut tris = Vec::new();
+        for r in 0..8u32 {
+            for c in 0..8u32 {
+                let i = r * 9 + c;
+                tris.push([i, i + 1, i + 10]);
+                tris.push([i, i + 10, i + 9]);
+            }
+        }
+        let fid = rig.fresh_id();
+        rig.meshes.push(ArtMesh { id: fid, layer: ids[0], verts, tris, parent: None });
+        let eye = quad_mesh(&mut rig, ids[1], 400.0, 400.0, 520.0, 460.0);
+        let w = rig.add_changer("Slide", Kind::Warp { rect: [390.0, 390.0, 530.0, 470.0], cols: 1, rows: 1 }, None);
+        rig.meshes.iter_mut().find(|m| m.id == eye).unwrap().parent = Some(w);
+        let p = rig.add_param("Look", -1.0, 1.0, 0.0);
+        rig.set_keyform(w, p, 1.0, Form::Warp { offsets: vec![[80.0, 0.0]; 4] });
+        let issues = check(&rig, &d.layers, 1000);
+        assert!(!issues.iter().any(|i| matches!(i.kind, IssueKind::Gap { .. })), "{issues:?}");
+        let mut v = Values::default();
+        v.set(p, 1.0);
+        assert!(check_at(&rig, &d.layers, 1000, &v).is_empty());
     }
 }

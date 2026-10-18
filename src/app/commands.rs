@@ -42,6 +42,10 @@ impl SeviathApp {
         let fired = ctx.input_mut(|i| actions::pressed(i, &keys, ACTIONS.iter().filter(|d| !is_draw_action(d.id) && (d.typing_ok || !typing))));
         let redo_alias = !typing && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z));
         for id in fired {
+            // the pose key only means something in the Rig tab
+            if id == "rig.keypose" && self.tab != Tab::Rig {
+                continue;
+            }
             self.run_action(id, ctx);
         }
         if redo_alias {
@@ -76,6 +80,10 @@ impl SeviathApp {
             "win.fonts" => self.open_font_maker(),
             "win.work" => self.open_work_history(),
             "win.prerig" => self.open_prerig(),
+            "rig.keypose" => {
+                self.tab = Tab::Rig;
+                self.rig_key_pose(now);
+            }
             _ if id.starts_with("tab.") => {
                 if let Some(t) = id[4..].parse::<usize>().ok().and_then(|n| Tab::ALL.get(n.wrapping_sub(1))) {
                     self.tab = *t;
