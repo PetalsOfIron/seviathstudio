@@ -892,3 +892,42 @@ fn moved_texture_parts_move_the_picture_the_blend_shapes_and_the_mouth_settings(
     assert_ne!(off.as_raw(), on.as_raw());
     assert_eq!(off.as_raw(), super::preview::render(&moved, 35.0, 300, 480, &[]).as_raw());
 }
+
+#[test]
+fn painting_on_the_3d_character_is_kept_with_the_project_and_survives_making_it_again() {
+    use super::model::build_any;
+    use super::paint3d::{Brush, Tool, dab};
+    let img = crate::rig::uncut::tests::figure_image();
+    let mut d = uncut_doc(&img);
+    let ids: Vec<crate::doc::LayerId> = d.layers.iter().map(|l| l.id).collect();
+    let mut rig = Rig::default();
+    crate::rig::uncut::auto_rig(&mut rig, &d, &ids, 0.6).unwrap();
+    d.rig = std::sync::Arc::new(rig);
+    let opt = Options { shape: Some(std::sync::Arc::new(standin_shape(&d))), ..Default::default() };
+    let mut m = build_any(&d, &opt).unwrap();
+    // something is under the pointer in the middle of the body
+    let (w, h) = (300u32, 480u32);
+    let hit = (0..h).step_by(8).flat_map(|y| (0..w).step_by(8).map(move |x| (x, y))).find_map(|(x, y)| super::preview::pick(&m, 0.0, w, h, x as f32, y as f32).filter(|(p, _)| m.parts[*p].name == "Body").map(|r| (x, y, r)));
+    let (_, _, (part, uv)) = hit.expect("the body is under the pointer somewhere");
+    let dims = m.parts[0].image.dimensions();
+    assert_eq!(m.parts[part].image.dimensions(), dims);
+    let at = [uv[0] * dims.0 as f32, uv[1] * dims.1 as f32];
+    // paint a red dab there: the picture of the part shows it at once
+    let mut overlay = image::RgbaImage::new(dims.0, dims.1);
+    let brush = Brush { tool: Tool::Brush, colour: [250, 0, 0], size: 6.0, hardness: 1.0, opacity: 1.0 };
+    dab(&mut m, &mut overlay, &brush, at[0], at[1]);
+    let p = m.parts[part].image.get_pixel(at[0] as u32, at[1] as u32).0;
+    assert_eq!(&p[..3], &[250, 0, 0]);
+    // kept with the project, then the character is made again: the paint is still there
+    std::sync::Arc::make_mut(&mut d.rig).skin.as_mut().unwrap().tex.set_atlas_paint(&overlay);
+    assert!(!d.rig.skin.as_ref().unwrap().tex.atlas_paint.is_empty());
+    let again = build_any(&d, &opt).unwrap();
+    let q = again.parts[0].image.get_pixel(at[0] as u32, at[1] as u32).0;
+    assert_eq!(&q[..3], &[250, 0, 0], "the paint came back");
+    // and it goes into the saved files
+    validate(&export(&again, Format::Vrm1).unwrap()).unwrap();
+    // the plain mesh to paint by hand: one colour, no drawing
+    let plain = build_any(&d, &Options { mesh_only: true, ..opt.clone() }).unwrap();
+    let distinct: std::collections::HashSet<[u8; 4]> = plain.parts[0].image.pixels().map(|p| p.0).collect();
+    assert!(distinct.len() < 40, "a plain texture has hardly any colours: {}", distinct.len());
+}

@@ -250,27 +250,8 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
     }
     let model_pts: Vec<[f32; 3]> = pts.iter().map(|p| to3([p[0], p[1]], p[2] * scale)).collect();
     // the texture: the drawing from the front, and mirrored from the back, side by side
-    let (cx0, cy0) = ((vb[0].floor() as i64 - 2).max(0) as u32, (vb[1].floor() as i64 - 2).max(0) as u32);
-    let (cx1, cy1) = (((vb[2].ceil() as u32) + 2).min(page.width()), ((vb[3].ceil() as u32) + 2).min(page.height()));
-    if cx1 <= cx0 + 2 || cy1 <= cy0 + 2 {
-        return None;
-    }
-    let crop = image::imageops::crop_imm(&page, cx0, cy0, cx1 - cx0, cy1 - cy0).to_image();
-    let (tw, th) = (crop.width() as f32, crop.height() as f32);
-    let big = crop.width().max(crop.height());
-    let mut front = if big > opt.max_texture {
-        let k = opt.max_texture as f32 / big as f32;
-        image::imageops::resize(&crop, ((tw * k).round() as u32).max(1), ((th * k).round() as u32).max(1), image::imageops::FilterType::Triangle)
-    } else {
-        crop
-    };
-    let mask: Vec<bool> = front.pixels().map(|p| p.0[3] >= 128).collect();
-    spread_colour(&mut front);
-    // the parts the user moved: cut out, the skin filled in, put down again
-    if let Some(m0) = &marks_drawn {
-        let k = front.width() as f32 / tw;
-        tex.apply(&mut front, m0, head_box(rig), [cx0 as f32, cy0 as f32], k);
-    }
+    let painted = paint_layer_image(doc, &tex);
+    let Front { tile: mut front, mask, cx0, cy0, tw, th } = make_front(&page, vb, rig, &tex, &marks_drawn, opt.max_texture, true, painted.as_ref(), opt.mesh_only)?;
     let mut back = image::imageops::flip_horizontal(&front);
     // the back of the head is hair (or the top of the head), not the face of the front turned round
     if let Some(hb) = head_box(rig) {
@@ -321,6 +302,19 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
     image::imageops::replace(&mut atlas, &back, fw as i64, 0);
     image::imageops::replace(&mut atlas, &soft_front, 0, fh as i64);
     image::imageops::replace(&mut atlas, &soft_back, sw as i64, fh as i64);
+    // what was painted straight on the 3D character
+    if let Some(p) = tex.atlas_paint_image() {
+        if p.dimensions() == atlas.dimensions() {
+            for (d, s) in atlas.pixels_mut().zip(p.pixels()) {
+                let a = s.0[3] as f32 / 255.0;
+                if a > 0.0 {
+                    for c in 0..3 {
+                        d.0[c] = (d.0[c] as f32 * (1.0 - a) + s.0[c] as f32 * a) as u8;
+                    }
+                }
+            }
+        }
+    }
     let (awf, ahf, fwf, fhf, swf, shf) = (aw as f32, ah as f32, fw as f32, fh as f32, sw as f32, sh as f32);
     // The points are made once for the front and once for the back. A triangle that leans away from the viewer (the side of
     // an arm, under the arm) would stretch the edge of the drawing, the dark outline, across itself: it gets points of its
@@ -471,6 +465,13 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
         put("eye_l", m.eye_l, &mut model);
         put("eye_r", m.eye_r, &mut model);
         put("nose", super::texedit::TexEdit::nose_at(m), &mut model);
+        if let Some(m0) = &marks_drawn {
+            let base = [tex.head[0] + tex.face[0], tex.head[1] + tex.face[1]];
+            for (name, left, off) in [("brow_l", true, tex.brow_l), ("brow_r", false, tex.brow_r)] {
+                let b = super::texedit::TexEdit::brow_at(m0, left);
+                put(name, [b[0] + base[0] + off[0], b[1] + base[1] + off[1]], &mut model);
+            }
+        }
         put("mouth", m.mouth, &mut model);
         let near = |p: &&[f32; 3]| (p[0] - c[0]).abs() < dist * 0.35 && p[1] > eye_y - 0.2 * d && p[1] < m.mouth[1] + 0.4 * d;
         if let Some(tip) = pts.iter().filter(near).max_by(|a, b| a[2].total_cmp(&b[2])) {
@@ -545,4 +546,193 @@ fn split_part(part: &Part3d, take: impl Fn(&[u32; 3]) -> bool) -> (Option<Part3d
     };
     let face = if sides[0].2.len() >= 20 { Some(make("Face", &sides[0])) } else { None };
     (face, make("Body", &sides[1]))
+}
+
+/// The picture of the front of the character as laid on the shape: the drawing cut to the figure, the empty places filled, the
+/// parts the user moved or picked again put right, and (when `with_paint`) what was painted by hand over it.
+pub(super) struct Front {
+    pub tile: RgbaImage,
+    /// Which pixels were part of the drawing before the empty places were filled.
+    pub mask: Vec<bool>,
+    pub cx0: u32,
+    pub cy0: u32,
+    pub tw: f32,
+    pub th: f32,
+}
+
+pub(super) fn make_front(page: &RgbaImage, vb: [f32; 4], rig: &crate::rig::Rig, tex: &super::texedit::TexEdit, marks_drawn: &Option<super::face::FaceMarks>, max_texture: u32, with_paint: bool, painted: Option<&RgbaImage>, plain: bool) -> Option<Front> {
+    let (cx0, cy0) = ((vb[0].floor() as i64 - 2).max(0) as u32, (vb[1].floor() as i64 - 2).max(0) as u32);
+    let (cx1, cy1) = (((vb[2].ceil() as u32) + 2).min(page.width()), ((vb[3].ceil() as u32) + 2).min(page.height()));
+    if cx1 <= cx0 + 2 || cy1 <= cy0 + 2 {
+        return None;
+    }
+    let crop = image::imageops::crop_imm(page, cx0, cy0, cx1 - cx0, cy1 - cy0).to_image();
+    let (tw, th) = (crop.width() as f32, crop.height() as f32);
+    let big = crop.width().max(crop.height());
+    let mut front = if big > max_texture {
+        let k = max_texture as f32 / big as f32;
+        image::imageops::resize(&crop, ((tw * k).round() as u32).max(1), ((th * k).round() as u32).max(1), image::imageops::FilterType::Triangle)
+    } else {
+        crop
+    };
+    let mask: Vec<bool> = front.pixels().map(|p| p.0[3] >= 128).collect();
+    spread_colour(&mut front);
+    if plain {
+        // a mesh to paint by hand: one neutral colour everywhere
+        for p in front.pixels_mut() {
+            p.0 = [205, 190, 180, 255];
+        }
+    }
+    // the parts the user moved: cut out, the skin filled in, put down again
+    if let Some(m0) = marks_drawn {
+        let k = front.width() as f32 / tw;
+        let mut t = tex.clone();
+        if !with_paint {
+            t.paint.clear();
+        }
+        t.apply(&mut front, m0, head_box(rig), [cx0 as f32, cy0 as f32], k);
+    } else if with_paint {
+        tex.apply_paint(&mut front);
+    }
+    // what was painted on the layer of the document with the brushes of the drawing app, over the whole result
+    if let (true, Some(p)) = (with_paint, painted) {
+        let crop = image::imageops::crop_imm(p, cx0, cy0, (p.width().saturating_sub(cx0)).min(tw as u32), (p.height().saturating_sub(cy0)).min(th as u32)).to_image();
+        if crop.width() > 0 && crop.height() > 0 {
+            let over = image::imageops::resize(&crop, front.width(), front.height(), image::imageops::FilterType::Triangle);
+            for (d, s) in front.pixels_mut().zip(over.pixels()) {
+                let a = s.0[3] as f32 / 255.0;
+                if a > 0.0 {
+                    for c in 0..3 {
+                        d.0[c] = (d.0[c] as f32 * (1.0 - a) + s.0[c] as f32 * a) as u8;
+                    }
+                }
+            }
+        }
+    }
+    Some(Front { tile: front, mask, cx0, cy0, tw, th })
+}
+
+/// The edited picture of the front of the character without the hand painting, for the painter: (the picture, the tile pixels per
+/// page pixel, the place of its top left on the page).
+pub fn edited_front_tile(doc: &Document, opt: &Options) -> Option<(RgbaImage, f32, [f32; 2])> {
+    let UncutSetup { page, vb, .. } = uncut_setup(doc, opt)?;
+    let rig = &*doc.rig;
+    let sk = rig.skin.as_ref()?;
+    let marks_drawn = face_marks(rig);
+    let f = make_front(&page, vb, rig, &sk.tex, &marks_drawn, opt.max_texture, false, None, opt.mesh_only)?;
+    let k = f.tile.width() as f32 / f.tw;
+    Some((f.tile, k, [f.cx0 as f32, f.cy0 as f32]))
+}
+
+/// What is painted on the paint layer of the document (the whole page, transparent where nothing is).
+fn paint_layer_image(doc: &Document, tex: &super::texedit::TexEdit) -> Option<RgbaImage> {
+    if tex.paint_layer == 0 {
+        return None;
+    }
+    crate::rig::uncut::composite(doc, &[tex.paint_layer])
+}
+
+/// Make (or renew) the two layers the texture is painted on in the drawing app: a locked layer that shows the edited picture of the
+/// front of the character in its place on the page, and above it an empty layer to paint on. Returns the layer to paint on.
+pub fn make_paint_layers(doc: &mut Document, opt: &Options, guides: Option<&[(String, [f32; 3])]>) -> Option<u64> {
+    let (tile, k, origin) = edited_front_tile(doc, opt)?;
+    let (cw, ch) = ((tile.width() as f32 / k).round().max(1.0) as u32, (tile.height() as f32 / k).round().max(1.0) as u32);
+    let mut on_page = image::imageops::resize(&tile, cw, ch, image::imageops::FilterType::Triangle);
+    let tex = doc.rig.skin.as_ref()?.tex.clone();
+    // lines at the places of the features, so they can be painted where they belong
+    if let (Some(lm), Some(m0)) = (guides, face_marks(&doc.rig)) {
+        let setup = uncut_setup(doc, opt)?;
+        draw_guides(&mut on_page, origin, &m0, &tex, lm, (setup.xc, setup.vb[3], setup.scale));
+    }
+    let (ox, oy) = (origin[0] as i32, origin[1] as i32);
+    // the view layer: renewed every time
+    doc.layers.retain(|l| l.id != tex.view_layer);
+    let mut view = doc.new_layer("Texture view (locked)", crate::doc::LayerKind::Raster);
+    view.tiles = crate::files::tiles_from_rgba(&on_page, ox, oy, doc.w, doc.h);
+    view.rev += 1;
+    view.locked = true;
+    let view_id = view.id;
+    // the paint layer: kept when it is there
+    let paint_id = if doc.layers.iter().any(|l| l.id == tex.paint_layer) {
+        tex.paint_layer
+    } else {
+        let paint = doc.new_layer("Texture paint", crate::doc::LayerKind::Raster);
+        let id = paint.id;
+        doc.layers.insert(0, paint);
+        id
+    };
+    // the view goes just under the paint layer
+    let at = doc.layers.iter().position(|l| l.id == paint_id).map(|i| i + 1).unwrap_or(0);
+    doc.layers.insert(at, view);
+    // on a mesh to paint by hand the drawing itself shows, faint and locked, to paint from
+    if opt.mesh_only {
+        doc.layers.retain(|l| l.name != "Drawing (reference)");
+        if let Some(page) = crate::rig::uncut::composite(doc, &doc.rig.skin.as_ref()?.layers.clone()) {
+            let mut reference = doc.new_layer("Drawing (reference)", crate::doc::LayerKind::Raster);
+            reference.tiles = crate::files::tiles_from_rgba(&page, 0, 0, doc.w, doc.h);
+            reference.rev += 1;
+            reference.locked = true;
+            reference.opacity = 45.0;
+            let above = doc.layers.iter().position(|l| l.id == view_id).map(|i| i + 1).unwrap_or(0);
+            doc.layers.insert(above, reference);
+        }
+    }
+    doc.mark_all_dirty();
+    let rig = std::sync::Arc::make_mut(&mut doc.rig);
+    if let Some(sk) = rig.skin.as_mut() {
+        sk.tex.view_layer = view_id;
+        sk.tex.paint_layer = paint_id;
+    }
+    Some(paint_id)
+}
+
+/// Draw the guide lines into the picture the texture is painted over: where the eyes (blue), the eyebrows (green), the nose (orange)
+/// and the mouth (red) of the texture belong, and the nose and the chin of the 3D shape itself (pink). `origin` is where the picture
+/// sits on the page; `frame` is (the middle of the figure, its bottom, metres per pixel) to bring the landmarks of the model back to
+/// the page.
+fn draw_guides(img: &mut RgbaImage, origin: [f32; 2], m0: &super::face::FaceMarks, tex: &super::texedit::TexEdit, landmarks: &[(String, [f32; 3])], frame: (f32, f32, f32)) {
+    use super::texedit::TexEdit;
+    let m = tex.effective(m0);
+    let base = [tex.head[0] + tex.face[0], tex.head[1] + tex.face[1]];
+    let brow = |left: bool| {
+        let b = TexEdit::brow_at(m0, left);
+        let o = if left { tex.brow_l } else { tex.brow_r };
+        [b[0] + base[0] + o[0], b[1] + base[1] + o[1]]
+    };
+    let nose = TexEdit::nose_at(m0);
+    let nose = [nose[0] + base[0] + tex.nose[0], nose[1] + base[1] + tex.nose[1]];
+    let cx = m.eye_center()[0];
+    let wide = m.eye_distance() * 1.25;
+    let mut line = |y: f32, col: [u8; 4], img: &mut RgbaImage| {
+        let ly = (y - origin[1]).round() as i32;
+        for x in ((cx - wide - origin[0]) as i32)..((cx + wide - origin[0]) as i32) {
+            for t in 0..2 {
+                let (px, py) = (x, ly + t);
+                if px >= 0 && py >= 0 && (px as u32) < img.width() && (py as u32) < img.height() {
+                    img.put_pixel(px as u32, py as u32, Rgba(col));
+                }
+            }
+        }
+    };
+    use image::Rgba;
+    line((brow(true)[1] + brow(false)[1]) / 2.0, [40, 200, 80, 255], img);
+    line((m.eye_l[1] + m.eye_r[1]) / 2.0, [0, 150, 255, 255], img);
+    line(nose[1], [255, 150, 0, 255], img);
+    line(m.mouth[1], [255, 40, 40, 255], img);
+    // the sides of the eyes and the middle of the mouth, as ticks
+    for (p, col) in [(m.eye_l, [0, 150, 255, 255]), (m.eye_r, [0, 150, 255, 255]), (m.mouth, [255, 40, 40, 255]), (brow(true), [40, 200, 80, 255]), (brow(false), [40, 200, 80, 255]), (nose, [255, 150, 0, 255])] {
+        for dy in -10..=10 {
+            let (px, py) = ((p[0] - origin[0]).round() as i32, (p[1] - origin[1]).round() as i32 + dy);
+            if px >= 0 && py >= 0 && (px as u32) < img.width() && (py as u32) < img.height() {
+                img.put_pixel(px as u32, py as u32, Rgba(col));
+            }
+        }
+    }
+    // the nose and the chin of the shape itself
+    for (name, p) in landmarks {
+        if name == "mesh_nose" || name == "mesh_chin" {
+            line(frame.1 - p[1] / frame.2, [255, 0, 200, 255], img);
+        }
+    }
+    let _ = frame.0;
 }

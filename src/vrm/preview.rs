@@ -11,6 +11,40 @@ pub fn render(model: &Model3d, yaw_deg: f32, w: u32, h: u32, active: &[(&str, f3
     render_posed(model, yaw_deg, w, h, active, &[])
 }
 
+/// What is under the pointer on the preview: the part of the model and the place on its picture (u, v in 0..1) of the front-most
+/// point there, or None when the pointer is over nothing. Same view as `render` (no pose, no expression).
+pub fn pick(model: &Model3d, yaw_deg: f32, w: u32, h: u32, px: f32, py: f32) -> Option<(usize, [f32; 2])> {
+    let (s, c) = yaw_deg.to_radians().sin_cos();
+    let top = model.parts.iter().flat_map(|p| p.verts.iter().map(|v| v[1])).fold(0.0f32, f32::max).max(0.1);
+    let scale = h as f32 * 0.9 / top;
+    let mut best: Option<(f32, usize, [f32; 2])> = None;
+    for (pi, part) in model.parts.iter().enumerate() {
+        let screen: Vec<[f32; 3]> = part.verts.iter().map(|v| [w as f32 / 2.0 + (v[0] * c + v[2] * s) * scale, h as f32 * 0.95 - v[1] * scale, -v[0] * s + v[2] * c]).collect();
+        for t in &part.tris {
+            let (a, b, cc) = (screen[t[0] as usize], screen[t[1] as usize], screen[t[2] as usize]);
+            if px < a[0].min(b[0]).min(cc[0]) - 0.5 || px > a[0].max(b[0]).max(cc[0]) + 0.5 || py < a[1].min(b[1]).min(cc[1]) - 0.5 || py > a[1].max(b[1]).max(cc[1]) + 0.5 {
+                continue;
+            }
+            let det = (b[1] - cc[1]) * (a[0] - cc[0]) + (cc[0] - b[0]) * (a[1] - cc[1]);
+            if det.abs() < 1e-6 {
+                continue;
+            }
+            let l1 = ((b[1] - cc[1]) * (px - cc[0]) + (cc[0] - b[0]) * (py - cc[1])) / det;
+            let l2 = ((cc[1] - a[1]) * (px - cc[0]) + (a[0] - cc[0]) * (py - cc[1])) / det;
+            let l3 = 1.0 - l1 - l2;
+            if l1 < -0.001 || l2 < -0.001 || l3 < -0.001 {
+                continue;
+            }
+            let z = a[2] * l1 + b[2] * l2 + cc[2] * l3;
+            if best.as_ref().is_none_or(|b| z > b.0) {
+                let (ua, ub, uc) = (part.uvs[t[0] as usize], part.uvs[t[1] as usize], part.uvs[t[2] as usize]);
+                best = Some((z, pi, [ua[0] * l1 + ub[0] * l2 + uc[0] * l3, ua[1] * l1 + ub[1] * l2 + uc[1] * l3]));
+            }
+        }
+    }
+    best.map(|b| (b.1, b.2))
+}
+
 /// The same picture with guide lines at the places of the features: the eyes, the nose and the mouth where the texture puts them
 /// (cyan) and the nose and the chin of the shape itself (pink), each as a line across the face and a dot where it is on the model.
 pub fn render_guides(model: &Model3d, yaw_deg: f32, w: u32, h: u32, active: &[(&str, f32)], show: bool) -> RgbaImage {
