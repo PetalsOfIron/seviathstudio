@@ -1996,7 +1996,7 @@ fn rig_tab_screens() {
     use crate::doc::LayerKind;
     use egui_kittest::kittest::Queryable;
     let _gpu = lock_gpu();
-    let mut h = Harness::builder().with_size([1440.0, 1100.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    let mut h = Harness::builder().with_size([1440.0, 1900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     // a head (a disc) and an arm (a bar) on the 3000 x 4000 page
     let (head, arm) = {
@@ -2551,4 +2551,89 @@ fn rig_tab_auto_face_screens() {
     h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
     h.run_steps(3);
     assert!(h.state().draw_mut_ref().doc.rig.params.is_empty(), "one undo step for the whole face rig");
+}
+
+#[test]
+fn rig_tab_body_hair_and_checker_screens() {
+    use crate::doc::LayerKind;
+    use crate::rig::check::IssueKind;
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 2000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    {
+        let d = h.state_mut().draw_mut();
+        let (w, h2) = (d.doc.w, d.doc.h);
+        let mut add = |name: &str, x: i32, y: i32, bw: u32, bh: u32, c: [u8; 3]| {
+            let img = image::RgbaImage::from_pixel(bw, bh, image::Rgba([c[0], c[1], c[2], 255]));
+            let mut l = d.doc.new_layer(name, LayerKind::Raster);
+            l.tiles = crate::files::tiles_from_rgba(&img, x, y, w, h2);
+            l.rev += 1;
+            d.doc.layers.insert(0, l);
+        };
+        add("hair back", 1000, 500, 1000, 1100, [90, 60, 140]);
+        add("face", 1100, 700, 800, 900, [240, 205, 180]);
+        add("eye L", 1550, 1100, 200, 90, [40, 70, 140]);
+        add("eye R", 1250, 1100, 200, 90, [40, 70, 140]);
+        add("mouth", 1350, 1450, 300, 70, [200, 80, 90]);
+        add("hair front", 1050, 600, 900, 250, [110, 70, 170]);
+        add("torso", 1200, 1700, 600, 800, [70, 130, 200]);
+        add("arm L", 1800, 1700, 160, 500, [60, 110, 180]);
+        add("hand L", 1800, 2200, 160, 160, [240, 205, 180]);
+        add("arm R", 1040, 1700, 160, 500, [60, 110, 180]);
+        add("hand R", 1040, 2200, 160, 160, [240, 205, 180]);
+        add("leg L", 1500, 2500, 300, 700, [50, 60, 120]);
+        add("leg R", 1200, 2500, 300, 700, [50, 60, 120]);
+        d.doc.mark_all_dirty();
+    }
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    h.get_by_label("This is a face").click();
+    h.run_steps(5);
+    h.get_by_label("Rig the body").click();
+    h.run_steps(5);
+    h.get_by_label("Hair sway").click();
+    h.run_steps(5);
+    let rig = h.state().draw_mut_ref().doc.rig.clone();
+    for n in ["Angle X", "Eyes open", "Mouth open", "Body tilt", "Breath", "Arm L", "Arm R", "Hand L", "Leg L", "Leg R", "Hair sway", "Hand L reach X", "Hand L reach Y"] {
+        assert!(rig.params.iter().any(|p| p.name == n), "a slider {n}");
+    }
+    assert_eq!(rig.iks.len(), 2, "both hands can reach");
+    assert_eq!(rig.auto.as_ref().unwrap().groups.len(), 3, "face, body and hair");
+    // the sliders work together: the head leans with the body, the hair swings
+    let id = |n: &str| rig.params.iter().find(|p| p.name == n).unwrap().id;
+    let layer = |h: &Harness<'_, SeviathApp>, n: &str| h.state().draw_mut_ref().doc.layers.iter().find(|l| l.name == n).unwrap().id;
+    let (face, hair, hand, torso) = (layer(&h, "face"), layer(&h, "hair front"), layer(&h, "hand L"), layer(&h, "torso"));
+    h.state_mut().test_rig().values.set(id("Body tilt"), 10.0);
+    h.run_steps(3);
+    assert!(h.state_mut().test_moved(face) > 20.0, "the head leans with the body");
+    assert!(h.state_mut().test_moved(torso) > 20.0);
+    h.state_mut().test_rig().values = crate::rig::Values::default();
+    h.state_mut().test_rig().values.set(id("Hair sway"), 1.0);
+    h.run_steps(3);
+    assert!(h.state_mut().test_moved(hair) > 20.0, "the hair sways");
+    h.state_mut().test_rig().values = crate::rig::Values::default();
+    h.state_mut().test_rig().values.set(id("Hand L reach X"), -150.0);
+    h.state_mut().test_rig().values.set(id("Hand L reach Y"), -250.0);
+    h.run_steps(3);
+    assert!(h.state_mut().test_moved(hand) > 100.0, "the hand is brought up by the reach sliders");
+    save(&mut h, "rig_10_body");
+    h.state_mut().test_rig().values = crate::rig::Values::default();
+    // the quality checker: gaps found, glued with one click each, until it is quiet
+    h.get_by_label("Check the rig").click();
+    h.run_steps(5);
+    for _ in 0..80 {
+        let gaps = h.state_mut().test_rig().issues.iter().filter(|i| matches!(i.kind, IssueKind::Gap { .. })).count();
+        if gaps == 0 {
+            break;
+        }
+        h.get_all_by_label("Glue them").next().unwrap().click();
+        h.run_steps(5);
+    }
+    assert_eq!(h.state_mut().test_rig().issues.iter().filter(|i| matches!(i.kind, IssueKind::Gap { .. })).count(), 0, "no gaps are left");
+    assert!(!h.state().draw_mut_ref().doc.rig.glues.is_empty() || h.state_mut().test_check() == 0);
+    save(&mut h, "rig_11_checked");
+    // undo goes back one fix at a time; the whole body rig is one step too
+    let steps = h.state().history().entries.len();
+    assert!(steps >= 4);
 }
