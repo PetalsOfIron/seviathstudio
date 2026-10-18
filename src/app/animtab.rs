@@ -15,7 +15,7 @@ use crate::rig::Id;
 use crate::theme::*;
 use crate::widgets::{self, section_title};
 
-const ROW: f32 = 22.0;
+pub(super) const ROW: f32 = 22.0;
 const LANE: f32 = 36.0;
 const RULER: f32 = 26.0;
 const NAMES: f32 = 190.0;
@@ -46,7 +46,7 @@ pub struct AnimUi {
     pub frame: f32,
     pub playing: bool,
     pub dir: f32,
-    applied: Option<f32>,
+    pub(super) applied: Option<f32>,
     pub sel: Option<(usize, usize)>,
     pub sel_track: Option<usize>,
     pub zoom: f32,
@@ -62,7 +62,7 @@ pub struct AnimUi {
     pub export_cols: u32,
     job: Option<ExportJob>,
     /// What the layers looked like before the animation moved them, to put back when it stops.
-    base: Option<HashMap<u64, (f32, bool)>>,
+    pub(super) base: Option<HashMap<u64, (f32, bool)>>,
     /// A change being made (a key dragged, a number dragged): the document before it, kept as one undo step when the mouse is let go.
     pending: Option<(String, DocState)>,
     pub view_zoom: f32,
@@ -74,6 +74,9 @@ pub struct AnimUi {
     player: Option<crate::audio::Player>,
     /// The slider the lip sync is made for.
     pub lip_param: Option<Id>,
+    /// Frame by frame: the pictures of frames that were put together, and the picked exposure (track, number in it).
+    pub(super) cel_cache: HashMap<u64, egui::TextureHandle>,
+    pub sel_cel: Option<(usize, usize)>,
 }
 
 impl Default for AnimUi {
@@ -106,6 +109,8 @@ impl Default for AnimUi {
             audio_last: 0.0,
             player: None,
             lip_param: None,
+            cel_cache: HashMap::new(),
+            sel_cel: None,
         }
     }
 }
@@ -151,7 +156,7 @@ fn target_color(t: &Target) -> Color32 {
 
 impl SeviathApp {
     /// Change the animation; the change is kept as one undo step when the mouse is let go.
-    fn anim_mut(&mut self, label: &str) -> &mut Animation {
+    pub(super) fn anim_mut(&mut self, label: &str) -> &mut Animation {
         if self.rigs.anim.pending.is_none() {
             self.rigs.anim.pending = Some((label.to_string(), self.draw.doc.snapshot()));
         }
@@ -197,6 +202,7 @@ impl SeviathApp {
                 }
             }
         }
+        self.cel_apply(frame);
         self.rigs.anim.applied = Some(frame);
     }
 
@@ -393,7 +399,9 @@ impl SeviathApp {
             }
         }
         let p = ui.painter_at(rect);
-        if let Some(t) = &self.rigs.image {
+        if self.cel_mode() {
+            self.cel_preview(ui, rect);
+        } else if let Some(t) = &self.rigs.image {
             let tex = t.size_vec2();
             let fit = ((rect.width() - 24.0) / tex.x).min((rect.height() - 24.0) / tex.y).max(0.05) * self.rigs.anim.view_zoom;
             let r = Rect::from_center_size(rect.center(), tex * fit);
@@ -411,7 +419,7 @@ impl SeviathApp {
 
     // ---- the timeline ----
 
-    fn anim_x(&self, key_left: f32, frame: f32) -> f32 {
+    pub(super) fn anim_x(&self, key_left: f32, frame: f32) -> f32 {
         key_left + (frame - self.rigs.anim.scroll) * self.rigs.anim.zoom
     }
 
@@ -585,7 +593,8 @@ impl SeviathApp {
                 painter.add(egui::Shape::convex_polygon(vec![c + vec2(0.0, -d), c + vec2(d, 0.0), c + vec2(0.0, d), c + vec2(-d, 0.0)], if on { Color32::WHITE } else { col }, Stroke::new(1.0, Color32::BLACK)));
             }
         }
-        if tracks_n == 0 {
+        self.cel_rows_paint(&painter, area, key_left, rows_top);
+        if tracks_n == 0 && !self.cel_mode() {
             painter.text(pos2(key_left + 16.0, rows_top + 14.0), egui::Align2::LEFT_CENTER, "No tracks yet. Add one on the right: a slider, or a layer.", egui::FontId::proportional(12.5), TEXT_DIM);
         }
         // the markers and the playhead
@@ -668,6 +677,8 @@ impl SeviathApp {
                 if pos.y < rows_top && pos.x >= key_left {
                     self.rigs.anim.frame = frame_at(pos.x).round().min(a.length.saturating_sub(1) as f32);
                     self.rigs.anim.playing = false;
+                } else if let Some(ci) = self.cel_row_at(pos, rows_top).filter(|_| pos.x >= key_left) {
+                    self.cel_row_click(ci, frame_at(pos.x));
                 } else if let Some((ti, k)) = at(pos) {
                     self.rigs.anim.sel_track = Some(ti);
                     self.rigs.anim.sel = k.map(|ki| (ti, ki));
@@ -734,6 +745,7 @@ impl SeviathApp {
 
     fn anim_side_ui(&mut self, ui: &mut Ui, now: f64) {
         let _ = now;
+        self.cel_side_ui(ui);
         section_title(ui, "Sliders at the playhead");
         ui.label(RichText::new("Move a slider to pose the character at this frame. With Auto key on (under the timeline) the move makes a key; otherwise use Key this slider.").size(11.5).color(TEXT_DIM));
         let params: Vec<(Id, String, f32, f32, f32)> = self.draw.doc.rig.params.iter().map(|p| (p.id, p.name.clone(), p.min, p.max, p.default)).collect();
@@ -1130,7 +1142,8 @@ impl SeviathApp {
                 left -= dt;
             }
             let paper = if job.transparent { None } else { Some(Color32::WHITE) };
-            let Some(img) = self.rig_still(job.size, paper) else {
+            let picture = if self.cel_mode() { Some(self.cel_picture(job.size, paper)) } else { self.rig_still(job.size, paper) };
+            let Some(img) = picture else {
                 job.error = Some("There is nothing to draw: the rig has no meshes yet.".into());
                 done = true;
                 break;
