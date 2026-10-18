@@ -179,6 +179,7 @@ impl SeviathApp {
         }
         let defs = crate::expressions::defs(&rig);
         self.rigs.stream.expr.apply(&defs, &rig, &mut self.rigs.values, dt);
+        self.rigs.expr_layers = self.rigs.stream.expr.layer_levels(&defs);
         if !rig.hotkeys.is_empty() || self.rigs.stream.hub.as_ref().is_some_and(|h| h.learn) {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
@@ -192,6 +193,16 @@ impl SeviathApp {
         let any_on = self.rigs.stream.sources.iter().any(|s| s.enabled) || rig.tracking.auto_blink || rig.tracking.breathing || rig.tracking.look_at_mouse;
         if any_on {
             ctx.request_repaint();
+        }
+    }
+
+    /// Outside the Stream tab the expressions are not on: the sliders and layers are as they were set.
+    pub(super) fn stream_release(&mut self) {
+        if self.rigs.stream.expr.has_applied() {
+            self.rigs.stream.expr.undo(&mut self.rigs.values);
+        }
+        if !self.rigs.expr_layers.is_empty() {
+            self.rigs.expr_layers.clear();
         }
     }
 
@@ -320,6 +331,9 @@ impl SeviathApp {
         let now = ui.ctx().input(|i| i.time);
         let mut delete: Option<String> = None;
         let mut fades: Vec<(String, f32)> = Vec::new();
+        // a layer made to show or hide by an expression: (expression, layer, 0 nothing / 1 show / 2 hide)
+        let mut layer_edit: Option<(String, u64, u8)> = None;
+        let layer_names: Vec<(u64, String)> = self.draw.doc.layers.iter().filter(|l| matches!(l.kind, crate::doc::LayerKind::Raster | crate::doc::LayerKind::Vector)).map(|l| (l.id, l.name.clone())).collect();
         for d in &defs {
             let on = self.rigs.stream.expr.is_on(&d.name);
             let level = self.rigs.stream.expr.level(&d.name);
@@ -337,6 +351,36 @@ impl SeviathApp {
                     }
                     if ui.small_button("Delete").clicked() {
                         delete = Some(d.name.clone());
+                    }
+                }
+            });
+            if d.own && !layer_names.is_empty() {
+                egui::CollapsingHeader::new(RichText::new("Layers it shows or hides").size(11.5).color(TEXT_DIM)).id_salt(("expr_layers", &d.name)).show(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(140.0).id_salt(("expr_layers_scroll", &d.name)).show(ui, |ui| {
+                        for (id, name) in &layer_names {
+                            let mode = if d.show.contains(id) { 1 } else if d.hide.contains(id) { 2 } else { 0 };
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(name).size(11.5));
+                                for (m, label) in [(1u8, "Show"), (2, "Hide")] {
+                                    if widgets::chip(ui, label, mode == m).clicked() {
+                                        layer_edit = Some((d.name.clone(), *id, if mode == m { 0 } else { m }));
+                                    }
+                                }
+                            });
+                        }
+                    });
+                });
+            }
+        }
+        if let Some((n, id, m)) = layer_edit {
+            self.rig_edit("Expression layers", now, |r| {
+                if let Some(e) = r.own_exprs.iter_mut().find(|e| e.name == n) {
+                    e.show.retain(|x| *x != id);
+                    e.hide.retain(|x| *x != id);
+                    match m {
+                        1 => e.show.push(id),
+                        2 => e.hide.push(id),
+                        _ => {}
                     }
                 }
             });

@@ -123,6 +123,8 @@ pub struct RigState {
     pub(super) anim: super::animtab::AnimUi,
     /// The Stream tab: tracking sources, inputs, outputs.
     pub(super) stream: super::streamtab::StreamUi,
+    /// Layers that expressions show or hide right now (Stream tab): whether to show, and how far.
+    pub expr_layers: std::collections::HashMap<LayerId, (bool, f32)>,
     /// Editing the hair: on or off, the tool (0 move joints, 1 add a strand, 2 add hair with the brush, 3 take hair away), the picked
     /// strand, the joints of the strand being made, the radius of the hair brush, the picture of the hair on the canvas, the hair the
     /// app found (before corrections) and a change waiting to be built.
@@ -385,7 +387,19 @@ impl SeviathApp {
         self.rigs.put_vals(&mut pose);
         self.rigs.add_phys(&rig, &mut pose);
         let all = rig.deformed_all(&pose);
-        let ids: Vec<(LayerId, f32)> = self.draw.doc.layers.iter().rev().filter(|l| l.visible && matches!(l.kind, crate::doc::LayerKind::Raster | crate::doc::LayerKind::Vector)).map(|l| (l.id, l.opacity / 100.0)).collect();
+        // what an expression shows or hides (Stream tab) is put over how the layers are
+        let over = &self.rigs.expr_layers;
+        let look = |l: &crate::doc::Layer| -> (bool, f32) {
+            match over.get(&l.id) {
+                Some((true, lv)) => (*lv > 0.0, l.opacity / 100.0 * if l.visible { 1.0 } else { *lv }),
+                Some((false, lv)) => (l.visible && *lv < 1.0, l.opacity / 100.0 * (1.0 - *lv)),
+                None => (l.visible, l.opacity / 100.0),
+            }
+        };
+        let ids: Vec<(LayerId, f32)> = self.draw.doc.layers.iter().rev().filter(|l| matches!(l.kind, crate::doc::LayerKind::Raster | crate::doc::LayerKind::Vector)).filter_map(|l| {
+            let (shown, op) = look(l);
+            shown.then_some((l.id, op))
+        }).collect();
         let mut out = Vec::new();
         // (place in `out`, how far forward an Order changer moves it)
         let mut shifts: Vec<(usize, f32)> = Vec::new();
@@ -467,6 +481,11 @@ impl SeviathApp {
         key.push((self.rigs.mode == Mode::Weight) as u64);
         key.push(self.rigs.hq as u64);
         key.push(self.settings.rig_quality as u64);
+        let mut el: Vec<(u64, bool, u32)> = self.rigs.expr_layers.iter().map(|(k, (s, l))| (*k, *s, l.to_bits())).collect();
+        el.sort();
+        for (k, s, l) in el {
+            key.extend([k, s as u64, l as u64]);
+        }
         if let (true, Some((id, v))) = (self.rigs.vals_live, &self.rigs.vals_edit) {
             key.push(*id as u64);
             key.extend(v.iter().map(|x| x.to_bits() as u64));

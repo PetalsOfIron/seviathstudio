@@ -3588,7 +3588,7 @@ fn stream_tab_follows_a_sent_face_and_serves_the_picture() {
     // a pad button switches an expression on and off, on top of the tracked face
     let (e_id, e_lo, e_hi, e_def) = { let p = h.state().draw_mut_ref().doc.rig.params[1].clone(); (p.id, p.min, p.max, p.default) };
     h.state_mut().test_rig_edit(|r| {
-        r.own_exprs.push(crate::expressions::OwnExpr { name: "Happy".into(), values: vec![(e_id, e_hi)], fade_in: 0.0, fade_out: 0.0 });
+        r.own_exprs.push(crate::expressions::OwnExpr { name: "Happy".into(), values: vec![(e_id, e_hi)], fade_in: 0.0, fade_out: 0.0, ..Default::default() });
         r.hotkeys.push(crate::hotkeys::Binding { input: crate::hotkeys::Input::Pad { button: "South".into() }, action: crate::hotkeys::Action::Toggle("Happy".into()) });
     });
     let press = crate::hotkeys::InputEvent { input: crate::hotkeys::Input::Pad { button: "South".into() }, pressed: true };
@@ -3605,10 +3605,22 @@ fn stream_tab_follows_a_sent_face_and_serves_the_picture() {
     assert!((val(&mut h) - e_def).abs() < 1e-3, "off again: {}", val(&mut h));
     h.state_mut().test_stream().hub.as_ref().unwrap().push(crate::hotkeys::InputEvent { input: crate::hotkeys::Input::Pad { button: "South".into() }, pressed: true });
     h.run_steps(3);
+    // an expression that hides a layer (a prop or accessory): the picture changes while it is on and comes back when it is off
+    let hidden_layer = h.state().draw_mut_ref().doc.rig.meshes.last().unwrap().layer;
+    h.state_mut().test_rig_edit(|r| r.own_exprs.push(crate::expressions::OwnExpr { name: "NoLayer".into(), fade_in: 0.0, fade_out: 0.0, hide: vec![hidden_layer], ..Default::default() }));
+    h.run_steps(3);
+    let with_layer = h.state_mut().test_still(300).unwrap();
+    h.state_mut().test_stream().expr.set("NoLayer", true);
+    h.run_steps(4);
+    let without = h.state_mut().test_still(300).unwrap();
+    assert_ne!(with_layer.as_raw(), without.as_raw(), "the layer is hidden by the expression");
+    h.state_mut().test_stream().expr.set("NoLayer", false);
+    h.run_steps(4);
+    assert_eq!(h.state_mut().test_still(300).unwrap().as_raw(), with_layer.as_raw(), "and shown again");
     // emotes: the plain face and the expression, at three sizes each, cut to the face
     let dir = std::env::temp_dir().join(format!("seviath_emotes_{}", std::process::id()));
     let n = h.state_mut().test_stream_emotes(&dir).unwrap();
-    assert_eq!(n, 6, "two looks at three sizes");
+    assert_eq!(n, 9, "three looks (plain, Happy, NoLayer) at three sizes");
     let neutral = image::open(dir.join("Neutral_112.png")).unwrap().to_rgba8();
     let happy = image::open(dir.join("Happy_112.png")).unwrap().to_rgba8();
     assert_eq!(neutral.dimensions(), (112, 112));
