@@ -571,8 +571,8 @@ pub fn rig_hair(rig: &mut Rig, layers: &[Layer], doc_w: u32, doc_h: u32) -> Resu
         let dir = if matches!(part, Part::HairSideL) { 1.0 } else if matches!(part, Part::HairSideR) { -1.0 } else { 1.0 };
         let amp = 0.22 * w * dir;
         let offsets: Vec<[f32; 2]> = (0..5).map(|i| [amp * (i as f32 / 4.0).powi(2), 0.0]).collect();
-        mk.rig.set_keyform(line, sway, 1.0, Form::Line { offsets: offsets.clone() });
-        mk.rig.set_keyform(line, sway, -1.0, Form::Line { offsets: offsets.iter().map(|o| [-o[0], o[1]]).collect() });
+        mk.rig.set_keyform(line, sway, 1.0, Form::Line { offsets: offsets.clone(), turns: vec![] });
+        mk.rig.set_keyform(line, sway, -1.0, Form::Line { offsets: offsets.iter().map(|o| [-o[0], o[1]]).collect(), turns: vec![] });
         if let Some(m) = mk.rig.meshes.iter_mut().find(|m| m.layer == l.id) {
             m.parent = Some(line);
         }

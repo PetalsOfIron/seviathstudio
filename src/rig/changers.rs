@@ -38,6 +38,50 @@ pub fn unflatten(paths: &[PathSpot], flat: &[[f32; 2]]) -> Vec<Vec<[f32; 2]>> {
         .collect()
 }
 
+/// The turns of all the curves in one list, and back (like `flatten`).
+pub fn flatten_turns(paths: &[PathSpot], t: Option<&Vec<Vec<f32>>>) -> Vec<f32> {
+    let mut out = Vec::new();
+    for (k, sp) in paths.iter().enumerate() {
+        for i in 0..sp.pts.len() {
+            out.push(t.and_then(|t| t.get(k)).and_then(|t| t.get(i)).copied().unwrap_or(0.0));
+        }
+    }
+    out
+}
+
+pub fn unflatten_turns(paths: &[PathSpot], flat: &[f32]) -> Vec<Vec<f32>> {
+    let mut at = 0;
+    paths
+        .iter()
+        .map(|sp| {
+            let v: Vec<f32> = (0..sp.pts.len()).map(|i| flat.get(at + i).copied().unwrap_or(0.0)).collect();
+            at += sp.pts.len();
+            v
+        })
+        .collect()
+}
+
+/// Turn the whole shape being edited by `deg` degrees about the middle of its rest points: every control point goes
+/// round with it. For curves, the picture at every point turns by the same angle too (`turns`, when given).
+pub fn rotate_shape(rest: &[[f32; 2]], off: &mut [[f32; 2]], turns: Option<&mut [f32]>, deg: f32) {
+    if rest.is_empty() {
+        return;
+    }
+    let n = rest.len() as f32;
+    let c = [rest.iter().map(|p| p[0]).sum::<f32>() / n, rest.iter().map(|p| p[1]).sum::<f32>() / n];
+    let (s, co) = deg.to_radians().sin_cos();
+    for (o, r) in off.iter_mut().zip(rest) {
+        let (x, y) = (r[0] + o[0] - c[0], r[1] + o[1] - c[1]);
+        let new = [c[0] + x * co - y * s, c[1] + x * s + y * co];
+        *o = [new[0] - r[0], new[1] - r[1]];
+    }
+    if let Some(t) = turns {
+        for x in t.iter_mut() {
+            *x += deg;
+        }
+    }
+}
+
 pub const MAX_PATHS: usize = 32;
 pub const MAX_PINS: usize = 64;
 
@@ -155,14 +199,15 @@ pub fn pin_shift(pts: &[[f32; 2]], off: &[[f32; 2]], p: [f32; 2]) -> [f32; 2] {
 
 /// Several curves on one part: each bends the picture around it (like a Line changer); where curves overlap their
 /// pushes are averaged, so the picture never jumps from one to the other.
-pub fn blend_paths(paths: &[PathSpot], off: &[Vec<[f32; 2]>], p: [f32; 2]) -> [f32; 2] {
+pub fn blend_paths(paths: &[PathSpot], off: &[Vec<[f32; 2]>], turns: &[Vec<f32>], p: [f32; 2]) -> [f32; 2] {
     let (mut sum, mut total) = ([0.0f32; 2], 0.0f32);
     for (k, sp) in paths.iter().enumerate() {
         let Some(o) = off.get(k) else { continue };
-        if o.iter().all(|v| v[0].abs() < 1e-5 && v[1].abs() < 1e-5) {
+        let t = turns.get(k).map(Vec::as_slice).unwrap_or(&[]);
+        if o.iter().all(|v| v[0].abs() < 1e-5 && v[1].abs() < 1e-5) && t.iter().all(|x| x.abs() < 1e-5) {
             continue;
         }
-        let (new, w) = bend_along(&sp.pts, o, sp.width, p);
+        let (new, w) = bend_along(&sp.pts, o, t, sp.width, p);
         if w <= 0.0 {
             continue;
         }
@@ -235,8 +280,11 @@ impl Rig {
         };
         for b in self.bindings.iter_mut().filter(|b| b.changer == changer) {
             for f in &mut b.forms {
-                if let super::Form::Paths { offsets } = f {
+                if let super::Form::Paths { offsets, turns } = f {
                     offsets.push(vec![[0.0, 0.0]; spot.pts.len()]);
+                    if !turns.is_empty() {
+                        turns.push(vec![0.0; spot.pts.len()]);
+                    }
                 }
             }
         }
@@ -255,9 +303,12 @@ impl Rig {
         }
         for b in self.bindings.iter_mut().filter(|b| b.changer == changer) {
             for f in &mut b.forms {
-                if let super::Form::Paths { offsets } = f {
+                if let super::Form::Paths { offsets, turns } = f {
                     if n < offsets.len() {
                         offsets.remove(n);
+                    }
+                    if n < turns.len() {
+                        turns.remove(n);
                     }
                 }
             }
@@ -401,6 +452,50 @@ mod tests {
     }
 
     #[test]
+    fn each_point_of_a_curve_can_turn_and_the_whole_shape_can_be_turned() {
+        // a line down from (100,100): a point beside it at x=130, at the middle of the curve
+        let pts = [[100.0, 100.0], [100.0, 150.0], [100.0, 200.0]];
+        let off = [[0.0f32; 2]; 3];
+        let p = [130.0, 150.0];
+        let (plain, _) = bend_along(&pts, &off, &[], 60.0, p);
+        assert_eq!(plain, p, "no turn, no change");
+        // the middle point turned by 90 degrees: the picture beside it swings round that point of the curve
+        let (turned, _) = bend_along(&pts, &off, &[0.0, 90.0, 0.0], 60.0, p);
+        assert!((turned[0] - 100.0).abs() < 1.5 && (turned[1] - 180.0).abs() < 1.5 || (turned[1] - 120.0).abs() < 1.5, "{turned:?}");
+        // between two points the turn is shared: half way to a point turned by 80 degrees is turned by about 40
+        let (q, _) = bend_along(&pts, &off, &[0.0, 80.0, 0.0], 60.0, [130.0, 125.0]);
+        let angle = (q[1] - 125.0).atan2(q[0] - 100.0).to_degrees();
+        assert!((angle - 40.0).abs() < 8.0, "{angle}");
+        // the turns are saved with the shape and blend between two keys; the mirror turns them the other way
+        let mut r = Rig::default();
+        let l = r.add_changer("Curl", Kind::Line { pts: pts.to_vec(), width: 60.0 }, None);
+        let s = r.add_param("Curl", 0.0, 1.0, 0.0);
+        r.set_keyform(l, s, 1.0, super::super::Form::Line { offsets: vec![[0.0; 2]; 3], turns: vec![0.0, 90.0, 0.0] });
+        let mut v = crate::rig::Values::default();
+        v.set(s, 0.5);
+        assert_eq!(r.pose(&v).line_turns[&l], [0.0, 45.0, 0.0]);
+        let back: Rig = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(back.bindings[0].forms[1], r.bindings[0].forms[1]);
+        assert_eq!(back.clone().sanitized().bindings.len(), 1);
+        let m = r.mirror_changer(l, 0.0, "Curl L").unwrap();
+        let mirrored = r.bindings.iter().find(|b| b.changer == m).unwrap();
+        assert!(matches!(&mirrored.forms[1], super::super::Form::Line { turns, .. } if turns == &[0.0, -90.0, 0.0]));
+        // turning the whole shape by 90 about its middle
+        let rest = [[0.0, 0.0], [100.0, 0.0]];
+        let mut o = [[0.0f32; 2]; 2];
+        let mut t = [0.0f32; 2];
+        rotate_shape(&rest, &mut o, Some(&mut t), 90.0);
+        assert!((rest[0][0] + o[0][0] - 50.0).abs() < 1e-3 && (rest[0][1] + o[0][1] + 50.0).abs() < 1e-3, "{o:?}");
+        assert_eq!(t, [90.0, 90.0]);
+        // flat lists go back and forth
+        let paths = [PathSpot { pts: vec![[0.0; 2]; 2], width: 1.0 }, PathSpot { pts: vec![[0.0; 2]; 3], width: 1.0 }];
+        let flat = [10.0, 11.0, 20.0, 21.0, 22.0];
+        let un = unflatten_turns(&paths, &flat);
+        assert_eq!(un, vec![vec![10.0, 11.0], vec![20.0, 21.0, 22.0]]);
+        assert_eq!(flatten_turns(&paths, Some(&un)), flat);
+    }
+
+    #[test]
     fn several_paths_each_bend_their_own_spot() {
         let a = PathSpot { pts: vec![[100.0, 100.0], [100.0, 140.0], [100.0, 180.0]], width: 25.0 };
         let b = PathSpot { pts: vec![[400.0, 100.0], [400.0, 140.0], [400.0, 180.0]], width: 25.0 };
@@ -408,16 +503,16 @@ mod tests {
         let mut off = vec![vec![[0.0; 2]; 3], vec![[0.0; 2]; 3]];
         // only the first path is dragged to the right
         off[0] = vec![[0.0, 0.0], [30.0, 0.0], [30.0, 0.0]];
-        let near_a = blend_paths(&paths, &off, [100.0, 160.0]);
+        let near_a = blend_paths(&paths, &off, &[], [100.0, 160.0]);
         assert!(near_a[0] > 120.0, "{near_a:?}");
-        let near_b = blend_paths(&paths, &off, [400.0, 160.0]);
+        let near_b = blend_paths(&paths, &off, &[], [400.0, 160.0]);
         assert_eq!(near_b, [400.0, 160.0], "the other spot does not move");
-        let far = blend_paths(&paths, &off, [250.0, 160.0]);
+        let far = blend_paths(&paths, &off, &[], [250.0, 160.0]);
         assert_eq!(far, [250.0, 160.0], "between them nothing moves");
         // overlapping curves are averaged, never added up
         let two = [PathSpot { pts: vec![[100.0, 100.0], [100.0, 200.0]], width: 40.0 }, PathSpot { pts: vec![[100.0, 100.0], [100.0, 200.0]], width: 40.0 }];
         let off2 = vec![vec![[0.0, 0.0], [40.0, 0.0]], vec![[0.0, 0.0], [40.0, 0.0]]];
-        let r = blend_paths(&two, &off2, [100.0, 200.0]);
+        let r = blend_paths(&two, &off2, &[], [100.0, 200.0]);
         assert!((r[0] - 140.0).abs() < 0.5, "{r:?}");
     }
 
@@ -429,11 +524,11 @@ mod tests {
         let c = r.new_path_changer("Lash", spot(0.0), None);
         let mut off = vec![vec![[0.0; 2]; 3]];
         off[0][1] = [0.0, 10.0];
-        r.set_keyform(c, p, 0.0, Form::Paths { offsets: off });
+        r.set_keyform(c, p, 0.0, Form::Paths { offsets: off, turns: vec![] });
         // adding a curve gives every saved shape a quiet one for it
         assert_eq!(r.add_path(c, spot(300.0)), Some(1));
         match &r.bindings[0].forms[0] {
-            Form::Paths { offsets } => assert_eq!(offsets.len(), 2),
+            Form::Paths { offsets, .. } => assert_eq!(offsets.len(), 2),
             f => panic!("{f:?}"),
         }
         assert!(r.remove_path(c, 1));

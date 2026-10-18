@@ -63,6 +63,14 @@ impl RigState {
             }
             Some(Kind::Line { .. }) => {
                 pose.line.insert(*id, off.clone());
+                match &self.turn_edit {
+                    Some(t) if t.len() == off.len() => {
+                        pose.line_turns.insert(*id, t.clone());
+                    }
+                    _ => {
+                        pose.line_turns.remove(id);
+                    }
+                }
             }
             Some(Kind::Soft { .. }) => {
                 pose.soft.insert(*id, (off.first().copied().unwrap_or([0.0, 0.0]), self.soft_grow));
@@ -72,6 +80,14 @@ impl RigState {
             }
             Some(Kind::Paths { paths }) => {
                 pose.paths.insert(*id, rig::changers::unflatten(paths, off));
+                match &self.turn_edit {
+                    Some(t) if t.len() == off.len() => {
+                        pose.path_turns.insert(*id, rig::changers::unflatten_turns(paths, t));
+                    }
+                    _ => {
+                        pose.path_turns.remove(id);
+                    }
+                }
             }
             _ => {}
         }
@@ -92,6 +108,10 @@ impl RigState {
 
 #[derive(Default)]
 pub struct RigState {
+    /// The turn at every point of the curve(s) being edited (curves after curve), next to `warp_edit`.
+    turn_edit: Option<Vec<f32>>,
+    /// How many degrees the next *Turn* button turns by.
+    turn_by: f32,
     /// The numbers of a numeric changer being set, and whether they are shown on the picture now.
     vals_edit: Option<(Id, Vec<f32>)>,
     vals_live: bool,
@@ -167,6 +187,39 @@ pub struct RigState {
     pan: Vec2,
     message: Option<String>,
     inited: bool,
+}
+
+/// A small circle beside a curve point: drag it round to turn the picture at that point. Gives the new turn (degrees)
+/// when it is being dragged.
+fn turn_handle(ui: &mut Ui, p: &egui::Painter, at: Pos2, tangent: Vec2, turn: f32, id: egui::Id, editing: bool) -> Option<f32> {
+    let t = if tangent.length() > 1e-3 { tangent.normalized() } else { vec2(0.0, 1.0) };
+    let n0 = vec2(-t.y, t.x);
+    let (s, c) = turn.to_radians().sin_cos();
+    let dir = vec2(n0.x * c - n0.y * s, n0.x * s + n0.y * c);
+    let h = at + dir * 26.0;
+    let amber = Color32::from_rgb(255, 200, 60);
+    p.line_segment([at, h], Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 200, 60, 120)));
+    p.circle_filled(h, 5.0, if editing { amber } else { Color32::from_rgb(120, 110, 60) });
+    if !editing {
+        return None;
+    }
+    let r = ui.interact(Rect::from_center_size(h, vec2(16.0, 16.0)), id, Sense::drag());
+    if r.dragged() {
+        if let Some(pp) = r.interact_pointer_pos() {
+            let v = pp - at;
+            if v.length() > 2.0 {
+                let mut deg = (v.y.atan2(v.x) - n0.y.atan2(n0.x)).to_degrees();
+                while deg > 180.0 {
+                    deg -= 360.0;
+                }
+                while deg < -180.0 {
+                    deg += 360.0;
+                }
+                return Some(deg);
+            }
+        }
+    }
+    None
 }
 
 /// The eye at the left of a row in the parts list: true when it was clicked.
@@ -578,6 +631,7 @@ impl SeviathApp {
             self.rigs.hq = true;
             self.rigs.path_width = 40.0;
             self.rigs.path_points = 5;
+            self.rigs.turn_by = 30.0;
             self.rigs.inited = true;
         }
     }
@@ -1821,6 +1875,50 @@ impl SeviathApp {
         mask
     }
 
+    /// Turning the whole shape being edited, and (for curves) the picture at every point.
+    fn rig_turn_tools(&mut self, ui: &mut Ui, cid: Id) {
+        if !self.rigs.warp_edit.as_ref().is_some_and(|w| w.0 == cid) {
+            return;
+        }
+        let Some(kind) = self.draw.doc.rig.changer(cid).map(|c| c.kind.clone()) else { return };
+        if matches!(kind, Kind::Soft { .. }) {
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Turn").size(12.0).color(TEXT_DIM));
+            ui.add(egui::DragValue::new(&mut self.rigs.turn_by).speed(0.5).range(-180.0..=180.0).suffix(" deg"));
+            let deg = self.rigs.turn_by;
+            if ui.button("the whole shape").on_hover_text("Turns every point round the middle of the shape, as if the whole part was rotated").clicked() {
+                let rest: Vec<[f32; 2]> = match &kind {
+                    Kind::Warp { rect, cols, rows } => Rig::warp_rest(*rect, *cols, *rows),
+                    Kind::Line { pts, .. } | Kind::Pins { pts } => pts.clone(),
+                    Kind::Paths { paths } => paths.iter().flat_map(|p| p.pts.clone()).collect(),
+                    _ => Vec::new(),
+                };
+                if let Some((_, off)) = self.rigs.warp_edit.as_mut() {
+                    let curve = matches!(kind, Kind::Line { .. } | Kind::Paths { .. });
+                    match (curve, self.rigs.turn_edit.as_mut()) {
+                        (true, Some(t)) => rig::changers::rotate_shape(&rest, off, Some(t), deg),
+                        _ => rig::changers::rotate_shape(&rest, off, None, deg),
+                    }
+                }
+            }
+            if matches!(kind, Kind::Line { .. } | Kind::Paths { .. }) && ui.button("every point").on_hover_text("Turns the picture at every point of the curves by this angle, without moving the points").clicked() {
+                if let Some(t) = self.rigs.turn_edit.as_mut() {
+                    t.iter_mut().for_each(|x| *x += deg);
+                }
+            }
+            if matches!(kind, Kind::Line { .. } | Kind::Paths { .. }) && ui.button("Reset the turns").clicked() {
+                if let Some(t) = self.rigs.turn_edit.as_mut() {
+                    t.iter_mut().for_each(|x| *x = 0.0);
+                }
+            }
+        });
+        if matches!(kind, Kind::Line { .. } | Kind::Paths { .. }) {
+            ui.label(RichText::new("The small circle by each point turns the picture at that point: drag it round.").size(11.5).color(TEXT_DIM));
+        }
+    }
+
     /// Adding, removing and giving physics to the curves of a Path changer, and the pins of a Pin changer.
     fn rig_path_pin_tools(&mut self, ui: &mut Ui, now: f64, cid: Id) {
         let rig = self.draw.doc.rig.clone();
@@ -2043,6 +2141,11 @@ impl SeviathApp {
                                     vec![o]
                                 }
                             };
+                            self.rigs.turn_edit = match &c.kind {
+                                Kind::Line { pts, .. } => Some(pose.line_turns.get(&cid).cloned().unwrap_or_else(|| vec![0.0; pts.len()])),
+                                Kind::Paths { paths } => Some(rig::changers::flatten_turns(paths, pose.path_turns.get(&cid))),
+                                _ => None,
+                            };
                             self.rigs.warp_edit = Some((cid, off));
                         }
                     } else {
@@ -2050,20 +2153,26 @@ impl SeviathApp {
                             if let Some((_, off)) = self.rigs.warp_edit.take() {
                                 let form = match &c.kind {
                                     Kind::Warp { .. } => Form::Warp { offsets: off },
-                                    Kind::Line { .. } => Form::Line { offsets: off },
+                                    Kind::Line { .. } => Form::Line { offsets: off, turns: self.rigs.turn_edit.clone().filter(|t| t.iter().any(|x| *x != 0.0)).unwrap_or_default() },
                                     Kind::Pins { .. } => Form::Pins { offsets: off },
-                                    Kind::Paths { paths } => Form::Paths { offsets: rig::changers::unflatten(paths, &off) },
+                                    Kind::Paths { paths } => {
+                                        let t = self.rigs.turn_edit.clone().filter(|t| t.iter().any(|x| *x != 0.0));
+                                        Form::Paths { offsets: rig::changers::unflatten(paths, &off), turns: t.map(|t| rig::changers::unflatten_turns(paths, &t)).unwrap_or_default() }
+                                    }
                                     _ => Form::Soft { offset: off.first().copied().unwrap_or([0.0, 0.0]), grow: self.rigs.soft_grow },
                                 };
                                 save(self, "Keyform", form);
+                                self.rigs.turn_edit = None;
                             }
                         }
                         if ui.button("Cancel").clicked() {
                             self.rigs.warp_edit = None;
+                            self.rigs.turn_edit = None;
                         }
                     }
                 });
                 self.rig_path_pin_tools(ui, now, cid);
+                self.rig_turn_tools(ui, cid);
             }
         }
         let keys_for: Vec<Id> = match pid2 {
@@ -2145,6 +2254,7 @@ impl SeviathApp {
         }
         // the picked changer: a pivot or a grid with handles
         let mut drag_handle: Option<(usize, Vec2)> = None;
+        let mut set_turn: Option<(usize, f32)> = None;
         if let Some(c) = self.rigs.sel_changer.and_then(|id| rig.changer(id)) {
             match &c.kind {
                 Kind::Rotation { pivot } => {
@@ -2188,6 +2298,18 @@ impl SeviathApp {
                     let curve: Vec<Pos2> = rig::curve_samples(&moved, 8).iter().map(|v| to_screen(rig.deform_point(&pose, c.parent, *v))).collect();
                     for w in curve.windows(2) {
                         p.line_segment([w[0], w[1]], Stroke::new(2.0, Color32::from_rgb(255, 200, 60)));
+                    }
+                    // the turn at every point
+                    {
+                        let turns: Vec<f32> = if editing { self.rigs.turn_edit.clone().unwrap_or_default() } else { pose.line_turns.get(&c.id).cloned().unwrap_or_default() };
+                        let scr: Vec<Pos2> = moved.iter().map(|v| to_screen(rig.deform_point(&pose, c.parent, *v))).collect();
+                        for i in 0..scr.len() {
+                            let tangent = scr[(i + 1).min(scr.len() - 1)] - scr[i.saturating_sub(1)];
+                            let tv = turns.get(i).copied().unwrap_or(0.0);
+                            if let Some(nt) = turn_handle(ui, &p, scr[i], tangent, tv, egui::Id::new(("line_turn", c.id, i)), editing) {
+                                set_turn = Some((i, nt));
+                            }
+                        }
                     }
                     // how far from the curve the picture follows it
                     if let Some(first) = curve.first() {
@@ -2237,6 +2359,17 @@ impl SeviathApp {
                         for w in curve.windows(2) {
                             p.line_segment([w[0], w[1]], Stroke::new(2.0, Color32::from_rgb(255, 200, 60)));
                         }
+                        {
+                            let turns: Vec<f32> = if editing { self.rigs.turn_edit.clone().unwrap_or_default() } else { pose.path_turns.get(&c.id).map(|t| rig::changers::flatten_turns(paths, Some(t))).unwrap_or_default() };
+                            let scr: Vec<Pos2> = moved.iter().map(|v| to_screen(rig.deform_point(&pose, c.parent, *v))).collect();
+                            for i in 0..scr.len() {
+                                let tangent = scr[(i + 1).min(scr.len() - 1)] - scr[i.saturating_sub(1)];
+                                let tv = turns.get(flat + i).copied().unwrap_or(0.0);
+                                if let Some(nt) = turn_handle(ui, &p, scr[i], tangent, tv, egui::Id::new(("path_turn", c.id, flat + i)), editing) {
+                                    set_turn = Some((flat + i, nt));
+                                }
+                            }
+                        }
                         if let Some(first) = curve.first() {
                             p.circle_stroke(*first, sp.width * sc, Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 200, 60, 70)));
                         }
@@ -2275,6 +2408,11 @@ impl SeviathApp {
                         }
                     }
                 }
+            }
+        }
+        if let (Some((i, t)), Some(te)) = (set_turn, self.rigs.turn_edit.as_mut()) {
+            if let Some(x) = te.get_mut(i) {
+                *x = t;
             }
         }
         if let (Some((i, d)), Some((_, off))) = (drag_handle, self.rigs.warp_edit.as_mut()) {

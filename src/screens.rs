@@ -3117,7 +3117,7 @@ fn new_changers_screens() {
         for o in off[0].iter_mut() {
             *o = [0.0, 40.0];
         }
-        r.set_keyform(pc, p, 0.0, Form::Paths { offsets: off });
+        r.set_keyform(pc, p, 0.0, Form::Paths { offsets: off, turns: vec![] });
         r.set_keyform(fade, p, 0.0, Form::Vals { v: vec![0.3] });
         r.set_keyform(order, p, 0.0, Form::Vals { v: vec![5.0] });
         let mut pin_off = vec![[0.0, 0.0]; 4];
@@ -3139,4 +3139,60 @@ fn new_changers_screens() {
     // numbers of a numeric changer can be typed and saved at the slider value
     h.state_mut().test_rig().values = crate::rig::Values::default();
     h.run_steps(2);
+}
+
+#[test]
+fn path_turns_and_turn_the_whole_shape_screens() {
+    use crate::doc::LayerKind;
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 2300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    let layer;
+    {
+        let d = h.state_mut().draw_mut();
+        let (w, h2) = (d.doc.w, d.doc.h);
+        let img = image::RgbaImage::from_fn(400, 500, |x, y| if (x / 40 + y / 40) % 2 == 0 { image::Rgba([220, 60, 80, 255]) } else { image::Rgba([240, 200, 60, 255]) });
+        let mut l = d.doc.new_layer("ribbon", LayerKind::Raster);
+        l.tiles = crate::files::tiles_from_rgba(&img, 900, 800, w, h2);
+        l.rev += 1;
+        layer = l.id;
+        d.doc.layers.insert(0, l);
+        d.doc.mark_all_dirty();
+    }
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    h.state_mut().test_rig().pro = true;
+    h.state_mut().test_rig_edit(|r| {
+        let id = r.fresh_id();
+        r.meshes.push(crate::rig::ArtMesh { id, layer, verts: vec![[900.0, 800.0], [1300.0, 800.0], [1300.0, 1300.0], [900.0, 1300.0]], tris: vec![[0, 1, 2], [0, 2, 3]], parent: None });
+        r.add_param("Curl", 0.0, 1.0, 0.0);
+    });
+    h.state_mut().test_rig().selected = vec![layer];
+    h.state_mut().test_stroke(vec![[1100.0, 800.0], [1100.0, 1050.0], [1100.0, 1300.0]]);
+    h.run_steps(3);
+    let (pc, curl) = {
+        let rig = &h.state().draw_mut_ref().doc.rig;
+        (rig.changers.iter().find(|c| matches!(c.kind, crate::rig::Kind::Paths { .. })).unwrap().id, rig.params[0].id)
+    };
+    h.state_mut().test_rig().sel_changer = Some(pc);
+    h.state_mut().test_rig().sel_param = Some(curl);
+    h.state_mut().test_rig().values.set(curl, 1.0);
+    h.run_steps(3);
+    h.get_by_label("Edit the shape").click();
+    h.run_steps(3);
+    assert!(h.state_mut().test_rig().test_warp_edit().is_some());
+    // turn the whole shape: the points go round
+    let before = h.state_mut().test_rig().test_warp_edit().unwrap().clone();
+    h.get_by_label("the whole shape").click();
+    h.run_steps(3);
+    let after = h.state_mut().test_rig().test_warp_edit().unwrap().clone();
+    assert_ne!(before, after, "the points moved round");
+    save(&mut h, "path_turn_1_edit");
+    // saved: the shape has turns, and the picture shows them
+    h.get_by_label("Save the shape at this value").click();
+    h.run_steps(3);
+    let rig = h.state().draw_mut_ref().doc.rig.clone();
+    assert!(rig.bindings.iter().any(|b| b.forms.iter().any(|f| matches!(f, crate::rig::Form::Paths { turns, .. } if !turns.is_empty() && turns[0].iter().any(|t| t.abs() > 1.0)))), "turns saved with the shape");
+    assert!(h.state_mut().test_moved(layer) > 20.0);
 }
