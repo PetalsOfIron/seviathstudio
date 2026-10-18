@@ -90,16 +90,24 @@ pub struct Param {
 pub enum Form {
     Rot { deg: f32 },
     Warp { offsets: Vec<[f32; 2]> },
-    /// How far each control point of a Line moved.
-    Line { offsets: Vec<[f32; 2]> },
+    /// How far each control point of a Line moved, and how much the picture turns at each point (degrees; empty = none).
+    Line {
+        offsets: Vec<[f32; 2]>,
+        #[serde(default)]
+        turns: Vec<f32>,
+    },
     /// How far a Soft changer pushes, and how much it grows (0.2 = 20% bigger in the middle).
     Soft { offset: [f32; 2], grow: f32 },
     /// The numbers of Move, Scale, Flip, Fade, Order and Wave (see `changers::val_names`).
     Vals { v: Vec<f32> },
     /// How far each pin moved.
     Pins { offsets: Vec<[f32; 2]> },
-    /// How far each point of each curve moved.
-    Paths { offsets: Vec<Vec<[f32; 2]>> },
+    /// How far each point of each curve moved, and how much the picture turns at each point.
+    Paths {
+        offsets: Vec<Vec<[f32; 2]>>,
+        #[serde(default)]
+        turns: Vec<Vec<f32>>,
+    },
 }
 
 /// How a value moves between two keys.
@@ -289,6 +297,9 @@ pub struct Pose {
     pub vals: HashMap<Id, Vec<f32>>,
     pub pins: HashMap<Id, Vec<[f32; 2]>>,
     pub paths: HashMap<Id, Vec<Vec<[f32; 2]>>>,
+    /// The turn at every point of a Line, and of every curve of a Path changer.
+    pub line_turns: HashMap<Id, Vec<f32>>,
+    pub path_turns: HashMap<Id, Vec<Vec<f32>>>,
 }
 
 pub const MAX_WARP: u32 = 24;
@@ -312,14 +323,28 @@ pub fn axis_weights(keys: &[f32], v: f32) -> (usize, usize, f32) {
     (i, i + 1, if span > 1e-9 { (v - keys[i]) / span } else { 0.0 })
 }
 
+/// Two lists of turns (empty = all zero) blended; empty when both are.
+fn lerp_turns(a: &[f32], b: &[f32], n: usize, t: f32) -> Vec<f32> {
+    if a.is_empty() && b.is_empty() {
+        return Vec::new();
+    }
+    (0..n).map(|i| {
+        let (x, y) = (a.get(i).copied().unwrap_or(0.0), b.get(i).copied().unwrap_or(0.0));
+        x + (y - x) * t
+    }).collect()
+}
+
 fn lerp_form(a: &Form, b: &Form, t: f32) -> Form {
     match (a, b) {
         (Form::Rot { deg: x }, Form::Rot { deg: y }) => Form::Rot { deg: x + (y - x) * t },
         (Form::Warp { offsets: x }, Form::Warp { offsets: y }) if x.len() == y.len() => Form::Warp { offsets: x.iter().zip(y).map(|(p, q)| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]).collect() },
-        (Form::Line { offsets: x }, Form::Line { offsets: y }) if x.len() == y.len() => Form::Line { offsets: x.iter().zip(y).map(|(p, q)| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]).collect() },
+        (Form::Line { offsets: x, turns: tx }, Form::Line { offsets: y, turns: ty }) if x.len() == y.len() => Form::Line { offsets: x.iter().zip(y).map(|(p, q)| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]).collect(), turns: lerp_turns(tx, ty, x.len(), t) },
         (Form::Vals { v: x }, Form::Vals { v: y }) if x.len() == y.len() => Form::Vals { v: x.iter().zip(y).map(|(p, q)| p + (q - p) * t).collect() },
         (Form::Pins { offsets: x }, Form::Pins { offsets: y }) if x.len() == y.len() => Form::Pins { offsets: x.iter().zip(y).map(|(p, q)| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]).collect() },
-        (Form::Paths { offsets: x }, Form::Paths { offsets: y }) if x.len() == y.len() && x.iter().zip(y).all(|(a, b)| a.len() == b.len()) => Form::Paths { offsets: x.iter().zip(y).map(|(a, b)| a.iter().zip(b).map(|(p, q)| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]).collect()).collect() },
+        (Form::Paths { offsets: x, turns: tx }, Form::Paths { offsets: y, turns: ty }) if x.len() == y.len() && x.iter().zip(y).all(|(a, b)| a.len() == b.len()) => Form::Paths {
+            offsets: x.iter().zip(y).map(|(a, b)| a.iter().zip(b).map(|(p, q)| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]).collect()).collect(),
+            turns: if tx.is_empty() && ty.is_empty() { Vec::new() } else { x.iter().enumerate().map(|(k, a)| lerp_turns(tx.get(k).map(Vec::as_slice).unwrap_or(&[]), ty.get(k).map(Vec::as_slice).unwrap_or(&[]), a.len(), t)).collect() },
+        },
         (Form::Soft { offset: a, grow: g }, Form::Soft { offset: b, grow: h }) => Form::Soft { offset: [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t], grow: g + (h - g) * t },
         _ => a.clone(),
     }
@@ -347,7 +372,7 @@ pub fn curve_samples(pts: &[[f32; 2]], per: usize) -> Vec<[f32; 2]> {
 }
 
 /// Move a point along with a bent curve: it keeps its place along the curve and its distance to the side.
-pub(crate) fn bend_along(rest: &[[f32; 2]], offsets: &[[f32; 2]], width: f32, p: [f32; 2]) -> ([f32; 2], f32) {
+pub(crate) fn bend_along(rest: &[[f32; 2]], offsets: &[[f32; 2]], turns: &[f32], width: f32, p: [f32; 2]) -> ([f32; 2], f32) {
     if rest.len() < 2 || offsets.len() != rest.len() {
         return (p, 0.0);
     }
@@ -376,7 +401,19 @@ pub(crate) fn bend_along(rest: &[[f32; 2]], offsets: &[[f32; 2]], width: f32, p:
     let along = [da[0] + (db[0] - da[0]) * best_u, da[1] + (db[1] - da[1]) * best_u];
     let (tx, ty) = (db[0] - da[0], db[1] - da[1]);
     let tl = (tx * tx + ty * ty).sqrt().max(1e-6);
-    let new = [along[0] + (-ty / tl) * side, along[1] + (tx / tl) * side];
+    let mut new = [along[0] + (-ty / tl) * side, along[1] + (tx / tl) * side];
+    // the picture turns about the curve by the turn at this place (between the turns of the two control points around it)
+    if turns.len() == rest.len() {
+        let at = (best_i as f32 + best_u) / 8.0;
+        let k = (at.floor() as usize).min(rest.len() - 2);
+        let f = (at - k as f32).clamp(0.0, 1.0);
+        let deg = turns[k] + (turns[k + 1] - turns[k]) * f;
+        if deg != 0.0 {
+            let (s, c) = deg.to_radians().sin_cos();
+            let (vx, vy) = (new[0] - along[0], new[1] - along[1]);
+            new = [along[0] + vx * c - vy * s, along[1] + vx * s + vy * c];
+        }
+    }
     // full strength close to the curve, fading out beyond `width`
     let w = width.max(1.0);
     let fade = if best <= w {
@@ -448,9 +485,9 @@ impl Rig {
         Some(match &self.changer(changer)?.kind {
             Kind::Rotation { .. } => Form::Rot { deg: 0.0 },
             Kind::Warp { cols, rows, .. } => Form::Warp { offsets: vec![[0.0, 0.0]; ((cols + 1) * (rows + 1)) as usize] },
-            Kind::Line { pts, .. } => Form::Line { offsets: vec![[0.0, 0.0]; pts.len()] },
+            Kind::Line { pts, .. } => Form::Line { offsets: vec![[0.0, 0.0]; pts.len()], turns: Vec::new() },
             Kind::Soft { .. } => Form::Soft { offset: [0.0, 0.0], grow: 0.0 },
-            Kind::Paths { paths } => Form::Paths { offsets: paths.iter().map(|p| vec![[0.0, 0.0]; p.pts.len()]).collect() },
+            Kind::Paths { paths } => Form::Paths { offsets: paths.iter().map(|p| vec![[0.0, 0.0]; p.pts.len()]).collect(), turns: Vec::new() },
             Kind::Pins { pts } => Form::Pins { offsets: vec![[0.0, 0.0]; pts.len()] },
             k => Form::Vals { v: changers::rest_vals(k).unwrap_or_default() },
         })
@@ -530,12 +567,18 @@ impl Rig {
                         }
                     }
                 }
-                Form::Line { offsets } => {
+                Form::Line { offsets, turns } => {
                     let e = pose.line.entry(b.changer).or_insert_with(|| vec![[0.0, 0.0]; offsets.len()]);
                     if e.len() == offsets.len() {
                         for (a, o) in e.iter_mut().zip(&offsets) {
                             a[0] += o[0];
                             a[1] += o[1];
+                        }
+                        if turns.len() == offsets.len() {
+                            let t = pose.line_turns.entry(b.changer).or_insert_with(|| vec![0.0; offsets.len()]);
+                            for (a, x) in t.iter_mut().zip(&turns) {
+                                *a += x;
+                            }
                         }
                     }
                 }
@@ -557,13 +600,21 @@ impl Rig {
                         }
                     }
                 }
-                Form::Paths { offsets } => {
+                Form::Paths { offsets, turns } => {
                     let e = pose.paths.entry(b.changer).or_insert_with(|| offsets.iter().map(|o| vec![[0.0, 0.0]; o.len()]).collect());
                     if e.len() == offsets.len() && e.iter().zip(&offsets).all(|(a, b)| a.len() == b.len()) {
                         for (ea, oa) in e.iter_mut().zip(&offsets) {
                             for (a, o) in ea.iter_mut().zip(oa) {
                                 a[0] += o[0];
                                 a[1] += o[1];
+                            }
+                        }
+                        if turns.len() == offsets.len() && turns.iter().zip(&offsets).all(|(t, o)| t.len() == o.len()) {
+                            let t = pose.path_turns.entry(b.changer).or_insert_with(|| offsets.iter().map(|o| vec![0.0; o.len()]).collect());
+                            for (ta, tb) in t.iter_mut().zip(&turns) {
+                                for (a, x) in ta.iter_mut().zip(tb) {
+                                    *a += x;
+                                }
                             }
                         }
                     }
@@ -621,10 +672,16 @@ impl Rig {
                             }
                         }
                     }
-                    (Form::Line { offsets }, _) => offsets.iter_mut().for_each(|o| o[0] = -o[0]),
+                    (Form::Line { offsets, turns }, _) => {
+                        offsets.iter_mut().for_each(|o| o[0] = -o[0]);
+                        turns.iter_mut().for_each(|t| *t = -*t);
+                    }
                     (Form::Soft { offset, .. }, _) => offset[0] = -offset[0],
                     (Form::Pins { offsets }, _) => offsets.iter_mut().for_each(|o| o[0] = -o[0]),
-                    (Form::Paths { offsets }, _) => offsets.iter_mut().flatten().for_each(|o| o[0] = -o[0]),
+                    (Form::Paths { offsets, turns }, _) => {
+                        offsets.iter_mut().flatten().for_each(|o| o[0] = -o[0]);
+                        turns.iter_mut().flatten().for_each(|t| *t = -*t);
+                    }
                     (Form::Vals { v }, Kind::Move) => v[0] = -v[0],
                     (Form::Vals { v }, Kind::Wave { .. }) if v.len() > 3 => v[3] = 180.0 - v[3],
                     _ => {}
@@ -741,10 +798,10 @@ impl Rig {
             }
             Kind::Line { pts, width } => {
                 let Some(off) = pose.line.get(&c.id) else { return p };
-                bend_along(pts, off, *width, p).0
+                bend_along(pts, off, pose.line_turns.get(&c.id).map(Vec::as_slice).unwrap_or(&[]), *width, p).0
             }
             Kind::Paths { paths } => match pose.paths.get(&c.id) {
-                Some(off) => changers::blend_paths(paths, off, p),
+                Some(off) => changers::blend_paths(paths, off, pose.path_turns.get(&c.id).map(Vec::as_slice).unwrap_or(&[]), p),
                 None => p,
             },
             Kind::Pins { pts } => match pose.pins.get(&c.id) {
@@ -976,10 +1033,10 @@ impl Rig {
             b.forms.iter().all(|f| match (f, &kinds[*ci]) {
                 (Form::Rot { deg }, Kind::Rotation { .. }) => fin(*deg),
                 (Form::Warp { offsets }, Kind::Warp { cols, rows, .. }) => offsets.len() == ((cols + 1) * (rows + 1)) as usize && offsets.iter().all(|o| fin(o[0]) && fin(o[1])),
-                (Form::Line { offsets }, Kind::Line { pts, .. }) => offsets.len() == pts.len() && offsets.iter().all(|o| fin(o[0]) && fin(o[1])),
+                (Form::Line { offsets, turns }, Kind::Line { pts, .. }) => offsets.len() == pts.len() && offsets.iter().all(|o| fin(o[0]) && fin(o[1])) && (turns.is_empty() || (turns.len() == pts.len() && turns.iter().all(|t| fin(*t)))),
                 (Form::Soft { offset, grow }, Kind::Soft { .. }) => fin(offset[0]) && fin(offset[1]) && fin(*grow),
                 (Form::Pins { offsets }, Kind::Pins { pts }) => offsets.len() == pts.len() && offsets.iter().all(|o| fin(o[0]) && fin(o[1])),
-                (Form::Paths { offsets }, Kind::Paths { paths }) => offsets.len() == paths.len() && offsets.iter().zip(paths).all(|(o, sp)| o.len() == sp.pts.len() && o.iter().all(|v| fin(v[0]) && fin(v[1]))),
+                (Form::Paths { offsets, turns }, Kind::Paths { paths }) => offsets.len() == paths.len() && offsets.iter().zip(paths).all(|(o, sp)| o.len() == sp.pts.len() && o.iter().all(|v| fin(v[0]) && fin(v[1]))) && (turns.is_empty() || (turns.len() == paths.len() && turns.iter().zip(paths).all(|(t, sp)| t.len() == sp.pts.len() && t.iter().all(|x| fin(*x))))),
                 (Form::Vals { v }, k) => changers::rest_vals(k).is_some_and(|r| r.len() == v.len()) && v.iter().all(|x| fin(*x)),
                 _ => false,
             })
@@ -1253,7 +1310,7 @@ mod tests {
         let line = r.add_changer("Strand", Kind::Line { pts: pts.clone(), width: 40.0 }, None);
         let p = r.add_param("Sway", 0.0, 1.0, 0.0);
         // the tip (last point) swings 60 to the right, the middle points a little
-        r.set_keyform(line, p, 1.0, Form::Line { offsets: vec![[0.0, 0.0], [5.0, 0.0], [25.0, 0.0], [60.0, 0.0]] });
+        r.set_keyform(line, p, 1.0, Form::Line { offsets: vec![[0.0, 0.0], [5.0, 0.0], [25.0, 0.0], [60.0, 0.0]], turns: vec![] });
         let mut v = Values::default();
         let at_rest = r.deform_point(&r.pose(&v), Some(line), [110.0, 300.0]);
         assert!((at_rest[0] - 110.0).abs() < 0.01 && (at_rest[1] - 300.0).abs() < 0.01);
@@ -1386,7 +1443,7 @@ mod tests {
         let l = r.add_changer("Strand", Kind::Line { pts: vec![[0.0, 0.0], [0.0, 50.0], [0.0, 100.0]], width: 20.0 }, None);
         let s = r.add_changer("Cheek", Kind::Soft { center: [5.0, 5.0], radius: 30.0 }, None);
         let p = r.add_param("A", 0.0, 1.0, 0.0);
-        r.set_keyform(l, p, 1.0, Form::Line { offsets: vec![[1.0, 0.0]; 3] });
+        r.set_keyform(l, p, 1.0, Form::Line { offsets: vec![[1.0, 0.0]; 3], turns: vec![] });
         r.set_keyform(s, p, 1.0, Form::Soft { offset: [2.0, 1.0], grow: 0.1 });
         r.bindings[0].ease = Ease::Smooth;
         let back: Rig = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
@@ -1395,7 +1452,7 @@ mod tests {
         assert_eq!(back.bindings[0].ease, Ease::Smooth);
         // a line with a wrong number of offsets and a soft with nan are dropped
         let mut bad = r.clone();
-        bad.bindings.push(Binding { changer: l, params: vec![p], keys: vec![vec![0.0]], forms: vec![Form::Line { offsets: vec![[0.0, 0.0]] }], ease: Ease::Linear });
+        bad.bindings.push(Binding { changer: l, params: vec![p], keys: vec![vec![0.0]], forms: vec![Form::Line { offsets: vec![[0.0, 0.0]], turns: vec![] }], ease: Ease::Linear });
         bad.bindings.push(Binding { changer: s, params: vec![p], keys: vec![vec![0.0]], forms: vec![Form::Soft { offset: [f32::NAN, 0.0], grow: 0.0 }], ease: Ease::Linear });
         assert_eq!(bad.sanitized().bindings.len(), 2);
         // old project files (a binding without an easing) still open

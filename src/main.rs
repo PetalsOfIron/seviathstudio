@@ -52,6 +52,7 @@ mod trace;
 mod transform;
 mod vector;
 mod view;
+mod vrm;
 mod wet;
 mod widgets;
 
