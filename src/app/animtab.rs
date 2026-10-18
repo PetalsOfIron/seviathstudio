@@ -77,6 +77,9 @@ pub struct AnimUi {
     /// Frame by frame: the pictures of frames that were put together, and the picked exposure (track, number in it).
     pub(super) cel_cache: HashMap<u64, egui::TextureHandle>,
     pub sel_cel: Option<(usize, usize)>,
+    /// The X-sheet (a table of frames and drawings) instead of the tracks, and the picked cell (cel track, frame).
+    pub xsheet: bool,
+    pub sel_x: Option<(usize, u32)>,
 }
 
 impl Default for AnimUi {
@@ -111,6 +114,8 @@ impl Default for AnimUi {
             lip_param: None,
             cel_cache: HashMap::new(),
             sel_cel: None,
+            xsheet: false,
+            sel_x: None,
         }
     }
 }
@@ -151,6 +156,7 @@ fn target_color(t: &Target) -> Color32 {
         Target::Param(_) => Color32::from_rgb(90, 200, 255),
         Target::Opacity(_) => Color32::from_rgb(255, 200, 60),
         Target::Visible(_) => Color32::from_rgb(255, 120, 170),
+        Target::CameraX | Target::CameraY | Target::CameraZoom | Target::CameraRotate => Color32::from_rgb(120, 230, 210),
     }
 }
 
@@ -200,6 +206,8 @@ impl SeviathApp {
                         layer.visible = v >= 0.5;
                     }
                 }
+                // the camera is read when the picture is drawn
+                Target::CameraX | Target::CameraY | Target::CameraZoom | Target::CameraRotate => {}
             }
         }
         self.cel_apply(frame);
@@ -371,6 +379,15 @@ impl SeviathApp {
             Target::Param(id) => self.draw.doc.rig.param(id).map(|p| self.rigs.values.0.get(&id).copied().unwrap_or(p.default)),
             Target::Opacity(l) => self.draw.doc.layers.iter().find(|x| x.id == l).map(|x| x.opacity),
             Target::Visible(l) => self.draw.doc.layers.iter().find(|x| x.id == l).map(|x| if x.visible { 1.0 } else { 0.0 }),
+            Target::CameraX | Target::CameraY | Target::CameraZoom | Target::CameraRotate => {
+                let c = self.draw.doc.rig.anim.camera_at(frame);
+                Some(match t.target {
+                    Target::CameraX => c.x,
+                    Target::CameraY => c.y,
+                    Target::CameraZoom => c.zoom,
+                    _ => c.rot,
+                })
+            }
         };
         if let Some(v) = value {
             let k = self.anim_mut("Key").tracks[ti].set_key(frame, v, Ease::Linear);
@@ -379,6 +396,15 @@ impl SeviathApp {
     }
 
     fn anim_delete_selected(&mut self) {
+        if self.rigs.anim.xsheet {
+            if let Some((ci, f)) = self.rigs.anim.sel_x {
+                if let Some(t) = self.anim_mut("Remove exposure").cel_tracks.get_mut(ci) {
+                    t.remove_exposure(f);
+                }
+                self.rigs.anim.applied = None;
+            }
+            return;
+        }
         if let Some((ti, ki)) = self.rigs.anim.sel.take() {
             let a = self.anim_mut("Delete a key");
             if let Some(t) = a.tracks.get_mut(ti) {
@@ -405,7 +431,12 @@ impl SeviathApp {
             let tex = t.size_vec2();
             let fit = ((rect.width() - 24.0) / tex.x).min((rect.height() - 24.0) / tex.y).max(0.05) * self.rigs.anim.view_zoom;
             let r = Rect::from_center_size(rect.center(), tex * fit);
-            p.image(t.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            let cam = self.draw.doc.rig.anim.camera_at(self.rigs.anim.frame);
+            if cam.is_default() {
+                p.image(t.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            } else {
+                super::celtab::tex_quad(&p.with_clip_rect(r.intersect(rect)), t.id(), self.camera_corners(r), Color32::WHITE);
+            }
         } else {
             p.text(rect.center(), egui::Align2::CENTER_CENTER, "Make a rig first (Rig tab) to animate it", egui::FontId::proportional(14.0), TEXT_DIM);
         }
@@ -449,6 +480,10 @@ impl SeviathApp {
                     self.rigs.anim.playing = false;
                 }
             }
+            let xs = self.rigs.anim.xsheet;
+            if widgets::chip(ui, "X-sheet", xs).on_hover_text("The timing as a table: a row for every frame, a column for every cel track").clicked() {
+                self.rigs.anim.xsheet = !xs;
+            }
             if ui.button("Add marker").on_hover_text("A named place at the playhead; markers cut the animation into parts").clicked() {
                 let here = self.rigs.anim.frame.round().max(0.0) as u32;
                 let n = self.draw.doc.rig.anim.markers.len() + 1;
@@ -485,6 +520,10 @@ impl SeviathApp {
             ui.label(RichText::new(format!("Frame {}  ({:.2} s of {:.2} s)", f.round() as i32, f / a.fps.max(1.0), a.seconds())).monospace().size(12.0));
         });
         ui.add_space(4.0);
+        if self.rigs.anim.xsheet {
+            self.cel_xsheet_ui(ui);
+            return;
+        }
 
         // the tracks and their keys
         let avail = ui.available_rect_before_wrap();
@@ -845,6 +884,18 @@ impl SeviathApp {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
             let layers: Vec<(u64, String)> = self.draw.doc.layers.iter().filter(|l| matches!(l.kind, crate::doc::LayerKind::Raster | crate::doc::LayerKind::Vector)).map(|l| (l.id, l.name.clone())).collect();
+            egui::ComboBox::from_id_salt("anim_add_camera").selected_text("Add a camera track").width(150.0).show_ui(ui, |ui| {
+                let c = self.draw.doc.rig.anim.camera_at(self.rigs.anim.frame.round());
+                for (target, label, value) in [(Target::CameraX, "Camera: move across", c.x), (Target::CameraY, "Camera: move down", c.y), (Target::CameraZoom, "Camera: zoom", c.zoom), (Target::CameraRotate, "Camera: turn", c.rot)] {
+                    if ui.selectable_label(false, label).clicked() {
+                        let frame = self.rigs.anim.frame.round();
+                        let a = self.anim_mut("Add a camera track");
+                        let t = a.track_for(target, label);
+                        a.tracks[t].set_key(frame, value, Ease::Linear);
+                        self.rigs.anim.sel_track = Some(t);
+                    }
+                }
+            });
             egui::ComboBox::from_id_salt("anim_add_layer").selected_text("Add a layer track").width(150.0).show_ui(ui, |ui| {
                 for (id, name) in &layers {
                     for (target, label) in [(Target::Opacity(*id), format!("{name}: see-through")), (Target::Visible(*id), format!("{name}: shown"))] {
@@ -909,6 +960,7 @@ impl SeviathApp {
                 });
             }
         }
+        self.anim_camera_ui(ui);
         self.anim_sound_ui(ui);
         self.anim_markers_ui(ui);
         self.anim_export_ui(ui);
@@ -918,6 +970,62 @@ impl SeviathApp {
     }
 
     // ---- saving the animation ----
+
+    /// Where the picture is on the screen when the camera looks at it: the four corners of the picture for the page rectangle.
+    pub(super) fn camera_corners(&self, page: Rect) -> [Pos2; 4] {
+        let (w, h) = (self.draw.doc.w as f32, self.draw.doc.h as f32);
+        let cam = self.draw.doc.rig.anim.camera_at(self.rigs.anim.frame);
+        [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]].map(|c| {
+            let v = cam.to_view(c, w, h);
+            pos2(page.min.x + v[0] / w * page.width(), page.min.y + v[1] / h * page.height())
+        })
+    }
+
+    /// The camera and its shake.
+    fn anim_camera_ui(&mut self, ui: &mut Ui) {
+        section_title(ui, "Camera");
+        ui.label(RichText::new("The camera looks at the finished picture: add tracks to move, zoom and turn it (Add a camera track), and a shake for hits and blasts.").size(11.5).color(TEXT_DIM));
+        let mut s = self.draw.doc.rig.anim.shake;
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut s.on, "Shake");
+            ui.add_enabled_ui(s.on, |ui| {
+                ui.label(RichText::new("size").size(12.0).color(TEXT_DIM));
+                ui.add(egui::DragValue::new(&mut s.amount).range(0.0..=400.0).speed(0.5).suffix(" px"));
+                ui.label(RichText::new("speed").size(12.0).color(TEXT_DIM));
+                ui.add(egui::DragValue::new(&mut s.speed).range(0.1..=40.0).speed(0.1).suffix(" /s"));
+                ui.label(RichText::new("turn").size(12.0).color(TEXT_DIM));
+                ui.add(egui::DragValue::new(&mut s.spin).range(0.0..=45.0).speed(0.05).suffix("deg"));
+            });
+        });
+        if s != self.draw.doc.rig.anim.shake {
+            self.anim_mut("Camera shake").shake = s;
+        }
+    }
+
+    /// The picture of a frame for saving: the rig or the drawings, seen by the camera, with `paper` behind it (None: see-through).
+    pub(super) fn anim_picture(&mut self, size: (u32, u32), paper: Option<Color32>, frame: f32) -> Option<image::RgbaImage> {
+        let cam = self.draw.doc.rig.anim.camera_at(frame);
+        let cel = self.cel_mode();
+        let draw = |s: &mut Self, p: Option<Color32>| if cel { Some(s.cel_picture(size, p)) } else { s.rig_still(size, p) };
+        if cam.is_default() {
+            return draw(self, paper);
+        }
+        // the camera works on the picture without paper; the paper goes behind what it sees
+        let base = draw(self, None)?;
+        let k = size.0 as f32 / self.draw.doc.w.max(1) as f32;
+        let mut img = crate::camera::warp(&base, &crate::camera::Camera { x: cam.x * k, y: cam.y * k, ..cam });
+        if let Some(p) = paper {
+            let [pr, pg, pb, _] = p.to_array();
+            for px in img.pixels_mut() {
+                let a = px.0[3] as u32;
+                for (c, back) in px.0[..3].iter_mut().zip([pr, pg, pb]) {
+                    *c = ((*c as u32 * a + back as u32 * (255 - a) + 127) / 255) as u8;
+                }
+                px.0[3] = 255;
+            }
+        }
+        Some(img)
+    }
 
     fn anim_sound_ui(&mut self, ui: &mut Ui) {
         section_title(ui, "Sound");
@@ -1142,7 +1250,7 @@ impl SeviathApp {
                 left -= dt;
             }
             let paper = if job.transparent { None } else { Some(Color32::WHITE) };
-            let picture = if self.cel_mode() { Some(self.cel_picture(job.size, paper)) } else { self.rig_still(job.size, paper) };
+            let picture = self.anim_picture(job.size, paper, f as f32);
             let Some(img) = picture else {
                 job.error = Some("There is nothing to draw: the rig has no meshes yet.".into());
                 done = true;

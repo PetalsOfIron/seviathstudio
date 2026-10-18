@@ -6,13 +6,25 @@
 
 use std::hash::{Hash, Hasher};
 
-use eframe::egui::{self, Color32, Pos2, Rect, RichText, Stroke, Ui, pos2, vec2};
+use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
 
 use super::SeviathApp;
 use super::animtab::ROW;
 use crate::doc::LayerKind;
 use crate::theme::*;
 use crate::widgets::{self, section_title};
+
+/// A texture (the whole of it) on four corners, which may be turned and scaled; the default texture is a plain colour.
+pub(super) fn tex_quad(p: &egui::Painter, tex: egui::TextureId, corners: [Pos2; 4], tint: Color32) {
+    let mut m = egui::Mesh::with_texture(tex);
+    let uvs = [pos2(0.0, 0.0), pos2(1.0, 0.0), pos2(1.0, 1.0), pos2(0.0, 1.0)];
+    for (pos, uv) in corners.iter().zip(uvs) {
+        m.vertices.push(egui::epaint::Vertex { pos: *pos, uv: if tex == egui::TextureId::default() { egui::epaint::WHITE_UV } else { uv }, color: tint });
+    }
+    m.add_triangle(0, 1, 2);
+    m.add_triangle(0, 2, 3);
+    p.add(egui::Shape::mesh(m));
+}
 
 /// The biggest side of the pictures the preview keeps.
 const PREVIEW_SIDE: f32 = 1100.0;
@@ -124,11 +136,11 @@ impl SeviathApp {
         let (w, h) = (self.draw.doc.w as f32, self.draw.doc.h as f32);
         let fit = ((rect.width() - 24.0) / w).min((rect.height() - 24.0) / h).max(0.01) * self.rigs.anim.view_zoom;
         let page = Rect::from_center_size(rect.center(), vec2(w, h) * fit);
-        let p = ui.painter_at(rect);
-        p.rect_filled(page, 0.0, Color32::from_rgb(244, 242, 236));
+        let p = ui.painter_at(rect).with_clip_rect(page.intersect(rect));
+        let corners = self.camera_corners(page);
+        tex_quad(&p, egui::TextureId::default(), corners, Color32::from_rgb(244, 242, 236));
         let frame = self.rigs.anim.frame.round().max(0.0) as u32;
         let onion = self.draw.doc.rig.anim.onion;
-        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
         if onion.on && !self.rigs.anim.playing {
             for (n, dir, tint) in [(onion.before, -1i64, (255u8, 110u8, 110u8)), (onion.after, 1, (90, 200, 120))] {
                 for k in (1..=n as i64).rev() {
@@ -138,13 +150,13 @@ impl SeviathApp {
                     }
                     let alpha = (onion.opacity * (1.0 - (k - 1) as f32 / (n as f32 + 0.5)) * 255.0).clamp(0.0, 255.0) as u8;
                     if let Some(t) = self.cel_texture(&ctx, f as u32) {
-                        p.image(t.id(), page, uv, Color32::from_rgba_unmultiplied(tint.0, tint.1, tint.2, alpha));
+                        tex_quad(&p, t.id(), corners, Color32::from_rgba_unmultiplied(tint.0, tint.1, tint.2, alpha));
                     }
                 }
             }
         }
         if let Some(t) = self.cel_texture(&ctx, frame) {
-            p.image(t.id(), page, uv, Color32::WHITE);
+            tex_quad(&p, t.id(), corners, Color32::WHITE);
         }
     }
 
@@ -274,6 +286,88 @@ impl SeviathApp {
         self.rigs.anim.sel_cel = ex.map(|e| (ci, e));
         self.rigs.anim.sel_track = None;
         self.rigs.anim.sel = None;
+    }
+
+    /// The X-sheet: a row for every frame and a column for every cel track. A cell shows the drawing that starts there, or a line while a
+    /// drawing is held. Click a cell, then type a number to show that drawing from there (0 for blank), or Delete to take the change away.
+    pub(super) fn cel_xsheet_ui(&mut self, ui: &mut Ui) {
+        let a = self.draw.doc.rig.anim.clone();
+        if a.cel_tracks.is_empty() {
+            ui.label(RichText::new("The X-sheet shows the cel tracks. Make a cel track on the right first (Frame by frame).").size(12.0).color(TEXT_DIM));
+            return;
+        }
+        let (row_h, col_w, num_w) = (20.0, 78.0, 56.0);
+        let cur = self.rigs.anim.frame.round().max(0.0) as u32;
+        ui.horizontal(|ui| {
+            ui.add_space(num_w);
+            for t in &a.cel_tracks {
+                ui.add_sized([col_w, 18.0], egui::Label::new(RichText::new(&t.name).size(11.5).color(if t.muted { TEXT_DIM } else { TEXT })).truncate());
+            }
+        });
+        let mut clicked: Option<(usize, u32)> = None;
+        let fps = a.fps.round().max(1.0) as u32;
+        egui::ScrollArea::vertical().id_salt("xsheet_rows").auto_shrink([false, false]).show_rows(ui, row_h, a.length as usize, |ui, range| {
+            for f in range {
+                let f = f as u32;
+                let (rect, resp) = ui.allocate_exact_size(vec2(num_w + col_w * a.cel_tracks.len() as f32, row_h), Sense::click());
+                let p = ui.painter();
+                if f == cur {
+                    p.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(255, 90, 90, 40));
+                } else if (f / fps) % 2 == 1 {
+                    p.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 6));
+                }
+                p.text(rect.left_center() + vec2(8.0, 0.0), egui::Align2::LEFT_CENTER, format!("{}", f + 1), egui::FontId::monospace(11.5), if f % fps == 0 { TEXT } else { TEXT_DIM });
+                for (ci, t) in a.cel_tracks.iter().enumerate() {
+                    let cell = Rect::from_min_size(rect.min + vec2(num_w + col_w * ci as f32, 0.0), vec2(col_w, row_h));
+                    let picked = self.rigs.anim.sel_x == Some((ci, f));
+                    if picked {
+                        p.rect_stroke(cell.shrink(1.0), 2.0, Stroke::new(1.5, Color32::WHITE), egui::StrokeKind::Inside);
+                    }
+                    p.line_segment([cell.left_top(), cell.left_bottom()], Stroke::new(1.0, Color32::from_gray(45)));
+                    match t.exposures.iter().find(|e| e.frame == f) {
+                        Some(e) => {
+                            let (txt, col) = match e.cel.and_then(|c| t.number_of(c)) {
+                                Some(n) => (n.to_string(), Color32::from_rgb(255, 200, 120)),
+                                None => ("X".to_string(), Color32::from_gray(150)),
+                            };
+                            p.text(cell.center(), egui::Align2::CENTER_CENTER, txt, egui::FontId::monospace(13.0), col);
+                        }
+                        None if t.exposure_at(f).is_some() => {
+                            p.line_segment([cell.center_top() + vec2(0.0, 2.0), cell.center_bottom() - vec2(0.0, 2.0)], Stroke::new(1.0, Color32::from_gray(110)));
+                        }
+                        None => {}
+                    }
+                }
+                if resp.clicked() {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        let ci = (((pos.x - rect.min.x - num_w) / col_w).floor().max(0.0) as usize).min(a.cel_tracks.len() - 1);
+                        clicked = Some((ci, f));
+                    }
+                }
+            }
+        });
+        if let Some((ci, f)) = clicked {
+            self.rigs.anim.sel_x = Some((ci, f));
+            self.rigs.anim.frame = f as f32;
+            self.rigs.anim.playing = false;
+        }
+        // typing a number puts that drawing at the picked cell
+        let Some((ci, f)) = self.rigs.anim.sel_x else { return };
+        if ui.ctx().egui_wants_keyboard_input() {
+            return;
+        }
+        let typed: String = ui.ctx().input(|i| i.events.iter().filter_map(|e| if let egui::Event::Text(t) = e { Some(t.clone()) } else { None }).collect());
+        for ch in typed.chars().filter(|c| c.is_ascii_digit()) {
+            let n = ch.to_digit(10).unwrap_or(0) as usize;
+            let cel = if n == 0 { None } else { a.cel_tracks.get(ci).and_then(|t| t.cels.get(n - 1)).copied() };
+            if n != 0 && cel.is_none() {
+                continue;
+            }
+            if let Some(t) = self.anim_mut("X-sheet").cel_tracks.get_mut(ci) {
+                t.set_exposure(f, cel);
+            }
+            self.rigs.anim.applied = None;
+        }
     }
 
     // ---- making and changing tracks ----

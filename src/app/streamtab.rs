@@ -55,6 +55,12 @@ pub struct StreamUi {
     /// Emotes: cut to the face, and which sizes.
     pub emote_face: bool,
     pub emote_sizes: [bool; 5],
+    /// OBS Studio remote control: where it is, the connection, and the scene a new hotkey would switch to.
+    pub obs: Option<crate::obs::Obs>,
+    pub obs_host: String,
+    pub obs_port: u16,
+    pub obs_password: String,
+    pub hk_scene: String,
 }
 
 impl Default for StreamUi {
@@ -89,6 +95,11 @@ impl Default for StreamUi {
             hk_input: None,
             emote_face: true,
             emote_sizes: [true, true, true, false, false],
+            obs: None,
+            obs_host: "localhost".into(),
+            obs_port: 4455,
+            obs_password: String::new(),
+            hk_scene: String::new(),
         }
     }
 }
@@ -175,6 +186,21 @@ impl SeviathApp {
                 crate::hotkeys::Action::Show(n) => e.show_only(&n),
                 crate::hotkeys::Action::Hold(n) => e.set(&n, pressed),
                 crate::hotkeys::Action::Clear => e.clear(),
+                crate::hotkeys::Action::ObsScene(n) => {
+                    if let Some(o) = &self.rigs.stream.obs {
+                        o.send(crate::obs::Cmd::Scene(n));
+                    }
+                }
+                crate::hotkeys::Action::ObsStream => {
+                    if let Some(o) = &self.rigs.stream.obs {
+                        o.send(crate::obs::Cmd::ToggleStream);
+                    }
+                }
+                crate::hotkeys::Action::ObsRecord => {
+                    if let Some(o) = &self.rigs.stream.obs {
+                        o.send(crate::obs::Cmd::ToggleRecord);
+                    }
+                }
             }
         }
         let defs = crate::expressions::defs(&rig);
@@ -300,6 +326,7 @@ impl SeviathApp {
         ui.label(RichText::new("From a phone: iFacialMocap sends to this computer (give it this computer's address). Waidayo and similar apps send VMC to port 39539. OpenSeeFace sends to 11573.").size(11.0).color(TEXT_DIM));
 
         self.stream_expr_ui(ui);
+        self.stream_obs_ui(ui);
         self.stream_hotkeys_ui(ui);
 
         section_title(ui, "What the face does now");
@@ -419,6 +446,61 @@ impl SeviathApp {
         }
     }
 
+    fn stream_obs_ui(&mut self, ui: &mut Ui) {
+        section_title(ui, "OBS Studio");
+        ui.label(RichText::new("Switch scenes and start or stop the stream and the recording from here or from a hotkey. In OBS: Tools, WebSocket Server Settings, switch it on. The password is not saved.").size(11.5).color(TEXT_DIM));
+        let snap = self.rigs.stream.obs.as_ref().map(|o| o.snapshot());
+        ui.horizontal_wrapped(|ui| {
+            ui.add_enabled(snap.is_none(), egui::TextEdit::singleline(&mut self.rigs.stream.obs_host).desired_width(110.0));
+            ui.add_enabled(snap.is_none(), egui::DragValue::new(&mut self.rigs.stream.obs_port).range(1..=65535));
+            ui.add_enabled(snap.is_none(), egui::TextEdit::singleline(&mut self.rigs.stream.obs_password).password(true).hint_text("Password").desired_width(90.0));
+            if snap.is_none() {
+                if ui.button("Connect").clicked() {
+                    self.rigs.stream.obs = Some(crate::obs::Obs::connect(&self.rigs.stream.obs_host, self.rigs.stream.obs_port, &self.rigs.stream.obs_password));
+                }
+            } else if ui.button("Disconnect").clicked() {
+                self.rigs.stream.obs = None;
+            }
+        });
+        if let Some(s) = &snap {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            match &s.status {
+                crate::obs::Status::Connecting => {
+                    ui.label(RichText::new("Connecting...").size(11.5).color(GOLD));
+                }
+                crate::obs::Status::Failed(e) => {
+                    ui.label(RichText::new(e).size(11.5).color(Color32::from_rgb(255, 120, 100)));
+                }
+                crate::obs::Status::Connected => {
+                    ui.horizontal_wrapped(|ui| {
+                        for name in &s.scenes {
+                            if widgets::chip(ui, name, s.current.as_deref() == Some(name.as_str())).clicked() {
+                                if let Some(o) = &self.rigs.stream.obs {
+                                    o.send(crate::obs::Cmd::Scene(name.clone()));
+                                }
+                            }
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        if widgets::chip(ui, if s.streaming { "Streaming: stop" } else { "Start streaming" }, s.streaming).clicked() {
+                            if let Some(o) = &self.rigs.stream.obs {
+                                o.send(crate::obs::Cmd::ToggleStream);
+                            }
+                        }
+                        if widgets::chip(ui, if s.recording { "Recording: stop" } else { "Start recording" }, s.recording).clicked() {
+                            if let Some(o) = &self.rigs.stream.obs {
+                                o.send(crate::obs::Cmd::ToggleRecord);
+                            }
+                        }
+                    });
+                }
+                crate::obs::Status::Off => {
+                    ui.label(RichText::new("Disconnected.").size(11.5).color(TEXT_DIM));
+                }
+            }
+        }
+    }
+
     fn stream_hotkeys_ui(&mut self, ui: &mut Ui) {
         section_title(ui, "Hotkeys");
         ui.label(RichText::new("A key, a MIDI note or a pad button switches an expression. Keys work while a game has the focus (Windows). Keep this tab open while streaming.").size(11.5).color(TEXT_DIM));
@@ -494,14 +576,31 @@ impl SeviathApp {
         });
         let names: Vec<String> = crate::expressions::defs(&rig).into_iter().map(|d| d.name).collect();
         ui.horizontal_wrapped(|ui| {
-            egui::ComboBox::from_id_salt("hk_action").selected_text(["Switch on or off", "Show only", "While held", "All off"][self.rigs.stream.hk_action as usize % 4]).width(120.0).show_ui(ui, |ui| {
-                for (i, n) in ["Switch on or off", "Show only", "While held", "All off"].iter().enumerate() {
+            const ACTIONS: [&str; 7] = ["Switch on or off", "Show only", "While held", "All off", "OBS scene", "OBS stream on or off", "OBS recording on or off"];
+            egui::ComboBox::from_id_salt("hk_action").selected_text(ACTIONS[self.rigs.stream.hk_action as usize % 7]).width(150.0).show_ui(ui, |ui| {
+                for (i, n) in ACTIONS.iter().enumerate() {
                     if ui.selectable_label(self.rigs.stream.hk_action == i as u8, *n).clicked() {
                         self.rigs.stream.hk_action = i as u8;
                     }
                 }
             });
-            if self.rigs.stream.hk_action != 3 {
+            if self.rigs.stream.hk_action == 4 {
+                let scenes: Vec<String> = self.rigs.stream.obs.as_ref().map(|o| o.snapshot().scenes).unwrap_or_default();
+                if scenes.is_empty() {
+                    ui.add(egui::TextEdit::singleline(&mut self.rigs.stream.hk_scene).hint_text("Scene name").desired_width(110.0));
+                } else {
+                    let sel = if scenes.contains(&self.rigs.stream.hk_scene) { self.rigs.stream.hk_scene.clone() } else { scenes[0].clone() };
+                    egui::ComboBox::from_id_salt("hk_scene").selected_text(sel.clone()).width(120.0).show_ui(ui, |ui| {
+                        for n in &scenes {
+                            if ui.selectable_label(&sel == n, n).clicked() {
+                                self.rigs.stream.hk_scene = n.clone();
+                            }
+                        }
+                    });
+                    self.rigs.stream.hk_scene = sel;
+                }
+            }
+            if self.rigs.stream.hk_action < 3 {
                 let sel = if names.contains(&self.rigs.stream.hk_expr) { self.rigs.stream.hk_expr.clone() } else { names.first().cloned().unwrap_or_default() };
                 egui::ComboBox::from_id_salt("hk_expr").selected_text(sel.clone()).width(120.0).show_ui(ui, |ui| {
                     for n in &names {
@@ -512,13 +611,21 @@ impl SeviathApp {
                 });
                 self.rigs.stream.hk_expr = sel;
             }
-            let ready = self.rigs.stream.hk_input.is_some() && (self.rigs.stream.hk_action == 3 || !self.rigs.stream.hk_expr.is_empty());
+            let ready = self.rigs.stream.hk_input.is_some()
+                && match self.rigs.stream.hk_action {
+                    0..=2 => !self.rigs.stream.hk_expr.is_empty(),
+                    4 => !self.rigs.stream.hk_scene.trim().is_empty(),
+                    _ => true,
+                };
             if ui.add_enabled(ready, egui::Button::new("Add")).clicked() {
                 let n = self.rigs.stream.hk_expr.clone();
                 let action = match self.rigs.stream.hk_action {
                     0 => crate::hotkeys::Action::Toggle(n),
                     1 => crate::hotkeys::Action::Show(n),
                     2 => crate::hotkeys::Action::Hold(n),
+                    4 => crate::hotkeys::Action::ObsScene(self.rigs.stream.hk_scene.trim().to_string()),
+                    5 => crate::hotkeys::Action::ObsStream,
+                    6 => crate::hotkeys::Action::ObsRecord,
                     _ => crate::hotkeys::Action::Clear,
                 };
                 if let Some(input) = self.rigs.stream.hk_input.take() {

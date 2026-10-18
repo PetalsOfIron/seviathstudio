@@ -125,6 +125,7 @@ pub struct RigState {
     pub(super) stream: super::streamtab::StreamUi,
     /// Layers that expressions show or hide right now (Stream tab): whether to show, and how far.
     pub expr_layers: std::collections::HashMap<LayerId, (bool, f32)>,
+    pub views_message: Option<String>,
     /// Editing the hair: on or off, the tool (0 move joints, 1 add a strand, 2 add hair with the brush, 3 take hair away), the picked
     /// strand, the joints of the strand being made, the radius of the hair brush, the picture of the hair on the canvas, the hair the
     /// app found (before corrections) and a change waiting to be built.
@@ -882,7 +883,106 @@ impl SeviathApp {
         if self.rigs.pro {
             self.rig_pro_sections(ui, now);
         }
+        self.rig_views_section(ui, now);
         self.rig_sliders_section(ui, now);
+    }
+
+    /// Views: front, three quarters, side, back. Layers are put in views and one slider shows one at a time.
+    fn rig_views_section(&mut self, ui: &mut Ui, now: f64) {
+        egui::CollapsingHeader::new(RichText::new("Views").size(14.0).strong()).default_open(false).show(ui, |ui| self.rig_views_body(ui, now));
+    }
+
+    fn rig_views_body(&mut self, ui: &mut Ui, now: f64) {
+        let rig = self.draw.doc.rig.clone();
+        let v = rig.views.clone();
+        ui.label(RichText::new("Draw the character from more sides (front, side, back) as separate layers, put each layer in its view, and one slider (View) shows one view at a time, fading between them.").size(11.5).color(TEXT_DIM));
+        let mut names = v.names.clone();
+        let mut crossfade = v.crossfade;
+        let mut remove: Option<usize> = None;
+        for (i, n) in names.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{i}")).monospace().size(11.5).color(TEXT_DIM));
+                ui.add(egui::TextEdit::singleline(n).desired_width(120.0));
+                let count = v.assign.iter().filter(|(_, x)| *x == i).count();
+                ui.label(RichText::new(format!("{count} layers")).size(11.0).color(TEXT_DIM));
+                if ui.small_button("Delete").clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Add a view").clicked() {
+                let n = names.len();
+                names.push(crate::rig::views::Views::SUGGESTED.get(n).map(|s| s.to_string()).unwrap_or_else(|| format!("View {}", n + 1)));
+            }
+            ui.checkbox(&mut crossfade, "Fade between views").on_hover_text("Off: the picture cuts from one view to the next");
+        });
+        if let Some(i) = remove {
+            names.remove(i);
+        }
+        // the picked layers go in a view
+        let picked: Vec<u64> = self.rigs.selected.clone();
+        if !names.is_empty() {
+            if picked.is_empty() {
+                ui.label(RichText::new("Pick layers in the list on the left to put them in a view.").size(11.5).color(TEXT_DIM));
+            } else {
+                ui.label(RichText::new(format!("Put the {} picked layers in:", picked.len())).size(12.0).color(TEXT_DIM));
+            }
+        }
+        let mut put: Option<(usize, bool)> = None;
+        ui.horizontal_wrapped(|ui| {
+            for (i, n) in names.iter().enumerate() {
+                if ui.add_enabled(!picked.is_empty(), egui::Button::new(n)).clicked() {
+                    put = Some((i, true));
+                }
+            }
+            if ui.add_enabled(!picked.is_empty() && !v.assign.is_empty(), egui::Button::new("No view")).clicked() {
+                put = Some((usize::MAX, false));
+            }
+        });
+        let changed = names != v.names || crossfade != v.crossfade || put.is_some() || remove.is_some();
+        if changed {
+            self.rig_edit("Views", now, |r| {
+                r.views.names = names.clone();
+                r.views.crossfade = crossfade;
+                // a view that was taken away takes its layers out, and the later ones move up
+                if let Some(i) = remove {
+                    r.views.assign.retain(|(_, x)| *x != i);
+                    for (_, x) in r.views.assign.iter_mut() {
+                        if *x > i {
+                            *x -= 1;
+                        }
+                    }
+                }
+                if let Some((view, _)) = put {
+                    for l in &picked {
+                        r.views.assign_layer(*l, view);
+                    }
+                }
+            });
+        }
+        let assigned = v.assign.len();
+        ui.horizontal_wrapped(|ui| {
+            let built = v.is_built();
+            if ui.add_enabled(names.len() >= 2 && assigned > 0, egui::Button::new(if built { "Build the views again" } else { "Build the views" })).on_hover_text("Makes the View slider and a fade for every drawing in a view").clicked() {
+                let has_mesh: std::collections::HashSet<u64> = rig.meshes.iter().map(|m| m.layer).collect();
+                let mut result = Ok(0);
+                self.rig_edit("Build views", now, |r| result = r.build_views(&|l| has_mesh.contains(&l)));
+                self.rigs.views_message = Some(match result {
+                    Ok(n) => format!("{n} drawings are in views. Move the View slider to change the view."),
+                    Err(e) => e,
+                });
+                self.rigs.weight_gen += 1;
+            }
+            if built && ui.button("Take the views away").clicked() {
+                self.rig_edit("Remove views", now, |r| r.clear_views());
+                self.rigs.weight_gen += 1;
+                self.rigs.views_message = Some("The drawings are as they were.".into());
+            }
+        });
+        if let Some(m) = &self.rigs.views_message {
+            ui.label(RichText::new(m).size(11.5).color(TEXT_DIM));
+        }
     }
 
     /// Face rigging from the tags, in one click.

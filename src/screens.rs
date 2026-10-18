@@ -3630,6 +3630,18 @@ fn stream_tab_follows_a_sent_face_and_serves_the_picture() {
     assert_eq!(image::open(dir.join("Happy_28.png")).unwrap().to_rgba8().dimensions(), (28, 28));
     assert!((h.state_mut().test_rig().values.0.get(&e_id).copied().unwrap_or(e_def) - e_hi).abs() < 1e-3, "the sliders are as they were");
     let _ = std::fs::remove_dir_all(&dir);
+    // OBS is not running here: the panel says so in words
+    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    h.state_mut().test_stream().obs = Some(crate::obs::Obs::connect("127.0.0.1", free, ""));
+    for _ in 0..200 {
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        if matches!(h.state_mut().test_stream().obs.as_ref().unwrap().snapshot().status, crate::obs::Status::Failed(_)) {
+            break;
+        }
+    }
+    h.run_steps(2);
+    assert!(matches!(h.state_mut().test_stream().obs.as_ref().unwrap().snapshot().status, crate::obs::Status::Failed(_)));
     save(&mut h, "stream_2_expressions");
     save(&mut h, "stream_1");
     // switched off again
@@ -3761,5 +3773,63 @@ fn animate_tab_cels_show_by_frame_and_save() {
     assert_eq!(f1.get_pixel(280, 180).0, [255, 255, 255, 255], "the blue one is not there yet: white paper");
     assert_eq!(f5.get_pixel(280, 180).0, [30, 30, 220, 255], "the blue square at frame 5");
     assert_eq!(f5.get_pixel(80, 80).0, [255, 255, 255, 255]);
+    // the X-sheet shows the timing as a table
+    h.state_mut().test_anim().xsheet = true;
+    h.state_mut().test_anim().sel_x = Some((0, 3));
+    h.run_steps(4);
+    save(&mut h, "animate_5_xsheet");
+    h.state_mut().test_anim().xsheet = false;
+    h.run_steps(2);
+    // a camera zoomed to twice as close: the red square, which was at 50..110, is cut by the edge of the view
+    h.state_mut().test_rig_edit(|r| {
+        let t = r.anim.track_for(crate::anim::Target::CameraZoom, "Zoom");
+        r.anim.tracks[t].set_key(0.0, 200.0, crate::anim::Ease::Linear);
+    });
     let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    h.state_mut().test_anim_export_png(dir.clone(), 400);
+    for _ in 0..200 {
+        h.run_steps(1);
+        if !h.state_mut().test_anim_busy() {
+            break;
+        }
+    }
+    let z1 = image::open(dir.join("frame_0002.png")).unwrap().to_rgba8();
+    assert_eq!(z1.get_pixel(10, 40).0, [220, 30, 30, 255], "the camera sees the edge of the red square, bigger");
+    assert_eq!(z1.get_pixel(150, 120).0, [255, 255, 255, 255], "the paper is behind what it sees");
+    h.run_steps(2);
+    save(&mut h, "animate_6_camera");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Views: layers put in views, one slider shows one view at a time.
+#[test]
+fn rig_tab_views_switch_the_drawings() {
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(4);
+    let layers: Vec<u64> = h.state().draw_mut_ref().doc.rig.meshes.iter().map(|m| m.layer).collect();
+    assert!(layers.len() >= 2);
+    let (a, b) = (layers[0], layers[1]);
+    h.state_mut().test_rig_edit(|r| {
+        r.views.names = vec!["Front".into(), "Back".into()];
+        r.views.assign_layer(a, 0);
+        r.views.assign_layer(b, 1);
+        let has: std::collections::HashSet<u64> = r.meshes.iter().map(|m| m.layer).collect();
+        r.build_views(&|l| has.contains(&l)).unwrap();
+    });
+    h.run_steps(3);
+    let p = h.state().draw_mut_ref().doc.rig.views.param.unwrap();
+    h.state_mut().test_rig().values.set(p, 0.0);
+    h.run_steps(3);
+    let front = h.state_mut().test_still(300).unwrap();
+    h.state_mut().test_rig().values.set(p, 1.0);
+    h.run_steps(3);
+    let back = h.state_mut().test_still(300).unwrap();
+    assert_ne!(front.as_raw(), back.as_raw(), "the view slider changes which drawings show");
+    save(&mut h, "rig_views");
 }

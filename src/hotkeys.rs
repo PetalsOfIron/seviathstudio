@@ -49,6 +49,12 @@ pub enum Action {
     Hold(String),
     /// Every expression off.
     Clear,
+    /// OBS Studio goes to this scene.
+    ObsScene(String),
+    /// OBS starts or stops streaming.
+    ObsStream,
+    /// OBS starts or stops recording.
+    ObsRecord,
 }
 
 impl Action {
@@ -58,6 +64,9 @@ impl Action {
             Action::Show(n) => format!("Show only {n}"),
             Action::Hold(n) => format!("{n} while held"),
             Action::Clear => "All expressions off".into(),
+            Action::ObsScene(n) => format!("OBS scene {n}"),
+            Action::ObsStream => "OBS start or stop streaming".into(),
+            Action::ObsRecord => "OBS start or stop recording".into(),
         }
     }
 }
@@ -339,6 +348,7 @@ mod tests {
         assert_eq!(Input::Pad { button: "South".into() }.label(), "Pad South");
         assert_eq!(note_name(21), "A0");
         assert_eq!(Action::Hold("Blush".into()).label(), "Blush while held");
+        assert_eq!(Action::ObsScene("Main".into()).label(), "OBS scene Main");
     }
 
     #[test]
