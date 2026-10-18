@@ -261,3 +261,30 @@ mod tests {
         st.apply(&d, &r, &mut v, 0.1);
     }
 }
+
+/// The sliders with one expression fully on (to draw it, for example as an emote).
+pub fn pose_with(def: &ExprDef, rig: &Rig, base: &Values) -> Values {
+    let mut st = ExprState::default();
+    st.set(&def.name, true);
+    let mut d = def.clone();
+    d.fade_in = 0.0;
+    let mut v = base.clone();
+    st.apply(&[d], rig, &mut v, 1.0);
+    v
+}
+
+#[cfg(test)]
+mod pose_tests {
+    use super::*;
+
+    #[test]
+    fn an_expression_can_be_looked_at_fully_on_without_fading() {
+        let mut r = Rig::default();
+        let a = r.add_param("Smile", 0.0, 1.0, 0.0);
+        r.own_exprs.push(OwnExpr { name: "Happy".into(), values: vec![(a, 1.0)], fade_in: 5.0, fade_out: 5.0 });
+        let d = defs(&r);
+        let base = Values::default();
+        assert_eq!(pose_with(&d[0], &r, &base).0[&a], 1.0);
+        assert!(base.0.is_empty(), "the sliders given are not changed");
+    }
+}

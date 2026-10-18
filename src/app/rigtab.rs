@@ -17,7 +17,6 @@ use crate::tabs::Tab;
 use crate::theme::*;
 use crate::widgets::{self, section_title};
 
-const MAX_PREVIEW: f32 = 900.0;
 /// Frames a second when recording a pose.
 const RECORD_FPS: f32 = 30.0;
 
@@ -467,6 +466,7 @@ impl SeviathApp {
         key.push(self.rigs.weight_gen);
         key.push((self.rigs.mode == Mode::Weight) as u64);
         key.push(self.rigs.hq as u64);
+        key.push(self.settings.rig_quality as u64);
         if let (true, Some((id, v))) = (self.rigs.vals_live, &self.rigs.vals_edit) {
             key.push(*id as u64);
             key.extend(v.iter().map(|x| x.to_bits() as u64));
@@ -498,7 +498,7 @@ impl SeviathApp {
             return;
         }
         let (w, h) = (d.w as f32, d.h as f32);
-        let scale = (MAX_PREVIEW / w.max(h)).min(1.0);
+        let scale = (self.settings.preview_px() / w.max(h)).min(1.0);
         let (pw, ph) = (((w * scale) as usize).max(8), ((h * scale) as usize).max(8));
         let items = self.rig_items();
         let list: Vec<Item> = items.iter().map(|(_, tex, rest, now, tris, op)| Item { tex, rest, now: now.clone(), tris, opacity: *op }).collect();

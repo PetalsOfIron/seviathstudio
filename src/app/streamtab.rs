@@ -52,6 +52,9 @@ pub struct StreamUi {
     pub hk_action: u8,
     pub hk_expr: String,
     pub hk_input: Option<crate::hotkeys::Input>,
+    /// Emotes: cut to the face, and which sizes.
+    pub emote_face: bool,
+    pub emote_sizes: [bool; 5],
 }
 
 impl Default for StreamUi {
@@ -84,6 +87,8 @@ impl Default for StreamUi {
             hk_action: 0,
             hk_expr: String::new(),
             hk_input: None,
+            emote_face: true,
+            emote_sizes: [true, true, true, false, false],
         }
     }
 }
@@ -587,6 +592,85 @@ impl SeviathApp {
             ui.label(RichText::new(msg).size(11.5).color(TEXT_DIM));
         }
         self.stream_output_ui(ui);
+        self.stream_emotes_ui(ui);
+    }
+
+    fn stream_emotes_ui(&mut self, ui: &mut Ui) {
+        section_title(ui, "Emotes");
+        ui.label(RichText::new("A picture of the character for every expression (and the plain face), with a see-through background, at the sizes chat services ask for.").size(11.5).color(TEXT_DIM));
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.rigs.stream.emote_face, "Cut to the face");
+            for (i, (name, _)) in crate::emotes::SIZES.iter().enumerate() {
+                ui.checkbox(&mut self.rigs.stream.emote_sizes[i], *name);
+            }
+        });
+        if ui.add_enabled(self.rigs.stream.emote_sizes.iter().any(|s| *s), egui::Button::new("Save the emotes...")).clicked() {
+            if let Some(dir) = rfd::FileDialog::new().set_title("Folder for the emotes").set_directory(self.settings.projects_folder()).pick_folder() {
+                self.rigs.stream.message = Some(match self.stream_save_emotes(&dir) {
+                    Ok(n) => format!("Saved {n} pictures in {}.", dir.display()),
+                    Err(e) => e,
+                });
+            }
+        }
+    }
+
+    /// Draw the plain face and every expression fully on, cut and shrunk, into a folder. Returns how many pictures were saved.
+    pub(super) fn stream_save_emotes(&mut self, dir: &std::path::Path) -> Result<usize, String> {
+        let rig = self.draw.doc.rig.clone();
+        let defs = crate::expressions::defs(&rig);
+        let saved = self.rigs.values.clone();
+        let base = self.rigs.stream.expr.without_effects(&saved);
+        let (w, h) = (self.draw.doc.w as f32, self.draw.doc.h as f32);
+        let k = (1024.0 / w.max(h)).min(1.0);
+        let size = (((w * k).round() as u32).max(8), ((h * k).round() as u32).max(8));
+        // the face: the box around the parts that make it
+        let mut lo = [f32::MAX; 2];
+        let mut hi = [f32::MIN; 2];
+        for l in &self.draw.doc.layers {
+            use crate::parts::Part::*;
+            if !matches!(l.part, Some(Face | EyeL | EyeR | EyeballL | EyeballR | BrowL | BrowR | Nose | Mouth | MouthInside | Blush | HairFront)) {
+                continue;
+            }
+            if let Some(m) = rig.mesh_of(l.id) {
+                for v in &m.verts {
+                    for a in 0..2 {
+                        lo[a] = lo[a].min(v[a] * k);
+                        hi[a] = hi[a].max(v[a] * k);
+                    }
+                }
+            }
+        }
+        let around = (self.rigs.stream.emote_face && lo[0] < hi[0] && lo[1] < hi[1]).then_some([lo[0], lo[1], hi[0], hi[1]]);
+        let mut poses: Vec<(String, crate::rig::Values)> = vec![("Neutral".into(), base.clone())];
+        poses.extend(defs.iter().map(|d| (d.name.clone(), crate::expressions::pose_with(d, &rig, &base))));
+        std::fs::create_dir_all(dir).map_err(|e| format!("Could not make the folder: {e}"))?;
+        let sizes: Vec<u32> = crate::emotes::SIZES.iter().enumerate().filter(|(i, _)| self.rigs.stream.emote_sizes[*i]).map(|(_, s)| s.1).collect();
+        let mut count = 0;
+        let mut error = None;
+        for (name, values) in poses {
+            self.rigs.values = values;
+            let Some(img) = self.rig_still(size, None) else {
+                error = Some("There is nothing to draw: the rig has no meshes yet.".to_string());
+                break;
+            };
+            let cut = crate::emotes::square_cut(&img, around, if around.is_some() { 1.35 } else { 1.0 });
+            for s in &sizes {
+                let path = dir.join(format!("{}_{s}.png", crate::emotes::file_name(&name)));
+                if let Err(e) = crate::emotes::shrink(&cut, *s).save(&path) {
+                    error = Some(format!("Could not save {}: {e}", path.display()));
+                    break;
+                }
+                count += 1;
+            }
+            if error.is_some() {
+                break;
+            }
+        }
+        self.rigs.values = saved;
+        match error {
+            Some(e) => Err(e),
+            None => Ok(count),
+        }
     }
 
     fn stream_output_ui(&mut self, ui: &mut Ui) {
@@ -658,7 +742,7 @@ impl SeviathApp {
     fn stream_outputs(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
         // the browser source gets a new picture about 30 times a second
-        if self.rigs.stream.server.is_some() && now - self.rigs.stream.last_sent >= 1.0 / 30.0 {
+        if self.rigs.stream.server.is_some() && now - self.rigs.stream.last_sent >= 1.0 / self.settings.stream_fps.clamp(1, 120) as f64 {
             self.rigs.stream.last_sent = now;
             let (w, h) = (self.draw.doc.w, self.draw.doc.h);
             let k = (self.rigs.stream.server_side as f32 / w.max(h) as f32).min(1.0);
@@ -711,6 +795,11 @@ impl SeviathApp {
     #[cfg(test)]
     pub fn test_stream(&mut self) -> &mut StreamUi {
         &mut self.rigs.stream
+    }
+
+    #[cfg(test)]
+    pub fn test_stream_emotes(&mut self, dir: &std::path::Path) -> Result<usize, String> {
+        self.stream_save_emotes(dir)
     }
 
     #[cfg(test)]
