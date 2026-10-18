@@ -31,6 +31,10 @@ enum Mode {
     Bone,
     /// Paint the weights of the picked bone (the picture is shown at rest).
     Weight,
+    /// Every click on the picture puts a pin on the picked Pin changer.
+    AddPin,
+    /// Drag on the picture to draw a path on the picked Path changer (or on a new one).
+    DrawPath,
 }
 
 /// What dragging does in weight mode.
@@ -63,7 +67,20 @@ impl RigState {
             Some(Kind::Soft { .. }) => {
                 pose.soft.insert(*id, (off.first().copied().unwrap_or([0.0, 0.0]), self.soft_grow));
             }
+            Some(Kind::Pins { .. }) => {
+                pose.pins.insert(*id, off.clone());
+            }
+            Some(Kind::Paths { paths }) => {
+                pose.paths.insert(*id, rig::changers::unflatten(paths, off));
+            }
             _ => {}
+        }
+    }
+
+    /// Show the numbers being set for a numeric changer.
+    fn put_vals(&self, pose: &mut rig::Pose) {
+        if let (true, Some((id, v))) = (self.vals_live, &self.vals_edit) {
+            pose.vals.insert(*id, v.clone());
         }
     }
 
@@ -75,6 +92,13 @@ impl RigState {
 
 #[derive(Default)]
 pub struct RigState {
+    /// The numbers of a numeric changer being set, and whether they are shown on the picture now.
+    vals_edit: Option<(Id, Vec<f32>)>,
+    vals_live: bool,
+    /// The path being drawn on the picture.
+    stroke: Vec<[f32; 2]>,
+    path_width: f32,
+    path_points: usize,
     /// Add triangles where a mesh bends, so the picture stays sharp.
     pub hq: bool,
     /// Where the picture is being pulled (page position of the grab).
@@ -207,6 +231,19 @@ impl SeviathApp {
         self.rig_edit("Rig edit", 0.0, f);
     }
 
+    /// Draw a path on the picture (a test stand-in for dragging).
+    #[cfg(test)]
+    pub fn test_stroke(&mut self, stroke: Vec<[f32; 2]>) {
+        self.add_path_from_stroke(stroke, 0.0);
+    }
+
+    /// (place in the stack from the bottom, opacity) of a layer as drawn now (for the tests).
+    #[cfg(test)]
+    pub fn test_stack(&mut self, layer: LayerId) -> Option<(usize, f32)> {
+        let items = self.rig_items();
+        items.iter().position(|i| i.0 == layer).map(|p| (p, items[p].5))
+    }
+
     /// How many triangles a layer is drawn with now (for the tests).
     #[cfg(test)]
     pub fn test_tris(&mut self, layer: LayerId) -> usize {
@@ -259,10 +296,13 @@ impl SeviathApp {
         let mut pose = if painting { rig.pose(&Values::default()) } else { rig.pose(&self.rigs.values) };
         // a Warp being edited shows the shape being dragged
         self.rigs.put_edit(&rig, &mut pose);
-        self.rigs.add_phys(&mut pose);
+        self.rigs.put_vals(&mut pose);
+        self.rigs.add_phys(&rig, &mut pose);
         let all = rig.deformed_all(&pose);
         let ids: Vec<(LayerId, f32)> = self.draw.doc.layers.iter().rev().filter(|l| l.visible && matches!(l.kind, crate::doc::LayerKind::Raster | crate::doc::LayerKind::Vector)).map(|l| (l.id, l.opacity / 100.0)).collect();
         let mut out = Vec::new();
+        // (place in `out`, how far forward an Order changer moves it)
+        let mut shifts: Vec<(usize, f32)> = Vec::new();
         let skin = rig.skin.clone();
         let skin_tex = skin.as_ref().and_then(|_| self.skin_texture());
         let mut skin_done = false;
@@ -281,6 +321,8 @@ impl SeviathApp {
             match rig.meshes.iter().position(|m| m.layer == id) {
                 Some(mi) => {
                     let m = &rig.meshes[mi];
+                    let op = op * rig.mesh_fade(m, &pose);
+                    shifts.push((out.len(), rig.mesh_order(m, &pose)));
                     if self.rigs.hq && rig::refine::bends(&rig, m) {
                         let r = rig::refine::refine(&rig, m, &all[mi], &pose, 0.35, 5.0);
                         out.push((id, tex, r.rest, r.now, r.tris, op));
@@ -296,6 +338,17 @@ impl SeviathApp {
                 }
             }
         }
+        // Order changers move parts forward or back in the stack
+        if shifts.iter().any(|s| s.1.abs() > 1e-4) {
+            let mut keys: Vec<f32> = (0..out.len()).map(|i| i as f32).collect();
+            for (i, sh) in &shifts {
+                keys[*i] += sh;
+            }
+            let mut idx: Vec<usize> = (0..out.len()).collect();
+            idx.sort_by(|a, b| keys[*a].total_cmp(&keys[*b]).then(a.cmp(b)));
+            let mut taken: Vec<Option<_>> = out.into_iter().map(Some).collect();
+            out = idx.into_iter().filter_map(|i| taken[i].take()).collect();
+        }
         out
     }
 
@@ -308,6 +361,10 @@ impl SeviathApp {
         key.push(self.rigs.weight_gen);
         key.push((self.rigs.mode == Mode::Weight) as u64);
         key.push(self.rigs.hq as u64);
+        if let (true, Some((id, v))) = (self.rigs.vals_live, &self.rigs.vals_edit) {
+            key.push(*id as u64);
+            key.extend(v.iter().map(|x| x.to_bits() as u64));
+        }
         let mut vals: Vec<(Id, u32)> = self.rigs.values.0.iter().map(|(k, v)| (*k, v.to_bits())).collect();
         vals.sort();
         for (k, v) in vals {
@@ -324,7 +381,7 @@ impl SeviathApp {
             let mut ids: Vec<_> = self.rigs.phys.offs.iter().collect();
             ids.sort_by_key(|(k, _)| **k);
             for (k, v) in ids {
-                key.push(*k as u64);
+                key.extend([k.0 as u64, k.1 as u64]);
                 for o in v {
                     key.extend([o[0].to_bits() as u64, o[1].to_bits() as u64]);
                 }
@@ -413,6 +470,54 @@ impl SeviathApp {
         self.rigs.message = Some(format!("One mesh with {nt} triangles over {} layers.", ids.len()));
     }
 
+    /// A new changer of this kind around the picked parts (they go inside it).
+    fn new_changer_kind(&mut self, word: &str, kind: Kind, now: f64) {
+        let sel = self.rigs.selected.clone();
+        let n = self.draw.doc.rig.changers.len() + 1;
+        let mut new_id = 0;
+        self.rig_edit(&format!("New {word} changer"), now, |r| {
+            let id = r.add_changer(&format!("{word} {n}"), kind, None);
+            for m in r.meshes.iter_mut().filter(|m| sel.contains(&m.layer)) {
+                m.parent = Some(id);
+            }
+            new_id = id;
+        });
+        self.rigs.sel_changer = Some(new_id);
+        self.rigs.warp_edit = None;
+        self.rigs.vals_edit = None;
+        self.rigs.vals_live = false;
+    }
+
+    /// The path drawn on the picture goes on the picked Path changer, or on a new one around the picked parts.
+    fn add_path_from_stroke(&mut self, stroke: Vec<[f32; 2]>, now: f64) {
+        let Some(spot) = rig::changers::path_from_stroke(&stroke, self.rigs.path_points, self.rigs.path_width) else {
+            self.rigs.message = Some("Drag a little longer to draw a path.".into());
+            return;
+        };
+        let on = self.rigs.sel_changer.filter(|c| matches!(self.draw.doc.rig.changer(*c).map(|c| &c.kind), Some(Kind::Paths { .. })));
+        match on {
+            Some(cid) => {
+                self.rig_edit("Add a path", now, |r| {
+                    r.add_path(cid, spot);
+                });
+            }
+            None => {
+                let sel = self.rigs.selected.clone();
+                let n = self.draw.doc.rig.changers.len() + 1;
+                let mut new_id = 0;
+                self.rig_edit("New Path changer", now, |r| {
+                    let id = r.new_path_changer(&format!("Path {n}"), spot, None);
+                    for m in r.meshes.iter_mut().filter(|m| sel.contains(&m.layer)) {
+                        m.parent = Some(id);
+                    }
+                    new_id = id;
+                });
+                self.rigs.sel_changer = Some(new_id);
+            }
+        }
+        self.rigs.warp_edit = None;
+    }
+
     fn add_bone(&mut self, head: [f32; 2], tail: [f32; 2], now: f64) {
         let n = self.draw.doc.rig.skin.as_ref().map(|s| s.bones.len()).unwrap_or(0) + 1;
         let parent = if self.rigs.bone_chain {
@@ -471,6 +576,8 @@ impl SeviathApp {
             self.rigs.new_param = ("Head tilt".into(), -30.0, 30.0);
             self.rigs.zoom = 1.0;
             self.rigs.hq = true;
+            self.rigs.path_width = 40.0;
+            self.rigs.path_points = 5;
             self.rigs.inited = true;
         }
     }
@@ -1176,6 +1283,41 @@ impl SeviathApp {
                 }
             }
         });
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            let has = !sel.is_empty();
+            let b = self.selection_box();
+            let (center, left_mid) = b.map(|b| ([(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0], [b[0], (b[1] + b[3]) / 2.0])).unwrap_or(([0.0; 2], [0.0; 2]));
+            if ui.button("New Path changer").on_hover_text("Draw paths on the picture: drag a spot of a path and the picture bends like a line. Put several on one part. Works for cloth and for things that are not physics, like closing an eye.").clicked() {
+                self.rigs.mode = Mode::DrawPath;
+                self.rigs.stroke.clear();
+            }
+            if ui.add_enabled(has, egui::Button::new("New Pin changer")).on_hover_text("Pins on the picture: drag a pin and the picture follows smoothly without breaking. Pins you do not move hold it still.").clicked() {
+                if let Some(b) = b {
+                    let pts = vec![[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]];
+                    self.new_changer_kind("Pins", Kind::Pins { pts }, now);
+                    self.rigs.mode = Mode::AddPin;
+                }
+            }
+            if ui.add_enabled(has, egui::Button::new("New Move changer")).on_hover_text("Shifts the picked parts (Inochi translate)").clicked() {
+                self.new_changer_kind("Move", Kind::Move, now);
+            }
+            if ui.add_enabled(has, egui::Button::new("New Scale changer")).on_hover_text("Makes the picked parts wider or taller about their middle").clicked() {
+                self.new_changer_kind("Scale", Kind::Scale { center }, now);
+            }
+            if ui.add_enabled(has, egui::Button::new("New Flip changer")).on_hover_text("Turns the picked parts over, through flat (Live2D reflect)").clicked() {
+                self.new_changer_kind("Flip", Kind::Flip { center, vertical: false }, now);
+            }
+            if ui.add_enabled(has, egui::Button::new("New Fade changer")).on_hover_text("Makes the picked parts see-through: show or hide a part with a slider").clicked() {
+                self.new_changer_kind("Fade", Kind::Fade, now);
+            }
+            if ui.add_enabled(has, egui::Button::new("New Order changer")).on_hover_text("Moves the picked parts forward or back in the stack (draw order)").clicked() {
+                self.new_changer_kind("Order", Kind::Order, now);
+            }
+            if ui.add_enabled(has, egui::Button::new("New Wave changer")).on_hover_text("A wave runs through the picked parts: flags, seaweed, hair ends").clicked() {
+                self.new_changer_kind("Wave", Kind::Wave { center: left_mid }, now);
+            }
+        });
         ui.horizontal(|ui| {
             ui.label(RichText::new("Warp grid").size(12.0).color(TEXT_DIM));
             ui.add(egui::DragValue::new(&mut self.rigs.cols_rows.0).range(1..=rig::MAX_WARP).suffix(" across"));
@@ -1679,6 +1821,91 @@ impl SeviathApp {
         mask
     }
 
+    /// Adding, removing and giving physics to the curves of a Path changer, and the pins of a Pin changer.
+    fn rig_path_pin_tools(&mut self, ui: &mut Ui, now: f64, cid: Id) {
+        let rig = self.draw.doc.rig.clone();
+        match rig.changer(cid).map(|c| c.kind.clone()) {
+            Some(Kind::Paths { paths }) => {
+                ui.horizontal_wrapped(|ui| {
+                    let on = self.rigs.mode == Mode::DrawPath;
+                    if widgets::chip(ui, if on { "Drag on the picture to draw…" } else { "Draw another path" }, on).on_hover_text("Drag across the part where the path should lie").clicked() {
+                        self.rigs.mode = if on { Mode::Look } else { Mode::DrawPath };
+                        self.rigs.stroke.clear();
+                    }
+                    ui.label(RichText::new("points").size(12.0).color(TEXT_DIM));
+                    ui.add(egui::DragValue::new(&mut self.rigs.path_points).range(2..=12));
+                    ui.label(RichText::new("reach").size(12.0).color(TEXT_DIM));
+                    ui.add(egui::DragValue::new(&mut self.rigs.path_width).range(2.0..=1000.0).suffix(" px"));
+                });
+                for (k, sp) in paths.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("Path {}", k + 1)).size(12.0));
+                        let mut w = sp.width;
+                        if ui.add(egui::DragValue::new(&mut w).range(2.0..=1000.0).suffix(" px")).on_hover_text("How far from the path the picture follows it").changed() {
+                            self.rig_edit("Path reach", now, |r| {
+                                if let Some(Kind::Paths { paths }) = r.changers.iter_mut().find(|c| c.id == cid).map(|c| &mut c.kind) {
+                                    if let Some(s) = paths.get_mut(k) {
+                                        s.width = w;
+                                    }
+                                }
+                            });
+                        }
+                        let flows = rig.physics.iter().position(|p| p.changer == cid && p.path == k);
+                        match flows {
+                            Some(i) => {
+                                if ui.small_button("Stop flowing").clicked() {
+                                    self.rig_edit("Stop path physics", now, |r| {
+                                        if i < r.physics.len() {
+                                            r.physics.remove(i);
+                                        }
+                                    });
+                                }
+                            }
+                            None => {
+                                if ui.small_button("Make it flow").on_hover_text("Adds physics to this path: it swings and lags with the head (set the kind in the Physics tab)").clicked() {
+                                    let (kind, mat) = (self.rigs.phys.kind, self.rigs.phys.material);
+                                    let name = format!("{} {}", rig.changer(cid).map(|c| c.name.clone()).unwrap_or_default(), k + 1);
+                                    self.rig_edit("Path physics", now, |r| {
+                                        let mut c = rig::physics::PhysChain::new(&name, kind, mat, cid);
+                                        c.path = k;
+                                        r.physics.push(c);
+                                    });
+                                }
+                            }
+                        }
+                        if paths.len() > 1 && ui.small_button("Delete").clicked() {
+                            self.rig_edit("Delete a path", now, |r| {
+                                r.remove_path(cid, k);
+                            });
+                            self.rigs.warp_edit = None;
+                        }
+                    });
+                }
+            }
+            Some(Kind::Pins { pts }) => {
+                ui.horizontal_wrapped(|ui| {
+                    let on = self.rigs.mode == Mode::AddPin;
+                    if widgets::chip(ui, if on { "Click the picture to add pins…" } else { "Add pins" }, on).on_hover_text("Every click puts a pin on the picture").clicked() {
+                        self.rigs.mode = if on { Mode::Look } else { Mode::AddPin };
+                    }
+                    ui.label(RichText::new(format!("{} pins. Pins you do not move hold the picture still.", pts.len())).size(11.5).color(TEXT_DIM));
+                });
+                ui.horizontal_wrapped(|ui| {
+                    for i in 0..pts.len() {
+                        if pts.len() > 1 && ui.small_button(format!("Delete pin {}", i + 1)).clicked() {
+                            self.rig_edit("Delete a pin", now, |r| {
+                                r.remove_pin(cid, i);
+                            });
+                            self.rigs.warp_edit = None;
+                            break;
+                        }
+                    }
+                });
+            }
+            _ => {}
+        }
+    }
+
     fn rig_keyforms(&mut self, ui: &mut Ui, now: f64, cid: Id, pid: Id) {
         let rig = self.draw.doc.rig.clone();
         let (Some(c), Some(p)) = (rig.changer(cid).cloned(), rig.param(pid).cloned()) else { return };
@@ -1727,7 +1954,54 @@ impl SeviathApp {
                     save(self, "Rotation keyform", Form::Rot { deg });
                 }
             }
-            Kind::Warp { .. } | Kind::Line { .. } | Kind::Soft { .. } => {
+            Kind::Move | Kind::Scale { .. } | Kind::Flip { .. } | Kind::Fade | Kind::Order | Kind::Wave { .. } => {
+                let names = rig::changers::val_names(&c.kind);
+                let ranges = rig::changers::val_ranges(&c.kind);
+                if self.rigs.vals_edit.as_ref().map(|v| v.0) != Some(cid) {
+                    let pose = rig.pose(&self.rigs.values);
+                    let cur = pose.vals.get(&cid).cloned().or_else(|| rig::changers::rest_vals(&c.kind)).unwrap_or_default();
+                    self.rigs.vals_edit = Some((cid, cur));
+                    self.rigs.vals_live = false;
+                }
+                let help = match c.kind {
+                    Kind::Move => "Set how far the parts move, at the slider value you want.",
+                    Kind::Scale { .. } => "1 is the size it is drawn at. 2 is twice as wide or tall.",
+                    Kind::Flip { .. } => "0 is as drawn, 1 is turned over, 0.5 is seen edge on.",
+                    Kind::Fade => "1 shows the part, 0 hides it. Set 0 at the slider value where it should be gone.",
+                    Kind::Order => "Moves the parts forward (more) or back (less) in the stack of layers.",
+                    _ => "Height of the wave, length of one wave, how far it has travelled (set different values at two slider ends and it runs between them), the direction in degrees, and how much the start is held still.",
+                };
+                ui.label(RichText::new(help).size(11.5).color(TEXT_DIM));
+                let mut changed = false;
+                if let Some((_, v)) = self.rigs.vals_edit.as_mut() {
+                    for (i, name) in names.iter().enumerate() {
+                        let (lo, hi, step) = ranges[i];
+                        if let Some(x) = v.get_mut(i) {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(*name).size(12.0).color(TEXT_DIM));
+                                changed |= ui.add(egui::DragValue::new(x).speed(step).range(lo..=hi).max_decimals(2)).changed();
+                            });
+                        }
+                    }
+                }
+                if changed {
+                    self.rigs.vals_live = true;
+                }
+                ui.horizontal(|ui| {
+                    if ui.button(if second.is_some() { "Set at these two values" } else { "Set at this value" }).on_hover_text("Adds one keyform at the slider value(s) now").clicked() {
+                        if let Some((_, v)) = self.rigs.vals_edit.clone() {
+                            save(self, "Keyform", Form::Vals { v });
+                            self.rigs.vals_live = false;
+                            self.rigs.vals_edit = None;
+                        }
+                    }
+                    if ui.button("Back to the slider").on_hover_text("Forget the numbers you typed").clicked() {
+                        self.rigs.vals_edit = None;
+                        self.rigs.vals_live = false;
+                    }
+                });
+            }
+            Kind::Warp { .. } | Kind::Line { .. } | Kind::Soft { .. } | Kind::Pins { .. } | Kind::Paths { .. } => {
                 let editing = self.rigs.warp_edit.as_ref().is_some_and(|w| w.0 == cid);
                 let is_soft = matches!(c.kind, Kind::Soft { .. });
                 if matches!(c.kind, Kind::Warp { .. }) {
@@ -1761,6 +2035,8 @@ impl SeviathApp {
                             let off: Vec<[f32; 2]> = match &c.kind {
                                 Kind::Warp { cols, rows, .. } => pose.warp.get(&cid).cloned().unwrap_or_else(|| vec![[0.0, 0.0]; ((cols + 1) * (rows + 1)) as usize]),
                                 Kind::Line { pts, .. } => pose.line.get(&cid).cloned().unwrap_or_else(|| vec![[0.0, 0.0]; pts.len()]),
+                                Kind::Pins { pts } => pose.pins.get(&cid).cloned().unwrap_or_else(|| vec![[0.0, 0.0]; pts.len()]),
+                                Kind::Paths { paths } => rig::changers::flatten(&paths, pose.paths.get(&cid)),
                                 _ => {
                                     let (o, g) = pose.soft.get(&cid).copied().unwrap_or(([0.0, 0.0], 0.0));
                                     self.rigs.soft_grow = g;
@@ -1775,6 +2051,8 @@ impl SeviathApp {
                                 let form = match &c.kind {
                                     Kind::Warp { .. } => Form::Warp { offsets: off },
                                     Kind::Line { .. } => Form::Line { offsets: off },
+                                    Kind::Pins { .. } => Form::Pins { offsets: off },
+                                    Kind::Paths { paths } => Form::Paths { offsets: rig::changers::unflatten(paths, &off) },
                                     _ => Form::Soft { offset: off.first().copied().unwrap_or([0.0, 0.0]), grow: self.rigs.soft_grow },
                                 };
                                 save(self, "Keyform", form);
@@ -1785,6 +2063,7 @@ impl SeviathApp {
                         }
                     }
                 });
+                self.rig_path_pin_tools(ui, now, cid);
             }
         }
         let keys_for: Vec<Id> = match pid2 {
@@ -1845,7 +2124,8 @@ impl SeviathApp {
         let rig = self.draw.doc.rig.clone();
         let mut pose = if self.rigs.mode == Mode::Weight { rig.pose(&Values::default()) } else { rig.pose(&self.rigs.values) };
         self.rigs.put_edit(&rig, &mut pose);
-        self.rigs.add_phys(&mut pose);
+        self.rigs.put_vals(&mut pose);
+        self.rigs.add_phys(&rig, &mut pose);
         let all = rig.deformed_all(&pose);
         // triangles of the picked parts
         if self.rigs.wire {
@@ -1925,6 +2205,62 @@ impl SeviathApp {
                         }
                     }
                 }
+                Kind::Pins { pts } => {
+                    let off = pose.pins.get(&c.id).cloned().unwrap_or_else(|| vec![[0.0, 0.0]; pts.len()]);
+                    let editing = self.rigs.warp_edit.as_ref().is_some_and(|w| w.0 == c.id);
+                    for (i, a0) in pts.iter().enumerate() {
+                        let o = off.get(i).copied().unwrap_or([0.0, 0.0]);
+                        let at = to_screen(rig.deform_point(&pose, c.parent, [a0[0] + o[0], a0[1] + o[1]]));
+                        let hr = Rect::from_center_size(at, vec2(16.0, 16.0));
+                        let moved = o[0].abs() > 0.5 || o[1].abs() > 0.5;
+                        p.circle_filled(at, 7.0, if editing { Color32::from_rgb(255, 200, 60) } else { Color32::from_rgb(120, 110, 60) });
+                        p.circle_stroke(at, 7.0, Stroke::new(if moved { 2.5 } else { 1.0 }, Color32::WHITE));
+                        if editing {
+                            let r = ui.interact(hr, egui::Id::new(("pin_handle", c.id, i)), Sense::drag());
+                            if r.dragged() {
+                                drag_handle = Some((i, r.drag_delta() / sc));
+                            }
+                        }
+                    }
+                }
+                Kind::Paths { paths } => {
+                    let off = pose.paths.get(&c.id).cloned().unwrap_or_default();
+                    let editing = self.rigs.warp_edit.as_ref().is_some_and(|w| w.0 == c.id);
+                    let mut flat = 0usize;
+                    for (k, sp) in paths.iter().enumerate() {
+                        let o = off.get(k);
+                        let moved: Vec<[f32; 2]> = sp.pts.iter().enumerate().map(|(i, a)| {
+                            let d = o.and_then(|o| o.get(i)).copied().unwrap_or([0.0, 0.0]);
+                            [a[0] + d[0], a[1] + d[1]]
+                        }).collect();
+                        let curve: Vec<Pos2> = rig::curve_samples(&moved, 8).iter().map(|v| to_screen(rig.deform_point(&pose, c.parent, *v))).collect();
+                        for w in curve.windows(2) {
+                            p.line_segment([w[0], w[1]], Stroke::new(2.0, Color32::from_rgb(255, 200, 60)));
+                        }
+                        if let Some(first) = curve.first() {
+                            p.circle_stroke(*first, sp.width * sc, Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 200, 60, 70)));
+                        }
+                        for (i, v) in moved.iter().enumerate() {
+                            let at = to_screen(rig.deform_point(&pose, c.parent, *v));
+                            let hr = Rect::from_center_size(at, vec2(12.0, 12.0));
+                            p.rect_filled(hr, 6.0, if editing { Color32::from_rgb(255, 200, 60) } else { Color32::from_rgb(120, 110, 60) });
+                            if editing {
+                                let r = ui.interact(hr, egui::Id::new(("path_handle", c.id, flat + i)), Sense::drag());
+                                if r.dragged() {
+                                    drag_handle = Some((flat + i, r.drag_delta() / sc));
+                                }
+                            }
+                        }
+                        flat += sp.pts.len();
+                    }
+                }
+                Kind::Scale { center } | Kind::Flip { center, .. } | Kind::Wave { center } => {
+                    let at = to_screen(rig.deform_point(&pose, c.parent, *center));
+                    p.circle_stroke(at, 9.0, Stroke::new(2.0, Color32::from_rgb(255, 200, 60)));
+                    p.line_segment([at - vec2(6.0, 0.0), at + vec2(6.0, 0.0)], Stroke::new(1.5, Color32::from_rgb(255, 200, 60)));
+                    p.line_segment([at - vec2(0.0, 6.0), at + vec2(0.0, 6.0)], Stroke::new(1.5, Color32::from_rgb(255, 200, 60)));
+                }
+                Kind::Move | Kind::Fade | Kind::Order => {}
                 Kind::Soft { center, radius } => {
                     let (o, _) = pose.soft.get(&c.id).copied().unwrap_or(([0.0, 0.0], 0.0));
                     let editing = self.rigs.warp_edit.as_ref().is_some_and(|w| w.0 == c.id);
@@ -1969,6 +2305,38 @@ impl SeviathApp {
                 }
             }
         }
+        // draw a path on the picture
+        if self.rigs.mode == Mode::DrawPath {
+            if resp.dragged_by(egui::PointerButton::Primary) {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    let pg = to_page(pos);
+                    if self.rigs.stroke.last().is_none_or(|l| (l[0] - pg[0]).hypot(l[1] - pg[1]) > 3.0 / sc) {
+                        self.rigs.stroke.push(pg);
+                    }
+                }
+            }
+            if self.rigs.stroke.len() > 1 {
+                let pts: Vec<Pos2> = self.rigs.stroke.iter().map(|v| to_screen(*v)).collect();
+                for w in pts.windows(2) {
+                    p.line_segment([w[0], w[1]], Stroke::new(3.0, Color32::from_rgb(255, 200, 60)));
+                }
+            }
+            if resp.drag_stopped() {
+                let stroke = std::mem::take(&mut self.rigs.stroke);
+                self.rigs.mode = Mode::Look;
+                self.add_path_from_stroke(stroke, now);
+            }
+        }
+        // add a pin
+        if self.rigs.mode == Mode::AddPin && resp.clicked_by(egui::PointerButton::Primary) {
+            if let (Some(pos), Some(cid)) = (resp.interact_pointer_pos().filter(|q| page.contains(*q)), self.rigs.sel_changer) {
+                let pg = to_page(pos);
+                self.rig_edit("Add a pin", now, |r| {
+                    r.add_pin(cid, pg);
+                });
+                self.rigs.warp_edit = None;
+            }
+        }
         // the turn rings
         if self.rigs.gizmo && self.rigs.mode == Mode::Look {
             self.gizmo_input(ui, &resp, &p, &to_screen, sc);
@@ -2010,7 +2378,7 @@ impl SeviathApp {
             }
         }
         // click: place the pivot, or pick the part under the pointer
-        if resp.clicked_by(egui::PointerButton::Primary) {
+        if resp.clicked_by(egui::PointerButton::Primary) && self.rigs.mode != Mode::AddPin {
             if let Some(pos) = resp.interact_pointer_pos().filter(|q| page.contains(*q)) {
                 let pg = to_page(pos);
                 if self.rigs.mode == Mode::Pivot {
@@ -2269,6 +2637,14 @@ fn kind_word(rig: &Rig, id: Id, is_rot: bool) -> &'static str {
         Some(Kind::Warp { .. }) => "warp",
         Some(Kind::Line { .. }) => "line",
         Some(Kind::Soft { .. }) => "soft",
+        Some(Kind::Paths { .. }) => "path",
+        Some(Kind::Pins { .. }) => "pins",
+        Some(Kind::Move) => "move",
+        Some(Kind::Scale { .. }) => "scale",
+        Some(Kind::Flip { .. }) => "flip",
+        Some(Kind::Fade) => "fade",
+        Some(Kind::Order) => "order",
+        Some(Kind::Wave { .. }) => "wave",
         _ => "rotation",
     }
 }

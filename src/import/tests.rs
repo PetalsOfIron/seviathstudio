@@ -18,7 +18,7 @@ pub(crate) fn model_xml() -> String {
         format!("<KeyformGridSource xs.n=\"keyformGridSource\"><array_list xs.n=\"keyformsOnGrid\" count=\"{}\">{on}</array_list><array_list xs.n=\"keyformBindings\" count=\"1\">{bdef}</array_list></KeyformGridSource>", forms.len())
     };
     let form_head = |g: &str| format!("<ACDeformerForm xs.n=\"super\"><ACForm xs.n=\"super\"><CFormGuid xs.n=\"guid\" xs.id=\"{g}\"/></ACForm></ACDeformerForm>");
-    let mesh_head = |g: &str, order: i32| format!("<ACDrawableForm xs.n=\"super\"><ACForm xs.n=\"super\"><CFormGuid xs.n=\"guid\" xs.id=\"{g}\"/></ACForm><i xs.n=\"drawOrder\">{order}</i><f xs.n=\"opacity\">1.0</f></ACDrawableForm>");
+    let mesh_head = |g: &str, order: i32, op: f32| format!("<ACDrawableForm xs.n=\"super\"><ACForm xs.n=\"super\"><CFormGuid xs.n=\"guid\" xs.id=\"{g}\"/></ACForm><i xs.n=\"drawOrder\">{order}</i><f xs.n=\"opacity\">{op}</f></ACDrawableForm>");
     // the warp: 2 by 2 cells, in the rotation's pixels around its origin (200, 200): -50..50
     let unit = |dx: f32| -> String { (0..3).flat_map(|r| (0..3).map(move |c| format!("{} {}", -50.0 + 50.0 * c as f32 + dx, -50.0 + 50.0 * r as f32))).collect::<Vec<_>>().join(" ") };
     format!(
@@ -52,8 +52,8 @@ pub(crate) fn model_xml() -> String {
         fw = form_head("#fw"),
         wpos = unit(0.0),
         mg = grid("#be", &[0.0, 1.0], &["#m1", "#m2"], true),
-        m1 = mesh_head("#m1", 500),
-        m2 = mesh_head("#m2", 500),
+        m1 = mesh_head("#m1", 700, 0.2),
+        m2 = mesh_head("#m2", 500, 1.0),
     )
 }
 
@@ -109,6 +109,14 @@ fn a_hand_made_model_becomes_a_rig_with_the_same_motion() {
     closed.set(id_of("Eye open"), 0.0);
     let flat = rig.deformed(m, &rig.pose(&closed));
     assert!(flat.iter().all(|p| (p[1] - 200.0).abs() < 4.0), "{flat:?}");
+    // the closed eye is also faded and moved forward, by changers the slider drives
+    let fade = rig.changers.iter().find(|c| matches!(c.kind, crate::rig::Kind::Fade)).expect("a fade changer");
+    let order = rig.changers.iter().find(|c| matches!(c.kind, crate::rig::Kind::Order)).expect("an order changer");
+    let (open_pose, closed_pose) = (rig.pose(&Values::default()), rig.pose(&closed));
+    assert_eq!((rig.mesh_fade(m, &open_pose), rig.mesh_order(m, &open_pose)), (1.0, 0.0));
+    assert!((rig.mesh_fade(m, &closed_pose) - 0.2).abs() < 1e-4 && (rig.mesh_order(m, &closed_pose) - 20.0).abs() < 1e-3, "{} {}", rig.mesh_fade(m, &closed_pose), rig.mesh_order(m, &closed_pose));
+    assert_eq!(imp.doc.layers[0].opacity, 100.0, "the opacity comes from the changer");
+    let _ = (fade, order);
     // and at the default (open) it is untouched
     let open = rig.deformed(m, &rig.pose(&Values::default()));
     for (a, b) in open.iter().zip(&m.verts) {
