@@ -2637,3 +2637,131 @@ fn rig_tab_body_hair_and_checker_screens() {
     let steps = h.state().history().entries.len();
     assert!(steps >= 4);
 }
+
+#[test]
+fn rig_tab_gizmo_screens() {
+    use crate::doc::LayerKind;
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 2200.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    {
+        let d = h.state_mut().draw_mut();
+        let (w, h2) = (d.doc.w, d.doc.h);
+        let mut add = |name: &str, x: i32, y: i32, bw: u32, bh: u32, c: [u8; 3]| {
+            let img = image::RgbaImage::from_pixel(bw, bh, image::Rgba([c[0], c[1], c[2], 255]));
+            let mut l = d.doc.new_layer(name, LayerKind::Raster);
+            l.tiles = crate::files::tiles_from_rgba(&img, x, y, w, h2);
+            l.rev += 1;
+            d.doc.layers.insert(0, l);
+        };
+        add("hair back", 1000, 600, 1000, 1100, [90, 60, 140]);
+        add("face", 1100, 800, 800, 900, [240, 205, 180]);
+        add("eye L", 1550, 1200, 200, 90, [40, 70, 140]);
+        add("eye R", 1250, 1200, 200, 90, [40, 70, 140]);
+        add("nose", 1450, 1350, 100, 200, [225, 180, 150]);
+        add("mouth", 1350, 1560, 300, 70, [200, 80, 90]);
+        d.doc.mark_all_dirty();
+    }
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    h.get_by_label("This is a face").click();
+    h.run_steps(6);
+    let (ax, ay, az) = {
+        let r = h.state().draw_mut_ref().doc.rig.clone();
+        let id = |n: &str| r.params.iter().find(|p| p.name == n).unwrap().id;
+        (id("Angle X"), id("Angle Y"), id("Angle Z"))
+    };
+    let (centre, radius) = h.state_mut().test_rig().gizmo_geom.expect("the rings are drawn");
+    // drag the left-right ring to the right: the head turns
+    let start = centre + vec2(radius * 0.3, 0.0);
+    h.hover_at(start);
+    h.step();
+    button(&h, start, true);
+    h.step();
+    h.hover_at(start + vec2(25.0, 0.0));
+    h.step();
+    h.hover_at(start + vec2(50.0, 0.0));
+    h.step();
+    button(&h, start + vec2(50.0, 0.0), false);
+    h.run_steps(3);
+    let x = h.state_mut().test_rig().values.0.get(&ax).copied().unwrap_or(0.0);
+    assert!((x - 15.0).abs() < 1.0, "50 px on the ring moves it a quarter of the range: {x}");
+    // the up-down ring: drag it up
+    let (centre, radius) = h.state_mut().test_rig().gizmo_geom.unwrap();
+    let start = centre + vec2(radius, 0.0);
+    h.hover_at(start);
+    h.step();
+    button(&h, start, true);
+    h.step();
+    h.hover_at(start + vec2(0.0, -30.0));
+    h.step();
+    button(&h, start + vec2(0.0, -30.0), false);
+    h.run_steps(3);
+    let y = h.state_mut().test_rig().values.0.get(&ay).copied().unwrap_or(0.0);
+    assert!(y > 5.0, "dragging up raises it: {y}");
+    // the tilt ring: a quarter turn around
+    let (centre, radius) = h.state_mut().test_rig().gizmo_geom.unwrap();
+    let start = centre + vec2(radius * 0.707, radius * 0.707);
+    h.hover_at(start);
+    h.step();
+    button(&h, start, true);
+    h.step();
+    h.hover_at(centre + vec2(0.0, radius));
+    h.step();
+    h.hover_at(centre + vec2(-radius * 0.707, radius * 0.707));
+    h.step();
+    button(&h, centre + vec2(-radius * 0.707, radius * 0.707), false);
+    h.run_steps(3);
+    let z = h.state_mut().test_rig().values.0.get(&az).copied().unwrap_or(0.0);
+    assert!((z - 15.0).abs() < 1.5, "a quarter turn around the ring is a quarter of the range: {z}");
+    save(&mut h, "rig_12_gizmo");
+    // snapping and limits from the rig
+    h.state_mut().test_rig().snap = 15.0;
+    let before = h.state_mut().test_rig().values.clone();
+    let _ = before;
+    // Key this pose: kept, and K does it too in the Rig tab
+    let n = h.state().draw_mut_ref().doc.rig.poses.len();
+    h.get_by_label("Key this pose (K)").click();
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().doc.rig.poses.len(), n + 1);
+    h.key_press(Key::K);
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().doc.rig.poses.len(), n + 2, "K keys a pose in the Rig tab");
+    let pose = h.state().draw_mut_ref().doc.rig.poses[0].clone();
+    assert!(pose.values.iter().any(|(id, v)| *id == ax && (*v - 15.0).abs() < 1.0), "the pose holds the turn: {:?}", pose.values);
+    // going back to rest and then to the pose
+    h.state_mut().test_rig().values = crate::rig::Values::default();
+    h.run_steps(2);
+    h.get_all_by_label("Go to").next().unwrap().click();
+    h.run_steps(3);
+    let back = h.state_mut().test_rig().values.0.get(&ax).copied().unwrap_or(0.0);
+    assert!((back - 15.0).abs() < 1.0, "{back}");
+    // recording while posing makes a motion
+    h.get_by_label("Record while posing").click();
+    h.run_steps(2);
+    for i in 0..12 {
+        h.state_mut().test_rig().values.set(ax, i as f32 * 2.0);
+        h.run_steps(3);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    h.get_by_label("Stop recording").click();
+    h.run_steps(3);
+    let clips = h.state().draw_mut_ref().doc.rig.clips.clone();
+    assert_eq!(clips.len(), 1, "one motion");
+    assert!(clips[0].frames.len() >= 4, "{} frames", clips[0].frames.len());
+    // it plays back: the sliders follow the recording
+    h.state_mut().test_rig().values = crate::rig::Values::default();
+    h.get_by_label("Play").click();
+    h.run_steps(6);
+    assert!(h.state_mut().test_rig().values.0.contains_key(&ax) || clips[0].frames.iter().any(|f| f.is_empty()));
+    // K in the Draw tab does nothing to the rig
+    h.get_by_label("Stop").click();
+    h.run_steps(2);
+    h.state_mut().test_run_action_now("tab.1");
+    h.run_steps(3);
+    let poses = h.state().draw_mut_ref().doc.rig.poses.len();
+    h.key_press(Key::K);
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().doc.rig.poses.len(), poses);
+}

@@ -18,6 +18,8 @@ use crate::theme::*;
 use crate::widgets::{self, section_title};
 
 const MAX_PREVIEW: f32 = 900.0;
+/// Frames a second when recording a pose.
+const RECORD_FPS: f32 = 30.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 enum Mode {
@@ -96,6 +98,17 @@ pub struct RigState {
     pub wtool: WTool,
     pub face_opts: rig::autorig::FaceOptions,
     pub body_opts: rig::autorig::BodyOptions,
+    pub gizmo: bool,
+    pub gtarget: usize,
+    pub snap: f32,
+    gdrag: Option<(rig::gizmo::Axis, Pos2, f32)>,
+    pub warnings: Vec<String>,
+    /// Where the rings were drawn last: centre and radius on the screen (for the tests).
+    pub gizmo_geom: Option<(Pos2, f32)>,
+    /// Recording the sliders: when it started, the time of the last frame, and the frames so far.
+    recording: Option<(f64, f64, Vec<Vec<(Id, f32)>>)>,
+    /// Playing a clip: which one and when it started.
+    playing: Option<(usize, f64)>,
     pub issues: Vec<rig::check::Issue>,
     checked: bool,
     pub pro: bool,
@@ -412,6 +425,7 @@ impl SeviathApp {
             self.rigs.wopts = rig::skin::BrushOpts::default();
             self.rigs.face_opts = rig::autorig::FaceOptions::default();
             self.rigs.body_opts = rig::autorig::BodyOptions::default();
+            self.rigs.gizmo = true;
             self.rigs.feather = 60.0;
             self.rigs.mirror_axis = self.draw.doc.w as f32 / 2.0;
             self.rigs.tag_pick = Some(parts::Part::ArmL);
@@ -432,6 +446,29 @@ impl SeviathApp {
             if self.rigs.sel_param2.is_some_and(|p| rig.param(p).is_none()) {
                 self.rigs.sel_param2 = None;
             }
+        }
+        // playing a recorded clip
+        if let Some((ci, t0)) = self.rigs.playing {
+            let now = ctx.input(|i| i.time);
+            let frame = self.draw.doc.rig.clips.get(ci).and_then(|c| c.frame_at((now - t0) as f32)).cloned();
+            match frame {
+                Some(f) => {
+                    self.rigs.values = self.draw.doc.rig.values_from(&f);
+                    ctx.request_repaint();
+                }
+                None => self.rigs.playing = None,
+            }
+        }
+        // recording the sliders while you pose
+        if let Some((t0, last, frames)) = self.rigs.recording.as_mut() {
+            let now = ctx.input(|i| i.time);
+            if now - *last >= 1.0 / RECORD_FPS as f64 {
+                *last = now;
+                let kept = self.draw.doc.rig.values_to_keep(&self.rigs.values);
+                frames.push(kept);
+            }
+            let _ = t0;
+            ctx.request_repaint();
         }
         if self.rigs.play {
             // every slider swings between its ends, each at its own pace
@@ -494,6 +531,7 @@ impl SeviathApp {
         });
         self.rig_auto_section(ui, now);
         self.rig_quality_section(ui, now);
+        self.rig_pose_section(ui, now);
         if self.rigs.pro {
             self.rig_pro_sections(ui, now);
         }
@@ -555,6 +593,165 @@ impl SeviathApp {
                     });
                 }
             }
+        }
+    }
+
+    /// The rotation gizmo's panel: numbers, snapping, spin to the side, poses and recordings.
+    fn rig_pose_section(&mut self, ui: &mut Ui, now: f64) {
+        use rig::gizmo::{Axis, SPIN};
+        section_title(ui, "Pose");
+        let rig = self.draw.doc.rig.clone();
+        let targets = rig::gizmo::targets(&rig);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            ui.checkbox(&mut self.rigs.gizmo, "Turn rings on the picture");
+            for (i, t) in targets.iter().enumerate() {
+                if widgets::chip(ui, &t.name, self.rigs.gtarget == i).clicked() {
+                    self.rigs.gtarget = i;
+                }
+            }
+        });
+        let Some(t) = targets.get(self.rigs.gtarget.min(targets.len().saturating_sub(1))).cloned() else {
+            ui.label(RichText::new("The turn rings need the head or body sliders: use the auto-rig first.").size(11.5).color(TEXT_DIM));
+            self.rig_pose_store(ui, now);
+            return;
+        };
+        let mut changed = false;
+        for (axis, label) in [(Axis::X, "Left and right"), (Axis::Y, "Up and down"), (Axis::Z, "Tilt")] {
+            let Some(id) = t.param(axis) else { continue };
+            let (lo, hi) = rig.param(id).map(|p| (p.min, p.max)).unwrap_or((-1.0, 1.0));
+            let mut v = rig.value(&self.rigs.values, id);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(label).size(12.0).color(TEXT_DIM));
+                if ui.add(egui::DragValue::new(&mut v).speed(0.3).range(lo..=hi).max_decimals(1)).changed() {
+                    rig::gizmo::set_value(&rig, &mut self.rigs.values, id, v, self.rigs.snap);
+                    changed = true;
+                }
+            });
+        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Snap").size(12.0).color(TEXT_DIM));
+            for (st, name) in [(0.0, "Off"), (5.0, "5"), (15.0, "15")] {
+                if widgets::chip(ui, name, (self.rigs.snap - st).abs() < 1e-4).clicked() {
+                    self.rigs.snap = st;
+                }
+            }
+        });
+        if t.x.is_some() {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                for (name, share) in SPIN {
+                    if widgets::chip(ui, name, false).clicked() {
+                        rig::gizmo::spin(&rig, &mut self.rigs.values, &t, share);
+                        changed = true;
+                    }
+                }
+            });
+        }
+        if changed {
+            self.refresh_warnings();
+        }
+        for w in &self.rigs.warnings {
+            ui.label(RichText::new(format!("Warning: {w}")).size(11.5).color(Color32::from_rgb(235, 170, 80)));
+        }
+        self.rig_pose_store(ui, now);
+    }
+
+    fn refresh_warnings(&mut self) {
+        let d = &self.draw.doc;
+        self.rigs.warnings = rig::check::check_at(&d.rig, &d.layers, d.w, &self.rigs.values);
+    }
+
+    /// Key this pose (K): keep the sliders as a pose you can come back to.
+    pub(super) fn rig_key_pose(&mut self, now: f64) {
+        let rig = self.draw.doc.rig.clone();
+        let kept = rig.values_to_keep(&self.rigs.values);
+        let n = rig.poses.len() + 1;
+        self.rig_edit("Key this pose", now, |r| r.poses.push(rig::SavedPose { name: format!("Pose {n}"), values: kept }));
+        self.rigs.message = Some(format!("Pose {n} kept."));
+    }
+
+    #[cfg(test)]
+    pub fn test_key_pose(&mut self) {
+        self.rig_key_pose(0.0);
+    }
+
+    fn rig_pose_store(&mut self, ui: &mut Ui, now: f64) {
+        let rig = self.draw.doc.rig.clone();
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Key this pose (K)").on_hover_text("Keeps the sliders as they are now").clicked() {
+                self.rig_key_pose(now);
+            }
+            let rec = self.rigs.recording.is_some();
+            if ui.button(if rec { "Stop recording" } else { "Record while posing" }).on_hover_text("Records the sliders as you move them, to use in the Animate tab").clicked() {
+                if rec {
+                    if let Some((t0, _, frames)) = self.rigs.recording.take() {
+                        if frames.len() >= 2 {
+                            let n = rig.clips.len() + 1;
+                            self.rig_edit("Record a motion", now, |r| r.clips.push(rig::Clip { name: format!("Motion {n}"), fps: RECORD_FPS, frames }));
+                            self.rigs.message = Some(format!("Motion {n} recorded ({:.1} s).", (now - t0).max(0.0)));
+                        }
+                    }
+                } else {
+                    self.rigs.playing = None;
+                    self.rigs.recording = Some((now, now, Vec::new()));
+                }
+            }
+        });
+        if let Some((t0, _, frames)) = &self.rigs.recording {
+            ui.label(RichText::new(format!("Recording: {:.1} s, {} frames", (now - t0).max(0.0), frames.len())).size(11.5).color(Color32::from_rgb(235, 90, 90)));
+        }
+        let mut recall: Option<usize> = None;
+        let mut del_pose: Option<usize> = None;
+        for (i, p) in rig.poses.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&p.name).size(12.5));
+                if ui.small_button("Go to").clicked() {
+                    recall = Some(i);
+                }
+                if ui.small_button("Delete").clicked() {
+                    del_pose = Some(i);
+                }
+            });
+        }
+        if let Some(i) = recall {
+            self.rigs.values = rig.values_from(&rig.poses[i].values);
+            self.refresh_warnings();
+        }
+        if let Some(i) = del_pose {
+            self.rig_edit("Delete a pose", now, |r| {
+                if i < r.poses.len() {
+                    r.poses.remove(i);
+                }
+            });
+        }
+        let mut play: Option<usize> = None;
+        let mut del_clip: Option<usize> = None;
+        for (i, c) in rig.clips.iter().enumerate() {
+            let on = self.rigs.playing.is_some_and(|p| p.0 == i);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{} ({:.1} s)", c.name, c.seconds())).size(12.5));
+                if ui.small_button(if on { "Stop" } else { "Play" }).clicked() {
+                    play = Some(if on { usize::MAX } else { i });
+                }
+                if ui.small_button("Delete").clicked() {
+                    del_clip = Some(i);
+                }
+            });
+        }
+        if let Some(i) = play {
+            self.rigs.playing = if i == usize::MAX { None } else { Some((i, now)) };
+            if i == usize::MAX {
+                self.rigs.values = Values::default();
+            }
+        }
+        if let Some(i) = del_clip {
+            self.rigs.playing = None;
+            self.rig_edit("Delete a motion", now, |r| {
+                if i < r.clips.len() {
+                    r.clips.remove(i);
+                }
+            });
         }
     }
 
@@ -1507,6 +1704,10 @@ impl SeviathApp {
                 o[1] += d.y;
             }
         }
+        // the turn rings
+        if self.rigs.gizmo && self.rigs.mode == Mode::Look {
+            self.gizmo_input(ui, &resp, &p, &to_screen, sc);
+        }
         // the bones of the skin
         if let Some(sk) = &rig.skin {
             for b in &sk.bones {
@@ -1575,6 +1776,69 @@ impl SeviathApp {
                 ui.label(RichText::new("Wheel: zoom. Right drag: move. Blend modes are not shown here.").size(11.0).color(TEXT_DIM));
             });
         });
+    }
+
+    /// The three rings of the rotation gizmo: left-right, up-down and tilt. Drag a ring to move its slider.
+    fn gizmo_input(&mut self, ui: &mut Ui, resp: &egui::Response, p: &egui::Painter, to_screen: &dyn Fn([f32; 2]) -> Pos2, sc: f32) {
+        use rig::gizmo::Axis;
+        let rig = self.draw.doc.rig.clone();
+        let targets = rig::gizmo::targets(&rig);
+        let Some(t) = targets.get(self.rigs.gtarget.min(targets.len().saturating_sub(1))) else { return };
+        let centre = to_screen(t.pivot);
+        let r = 70.0f32.max(60.0 * sc * 4.0).min(140.0);
+        self.rigs.gizmo_geom = Some((centre, r));
+        // the rings as outlines (an ellipse for the two turns, a circle for the tilt)
+        let ring = |axis: Axis| -> Vec<Pos2> {
+            (0..=48)
+                .map(|i| {
+                    let a = i as f32 / 48.0 * std::f32::consts::TAU;
+                    match axis {
+                        Axis::Z => centre + vec2(a.cos() * r, a.sin() * r),
+                        Axis::X => centre + vec2(a.cos() * r * 0.3, a.sin() * r),
+                        Axis::Y => centre + vec2(a.cos() * r, a.sin() * r * 0.3),
+                    }
+                })
+                .collect()
+        };
+        let colour = |a: Axis| match a {
+            Axis::X => Color32::from_rgb(235, 90, 90),
+            Axis::Y => Color32::from_rgb(110, 220, 110),
+            Axis::Z => Color32::from_rgb(90, 150, 255),
+        };
+        for axis in [Axis::Z, Axis::X, Axis::Y] {
+            if t.param(axis).is_none() {
+                continue;
+            }
+            let on = self.rigs.gdrag.as_ref().is_some_and(|d| d.0 == axis);
+            let pts = ring(axis);
+            for w in pts.windows(2) {
+                p.line_segment([w[0], w[1]], Stroke::new(if on { 4.0 } else { 2.0 }, colour(axis)));
+            }
+        }
+        let dist_to = |axis: Axis, pos: Pos2| ring(axis).iter().map(|q| (q.x - pos.x).hypot(q.y - pos.y)).fold(f32::MAX, f32::min);
+        if resp.drag_started_by(egui::PointerButton::Primary) {
+            if let Some(pos) = ui.input(|i| i.pointer.press_origin()) {
+                let best = [Axis::X, Axis::Y, Axis::Z].into_iter().filter(|a| t.param(*a).is_some()).map(|a| (a, dist_to(a, pos))).filter(|(_, d)| *d < 12.0).min_by(|a, b| a.1.total_cmp(&b.1));
+                if let Some((axis, _)) = best {
+                    let id = t.param(axis).unwrap_or(0);
+                    self.rigs.gdrag = Some((axis, pos, rig.value(&self.rigs.values, id)));
+                }
+            }
+        }
+        if let (Some((axis, start, v0)), true) = (self.rigs.gdrag, resp.dragged_by(egui::PointerButton::Primary)) {
+            if let (Some(pos), Some(id)) = (ui.input(|i| i.pointer.latest_pos()), t.param(axis)) {
+                let half = rig::gizmo::half_range(&rig, id);
+                let delta = match axis {
+                    Axis::X => rig::gizmo::x_delta(pos.x - start.x, half),
+                    Axis::Y => rig::gizmo::y_delta(pos.y - start.y, half),
+                    Axis::Z => rig::gizmo::z_delta([start.x, start.y], [pos.x, pos.y], [centre.x, centre.y], half),
+                };
+                rig::gizmo::set_value(&rig, &mut self.rigs.values, id, v0 + delta, self.rigs.snap);
+            }
+        }
+        if resp.drag_stopped() && self.rigs.gdrag.take().is_some() {
+            self.refresh_warnings();
+        }
     }
 
     /// Painting weights with the mouse or pen on the picture.

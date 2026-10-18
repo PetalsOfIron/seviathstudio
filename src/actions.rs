@@ -94,6 +94,8 @@ pub const ACTIONS: &[ActionDef] = &[
     a("ws.next", "Next workspace", "Panels", ""),
     a("ws.prev", "Previous workspace", "Panels", ""),
     a("ws.reset", "Put the panels back as in this workspace", "Panels", ""),
+    // the rig
+    a("rig.keypose", "Key this pose", "Rig", "K"),
     // tabs
     t("tab.1", "Go to the first tab", "Tabs", "Ctrl+1"),
     t("tab.2", "Go to the second tab", "Tabs", "Ctrl+2"),

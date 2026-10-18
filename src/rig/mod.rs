@@ -6,6 +6,7 @@
 
 pub mod autorig;
 pub mod check;
+pub mod gizmo;
 pub mod mesh;
 pub mod raster;
 pub mod skin;
@@ -171,6 +172,37 @@ pub fn solve_two_bone(root: [f32; 2], joint: [f32; 2], tip: [f32; 2], target: [f
     (wrap(th1 - rest1).to_degrees(), wrap((th2 - th1) - rest_rel).to_degrees())
 }
 
+/// A named set of slider values (a pose you made and want back).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct SavedPose {
+    pub name: String,
+    /// (slider, value); sliders not listed are at their default.
+    pub values: Vec<(Id, f32)>,
+}
+
+/// A recording of slider values over time: one entry per frame, `fps` frames a second.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Clip {
+    pub name: String,
+    pub fps: f32,
+    pub frames: Vec<Vec<(Id, f32)>>,
+}
+
+impl Clip {
+    pub fn seconds(&self) -> f32 {
+        self.frames.len() as f32 / self.fps.max(1.0)
+    }
+
+    /// The frame to show `t` seconds in (the clip loops).
+    pub fn frame_at(&self, t: f32) -> Option<&Vec<(Id, f32)>> {
+        if self.frames.is_empty() {
+            return None;
+        }
+        let i = ((t.max(0.0) * self.fps.max(1.0)) as usize) % self.frames.len();
+        self.frames.get(i)
+    }
+}
+
 /// A seam: vertices of two meshes that sit together at rest are pulled together when the meshes move apart.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Glue {
@@ -191,6 +223,8 @@ pub struct Rig {
     pub bindings: Vec<Binding>,
     pub glues: Vec<Glue>,
     pub iks: Vec<Ik>,
+    pub poses: Vec<SavedPose>,
+    pub clips: Vec<Clip>,
     /// The uncut mode: one mesh over a group of layers, moved by bones with painted weights.
     pub skin: Option<skin::Skin>,
     /// What the automatic rigging made (and what you locked).
@@ -313,7 +347,7 @@ impl Values {
 
 impl Rig {
     pub fn is_empty(&self) -> bool {
-        self.meshes.is_empty() && self.changers.is_empty() && self.params.is_empty() && self.skin.is_none() && self.auto.is_none() && self.iks.is_empty()
+        self.meshes.is_empty() && self.changers.is_empty() && self.params.is_empty() && self.skin.is_none() && self.auto.is_none() && self.iks.is_empty() && self.poses.is_empty() && self.clips.is_empty()
     }
 
     pub fn fresh_id(&mut self) -> Id {
@@ -506,6 +540,22 @@ impl Rig {
             self.bindings.push(b);
         }
         Some(new)
+    }
+
+    /// The slider values that are not at their default, ready to keep.
+    pub fn values_to_keep(&self, vals: &Values) -> Vec<(Id, f32)> {
+        self.params.iter().filter_map(|p| vals.0.get(&p.id).filter(|v| (**v - p.default).abs() > 1e-4).map(|v| (p.id, *v))).collect()
+    }
+
+    /// The other way: sliders not listed are at their default.
+    pub fn values_from(&self, kept: &[(Id, f32)]) -> Values {
+        let mut v = Values::default();
+        for (id, x) in kept {
+            if let Some(p) = self.param(*id) {
+                v.set(*id, x.clamp(p.min, p.max));
+            }
+        }
+        v
     }
 
     /// Move a point by one changer (not its parents).
@@ -776,6 +826,27 @@ impl Rig {
             let pids: HashSet<Id> = self.params.iter().map(|p| p.id).collect();
             self.iks.truncate(64);
             self.iks.retain(|k| rot_ids.contains(&k.upper) && rot_ids.contains(&k.lower) && k.upper != k.lower && pids.contains(&k.px) && pids.contains(&k.py) && [k.root, k.joint, k.tip].iter().all(|p| p[0].is_finite() && p[1].is_finite()));
+        }
+        {
+            let pids: HashSet<Id> = self.params.iter().map(|p| p.id).collect();
+            let clean = |v: &mut Vec<(Id, f32)>| {
+                v.retain(|(id, x)| pids.contains(id) && x.is_finite());
+                v.truncate(500);
+            };
+            self.poses.truncate(200);
+            for p in &mut self.poses {
+                clean(&mut p.values);
+                p.name = p.name.chars().filter(|c| !c.is_control()).take(40).collect();
+            }
+            self.clips.truncate(50);
+            for c in &mut self.clips {
+                c.fps = if c.fps.is_finite() { c.fps.clamp(1.0, 120.0) } else { 30.0 };
+                c.frames.truncate(20_000);
+                for f in &mut c.frames {
+                    clean(f);
+                }
+                c.name = c.name.chars().filter(|c| !c.is_control()).take(40).collect();
+            }
         }
         if let Some(a) = self.auto.as_mut() {
             let cids: HashSet<Id> = self.changers.iter().map(|c| c.id).collect();
