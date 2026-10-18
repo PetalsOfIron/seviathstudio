@@ -2,7 +2,7 @@
 // Frame by frame animation in the Animate tab. A cel track is a folder of layers: every layer is one drawing (a cel), drawn in the Draw
 // tab, and the track says which drawing shows from which frame on. The Animate tab shows the picture put together from the layers
 // (the drawings of the frame, onion skin of the frames around it), plays it, and saves it like the rig animation. A character that is
-// both rigged and drawn frame by frame is not mixed yet: with a cel track the picture is the layers as they are drawn.
+// both rigged and drawn frame by frame works as well: the rig (posed by the sliders and their tracks) is the base and the drawings are over it.
 
 use std::hash::{Hash, Hasher};
 
@@ -13,6 +13,22 @@ use super::animtab::ROW;
 use crate::doc::LayerKind;
 use crate::theme::*;
 use crate::widgets::{self, section_title};
+
+/// Put `top` over `base` (both the same size, not premultiplied).
+pub(super) fn composite_over(base: &mut image::RgbaImage, top: &image::RgbaImage) {
+    for (b, t) in base.pixels_mut().zip(top.pixels()) {
+        let ta = t.0[3] as f32 / 255.0;
+        if ta <= 0.0 {
+            continue;
+        }
+        let ba = b.0[3] as f32 / 255.0;
+        let oa = ta + ba * (1.0 - ta);
+        for k in 0..3 {
+            b.0[k] = ((t.0[k] as f32 * ta + b.0[k] as f32 * ba * (1.0 - ta)) / oa).round().clamp(0.0, 255.0) as u8;
+        }
+        b.0[3] = (oa * 255.0).round() as u8;
+    }
+}
 
 /// A texture (the whole of it) on four corners, which may be turned and scaled; the default texture is a plain colour.
 pub(super) fn tex_quad(p: &egui::Painter, tex: egui::TextureId, corners: [Pos2; 4], tint: Color32) {
@@ -33,6 +49,11 @@ const MAX_CACHED: usize = 90;
 impl SeviathApp {
     pub(super) fn cel_mode(&self) -> bool {
         !self.draw.doc.rig.anim.cel_tracks.is_empty()
+    }
+
+    /// The character is rigged too: its picture (posed by the sliders) is the base, and the cel drawings are drawn over it.
+    pub(super) fn has_rig(&self) -> bool {
+        !self.draw.doc.rig.meshes.is_empty()
     }
 
     /// Whether each drawing shows at a frame (drawings whose layer is gone are left out).
@@ -79,8 +100,10 @@ impl SeviathApp {
     /// The picture of the layers with `vis` set (and the paper hidden), at full size. The layers are put back.
     fn cel_flatten(&mut self, vis: &[(u64, bool)]) -> image::RgbaImage {
         let saved: Vec<(u64, bool)> = self.draw.doc.layers.iter().map(|l| (l.id, l.visible)).collect();
+        // the layers of a rigged character are drawn by the rig, not here
+        let rigged: std::collections::HashSet<u64> = self.draw.doc.rig.meshes.iter().map(|m| m.layer).collect();
         for l in self.draw.doc.layers.iter_mut() {
-            if l.kind == LayerKind::Paper {
+            if l.kind == LayerKind::Paper || rigged.contains(&l.id) {
                 l.visible = false;
             } else if let Some((_, v)) = vis.iter().find(|(id, _)| *id == l.id) {
                 l.visible = *v;
@@ -139,6 +162,11 @@ impl SeviathApp {
         let p = ui.painter_at(rect).with_clip_rect(page.intersect(rect));
         let corners = self.camera_corners(page);
         tex_quad(&p, egui::TextureId::default(), corners, Color32::from_rgb(244, 242, 236));
+        if self.has_rig() {
+            if let Some(t) = self.rigs.image.clone() {
+                tex_quad(&p, t.id(), corners, Color32::WHITE);
+            }
+        }
         let frame = self.rigs.anim.frame.round().max(0.0) as u32;
         let onion = self.draw.doc.rig.anim.onion;
         if onion.on && !self.rigs.anim.playing {
