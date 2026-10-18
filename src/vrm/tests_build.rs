@@ -182,3 +182,188 @@ fn the_preview_turns_round_and_shows_expressions() {
     sheet.save("target/screens/vrm_preview.png").unwrap();
 }
 
+
+#[test]
+fn physics_chains_become_spring_bones_and_colliders_in_both_formats() {
+    use crate::rig::physics::{Collider, Kind as PKind, Material, PhysChain, make_line};
+    let mut d = character();
+    {
+        let rig = std::sync::Arc::make_mut(&mut d.rig);
+        let layer = d.layers.iter().find(|l| l.name == "Hair back").unwrap().id;
+        let mi = rig.meshes.iter().position(|m| m.layer == layer).unwrap();
+        let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+        for v in &rig.meshes[mi].verts {
+            for k in 0..2 {
+                lo[k] = lo[k].min(v[k]);
+                hi[k] = hi[k].max(v[k]);
+            }
+        }
+        let line = make_line(rig, "Hair back", [lo[0], lo[1], hi[0], hi[1]], [1000.0, -10000.0], 5, None);
+        rig.meshes[mi].parent = Some(line);
+        rig.physics.push(PhysChain::new("Hair back", PKind::Hair, Material::Normal, line));
+        rig.colliders.push(Collider { name: "Head".into(), center: [1000.0, 550.0], radius: 260.0, changer: None });
+    }
+    let m = build(&d, &Options { name: "Test".into(), author: "Me".into(), ..Default::default() }).unwrap();
+    assert_eq!(m.springs.len(), 1);
+    let sp = &m.springs[0];
+    assert_eq!(sp.joints.len(), 5);
+    assert!(sp.stiffness > 0.3 && sp.stiffness < 2.5 && sp.drag > 0.0 && sp.gravity > 0.0, "{} {} {}", sp.stiffness, sp.drag, sp.gravity);
+    // the joints hang down from the head: each lower than the one before, the first fixed to the head bone
+    let ys: Vec<f32> = sp.joints.iter().map(|j| m.bones[*j].pos[1]).collect();
+    assert!(ys.windows(2).all(|w| w[1] < w[0]), "{ys:?}");
+    assert_eq!(m.bones[sp.joints[0]].parent, Some(m.bone("head").unwrap()));
+    assert!(m.bones[sp.joints[0]].humanoid == false && m.bone("head").is_some());
+    // the hair follows the joints of the chain, not the head
+    let hair = m.parts.iter().find(|p| p.name == "Hair back").unwrap();
+    let humanoid = m.bones.iter().filter(|b| b.humanoid).count() as u16;
+    assert!(hair.joints.iter().zip(&hair.weights).all(|(j, w)| (0..4).filter(|k| w[*k] > 0.0).all(|k| j[k] >= humanoid)), "only chain joints");
+    assert_eq!(m.colliders.len(), 1);
+    assert_eq!(m.colliders[0].bone, m.bone("head").unwrap());
+    // both formats say it, and are valid
+    let (one, zero) = (export(&m, Format::Vrm1).unwrap(), export(&m, Format::Vrm0).unwrap());
+    let (s1, s0) = (validate(&one).unwrap(), validate(&zero).unwrap());
+    assert_eq!((s1.springs, s0.springs), (5, 1));
+    let g1 = read_glb(&one).unwrap();
+    let sb = &g1.json["extensions"]["VRMC_springBone"];
+    assert_eq!(sb["springs"][0]["joints"].as_array().unwrap().len(), 5);
+    assert!(sb["springs"][0]["joints"][4].get("stiffness").is_none(), "the last joint is only a place");
+    assert_eq!(sb["colliders"].as_array().unwrap().len(), 1);
+    assert!(g1.json["extensionsUsed"].as_array().unwrap().iter().any(|e| e == "VRMC_springBone"));
+    let g0 = read_glb(&zero).unwrap();
+    let groups = g0.json["extensions"]["VRM"]["secondaryAnimation"]["boneGroups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert!(groups[0]["stiffiness"].as_f64().unwrap() > 0.3, "the 0.x spelling of the field");
+    // the humanoid still has only the humanoid bones
+    assert!(g1.json["extensions"]["VRMC_vrm"]["humanoid"]["humanBones"].as_object().unwrap().keys().all(|k| !k.starts_with("J_Sec")));
+    // a collider group that points nowhere is refused
+    let mut g = read_glb(&one).unwrap();
+    g.json["extensions"]["VRMC_springBone"]["colliderGroups"][0]["colliders"] = serde_json::json!([5]);
+    assert!(validate(&pack(&g.json, &g.bin)).is_err());
+}
+
+/// A document with one layer holding the whole picture (an uncut character).
+fn uncut_doc(img: &image::RgbaImage) -> Document {
+    let mut d = Document::new(img.width(), img.height());
+    let mut l = d.new_layer("Character", LayerKind::Raster);
+    l.tiles = crate::files::tiles_from_rgba(img, 0, 0, img.width(), img.height());
+    l.rev += 1;
+    d.layers.insert(0, l);
+    d.mark_all_dirty();
+    d
+}
+
+#[test]
+fn an_uncut_figure_is_rigged_and_becomes_a_valid_vrm_in_both_formats() {
+    use super::model::build_any;
+    let img = crate::rig::uncut::tests::figure_image();
+    let mut d = uncut_doc(&img);
+    let ids: Vec<crate::doc::LayerId> = d.layers.iter().map(|l| l.id).collect();
+    let mut rig = Rig::default();
+    let fig = crate::rig::uncut::auto_rig(&mut rig, &d, &ids, 0.6).unwrap();
+    assert!(fig.confidence > 0.6);
+    d.rig = std::sync::Arc::new(rig);
+    let sk = d.rig.skin.as_ref().unwrap();
+    assert!(sk.bones.len() >= 15 && sk.verts.len() > 50);
+    let m = build_any(&d, &Options { name: "Uncut".into(), author: "Me".into(), ..Default::default() }).unwrap();
+    assert_eq!(m.parts.len(), 1);
+    for b in ["hips", "spine", "head", "leftUpperArm", "rightHand", "leftFoot", "rightLowerLeg"] {
+        assert!(m.bone(b).is_some(), "{b}");
+    }
+    // 1.6 m tall, standing on the floor
+    let top = m.parts[0].verts.iter().map(|v| v[1]).fold(0.0f32, f32::max);
+    let bottom = m.parts[0].verts.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
+    assert!((top - bottom - 1.6).abs() < 0.02 && bottom.abs() < 0.02, "{bottom} {top}");
+    // an arm vertex follows the arm bones; a leg vertex the leg bones; all add up to one
+    let p = &m.parts[0];
+    let hand = m.bone("leftHand").unwrap() as u16;
+    let near_hand = (0..p.verts.len()).min_by(|a, b| (p.verts[*a][0] - 0.8).abs().total_cmp(&(p.verts[*b][0] - 0.8).abs())).unwrap();
+    assert!(p.joints[near_hand].iter().zip(&p.weights[near_hand]).any(|(j, w)| *j == hand && *w > 0.4), "the fingertip follows the hand: {:?} {:?}", p.joints[near_hand], p.weights[near_hand]);
+    assert!(p.weights.iter().all(|w| (w.iter().sum::<f32>() - 1.0).abs() < 1e-3));
+    // both formats are valid
+    let (one, zero) = (export(&m, Format::Vrm1).unwrap(), export(&m, Format::Vrm0).unwrap());
+    let (s1, s0) = (validate(&one).unwrap(), validate(&zero).unwrap());
+    assert_eq!((s1.version, s0.version), (1, 0));
+    assert_eq!(s1.parts, 1);
+    // the preview turns round
+    let front = super::preview::render(&m, 0.0, 400, 520, &[]);
+    let side = super::preview::render(&m, 50.0, 400, 520, &[]);
+    assert_ne!(front.as_raw(), side.as_raw());
+}
+
+/// The user's uncut bases, when they are on this computer: every one is rigged, built and checked as a VRM, and a
+/// contact sheet of the 3D result (front and turned) is written to target/screens.
+#[test]
+fn real_uncut_characters_become_checked_vrms() {
+    use super::model::build_any;
+    let base = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Downloads/Bases/images/races/images");
+    let _ = std::fs::create_dir_all("target/screens");
+    for folder in ["female", "male"] {
+        let Ok(rd) = std::fs::read_dir(base.join(folder)) else { continue };
+        let mut files: Vec<std::path::PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "png")).collect();
+        files.sort();
+        let (tw, th) = (200u32, 260u32);
+        let cols = 6u32;
+        let rows = ((files.len() as u32) * 2).div_ceil(cols).max(1);
+        let mut sheet = image::RgbaImage::from_pixel(cols * tw, rows * th, image::Rgba([255, 255, 255, 255]));
+        for (i, f) in files.iter().enumerate() {
+            let Ok(bytes) = std::fs::read(f) else { continue };
+            let Ok(dynimg) = image::load_from_memory(&bytes) else { continue };
+            let img = dynimg.to_rgba8();
+            let mut d = uncut_doc(&img);
+            let ids: Vec<crate::doc::LayerId> = d.layers.iter().map(|l| l.id).collect();
+            let mut rig = Rig::default();
+            let name = f.file_name().unwrap().to_string_lossy().to_string();
+            let fig = crate::rig::uncut::auto_rig(&mut rig, &d, &ids, 0.5).unwrap_or_else(|e| panic!("{folder}/{name}: {e}"));
+            d.rig = std::sync::Arc::new(rig);
+            let t0 = std::time::Instant::now();
+            let m = build_any(&d, &Options { name: name.clone(), author: "test".into(), max_texture: 1024, ..Default::default() }).unwrap_or_else(|| panic!("{folder}/{name}: no model"));
+            let bytes1 = export(&m, Format::Vrm1).unwrap();
+            let bytes0 = export(&m, Format::Vrm0).unwrap();
+            let (s1, s0) = (validate(&bytes1).unwrap_or_else(|e| panic!("{folder}/{name} 1.0: {e}")), validate(&bytes0).unwrap_or_else(|e| panic!("{folder}/{name} 0.x: {e}")));
+            eprintln!("{folder}/{name}: {:.0}% sure, {} vertices, {} bones, VRM {} KB / {} KB, {:?}", fig.confidence * 100.0, s1.vertices, s1.bones, bytes1.len() / 1024, bytes0.len() / 1024, t0.elapsed());
+            assert_eq!((s1.version, s0.version), (1, 0));
+            // front, and with both arms raised and the head tilted (the skin weights at work)
+            let up = [("leftUpperArm", 55.0f32), ("rightUpperArm", -55.0), ("head", 12.0), ("leftUpperLeg", -12.0), ("rightUpperLeg", 12.0)];
+            for (k, yaw) in [0.0f32, 0.0].iter().enumerate() {
+                let view = if k == 0 { super::preview::render(&m, *yaw, tw, th, &[]) } else { super::preview::render_posed(&m, *yaw, tw, th, &[], &up) };
+                let slot = (i as u32) * 2 + k as u32;
+                image::imageops::replace(&mut sheet, &view, ((slot % cols) * tw) as i64, ((slot / cols) * th) as i64);
+            }
+        }
+        sheet.save(format!("target/screens/vrm_uncut_{folder}.png")).unwrap();
+    }
+}
+
+/// Figures with the arms at the sides and the legs together (told so): rigged, built, checked, and posed with the left
+/// arm raised and the left leg lifted, to see that the weights bend the right parts.
+#[test]
+fn closed_pose_figures_are_rigged_with_hints_and_bend_where_they_should() {
+    use super::model::build_any;
+    use crate::rig::uncut::{Found, Hints, Hold, apply, find};
+    let base = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Downloads/Bases/images/races/images/male");
+    let names = ["Goblinbase4.png", "InfernalBase.png", "OgreBase.png", "WolfBeastsBase.png", "Merfolkbase.png"];
+    let (tw, th) = (200u32, 280u32);
+    let mut sheet = image::RgbaImage::from_pixel(names.len() as u32 * tw * 2, th, image::Rgba([255, 255, 255, 255]));
+    let mut any = false;
+    for (i, n) in names.iter().enumerate() {
+        let Ok(bytes) = std::fs::read(base.join(n)) else { continue };
+        let img = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        let mut d = uncut_doc(&img);
+        let ids: Vec<crate::doc::LayerId> = d.layers.iter().map(|l| l.id).collect();
+        let f: Found = find(&d, &ids, 0.5, Hints { arms: Hold::Down, legs: Hold::Down }).unwrap();
+        let mut rig = Rig::default();
+        apply(&mut rig, (d.w, d.h), &ids, &f);
+        d.rig = std::sync::Arc::new(rig);
+        let m = build_any(&d, &Options { name: n.to_string(), max_texture: 1024, ..Default::default() }).unwrap();
+        assert!(validate(&export(&m, Format::Vrm1).unwrap()).is_ok());
+        let pose = [("leftUpperArm", -70.0f32), ("leftLowerArm", -20.0), ("leftUpperLeg", -25.0), ("head", 10.0)];
+        for (k, p) in [&[][..], &pose[..]].iter().enumerate() {
+            let view = super::preview::render_posed(&m, 0.0, tw, th, &[], p);
+            image::imageops::replace(&mut sheet, &view, ((i as u32 * 2 + k as u32) * tw) as i64, 0);
+        }
+        any = true;
+    }
+    if any {
+        sheet.save("target/screens/vrm_uncut_closed.png").unwrap();
+    }
+}

@@ -108,6 +108,8 @@ impl RigState {
 
 #[derive(Default)]
 pub struct RigState {
+    /// How the arms and legs of an uncut figure are held (for the automatic skeleton).
+    pub uncut_hints: rig::uncut::Hints,
     pub game: super::gameui::GameUi,
     /// The turn at every point of the curve(s) being edited (curves after curve), next to `warp_edit`.
     turn_edit: Option<Vec<f32>>,
@@ -524,6 +526,32 @@ impl SeviathApp {
         self.rigs.message = Some(format!("One mesh with {nt} triangles over {} layers.", ids.len()));
     }
 
+    /// The whole picture as one piece with a humanoid skeleton found from its outline: a mesh over the layers, bones
+    /// with their joints put where the arms, legs, neck and hips are, and weights from the bones.
+    pub fn rig_the_uncut(&mut self, now: f64) {
+        let ids: Vec<LayerId> = if self.rigs.selected.is_empty() { self.draw.doc.layers.iter().filter(|l| l.visible && parts::is_part_layer(l)).map(|l| l.id).collect() } else { self.rigs.selected.clone() };
+        let found = match rig::uncut::find(&self.draw.doc, &ids, self.rigs.skin_detail, self.rigs.uncut_hints) {
+            Ok(f) => f,
+            Err(e) => {
+                self.rigs.message = Some(e);
+                return;
+            }
+        };
+        let size = (self.draw.doc.w, self.draw.doc.h);
+        let ids2 = ids.clone();
+        let f2 = rig::uncut::Found { figure: found.figure.clone(), verts: found.verts, tris: found.tris };
+        self.rig_edit("Auto-rig the uncut picture", now, |r| rig::uncut::apply(r, size, &ids2, &f2));
+        self.rigs.skin_tex = None;
+        let fig = found.figure;
+        let mut msg = format!("A skeleton with {} bones found ({:.0}% sure).", fig.joints.len().min(rig::uncut::BONES.len()), fig.confidence * 100.0);
+        for n in &fig.notes {
+            msg.push(' ');
+            msg.push_str(n);
+        }
+        self.rigs.message = Some(msg);
+        self.rigs.sel_changer = None;
+    }
+
     /// A new changer of this kind around the picked parts (they go inside it).
     fn new_changer_kind(&mut self, word: &str, kind: Kind, now: f64) {
         let sel = self.rigs.selected.clone();
@@ -799,6 +827,9 @@ impl SeviathApp {
             if ui.button("Rig the face from the tags").on_hover_text("Replaces what the auto-rig made before, except what you locked").clicked() {
                 self.rig_the_face(now);
             }
+            if ui.button(RichText::new("Rig the whole picture (uncut)").strong()).on_hover_text("For one picture of a standing figure: finds the head, neck, arms, hips and legs from the outline, puts a skeleton there and gives the picture weights. Needs no cutting into parts.").clicked() {
+                self.rig_the_uncut(now);
+            }
             if ui.button(if self.rigs.play { "Stop the test motion" } else { "Test motion" }).on_hover_text("Every slider moves by itself, so you can see what the rig does").clicked() {
                 self.rigs.play = !self.rigs.play;
                 if !self.rigs.play {
@@ -814,6 +845,22 @@ impl SeviathApp {
                 self.rig_the_hair(now);
             }
             ui.checkbox(&mut self.rigs.body_opts.ik, "Hands reach (IK)");
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            use rig::uncut::Hold;
+            ui.label(RichText::new("Uncut: arms").size(12.0).color(TEXT_DIM));
+            for (h, name, tip) in [(Hold::Auto, "Auto", "Look at the outline"), (Hold::Out, "Out", "Held out to the sides (a T pose)"), (Hold::Down, "At the sides", "Hanging along the body")] {
+                if widgets::chip(ui, name, self.rigs.uncut_hints.arms == h).on_hover_text(tip).clicked() {
+                    self.rigs.uncut_hints.arms = h;
+                }
+            }
+            ui.label(RichText::new("legs").size(12.0).color(TEXT_DIM));
+            for (h, name, tip) in [(Hold::Auto, "Auto", "Look at the outline"), (Hold::Out, "Apart", "Legs apart"), (Hold::Down, "Together", "Legs together")] {
+                if widgets::chip(ui, name, self.rigs.uncut_hints.legs == h).on_hover_text(tip).clicked() {
+                    self.rigs.uncut_hints.legs = h;
+                }
+            }
         });
         let o = &mut self.rigs.face_opts;
         ui.horizontal(|ui| {
@@ -2791,21 +2838,7 @@ fn kind_word(rig: &Rig, id: Id, is_rot: bool) -> &'static str {
 
 /// The given layers drawn together on a see-through page.
 fn skin_composite(d: &Document, ids: &[LayerId]) -> Option<image::RgbaImage> {
-    let layers: Vec<crate::doc::Layer> = d
-        .layers
-        .iter()
-        .filter(|l| ids.contains(&l.id) && l.visible && matches!(l.kind, crate::doc::LayerKind::Raster | crate::doc::LayerKind::Vector))
-        .cloned()
-        .map(|mut l| {
-            l.parent = None;
-            l
-        })
-        .collect();
-    if layers.is_empty() {
-        return None;
-    }
-    let tmp = Document::from_parts(d.w, d.h, Color32::TRANSPARENT, layers);
-    Some(crate::files::flatten(&tmp))
+    rig::uncut::composite(d, ids)
 }
 
 /// A slider drawn like in Live2D and Inochi2D: circles at its key points, a red dot where it is now.
