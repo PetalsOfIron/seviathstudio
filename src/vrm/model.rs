@@ -815,27 +815,46 @@ pub fn build_uncut(doc: &Document, opt: &Options) -> Option<Model3d> {
             (0..5).max_by(|a, b| g[*a].total_cmp(&g[*b])).unwrap_or(0)
         })
         .collect();
-    let mut copy_of: HashMap<(u32, usize), u32> = HashMap::new();
-    let mut piece_verts: Vec<(u32, usize)> = Vec::new();
+    let mut copy_of: HashMap<(u32, usize, bool), u32> = HashMap::new();
+    let mut piece_verts: Vec<(u32, usize, bool)> = Vec::new();
     let mut piece_tris: Vec<[u32; 3]> = Vec::new();
-    for (t, g) in tris.iter().zip(&tri_group) {
+    let mut add_tri = |t: &[u32; 3], g: usize, ext: bool, piece_verts: &mut Vec<(u32, usize, bool)>, piece_tris: &mut Vec<[u32; 3]>| {
         let mut n = [0u32; 3];
         for k in 0..3 {
-            n[k] = *copy_of.entry((t[k], *g)).or_insert_with(|| {
-                piece_verts.push((t[k], *g));
+            n[k] = *copy_of.entry((t[k], g, ext)).or_insert_with(|| {
+                piece_verts.push((t[k], g, ext));
                 (piece_verts.len() - 1) as u32
             });
         }
         piece_tris.push(n);
+    };
+    // which pieces touch each point
+    let mut touches: Vec<[bool; 5]> = vec![[false; 5]; verts.len()];
+    for (t, g) in tris.iter().zip(&tri_group) {
+        for i in t {
+            touches[*i as usize][*g] = true;
+        }
+    }
+    for (t, g) in tris.iter().zip(&tri_group) {
+        add_tri(t, *g, false, &mut piece_verts, &mut piece_tris);
+    }
+    // Each piece also carries the triangles of its neighbours that touch it, a little behind its own: when the pieces
+    // move apart a little (a leg lifted, an arm swung) the picture stays whole instead of showing a gap.
+    for (t, g) in tris.iter().zip(&tri_group) {
+        for other in 0..5 {
+            if other != *g && t.iter().any(|i| touches[*i as usize][other]) {
+                add_tri(t, other, true, &mut piece_verts, &mut piece_tris);
+            }
+        }
     }
     let (verts, uvs, normals): (Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<[f32; 3]>) = (
-        piece_verts.iter().map(|(i, _)| verts[*i as usize]).collect(),
-        piece_verts.iter().map(|(i, _)| uvs[*i as usize]).collect(),
-        piece_verts.iter().map(|(i, _)| normals[*i as usize]).collect(),
+        piece_verts.iter().map(|(i, _, ext)| { let mut v = verts[*i as usize]; if *ext { v[2] -= 0.0008; } v }).collect(),
+        piece_verts.iter().map(|(i, _, _)| uvs[*i as usize]).collect(),
+        piece_verts.iter().map(|(i, _, _)| normals[*i as usize]).collect(),
     );
     let tris = piece_tris;
     let (mut joints, mut weights) = (Vec::with_capacity(verts.len()), Vec::with_capacity(verts.len()));
-    for (orig, group) in &piece_verts {
+    for (orig, group, _) in &piece_verts {
         // only the bones of the piece (the arm bones for an arm, the body bones for the body)
         let mut acc: Vec<(usize, f32)> = raw[*orig as usize].iter().filter(|(b, _)| bone_group[*b] == *group).cloned().collect();
         if acc.iter().map(|a| a.1).sum::<f32>() < 0.001 {
@@ -872,6 +891,22 @@ pub fn face_marks(rig: &Rig) -> Option<super::face::FaceMarks> {
         let c = rig.changer(b.changer)?;
         match c.kind {
             crate::rig::Kind::Rotation { pivot } if c.name == "head" => Some(super::face::guess([pivot[0], b.tail[1]], pivot)),
+            _ => None,
+        }
+    })
+}
+
+/// The head of an uncut figure as a box on the page (x, y, width, height), for a helper that looks for the face.
+pub fn head_box(rig: &Rig) -> Option<[f32; 4]> {
+    let sk = rig.skin.as_ref()?;
+    sk.bones.iter().find_map(|b| {
+        let c = rig.changer(b.changer)?;
+        match c.kind {
+            crate::rig::Kind::Rotation { pivot } if c.name == "head" => {
+                let hh = (pivot[1] - b.tail[1]).abs().max(30.0);
+                let (x, y) = (pivot[0] - hh * 1.0, b.tail[1].min(pivot[1]) - 0.1 * hh);
+                Some([x.max(0.0), y.max(0.0), hh * 2.0, hh * 1.5])
+            }
             _ => None,
         }
     })

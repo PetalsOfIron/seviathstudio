@@ -105,3 +105,15 @@ SeviathStudio is free software: you can redistribute it and/or modify it under t
 - Third-party libraries and fonts keep their own (GPL-compatible) licenses, listed in *Settings → Info*.
 
 **Created by Seviath** — <https://x.com/SnakeSeviath>
+
+
+## AI helpers (optional)
+
+The app works without any AI. The Rig tab can ask small helper programs (Python, in `tools/ai/`) for things that are hard to
+guess. They run one at a time and only on your computer. To use the face finder, install Python 3.10 or newer and then one of:
+
+- `pip install pillow mediapipe` for realistic faces,
+- `pip install pillow transformers torch` for drawings (Grounding DINO; the model is downloaded the first time it runs).
+
+Then give the Python command in *Rig for games* and press *Find the face with AI*. If the helper cannot run, the app says what is
+missing and keeps its own guess; the eyes and the mouth can always be dragged or clicked into place.

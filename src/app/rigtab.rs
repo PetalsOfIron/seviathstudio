@@ -115,6 +115,9 @@ pub struct RigState {
     turn_edit: Option<Vec<f32>>,
     /// The eyes and the mouth of an uncut figure are shown on the picture to be dragged.
     pub(super) face_edit: bool,
+    /// Clicking the face points one after the other: 0 off, 1 first eye, 2 second eye, 3 mouth (with the first eye kept here).
+    pub(super) face_click: u8,
+    pub(super) face_first: [f32; 2],
     /// How many degrees the next *Turn* button turns by.
     turn_by: f32,
     /// The numbers of a numeric changer being set, and whether they are shown on the picture now.
@@ -2458,6 +2461,37 @@ impl SeviathApp {
                             drag_handle = Some((0, r.drag_delta() / sc));
                         }
                     }
+                }
+            }
+        }
+        // clicking the face points: the two eyes, then the mouth
+        if self.rigs.face_click > 0 {
+            let words = ["", "Click the first eye", "Click the other eye", "Click the middle of the mouth"][self.rigs.face_click as usize];
+            p.text(rect.center_top() + vec2(0.0, 10.0), egui::Align2::CENTER_TOP, words, egui::FontId::proportional(15.0), Color32::from_rgb(60, 220, 200));
+            if resp.clicked_by(egui::PointerButton::Primary) {
+                if let (Some(pos), Some(mut f)) = (resp.interact_pointer_pos(), crate::vrm::model::face_marks(&rig)) {
+                    let at = to_page(pos);
+                    match self.rigs.face_click {
+                        1 => self.rigs.face_first = at,
+                        2 => {
+                            let a = self.rigs.face_first;
+                            let (l, r) = if a[0] >= at[0] { (a, at) } else { (at, a) };
+                            f.eye_l = l;
+                            f.eye_r = r;
+                            f.eye_w = (l[0] - r[0]).hypot(l[1] - r[1]) * 0.36;
+                        }
+                        _ => {
+                            f.mouth = at;
+                            f.mouth_w = f.eye_distance() * 0.8;
+                        }
+                    }
+                    if self.rigs.face_click >= 2 {
+                        if let Some(sk) = Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut() {
+                            sk.face = Some(f);
+                        }
+                        self.rigs.game.model = None;
+                    }
+                    self.rigs.face_click = if self.rigs.face_click >= 3 { 0 } else { self.rigs.face_click + 1 };
                 }
             }
         }

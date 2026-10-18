@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Writes a `Model3d` as a VRM file: VRM 1.0 (extension VRMC_vrm, faces +Z) or VRM 0.x (extension VRM, faces -Z), the way
+// Writes a `Model3d` as a VRM file for VTubers, or as a plain glTF binary (GLB) for games: VRM 1.0 (extension VRMC_vrm, faces +Z) or VRM 0.x (extension VRM, faces -Z), the way
 // games and VRM apps expect. `validate` reads a file back and checks it the way a loader would.
 
 use serde_json::{Value, json};
@@ -13,6 +13,8 @@ pub enum Format {
     Vrm1,
     /// VRM 0.x (the older format many apps still use).
     Vrm0,
+    /// A plain GLB for game engines: the skeleton, the skin and the blend shapes, no VRM data.
+    Glb,
 }
 
 fn png_bytes(img: &image::RgbaImage) -> Vec<u8> {
@@ -24,7 +26,7 @@ fn png_bytes(img: &image::RgbaImage) -> Vec<u8> {
 /// 1.0 faces +Z; 0.x faces -Z, so everything is turned half way round the up axis.
 fn conv(fmt: Format, p: [f32; 3]) -> [f32; 3] {
     match fmt {
-        Format::Vrm1 => p,
+        Format::Vrm1 | Format::Glb => p,
         Format::Vrm0 => [-p[0], p[1], -p[2]],
     }
 }
@@ -72,7 +74,9 @@ pub fn export(model: &Model3d, fmt: Format) -> Result<Vec<u8>, String> {
             "alphaCutoff": 0.5,
             "doubleSided": true,
         });
-        if fmt == Format::Vrm1 {
+        if fmt == Format::Glb {
+            // a game lights the picture itself
+        } else if fmt == Format::Vrm1 {
             material["extensions"] = json!({
                 "KHR_materials_unlit": {},
                 "VRMC_materials_mtoon": {
@@ -121,6 +125,7 @@ pub fn export(model: &Model3d, fmt: Format) -> Result<Vec<u8>, String> {
     // the VRM part
     let hb = |name: &str| model.bone(name).map(bone_node);
     match fmt {
+        Format::Glb => {}
         Format::Vrm1 => {
             b.extensions_used = vec!["KHR_materials_unlit".into(), "VRMC_vrm".into(), "VRMC_materials_mtoon".into()];
             let mut human = serde_json::Map::new();
@@ -258,6 +263,16 @@ pub fn validate(bytes: &[u8]) -> Result<Summary, String> {
         let v = &ext["VRM"];
         let hb = v["humanoid"]["humanBones"].as_array().ok_or("The humanoid is missing.")?;
         (0, hb.iter().map(|x| (x["bone"].as_str().unwrap_or("").to_owned(), x["node"].clone())).collect(), v["blendShapeMaster"]["blendShapeGroups"].as_array().map(|a| a.len()).unwrap_or(0))
+    } else if ext.get("VRMC_vrm").is_none() && ext.get("VRM").is_none() && j["skins"].as_array().is_some_and(|s| !s.is_empty()) {
+        // a plain GLB for games: the bones are the joints of the skin, named as the humanoid, the expressions are the shapes
+        let joints: Vec<(String, Value)> = j["skins"][0]["joints"].as_array().map(|a| a.iter().map(|n| (nodes.get(n.as_u64().unwrap_or(u64::MAX) as usize).and_then(|x| x["name"].as_str()).unwrap_or("").to_owned(), n.clone())).collect()).unwrap_or_default();
+        let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for m in j["meshes"].as_array().unwrap_or(&Vec::new()) {
+            for t in m["extras"]["targetNames"].as_array().unwrap_or(&Vec::new()) {
+                names.insert(t.as_str().unwrap_or("").to_owned());
+            }
+        }
+        (2, joints, names.len())
     } else {
         return Err("This is a glTF file but not a VRM.".into());
     };

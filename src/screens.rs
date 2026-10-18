@@ -3231,3 +3231,38 @@ fn rig_for_games_screens() {
     assert!(h.state_mut().test_game().model.is_none());
     assert!(h.state_mut().test_game().message.as_deref().unwrap().contains("Nothing to build"));
 }
+
+#[test]
+fn uncut_face_points_screens() {
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let img = crate::rig::uncut::tests::figure_image();
+    let mut doc = crate::vrm::tests_build::uncut_doc(&img);
+    let ids: Vec<crate::doc::LayerId> = doc.layers.iter().map(|l| l.id).collect();
+    let mut rig = crate::rig::Rig::default();
+    crate::rig::uncut::auto_rig(&mut rig, &doc, &ids, 0.6).unwrap();
+    doc.rig = std::sync::Arc::new(rig);
+    let mut h = Harness::builder().with_size([1440.0, 2300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    h.get_by_label("Make the 3D character").click();
+    h.run_steps(4);
+    assert!(h.state_mut().test_game().model.is_some());
+    let msg = h.state_mut().test_game().message.clone().unwrap();
+    assert!(msg.contains("guessed"), "{msg}");
+    save(&mut h, "game_2_uncut_face_points");
+    // the face points can be set by clicking: the instruction shows on the picture
+    h.state_mut().test_face_click(1);
+    h.run_steps(3);
+    save(&mut h, "game_3_click_the_face");
+    // the AI finder is there, and without Python packages it says so plainly instead of failing
+    h.state_mut().test_game().ai_python = "definitely-not-python-xyz".into();
+    h.get_by_label("Find the face with AI").click();
+    h.run_steps(30);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    h.run_steps(10);
+    let msg = h.state_mut().test_game().message.clone().unwrap();
+    assert!(msg.contains("Install Python"), "{msg}");
+}
