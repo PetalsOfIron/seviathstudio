@@ -388,6 +388,115 @@ impl SeviathApp {
         self.rigs.anim.applied = None;
     }
 
+    /// Pictures (frames of a video, the frames of a GIF, an image sequence) as the drawings of a new cel track, one after the other from
+    /// the playhead. Every picture is fitted into the canvas. Returns how many drawings were made.
+    pub(super) fn cel_import_pictures(&mut self, pictures: Vec<image::RgbaImage>, name: &str) -> usize {
+        if pictures.is_empty() {
+            return 0;
+        }
+        let start = self.rigs.anim.frame.round().max(0.0) as u32;
+        let _ = self.anim_mut("Pictures as drawings");
+        let (w, h) = (self.draw.doc.w, self.draw.doc.h);
+        let doc = &mut self.draw.doc;
+        let mut folder = doc.new_layer(name, LayerKind::Group);
+        folder.expanded = false;
+        let fid = folder.id;
+        doc.layers.insert(0, folder);
+        let mut ids = Vec::new();
+        // the first drawing goes in the folder, the next ones above it, so the numbers run from the bottom up
+        for (i, pic) in pictures.iter().enumerate() {
+            let k = (w as f32 / pic.width().max(1) as f32).min(h as f32 / pic.height().max(1) as f32);
+            let (nw, nh) = (((pic.width() as f32 * k).round() as u32).clamp(1, w), ((pic.height() as f32 * k).round() as u32).clamp(1, h));
+            let fitted = if (nw, nh) == pic.dimensions() { pic.clone() } else { image::imageops::resize(pic, nw, nh, image::imageops::FilterType::Triangle) };
+            let mut layer = doc.new_layer(&(i + 1).to_string(), LayerKind::Raster);
+            layer.tiles = crate::files::tiles_from_rgba(&fitted, ((w - nw) / 2) as i32, ((h - nh) / 2) as i32, w, h);
+            layer.visible = false;
+            layer.rev += 1;
+            ids.push(doc.insert_layer(layer, fid));
+        }
+        doc.mark_all_dirty();
+        let n = ids.len() as u32;
+        let rig = std::sync::Arc::make_mut(&mut doc.rig);
+        let ti = rig.anim.add_cel_track(name, fid, ids[0]);
+        {
+            let t = &mut rig.anim.cel_tracks[ti];
+            t.exposures.clear();
+            t.cels = ids.clone();
+            for (i, id) in ids.iter().enumerate() {
+                t.set_exposure(start + i as u32, Some(*id));
+            }
+        }
+        if rig.anim.length < start + n {
+            rig.anim.length = start + n;
+        }
+        self.rigs.anim.sel_cel = Some((ti, 0));
+        self.rigs.anim.applied = None;
+        ids.len()
+    }
+
+    /// The frames of a video, made by ffmpeg when the computer has it (it is looked for on the path): `fps` pictures a second.
+    fn cel_read_video(path: &std::path::Path, fps: f32) -> Result<Vec<image::RgbaImage>, String> {
+        let dir = std::env::temp_dir().join(format!("seviath_video_{}_{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)));
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let mut cmd = std::process::Command::new("ffmpeg");
+        cmd.arg("-v").arg("error").arg("-i").arg(path).arg("-vf").arg(format!("fps={}", fps.max(1.0))).arg("-frames:v").arg("1200").arg(dir.join("f_%05d.png"));
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        let out = cmd.output().map_err(|_| "Reading a video needs ffmpeg, which this computer does not have (or it is not on the path). Install it, or turn the video into a GIF or pictures first.".to_string())?;
+        if !out.status.success() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!("ffmpeg could not read the video: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("")));
+        }
+        let mut files: Vec<_> = std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten().map(|e| e.path()).collect();
+        files.sort();
+        let pics: Result<Vec<_>, String> = files.iter().map(|p| image::open(p).map(|i| i.to_rgba8()).map_err(|e| e.to_string())).collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        pics
+    }
+
+    /// The pictures of a file: the frames of a GIF, of a video (with ffmpeg), or the one picture.
+    fn cel_read_pictures(path: &std::path::Path) -> Result<Vec<image::RgbaImage>, String> {
+        use image::AnimationDecoder;
+        let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if matches!(ext.as_str(), "mp4" | "mov" | "webm" | "mkv" | "avi" | "m4v") {
+            return Self::cel_read_video(path, 12.0);
+        }
+        let is_gif = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("gif"));
+        if is_gif {
+            let f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+            let dec = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(f)).map_err(|e| e.to_string())?;
+            let frames: Result<Vec<_>, _> = dec.into_frames().take(2000).collect();
+            return Ok(frames.map_err(|e| e.to_string())?.into_iter().map(|f| f.into_buffer()).collect());
+        }
+        Ok(vec![image::open(path).map_err(|e| format!("{}: {e}", path.display()))?.to_rgba8()])
+    }
+
+    /// Ask for pictures and make drawings of them.
+    fn cel_import_dialog(&mut self) {
+        let Some(mut files) = rfd::FileDialog::new().set_title("Pictures or a GIF").set_directory(self.settings.projects_folder()).add_filter("Pictures, GIF and video", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "mp4", "mov", "webm", "mkv", "avi", "m4v"]).pick_files() else { return };
+        // an image sequence is in the order of its names
+        files.sort();
+        let name = files.first().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Pictures".into());
+        let mut all = Vec::new();
+        for f in &files {
+            match Self::cel_read_pictures(f) {
+                Ok(mut v) => all.append(&mut v),
+                Err(e) => {
+                    self.rigs.anim.message = Some(e);
+                    return;
+                }
+            }
+            if all.len() > 2000 {
+                break;
+            }
+        }
+        let n = self.cel_import_pictures(all, &name);
+        self.rigs.anim.message = Some(format!("{n} pictures are drawings of a new track now. Trace over them in the Draw tab on a new layer, or use them as they are."));
+    }
+
     /// A new blank drawing in the folder of the track, shown from the playhead on.
     fn cel_new_cel(&mut self, ti: usize) {
         let Some(t) = self.draw.doc.rig.anim.cel_tracks.get(ti).cloned() else { return };
@@ -434,9 +543,14 @@ impl SeviathApp {
         if a.cel_tracks.is_empty() {
             ui.label(RichText::new("Draw every picture of the animation yourself. A cel track makes a folder of layers: each layer is one drawing, drawn in the Draw tab, and the track says which one shows at which frame.").size(11.5).color(TEXT_DIM));
         }
-        if ui.button("New cel track").on_hover_text("A folder with its first drawing").clicked() {
-            self.cel_new_track();
-        }
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("New cel track").on_hover_text("A folder with its first drawing").clicked() {
+                self.cel_new_track();
+            }
+            if ui.button("Pictures as drawings...").on_hover_text("The frames of a GIF, or pictures in the order of their names, one drawing each").clicked() {
+                self.cel_import_dialog();
+            }
+        });
         let frame = self.rigs.anim.frame.round().max(0.0) as u32;
         let mut remove: Option<usize> = None;
         for (ti, t) in a.cel_tracks.iter().enumerate() {
@@ -522,6 +636,16 @@ impl SeviathApp {
     }
 
     #[cfg(test)]
+    pub fn test_cel_import(&mut self, pictures: Vec<image::RgbaImage>) -> usize {
+        self.cel_import_pictures(pictures, "Frames")
+    }
+
+    #[cfg(test)]
+    pub fn test_cel_read(path: &std::path::Path) -> Result<Vec<image::RgbaImage>, String> {
+        Self::cel_read_pictures(path)
+    }
+
+    #[cfg(test)]
     pub fn test_cel_new_track(&mut self) {
         self.cel_new_track();
     }
@@ -534,5 +658,14 @@ impl SeviathApp {
     #[cfg(test)]
     pub fn test_cel_preview_picture(&mut self, ctx: &egui::Context, frame: u32) -> Option<egui::TextureHandle> {
         self.cel_texture(ctx, frame)
+    }
+}
+
+#[cfg(test)]
+impl SeviathApp {
+    /// The colour of a pixel of the picture put together for the frame that is applied now (None outside the canvas).
+    pub fn test_still_cels(&mut self, x: i32, y: i32) -> Option<[u8; 4]> {
+        let img = self.cel_flatten(&[]);
+        (x >= 0 && y >= 0 && (x as u32) < img.width() && (y as u32) < img.height()).then(|| img.get_pixel(x as u32, y as u32).0)
     }
 }

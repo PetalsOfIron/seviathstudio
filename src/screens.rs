@@ -3646,6 +3646,18 @@ fn stream_tab_follows_a_sent_face_and_serves_the_picture() {
     h.run_steps(4);
     assert!(!h.state_mut().test_stream().expr.is_on("Happy"), "the call cleared the expressions");
     h.state_mut().test_stream().hub.as_mut().unwrap().set_link(None).unwrap();
+    // a clip of the model is recorded to an MP4 file
+    let clip = std::env::temp_dir().join(format!("seviath_clip_{}.mp4", std::process::id()));
+    h.state_mut().test_stream_clip(&clip).unwrap();
+    for _ in 0..12 {
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+    }
+    let frames = h.state_mut().test_stream().rec.as_ref().map(|r| r.3).unwrap_or(0);
+    assert!(frames >= 3, "pictures were recorded: {frames}");
+    h.state_mut().test_stop_clip();
+    assert!(std::fs::metadata(&clip).map(|m| m.len() > 500).unwrap_or(false), "the video file was written");
+    let _ = std::fs::remove_file(&clip);
     // VRChat: the face goes out over OSC
     let vrc_rx = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     vrc_rx.set_read_timeout(Some(std::time::Duration::from_millis(1500))).unwrap();
@@ -3857,4 +3869,48 @@ fn rig_tab_views_switch_the_drawings() {
     let back = h.state_mut().test_still(300).unwrap();
     assert_ne!(front.as_raw(), back.as_raw(), "the view slider changes which drawings show");
     save(&mut h, "rig_views");
+}
+
+/// Pictures (the frames of a GIF) become the drawings of a cel track, one after the other.
+#[test]
+fn animate_tab_pictures_become_drawings() {
+    use crate::doc::Document;
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(Document::new(400, 300));
+    h.state_mut().test_run_action_now("tab.5");
+    h.run_steps(3);
+    // a GIF of three frames, read back as three pictures
+    let path = std::env::temp_dir().join(format!("seviath_frames_{}.gif", std::process::id()));
+    {
+        let mut enc = image::codecs::gif::GifEncoder::new(std::fs::File::create(&path).unwrap());
+        for c in [[220u8, 30, 30, 255], [30, 200, 30, 255], [30, 30, 220, 255]] {
+            let img = image::RgbaImage::from_pixel(40, 20, image::Rgba(c));
+            enc.encode_frame(image::Frame::from_parts(img, 0, 0, image::Delay::from_numer_denom_ms(100, 1))).unwrap();
+        }
+    }
+    let pics = SeviathApp::test_cel_read(&path).unwrap();
+    assert_eq!(pics.len(), 3, "the frames of the GIF");
+    let _ = std::fs::remove_file(&path);
+    h.state_mut().test_anim().frame = 2.0;
+    assert_eq!(h.state_mut().test_cel_import(pics), 3);
+    h.run_steps(3);
+    let a = h.state().draw_mut_ref().doc.rig.anim.clone();
+    let t = &a.cel_tracks[0];
+    assert_eq!(t.cels.len(), 3);
+    assert_eq!(t.exposures.iter().map(|e| e.frame).collect::<Vec<_>>(), [2, 3, 4], "one drawing a frame from the playhead");
+    assert!(a.length >= 5, "the animation is long enough: {}", a.length);
+    // every drawing shows at its frame, fitted in the middle of the canvas (40 x 20 grows to 400 x 200)
+    let (l1, l3) = (t.cels[0], t.cels[2]);
+    let color_at = |h: &mut Harness<'_, SeviathApp>, frame: f32, x: i32, y: i32| {
+        h.state_mut().test_anim().frame = frame;
+        h.run_steps(3);
+        let _ = (l1, l3);
+        h.state_mut().test_still_cels(x, y)
+    };
+    assert_eq!(color_at(&mut h, 2.0, 200, 150), Some([220, 30, 30, 255]), "the first picture, in the middle");
+    assert_eq!(color_at(&mut h, 4.0, 200, 150), Some([30, 30, 220, 255]), "the third");
+    assert_eq!(color_at(&mut h, 4.0, 200, 5), Some([0, 0, 0, 0]), "above the picture it is empty");
+    save(&mut h, "animate_7_pictures");
 }

@@ -22,6 +22,8 @@ pub struct GameUi {
     pub expr: Option<String>,
     pub model: Option<Model3d>,
     pub message: Option<String>,
+    /// What the SVRM check found in the last file that was made (things a game maker should know).
+    pub svrm_notes: Vec<String>,
     /// Face shapes from a real model, and where they came from.
     pub template: Option<(String, std::sync::Arc<crate::vrm::template::Template>)>,
     /// The command of Python for the AI helpers, which finder to use (0 auto, 1 MediaPipe, 2 Grounding DINO), and the job that runs.
@@ -58,7 +60,7 @@ pub struct GameUi {
 
 impl Default for GameUi {
     fn default() -> Self {
-        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, expr: None, model: None, message: None, template: None, ai_python: default_python(), guides: false, tex_dirty: false, paint_rev: 0, mesh_only: false, setup_job: None, setup_step: None, setup_text: String::new(), setup_agree: false, paint3d: false, brush: Default::default(), overlay: None, last_pt: None, paint_gen: 0, paint_undo: Vec::new(), paint_rebuild: false, ai_backend: 0, ai_job: None, shape: None, shape_job: None, tex: None, made: 0 }
+        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, expr: None, model: None, message: None, svrm_notes: Vec::new(), template: None, ai_python: default_python(), guides: false, tex_dirty: false, paint_rev: 0, mesh_only: false, setup_job: None, setup_step: None, setup_text: String::new(), setup_agree: false, paint3d: false, brush: Default::default(), overlay: None, last_pt: None, paint_gen: 0, paint_undo: Vec::new(), paint_rebuild: false, ai_backend: 0, ai_job: None, shape: None, shape_job: None, tex: None, made: 0 }
     }
 }
 
@@ -98,9 +100,14 @@ impl SeviathApp {
         if self.rigs.game.model.is_none() {
             self.game_make();
         }
+        let rig = self.draw.doc.rig.clone();
+        let layers: std::collections::HashMap<u64, String> = self.draw.doc.layers.iter().map(|l| (l.id, l.name.clone())).collect();
+        let svrm = crate::vrm::svrm::describe(&rig, &|id| layers.get(&id).cloned());
+        let notes = crate::vrm::svrm::report(&svrm);
         let m = self.rigs.game.model.as_ref().ok_or("There is no character to save.")?;
-        let bytes = export(m, fmt)?;
+        let bytes = crate::vrm::export::export_with(m, fmt, Some(&svrm))?;
         let summary = validate(&bytes)?;
+        self.rigs.game.svrm_notes = notes;
         Ok((bytes, summary))
     }
 
@@ -494,6 +501,9 @@ impl SeviathApp {
         });
         if let Some(m) = &self.rigs.game.message {
             ui.label(RichText::new(m).size(11.5).color(TEXT_DIM));
+        }
+        for n in &self.rigs.game.svrm_notes {
+            ui.label(RichText::new(format!("For game makers: {n}")).size(11.0).color(GOLD));
         }
         let Some(model) = &self.rigs.game.model else { return };
         // the preview: turn it round, and try the expressions

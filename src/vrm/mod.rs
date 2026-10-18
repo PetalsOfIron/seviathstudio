@@ -11,6 +11,7 @@ pub mod model;
 pub mod paint3d;
 pub mod preview;
 pub mod shape;
+pub mod svrm;
 pub mod template;
 pub mod texedit;
 

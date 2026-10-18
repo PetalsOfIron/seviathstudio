@@ -38,6 +38,11 @@ const PRESETS1: [&str; 18] = ["happy", "angry", "sad", "relaxed", "surprised", "
 const PRESETS0: [(&str, &str); 15] = [("aa", "a"), ("ih", "i"), ("ou", "u"), ("ee", "e"), ("oh", "o"), ("blink", "blink"), ("blinkLeft", "blink_l"), ("blinkRight", "blink_r"), ("happy", "joy"), ("sad", "sorrow"), ("relaxed", "fun"), ("lookUp", "lookup"), ("lookDown", "lookdown"), ("lookLeft", "lookleft"), ("lookRight", "lookright")];
 
 pub fn export(model: &Model3d, fmt: Format) -> Result<Vec<u8>, String> {
+    export_with(model, fmt, None)
+}
+
+/// The same, with the SVRM description of the rig (sliders, expressions, clips) as one more extension of the file.
+pub fn export_with(model: &Model3d, fmt: Format, svrm: Option<&Value>) -> Result<Vec<u8>, String> {
     if model.parts.is_empty() || model.bones.is_empty() {
         return Err("There is nothing to export: the character has no parts.".into());
     }
@@ -247,6 +252,10 @@ pub fn export(model: &Model3d, fmt: Format) -> Result<Vec<u8>, String> {
             }));
         }
     }
+    if let Some(s) = svrm {
+        b.extensions_used.push(super::svrm::EXTENSION.into());
+        b.extensions.insert(super::svrm::EXTENSION.into(), s.clone());
+    }
     Ok(b.glb())
 }
 
@@ -260,6 +269,8 @@ pub struct Summary {
     pub expressions: usize,
     /// Joints of swinging chains (hair, cloth).
     pub springs: usize,
+    /// The version of the SVRM description in the file, when it has one.
+    pub svrm: Option<u32>,
 }
 
 /// Read a VRM back and check it the way a loader would: the humanoid has what games need, every index points at
@@ -378,5 +389,5 @@ pub fn validate(bytes: &[u8]) -> Result<Summary, String> {
     if spring_nodes.iter().any(|n| !node_ok(n)) {
         return Err("A swinging chain has a joint that is not a node.".into());
     }
-    Ok(Summary { version, bones: bones.len(), parts: meshes.len(), vertices, expressions, springs: spring_nodes.len() })
+    Ok(Summary { version, bones: bones.len(), parts: meshes.len(), vertices, expressions, springs: spring_nodes.len(), svrm: ext[super::svrm::EXTENSION]["version"].as_u64().map(|v| v as u32) })
 }
