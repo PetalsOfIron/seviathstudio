@@ -23,6 +23,12 @@ pub struct PartsState {
     pub suggestions: Vec<Suggestion>,
     /// Look at layers that already have a tag too.
     redo_tagged: bool,
+    /// Your naming rules (kept in a file) and the one being typed.
+    pub rules: Vec<parts::NameRule>,
+    rules_loaded: bool,
+    pub new_rule: (String, Option<Part>),
+    /// "Tag everything for me" also uses the guesses made from shapes.
+    auto_guesses: bool,
     codes: bool,
     zoom: f32,
     pan: Vec2,
@@ -183,6 +189,8 @@ impl SeviathApp {
             self.parts.templates = parts::list_templates_in(&parts::templates_dir());
             self.parts.templates_loaded = true;
             self.parts.codes = true;
+            self.parts.rules = parts::load_rules();
+            self.parts.rules_loaded = true;
         }
         self.parts.selected.retain(|id| self.draw.doc.index_of(*id).is_some());
         self.parts_pictures(&ctx);
@@ -240,6 +248,33 @@ impl SeviathApp {
     }
 
     fn parts_side(&mut self, ui: &mut Ui, now: f64, act_tag: &mut Option<Part>, act_clear: &mut bool, picked: &mut Option<(LayerId, bool, bool)>) {
+        // 0. the easy way
+        section_title(ui, "Don't want to do it by hand?");
+        ui.horizontal_wrapped(|ui| {
+            if ui.add(egui::Button::new(RichText::new("Tag everything for me").strong())).on_hover_text("Uses your name rules, then what the layer names say. You can undo it and change any tag.").clicked() {
+                let min = if self.parts.auto_guesses { 0.3 } else { 0.7 };
+                let found = parts::suggest_with(&self.draw.doc.layers, self.draw.doc.w, self.draw.doc.h, false, &self.parts.rules);
+                let take: Vec<Suggestion> = found.iter().filter(|s| s.confidence >= min).cloned().collect();
+                let left = found.len() - take.len();
+                if take.is_empty() {
+                    self.parts.message = Some("Nothing could be tagged from the names. Try the guesses, or add a name rule below.".into());
+                } else {
+                    let n = take.len();
+                    self.parts_edit(&format!("Tag {n} layers automatically"), now, |d| {
+                        for s in &take {
+                            if let Some(l) = d.layers.iter_mut().find(|l| l.id == s.layer) {
+                                l.part = Some(s.part);
+                            }
+                        }
+                    });
+                    self.parts.suggestions = found.into_iter().filter(|s| s.confidence < min).collect();
+                    let untagged = self.draw.doc.layers.iter().filter(|l| parts::is_part_layer(l) && !l.tiles.is_empty() && l.part.is_none()).count();
+                    self.parts.message = Some(format!("{n} layers tagged. {untagged} still have no tag{}.", if left > 0 { " (the rest are in Suggestions)" } else { "" }));
+                }
+            }
+            ui.checkbox(&mut self.parts.auto_guesses, "Also use guesses from shape and place");
+        });
+
         // 1. tags
         section_title(ui, "Tag the selected layers");
         let n = self.parts.selected.len();
@@ -265,7 +300,7 @@ impl SeviathApp {
         ui.horizontal(|ui| {
             if ui.button("Suggest tags").on_hover_text("From the layer names, their shape and where they are on the page").clicked() {
                 let again = self.parts.redo_tagged;
-                self.parts.suggestions = parts::suggest(&self.draw.doc.layers, self.draw.doc.w, self.draw.doc.h, again);
+                self.parts.suggestions = parts::suggest_with(&self.draw.doc.layers, self.draw.doc.w, self.draw.doc.h, again, &self.parts.rules);
                 self.parts.message = Some(if self.parts.suggestions.is_empty() { "Nothing to suggest.".into() } else { format!("{} suggestions.", self.parts.suggestions.len()) });
             }
             ui.checkbox(&mut self.parts.redo_tagged, "Also tagged ones");
@@ -363,6 +398,51 @@ impl SeviathApp {
                     }
                 }
             });
+        }
+
+        // 4b. your name rules
+        section_title(ui, "Name rules");
+        ui.label(RichText::new("Your own words for your layers. * stands for any letters: eye*L fits Eye_big_L.").size(11.5).color(TEXT_DIM));
+        let mut del_rule: Option<usize> = None;
+        let mut rules_changed = false;
+        for (i, r) in self.parts.rules.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                rules_changed |= ui.add(egui::TextEdit::singleline(&mut r.pattern).desired_width(120.0).char_limit(60)).changed();
+                egui::ComboBox::from_id_salt(("rule_part", i)).selected_text(r.part.label()).width(110.0).show_ui(ui, |ui| {
+                    for p in Part::ALL {
+                        if ui.selectable_value(&mut r.part, p, p.label()).changed() {
+                            rules_changed = true;
+                        }
+                    }
+                });
+                if ui.small_button("Delete").clicked() {
+                    del_rule = Some(i);
+                }
+            });
+        }
+        if let Some(i) = del_rule {
+            self.parts.rules.remove(i);
+            rules_changed = true;
+        }
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.parts.new_rule.0).hint_text("name or pattern").desired_width(120.0).char_limit(60));
+            let part = self.parts.new_rule.1.unwrap_or(Part::Face);
+            egui::ComboBox::from_id_salt("new_rule_part").selected_text(part.label()).width(110.0).show_ui(ui, |ui| {
+                for p in Part::ALL {
+                    if ui.selectable_label(self.parts.new_rule.1 == Some(p), p.label()).clicked() {
+                        self.parts.new_rule.1 = Some(p);
+                    }
+                }
+            });
+            if ui.button("Add rule").clicked() && !self.parts.new_rule.0.trim().is_empty() && self.parts.rules.len() < 200 {
+                let pattern = self.parts.new_rule.0.trim().to_owned();
+                self.parts.rules.push(parts::NameRule { pattern, part });
+                self.parts.new_rule = (String::new(), None);
+                rules_changed = true;
+            }
+        });
+        if rules_changed {
+            parts::save_rules(&self.parts.rules);
         }
 
         // 5. templates

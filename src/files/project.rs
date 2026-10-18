@@ -161,12 +161,12 @@ fn tile_from_png(bytes: &[u8]) -> Result<Vec<Color32>, String> {
 /// half-written project behind.
 #[cfg(test)]
 pub fn save(w: u32, h: u32, paper: Color32, layers: &[Layer], presets: &[Preset], meta: &ProjectMeta, path: &Path) -> Result<(), String> {
-    save_full(w, h, paper, layers, presets, meta, &crate::processlog::ProcessLog::default(), path)
+    save_full(w, h, paper, layers, presets, meta, &crate::processlog::ProcessLog::default(), &crate::rig::Rig::default(), path)
 }
 
 /// Like `save`, with the process log of the picture.
 #[allow(clippy::too_many_arguments)]
-pub fn save_full(w: u32, h: u32, paper: Color32, layers: &[Layer], presets: &[Preset], meta: &ProjectMeta, log: &crate::processlog::ProcessLog, path: &Path) -> Result<(), String> {
+pub fn save_full(w: u32, h: u32, paper: Color32, layers: &[Layer], presets: &[Preset], meta: &ProjectMeta, log: &crate::processlog::ProcessLog, rig: &crate::rig::Rig, path: &Path) -> Result<(), String> {
     let json = ProjectJson {
         format: FORMAT.into(),
         version: VERSION,
@@ -238,6 +238,9 @@ pub fn save_full(w: u32, h: u32, paper: Color32, layers: &[Layer], presets: &[Pr
         put("mimetype", b"application/x-seviath", stored)?;
         put("project.json", serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?.as_bytes(), deflated)?;
         put("thumbnail.png", &thumb, stored)?;
+        if !rig.is_empty() {
+            put("rig.json", serde_json::to_string(rig).map_err(|e| e.to_string())?.as_bytes(), deflated)?;
+        }
         if !log.entries.is_empty() {
             put("process_log.json", serde_json::to_string(log).map_err(|e| e.to_string())?.as_bytes(), deflated)?;
         }
@@ -354,6 +357,11 @@ pub fn load(path: &Path) -> Result<Document, String> {
             doc.log = log.sanitized();
         }
     }
+    if let Ok(bytes) = read_entry(&mut zip, "rig.json", 256 << 20) {
+        if let Ok(rig) = serde_json::from_slice::<crate::rig::Rig>(&bytes) {
+            doc.rig = std::sync::Arc::new(rig.sanitized());
+        }
+    }
     ensure_usable(&mut doc);
     Ok(doc)
 }
@@ -422,7 +430,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("seviath_log_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("log.seviath");
-        save_full(d.w, d.h, d.paper, &d.layers, &[], &d.meta, &log, &path).unwrap();
+        save_full(d.w, d.h, d.paper, &d.layers, &[], &d.meta, &log, &Default::default(), &path).unwrap();
         let back = load(&path).unwrap();
         assert_eq!(back.log.entries.len(), 2);
         assert_eq!(back.log.verify(), Ok(()));
@@ -434,7 +442,7 @@ mod tests {
         let mut edited = log.clone();
         edited.entries[0].secs = 999.0;
         let tampered = dir.join("tampered.seviath");
-        save_full(d.w, d.h, d.paper, &d.layers, &[], &d.meta, &edited, &tampered).unwrap();
+        save_full(d.w, d.h, d.paper, &d.layers, &[], &d.meta, &edited, &Default::default(), &tampered).unwrap();
         assert_eq!(load(&tampered).unwrap().log.verify(), Err(0));
         std::fs::remove_dir_all(&dir).ok();
     }

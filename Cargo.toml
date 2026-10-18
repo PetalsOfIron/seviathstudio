@@ -23,6 +23,7 @@ zip = { version = "9.0.2", default-features = false, features = ["deflate"] }
 openh264 = "0.9.9"
 minimp4 = "0.1.2"
 sha2 = "0.10"
+spade = "2.15.1"
 
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["wgpu", "snapshot", "eframe"] }

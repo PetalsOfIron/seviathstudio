@@ -23,6 +23,7 @@ mod history;
 mod randomizer;
 mod recorder;
 mod refs;
+mod rig;
 mod select;
 mod icons;
 mod layerfilter;

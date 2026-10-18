@@ -1859,7 +1859,7 @@ fn parts_tab_screens() {
     use crate::parts::Part;
     use egui_kittest::kittest::Queryable;
     let _gpu = lock_gpu();
-    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    let mut h = Harness::builder().with_size([1440.0, 1500.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     // a small character sheet: named layers with paint in the right places (the page is 3000 x 4000)
     {
@@ -1989,4 +1989,157 @@ fn prerig_screens() {
     h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
     h.run_steps(3);
     save(&mut h, "prerig_02_after");
+}
+
+#[test]
+fn rig_tab_screens() {
+    use crate::doc::LayerKind;
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 1100.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    // a head (a disc) and an arm (a bar) on the 3000 x 4000 page
+    let (head, arm) = {
+        let d = h.state_mut().draw_mut();
+        let (w, h2) = (d.doc.w, d.doc.h);
+        let mut disc = image::RgbaImage::new(1000, 1000);
+        for y in 0..1000i32 {
+            for x in 0..1000i32 {
+                if (((x - 500).pow(2) + (y - 500).pow(2)) as f32).sqrt() <= 450.0 {
+                    disc.put_pixel(x as u32, y as u32, image::Rgba([240, 200, 170, 255]));
+                }
+            }
+        }
+        let bar = image::RgbaImage::from_pixel(900, 220, image::Rgba([70, 90, 200, 255]));
+        let mut a = d.doc.new_layer("Head", LayerKind::Raster);
+        a.tiles = crate::files::tiles_from_rgba(&disc, 1000, 800, w, h2);
+        a.part = Some(crate::parts::Part::Face);
+        a.rev += 1;
+        let ida = a.id;
+        let mut b = d.doc.new_layer("Arm", LayerKind::Raster);
+        b.tiles = crate::files::tiles_from_rgba(&bar, 1100, 2100, w, h2);
+        b.part = Some(crate::parts::Part::ArmL);
+        b.rev += 1;
+        let idb = b.id;
+        d.doc.layers.insert(0, a);
+        d.doc.layers.insert(0, b);
+        d.doc.mark_all_dirty();
+        (ida, idb)
+    };
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    // meshes for everything that is tagged
+    h.get_by_label("Mesh all tagged parts").click();
+    h.run_steps(4);
+    {
+        let rig = h.state().draw_mut_ref().doc.rig.clone();
+        assert_eq!(rig.meshes.len(), 2, "a mesh for the head and one for the arm");
+        assert!(rig.meshes.iter().all(|m| m.tris.len() >= 8), "{:?}", rig.meshes.iter().map(|m| m.tris.len()).collect::<Vec<_>>());
+    }
+    // a Rotation changer for the head, a slider, and the binding
+    h.state_mut().test_rig().selected = vec![head];
+    h.run_steps(2);
+    h.get_by_label("New Rotation changer").click();
+    h.run_steps(3);
+    h.get_by_label("Add slider").click();
+    h.run_steps(3);
+    h.get_by_label("Bind: turn with the slider").click();
+    h.run_steps(3);
+    let (pid, cid) = {
+        let r = h.state_mut().test_rig();
+        (r.sel_param.expect("a slider is picked"), r.sel_changer.expect("a changer is picked"))
+    };
+    let _ = cid;
+    assert_eq!(h.state().draw_mut_ref().doc.rig.bindings.len(), 1);
+    assert_eq!(h.state_mut().test_moved(head), 0.0, "the slider is in the middle: nothing moves");
+    save(&mut h, "rig_01_rest");
+    h.state_mut().test_rig().values.set(pid, 30.0);
+    h.run_steps(4);
+    assert!(h.state_mut().test_moved(head) > 100.0, "the head turns with the slider");
+    assert_eq!(h.state_mut().test_moved(arm), 0.0, "the arm has no changer and stays");
+    save(&mut h, "rig_02_turned");
+    // undo takes the binding away (undo in this tab)
+    let steps = h.state().history().entries.len();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(3);
+    assert!(h.state().draw_mut_ref().doc.rig.bindings.is_empty());
+    assert_eq!(h.state().history().cursor, steps - 1);
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().doc.rig.bindings.len(), 1, "redo brings it back");
+    // a Warp changer for the arm with a keyform made from a dragged shape
+    h.state_mut().test_rig().selected = vec![arm];
+    h.run_steps(2);
+    h.get_by_label("New Warp changer").click();
+    h.run_steps(3);
+    let warp = h.state_mut().test_rig().sel_changer.unwrap();
+    h.state_mut().test_rig().values.set(pid, 30.0);
+    h.get_by_label("Edit the shape").click();
+    h.run_steps(3);
+    {
+        let w = h.state_mut().test_rig().test_warp_edit().expect("editing");
+        let n = w.len();
+        w[n - 1] = [0.0, 150.0]; // the last corner goes down
+    }
+    h.get_by_label("Save the shape at this value").click();
+    h.run_steps(3);
+    assert!(h.state().draw_mut_ref().doc.rig.bindings.iter().any(|b| b.changer == warp));
+    assert!(h.state_mut().test_moved(arm) > 50.0, "the arm bends at this value");
+    h.state_mut().test_rig().values.set(pid, 0.0);
+    h.run_steps(2);
+    assert!(h.state_mut().test_moved(arm) < 1.0, "and is straight again in the middle");
+    save(&mut h, "rig_03_warp");
+    let _ = warp;
+}
+
+#[test]
+fn parts_one_click_button() {
+    use crate::doc::LayerKind;
+    use crate::parts::Part;
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    {
+        let d = h.state_mut().draw_mut();
+        let (w, h2) = (d.doc.w, d.doc.h);
+        let mut add = |name: &str, x: i32, y: i32, bw: u32, bh: u32| {
+            let img = image::RgbaImage::from_pixel(bw, bh, image::Rgba([120, 120, 200, 255]));
+            let mut l = d.doc.new_layer(name, LayerKind::Raster);
+            l.tiles = crate::files::tiles_from_rgba(&img, x, y, w, h2);
+            l.rev += 1;
+            d.doc.layers.insert(0, l);
+        };
+        add("Eye L", 1560, 1250, 300, 140);
+        add("Mouth", 1350, 1700, 300, 90);
+        add("sparkle 3", 100, 3000, 200, 200);
+        add("Layer 9", 2400, 3500, 200, 200);
+        d.doc.mark_all_dirty();
+    }
+    h.state_mut().test_run_action_now("tab.2");
+    h.run_steps(4);
+    // a rule of my own for "sparkle"
+    h.state_mut().test_parts().new_rule = ("sparkle*".into(), Some(Part::Accessory));
+    h.run_steps(2);
+    h.get_by_label("Add rule").click();
+    h.run_steps(3);
+    assert_eq!(h.state_mut().test_parts().rules.len(), 1);
+    h.get_by_label("Tag everything for me").click();
+    h.run_steps(4);
+    {
+        let d = h.state().draw_mut_ref();
+        let tag = |n: &str| d.doc.layers.iter().find(|l| l.name == n).and_then(|l| l.part);
+        assert_eq!(tag("Eye L"), Some(Part::EyeL));
+        assert_eq!(tag("Mouth"), Some(Part::Mouth));
+        assert_eq!(tag("Layer 9"), None, "an unnamed layer is left alone without guesses");
+    }
+    assert!(h.state().history().entries.last().unwrap().label.contains("automatically"));
+    save(&mut h, "parts_03_auto");
+    // undo puts it all back in one step
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(3);
+    assert!(h.state().draw_mut_ref().doc.layers.iter().all(|l| l.part.is_none()));
+    // a rule that is typed stays in the file for next time
+    assert_eq!(crate::parts::load_rules().len(), 1);
+    let _ = std::fs::remove_file(std::env::temp_dir().join(format!("seviath_name_rules_{}.json", std::process::id())));
 }

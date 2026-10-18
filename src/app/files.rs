@@ -128,6 +128,7 @@ fn doc_from_state(w: u32, h: u32, s: DocState) -> Document {
     let mut d = Document::from_parts(w, h, s.paper, s.layers);
     d.filter_presets = s.presets;
     d.meta = s.meta;
+    d.rig = s.rig;
     d
 }
 
@@ -274,7 +275,7 @@ impl SeviathApp {
         let log = self.draw.doc.log.clone();
         let label = format!("Saving {}…", stem(&path));
         self.start(label, move || {
-            project::save_full(w, h, state.paper, &state.layers, &state.presets, &state.meta, &log, &path)?;
+            project::save_full(w, h, state.paper, &state.layers, &state.presets, &state.meta, &log, &state.rig, &path)?;
             Ok(Done::Saved { path, generation, then })
         });
     }
@@ -395,10 +396,10 @@ impl SeviathApp {
                 std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
                 let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
                 let file = dir.join(format!("{name} {stamp}.seviath"));
-                project::save_full(w, h, state.paper, &state.layers, &state.presets, &state.meta, &log, &file)?;
+                project::save_full(w, h, state.paper, &state.layers, &state.presets, &state.meta, &log, &state.rig, &file)?;
                 prune_recovery(&dir, keep);
                 if let Some(p) = also {
-                    project::save_full(w, h, state.paper, &state.layers, &state.presets, &state.meta, &log, &p)?;
+                    project::save_full(w, h, state.paper, &state.layers, &state.presets, &state.meta, &log, &state.rig, &p)?;
                     return Ok(Done::Saved { path: p, generation, then: None });
                 }
                 Ok(Done::Autosaved)

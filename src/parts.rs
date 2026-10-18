@@ -325,12 +325,111 @@ enum NamePart {
     Pair(Part, Part),
 }
 
+/// Your own naming rule: a layer whose name fits the pattern gets this tag.
+/// `*` stands for any letters ("eye*L" fits "Eye_big_L"); with no `*` the pattern fits any name that contains it. Capitals don't matter.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct NameRule {
+    pub pattern: String,
+    pub part: Part,
+}
+
+pub fn rule_matches(pattern: &str, name: &str) -> bool {
+    let (p, n) = (pattern.trim().to_lowercase(), name.to_lowercase());
+    if p.is_empty() {
+        return false;
+    }
+    if !p.contains('*') {
+        return n.contains(&p);
+    }
+    // pieces between the stars must appear in order; the first and last stick to the ends when there is no star there
+    let pieces: Vec<&str> = p.split('*').collect();
+    let mut at = 0usize;
+    for (i, piece) in pieces.iter().enumerate() {
+        if piece.is_empty() {
+            continue;
+        }
+        if i == 0 {
+            if !n.starts_with(piece) {
+                return false;
+            }
+            at = piece.len();
+        } else if i == pieces.len() - 1 {
+            return n.len() >= at + piece.len() && n.ends_with(piece);
+        } else {
+            match n[at..].find(piece) {
+                Some(k) => at += k + piece.len(),
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
+/// The first rule that fits a name.
+pub fn rule_for<'a>(rules: &'a [NameRule], name: &str) -> Option<&'a NameRule> {
+    rules.iter().find(|r| rule_matches(&r.pattern, name))
+}
+
+/// Tag layers by your rules (and nothing else). Returns how many layers changed.
+pub fn apply_rules(layers: &mut [Layer], rules: &[NameRule], overwrite: bool) -> usize {
+    let mut n = 0;
+    for l in layers.iter_mut().filter(|l| is_part_layer(l)) {
+        if l.part.is_some() && !overwrite {
+            continue;
+        }
+        if let Some(r) = rule_for(rules, &l.name) {
+            if l.part != Some(r.part) {
+                l.part = Some(r.part);
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+fn rules_path() -> PathBuf {
+    if cfg!(test) {
+        return std::env::temp_dir().join(format!("seviath_name_rules_{}.json", std::process::id()));
+    }
+    dirs::config_dir().unwrap_or_else(std::env::temp_dir).join("SeviathStudio").join("part-name-rules.json")
+}
+
+pub fn load_rules() -> Vec<NameRule> {
+    let p = rules_path();
+    let mut v: Vec<NameRule> = std::fs::metadata(&p).ok().filter(|m| m.len() < 1 << 20).and_then(|_| std::fs::read(&p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    v.truncate(200);
+    for r in &mut v {
+        r.pattern = r.pattern.chars().filter(|c| !c.is_control()).take(60).collect();
+    }
+    v.retain(|r| !r.pattern.trim().is_empty());
+    v
+}
+
+pub fn save_rules(rules: &[NameRule]) {
+    let p = rules_path();
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    if let Ok(t) = serde_json::to_string_pretty(rules) {
+        let _ = std::fs::write(p, t);
+    }
+}
+
 /// Suggest tags for layers that have none. `include_tagged`: also look at layers that already have one.
 pub fn suggest(layers: &[Layer], doc_w: u32, doc_h: u32, include_tagged: bool) -> Vec<Suggestion> {
+    suggest_with(layers, doc_w, doc_h, include_tagged, &[])
+}
+
+/// Like `suggest`, with your own naming rules first.
+pub fn suggest_with(layers: &[Layer], doc_w: u32, doc_h: u32, include_tagged: bool, rules: &[NameRule]) -> Vec<Suggestion> {
     let (dw, dh) = (doc_w.max(1) as f32, doc_h.max(1) as f32);
     let mut out = Vec::new();
     for l in layers.iter().filter(|l| is_part_layer(l)) {
         if l.part.is_some() && !include_tagged {
+            continue;
+        }
+        if let Some(r) = rule_for(rules, &l.name) {
+            out.push(Suggestion { layer: l.id, part: r.part, confidence: 0.95, reason: format!("your rule “{}”", r.pattern) });
             continue;
         }
         let bounds = layer_bounds(l, doc_w, doc_h);
@@ -692,6 +791,44 @@ mod tests {
         delete_template_in(&dir, "My model");
         assert!(list_templates_in(&dir).is_empty());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn your_own_name_rules_tag_layers_and_win_over_the_built_in_names() {
+        assert!(rule_matches("eye", "Big Eye L"));
+        assert!(rule_matches("EYE*L", "eye_big_l"));
+        assert!(!rule_matches("eye*L", "eye_big_r"));
+        assert!(rule_matches("*_hi", "skin_hi"));
+        assert!(!rule_matches("*_hi", "hi_skin"));
+        assert!(rule_matches("a*b*c", "a--b--c"));
+        assert!(!rule_matches("a*b*c", "a--c--b"));
+        assert!(!rule_matches("", "anything") && !rule_matches("   ", "anything"));
+        let rules = vec![NameRule { pattern: "lashes*".into(), part: Part::EyeL }, NameRule { pattern: "sparkle".into(), part: Part::Accessory }];
+        let mut d = doc();
+        layer(&mut d, "lashes top", (600, 300, 700, 340));
+        layer(&mut d, "star sparkle 2", (10, 10, 50, 50));
+        layer(&mut d, "Eye R", (300, 300, 400, 340));
+        layer(&mut d, "Layer 7", (100, 700, 140, 740));
+        // suggestions put the rules first (with high confidence)
+        let s = suggest_with(&d.layers, 1000, 1000, false, &rules);
+        let by_name = |n: &str| s.iter().find(|x| d.layers.iter().any(|l| l.id == x.layer && l.name == n));
+        assert_eq!(by_name("lashes top").unwrap().part, Part::EyeL);
+        assert!(by_name("lashes top").unwrap().reason.contains("your rule"));
+        assert_eq!(by_name("Eye R").unwrap().part, Part::EyeR, "the built-in names still work");
+        assert!(by_name("Layer 7").is_none());
+        // applying only your rules
+        let n = apply_rules(&mut d.layers, &rules, false);
+        assert_eq!(n, 2);
+        assert_eq!(d.layers.iter().find(|l| l.name == "Eye R").unwrap().part, None, "rules only: the built-in names are not used");
+        // tagged layers keep their tag unless asked
+        let id = d.layers.iter().position(|l| l.name == "lashes top").unwrap();
+        d.layers[id].part = Some(Part::Nose);
+        assert_eq!(apply_rules(&mut d.layers, &rules, false), 0);
+        assert_eq!(apply_rules(&mut d.layers, &rules, true), 1);
+        // kept in a file
+        save_rules(&rules);
+        assert_eq!(load_rules(), rules);
+        std::fs::remove_file(rules_path()).ok();
     }
 
     #[test]
