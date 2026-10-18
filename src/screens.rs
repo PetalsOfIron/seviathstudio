@@ -2027,6 +2027,7 @@ fn rig_tab_screens() {
         (ida, idb)
     };
     h.state_mut().test_run_action_now("tab.3");
+    h.state_mut().test_rig().pro = true;
     h.run_steps(5);
     // meshes for everything that is tagged
     h.get_by_label("Mesh all tagged parts").click();
@@ -2183,6 +2184,7 @@ fn rig_tab_more_changers_screens() {
         (hair, cheek, left, right, head)
     };
     h.state_mut().test_run_action_now("tab.3");
+    h.state_mut().test_rig().pro = true;
     h.run_steps(4);
     h.state_mut().test_rig().selected = vec![hair, cheek, left, right, head];
     h.run_steps(2);
@@ -2311,6 +2313,7 @@ fn rig_tab_uncut_skin_screens() {
         d.doc.mark_all_dirty();
     }
     h.state_mut().test_run_action_now("tab.3");
+    h.state_mut().test_rig().pro = true;
     h.run_steps(4);
     h.get_by_label("Make one mesh of the drawing").click();
     h.run_steps(5);
@@ -2401,6 +2404,7 @@ fn rig_tab_manual_weights_screens() {
         d.doc.mark_all_dirty();
     }
     h.state_mut().test_run_action_now("tab.3");
+    h.state_mut().test_rig().pro = true;
     h.run_steps(4);
     h.get_by_label("Make one mesh of the drawing").click();
     h.run_steps(4);
@@ -2465,4 +2469,86 @@ fn rig_tab_manual_weights_screens() {
     h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
     h.run_steps(3);
     let _ = arm_after;
+}
+
+#[test]
+fn rig_tab_auto_face_screens() {
+    use crate::doc::LayerKind;
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 1500.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    // a simple face with named layers and nothing tagged
+    {
+        let d = h.state_mut().draw_mut();
+        let (w, h2) = (d.doc.w, d.doc.h);
+        let mut add = |name: &str, x: i32, y: i32, bw: u32, bh: u32, c: [u8; 3]| {
+            let mut img = image::RgbaImage::new(bw, bh);
+            for yy in 0..bh {
+                for xx in 0..bw {
+                    img.put_pixel(xx, yy, image::Rgba([c[0], c[1], c[2], 255]));
+                }
+            }
+            let mut l = d.doc.new_layer(name, LayerKind::Raster);
+            l.tiles = crate::files::tiles_from_rgba(&img, x, y, w, h2);
+            l.rev += 1;
+            d.doc.layers.insert(0, l);
+        };
+        add("hair back", 900, 700, 1200, 1500, [90, 60, 140]);
+        add("face", 1000, 900, 1000, 1200, [240, 205, 180]);
+        add("eye L", 1550, 1400, 250, 110, [40, 70, 140]);
+        add("eye R", 1200, 1400, 250, 110, [40, 70, 140]);
+        add("brow L", 1550, 1250, 250, 40, [70, 40, 30]);
+        add("brow R", 1200, 1250, 250, 40, [70, 40, 30]);
+        add("nose", 1450, 1550, 100, 200, [225, 180, 150]);
+        add("mouth inside", 1350, 1900, 300, 90, [120, 30, 50]);
+        add("mouth", 1350, 1900, 300, 90, [200, 80, 90]);
+        add("hair front", 950, 800, 1100, 350, [110, 70, 170]);
+        d.doc.mark_all_dirty();
+    }
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    // beginner mode: only the automatic rig and the sliders are shown
+    assert!(h.query_by_label("Mesh all tagged parts").is_none(), "pro things are hidden in beginner mode");
+    h.get_by_label("This is a face").click();
+    h.run_steps(5);
+    {
+        let d = h.state().draw_mut_ref();
+        assert_eq!(d.doc.layers.iter().filter(|l| l.part.is_some()).count(), 10, "tagged by name");
+        let rig = d.doc.rig.clone();
+        assert_eq!(rig.meshes.len(), 10);
+        for n in ["Angle X", "Angle Y", "Angle Z", "Eyes open", "Brows", "Mouth open", "Mouth A", "Mouth O"] {
+            assert!(rig.params.iter().any(|p| p.name == n), "a slider {n}");
+        }
+        assert!(rig.auto.is_some());
+    }
+    assert!(h.state().history().entries.iter().any(|e| e.label.starts_with("Rig the face")));
+    // the sliders move the drawing
+    let (ax, eyes, a) = {
+        let r = h.state().draw_mut_ref().doc.rig.clone();
+        let id = |n: &str| r.params.iter().find(|p| p.name == n).unwrap().id;
+        (id("Angle X"), id("Eyes open"), id("Mouth A"))
+    };
+    let eye_layer = h.state().draw_mut_ref().doc.layers.iter().find(|l| l.name == "eye L").unwrap().id;
+    let mouth_layer = h.state().draw_mut_ref().doc.layers.iter().find(|l| l.name == "mouth").unwrap().id;
+    save(&mut h, "rig_08_face_rest");
+    h.state_mut().test_rig().values.set(ax, 30.0);
+    h.state_mut().test_rig().values.set(eyes, 0.0);
+    h.state_mut().test_rig().values.set(a, 1.0);
+    h.run_steps(4);
+    assert!(h.state_mut().test_moved(eye_layer) > 30.0, "the eye closes and slides");
+    assert!(h.state_mut().test_moved(mouth_layer) > 30.0, "the mouth opens");
+    save(&mut h, "rig_09_face_posed");
+    // the test motion plays by itself
+    h.state_mut().test_rig().values = crate::rig::Values::default();
+    h.get_by_label("Test motion").click();
+    h.run_steps(8);
+    assert!(h.state_mut().test_rig().values.0.len() >= 8, "every slider is moving");
+    h.get_by_label("Stop the test motion").click();
+    h.run_steps(3);
+    assert!(h.state_mut().test_rig().values.0.is_empty());
+    // undo takes the whole rig back in one step
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(3);
+    assert!(h.state().draw_mut_ref().doc.rig.params.is_empty(), "one undo step for the whole face rig");
 }

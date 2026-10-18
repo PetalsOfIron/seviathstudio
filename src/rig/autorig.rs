@@ -1,0 +1,488 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Auto-rig: from the Parts tags, "Rig face" builds a whole face rig in one go: head turn (X and Y, with parallax so the
+// nose moves more than the cheek) and tilt (Z), blinking eyes, brows, and a mouth that opens and makes A, I, U, E and O.
+// It is a rule-based first version: meshes, changers, sliders and keyforms made by the same pieces you can edit by hand.
+
+use serde::{Deserialize, Serialize};
+
+use super::{Form, Id, Kind, Rig, mesh};
+use crate::doc::{Layer, LayerId};
+use crate::files::layer_bounds;
+use crate::parts::Part;
+
+/// What was made by the automation. Things in `locked` are left alone when it runs again.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoRig {
+    pub changers: Vec<Id>,
+    pub params: Vec<Id>,
+    pub locked: Vec<Id>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FaceOptions {
+    /// How strong the head turn is (1 = normal).
+    pub turn: f32,
+    /// One slider for both eyes (off: one each, for a face that is not symmetrical).
+    pub together_eyes: bool,
+    pub together_brows: bool,
+    /// A, I, U, E, O for the mouth.
+    pub vowels: bool,
+    /// How fine the meshes are, 0..1.
+    pub detail: f32,
+}
+
+impl Default for FaceOptions {
+    fn default() -> Self {
+        Self { turn: 1.0, together_eyes: true, together_brows: true, vowels: true, detail: 0.5 }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Report {
+    pub meshes: usize,
+    pub changers: usize,
+    pub params: usize,
+    pub notes: Vec<String>,
+}
+
+/// How far in front of the face a part sits: the nearer it is, the more it moves when the head turns.
+fn depth(p: Part) -> f32 {
+    match p {
+        Part::HairBack => 0.1,
+        Part::Face => 0.5,
+        Part::EarL | Part::EarR => 0.2,
+        Part::HairSideL | Part::HairSideR => 0.6,
+        Part::EyeL | Part::EyeR | Part::Blush => 0.9,
+        Part::BrowL | Part::BrowR => 0.95,
+        Part::Mouth | Part::MouthInside => 1.0,
+        Part::Nose => 1.2,
+        Part::HairFront => 1.15,
+        _ => 0.5,
+    }
+}
+
+fn is_face_part(p: Part) -> bool {
+    matches!(
+        p,
+        Part::Face | Part::EyeL | Part::EyeR | Part::BrowL | Part::BrowR | Part::Nose | Part::Mouth | Part::MouthInside | Part::EarL | Part::EarR | Part::Blush | Part::HairFront | Part::HairSideL | Part::HairSideR | Part::HairBack
+    )
+}
+
+fn union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]
+}
+
+fn grow(r: [f32; 4], by: f32) -> [f32; 4] {
+    [r[0] - by, r[1] - by, r[2] + by, r[3] + by]
+}
+
+/// Remove what an earlier run made (except what is locked). Returns the locked ones that are kept.
+pub fn clear_generated(rig: &mut Rig) {
+    let Some(auto) = rig.auto.take() else { return };
+    let drop: Vec<Id> = auto.changers.iter().copied().filter(|c| !auto.locked.contains(c)).collect();
+    rig.changers.retain(|c| !drop.contains(&c.id));
+    rig.bindings.retain(|b| !drop.contains(&b.changer));
+    for c in rig.changers.iter_mut() {
+        if c.parent.is_some_and(|p| drop.contains(&p)) {
+            c.parent = None;
+        }
+    }
+    for m in rig.meshes.iter_mut() {
+        if m.parent.is_some_and(|p| drop.contains(&p)) {
+            m.parent = None;
+        }
+    }
+    // a slider goes when nothing uses it any more
+    let used: Vec<Id> = rig.bindings.iter().flat_map(|b| b.params.clone()).collect();
+    let dead: Vec<Id> = auto.params.iter().copied().filter(|p| !used.contains(p)).collect();
+    rig.params.retain(|p| !dead.contains(&p.id));
+    rig.auto = Some(AutoRig { changers: auto.changers.into_iter().filter(|c| !drop.contains(c)).collect(), params: auto.params.into_iter().filter(|p| !dead.contains(p)).collect(), locked: auto.locked });
+}
+
+struct Maker<'a> {
+    rig: &'a mut Rig,
+    changers: Vec<Id>,
+    params: Vec<Id>,
+}
+
+impl Maker<'_> {
+    fn param(&mut self, name: &str, lo: f32, hi: f32, def: f32) -> Id {
+        let id = self.rig.add_param(name, lo, hi, def);
+        self.params.push(id);
+        id
+    }
+
+    fn changer(&mut self, name: &str, kind: Kind, parent: Option<Id>) -> Id {
+        let id = self.rig.add_changer(name, kind, parent);
+        self.changers.push(id);
+        id
+    }
+
+    /// A box that only slides: all four corners move by the same amount.
+    fn slide(&mut self, changer: Id, param: Id, at: f32, d: [f32; 2]) {
+        self.rig.set_keyform(changer, param, at, Form::Warp { offsets: vec![d; 4] });
+    }
+}
+
+/// Build the face rig from the tagged layers. Returns what was made, or why nothing could be.
+pub fn rig_face(rig: &mut Rig, layers: &[Layer], doc_w: u32, doc_h: u32, o: &FaceOptions) -> Result<Report, String> {
+    let items: Vec<(&Layer, Part, [f32; 4])> = layers
+        .iter()
+        .filter(|l| l.visible)
+        .filter_map(|l| {
+            let p = l.part.filter(|p| is_face_part(*p))?;
+            let (x0, y0, x1, y1) = layer_bounds(l, doc_w, doc_h)?;
+            Some((l, p, [x0 as f32, y0 as f32, x1 as f32, y1 as f32]))
+        })
+        .collect();
+    let has = |p: Part| items.iter().any(|i| i.1 == p);
+    if !has(Part::Face) && !has(Part::EyeL) && !has(Part::EyeR) {
+        return Err("Tag the face first: the face base and the eyes (Parts tab, or the Tag everything for me button).".into());
+    }
+    let rect_of = |parts: &[Part]| -> Option<[f32; 4]> { items.iter().filter(|i| parts.contains(&i.1)).map(|i| i.2).reduce(union) };
+    let head = rect_of(&[Part::Face]).or_else(|| rect_of(&[Part::EyeL, Part::EyeR, Part::Nose, Part::Mouth, Part::BrowL, Part::BrowR])).unwrap_or([0.0, 0.0, doc_w as f32, doc_h as f32]);
+    let (hw, hh) = ((head[2] - head[0]).max(10.0), (head[3] - head[1]).max(10.0));
+    let mut report = Report::default();
+
+    clear_generated(rig);
+    // meshes for every face layer
+    let ids: Vec<LayerId> = items.iter().map(|i| i.0.id).collect();
+    for (l, _, _) in &items {
+        if let Some((verts, tris)) = mesh::generate(l, doc_w, doc_h, o.detail) {
+            let mid = rig.fresh_id();
+            rig.meshes.retain(|m| m.layer != l.id);
+            rig.meshes.push(super::ArtMesh { id: mid, layer: l.id, verts, tris, parent: None });
+            report.meshes += 1;
+        } else {
+            report.notes.push(format!("“{}” has no paint, so it has no mesh.", l.name));
+        }
+    }
+    let locked = rig.auto.as_ref().map(|a| a.locked.clone()).unwrap_or_default();
+    let mut mk = Maker { rig, changers: Vec::new(), params: Vec::new() };
+
+    // head turn and tilt
+    let ax = mk.param("Angle X", -30.0, 30.0, 0.0);
+    let ay = mk.param("Angle Y", -30.0, 30.0, 0.0);
+    let az = mk.param("Angle Z", -30.0, 30.0, 0.0);
+    let pivot = [(head[0] + head[2]) / 2.0, head[3] - 0.08 * hh];
+    let tilt = mk.changer("Head tilt", Kind::Rotation { pivot }, None);
+    mk.rig.bind_rotation(tilt, az, 15.0 * o.turn);
+    // every kind of part slides a little, by how near it is
+    let mut parallax: Vec<(Part, Id)> = Vec::new();
+    for part in crate::parts::Part::ALL.iter().copied().filter(|p| is_face_part(*p) && has(*p)) {
+        let Some(r) = rect_of(&[part]) else { continue };
+        let c = mk.changer(&format!("Turn {}", part.label()), Kind::Warp { rect: grow(r, 4.0), cols: 1, rows: 1 }, Some(tilt));
+        let d = depth(part);
+        let (dx, dy) = (d * 0.14 * hw * o.turn, d * 0.10 * hh * o.turn);
+        mk.slide(c, ax, 30.0, [dx, 0.0]);
+        mk.slide(c, ax, -30.0, [-dx, 0.0]);
+        mk.slide(c, ay, 30.0, [0.0, -dy]);
+        mk.slide(c, ay, -30.0, [0.0, dy]);
+        parallax.push((part, c));
+    }
+    let par = |p: Part| parallax.iter().find(|x| x.0 == p).map(|x| x.1);
+    let mut parent_of: Vec<(Part, Option<Id>)> = parallax.iter().map(|(p, c)| (*p, Some(*c))).collect();
+    let set_parent = |parent_of: &mut Vec<(Part, Option<Id>)>, p: Part, c: Id| {
+        if let Some(e) = parent_of.iter_mut().find(|e| e.0 == p) {
+            e.1 = Some(c);
+        }
+    };
+
+    // eyes: closing
+    let eye_param_all = if o.together_eyes && (has(Part::EyeL) || has(Part::EyeR)) { Some(mk.param("Eyes open", 0.0, 1.0, 1.0)) } else { None };
+    for (part, name) in [(Part::EyeL, "Eye L open"), (Part::EyeR, "Eye R open")] {
+        if let (Some(r), Some(p)) = (rect_of(&[part]), par(part)) {
+            let prm = match eye_param_all {
+                Some(a) => a,
+                None => mk.param(name, 0.0, 1.0, 1.0),
+            };
+            let c = mk.changer(&format!("{} blink", part.label()), Kind::Warp { rect: grow(r, 2.0), cols: 1, rows: 1 }, Some(p));
+            let h = (r[3] - r[1]) + 4.0;
+            // closed: the top edge comes down to the bottom, leaving a line
+            mk.rig.set_keyform(c, prm, 0.0, Form::Warp { offsets: vec![[0.0, 0.9 * h], [0.0, 0.9 * h], [0.0, 0.0], [0.0, 0.0]] });
+            set_parent(&mut parent_of, part, c);
+        }
+    }
+    // brows: up and down
+    let brow_all = if o.together_brows && (has(Part::BrowL) || has(Part::BrowR)) { Some(mk.param("Brows", -1.0, 1.0, 0.0)) } else { None };
+    for (part, name) in [(Part::BrowL, "Brow L"), (Part::BrowR, "Brow R")] {
+        if let (Some(r), Some(p)) = (rect_of(&[part]), par(part)) {
+            let prm = match brow_all {
+                Some(a) => a,
+                None => mk.param(name, -1.0, 1.0, 0.0),
+            };
+            let c = mk.changer(&format!("{} raise", part.label()), Kind::Warp { rect: grow(r, 2.0), cols: 1, rows: 1 }, Some(p));
+            let up = 0.5 * (r[3] - r[1]) + 0.03 * hh;
+            mk.slide(c, prm, 1.0, [0.0, -up]);
+            mk.slide(c, prm, -1.0, [0.0, 0.6 * up]);
+            set_parent(&mut parent_of, part, c);
+        }
+    }
+    // mouth: open, and the five vowels
+    if let Some(mr) = rect_of(&[Part::Mouth, Part::MouthInside]) {
+        let open = mk.param("Mouth open", 0.0, 1.0, 0.0);
+        let vowels: Vec<(Id, &str, (f32, f32, f32))> = if o.vowels {
+            [("A", (0.05, 0.9, 0.1)), ("I", (0.18, 0.12, 0.0)), ("U", (-0.22, 0.35, 0.05)), ("E", (0.12, 0.45, 0.0)), ("O", (-0.18, 0.7, 0.1))].iter().map(|(n, s)| (mk.param(&format!("Mouth {n}"), 0.0, 1.0, 0.0), *n, *s)).collect()
+        } else {
+            Vec::new()
+        };
+        let (mw, mh) = (mr[2] - mr[0], mr[3] - mr[1]);
+        // the 3 x 3 control points: rows top to bottom, columns left to right
+        let shape = |corner: f32, bottom: f32, top: f32| -> Vec<[f32; 2]> {
+            let mut v = Vec::new();
+            for r in 0..3 {
+                for c in 0..3 {
+                    let x = match c {
+                        0 => -corner * mw,
+                        2 => corner * mw,
+                        _ => 0.0,
+                    };
+                    let mid = c == 1;
+                    let y = match r {
+                        2 => bottom * mh * if mid { 1.0 } else { 0.5 },
+                        0 => -top * mh * if mid { 1.0 } else { 0.5 },
+                        _ => bottom * mh * if mid { 0.5 } else { 0.25 },
+                    };
+                    v.push([x, y]);
+                }
+            }
+            v
+        };
+        for part in [Part::Mouth, Part::MouthInside] {
+            let (Some(_), Some(p)) = (rect_of(&[part]), par(part)) else { continue };
+            let c = mk.changer(&format!("{} shape", part.label()), Kind::Warp { rect: grow(mr, 2.0), cols: 2, rows: 2 }, Some(p));
+            mk.rig.set_keyform(c, open, 1.0, Form::Warp { offsets: shape(0.0, 0.8, 0.0) });
+            for (prm, _, (corner, bottom, top)) in &vowels {
+                mk.rig.set_keyform(c, *prm, 1.0, Form::Warp { offsets: shape(*corner, *bottom, *top) });
+            }
+            set_parent(&mut parent_of, part, c);
+        }
+        if !has(Part::MouthInside) {
+            report.notes.push("The mouth has no inside (teeth and tongue): tag one to see the mouth open.".into());
+        }
+    }
+    // every mesh goes into the last changer of its part's chain
+    let (changers, params) = (mk.changers, mk.params);
+    let rig = mk.rig;
+    for (l, part, _) in &items {
+        let parent = parent_of.iter().find(|e| e.0 == *part).and_then(|e| e.1);
+        if let Some(m) = rig.meshes.iter_mut().find(|m| m.layer == l.id) {
+            m.parent = parent;
+        }
+    }
+    report.changers = changers.len();
+    report.params = params.len();
+    rig.auto = Some(AutoRig { changers, params, locked });
+    let _ = ids;
+    Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::doc::{Document, LayerKind, TILE};
+    use crate::rig::Values;
+    use eframe::egui::Color32;
+    use std::sync::Arc;
+
+    fn add(d: &mut Document, name: &str, part: Option<Part>, b: (usize, usize, usize, usize)) {
+        let mut l = d.new_layer(name, LayerKind::Raster);
+        for ty in b.1 / TILE..=(b.3 - 1) / TILE {
+            for tx in b.0 / TILE..=(b.2 - 1) / TILE {
+                let mut px = vec![Color32::TRANSPARENT; TILE * TILE];
+                for j in 0..TILE {
+                    for i in 0..TILE {
+                        let (x, y) = (tx * TILE + i, ty * TILE + j);
+                        if x >= b.0 && x < b.2 && y >= b.1 && y < b.3 {
+                            px[j * TILE + i] = Color32::from_rgb(200, 120, 120);
+                        }
+                    }
+                }
+                l.tiles.insert((tx as i32, ty as i32), Arc::new(px));
+            }
+        }
+        l.part = part;
+        d.layers.insert(0, l);
+    }
+
+    /// A face on a 1000 x 1000 page.
+    fn face() -> Document {
+        let mut d = Document::new(1000, 1000);
+        add(&mut d, "Hair back", Some(Part::HairBack), (250, 80, 750, 700));
+        add(&mut d, "Face", Some(Part::Face), (300, 200, 700, 700));
+        add(&mut d, "Eye L", Some(Part::EyeL), (550, 400, 650, 450));
+        add(&mut d, "Eye R", Some(Part::EyeR), (350, 400, 450, 450));
+        add(&mut d, "Brow L", Some(Part::BrowL), (550, 340, 650, 360));
+        add(&mut d, "Brow R", Some(Part::BrowR), (350, 340, 450, 360));
+        add(&mut d, "Nose", Some(Part::Nose), (480, 470, 520, 540));
+        add(&mut d, "Mouth inside", Some(Part::MouthInside), (440, 580, 560, 610));
+        add(&mut d, "Mouth", Some(Part::Mouth), (440, 580, 560, 610));
+        add(&mut d, "Hair front", Some(Part::HairFront), (280, 150, 720, 300));
+        add(&mut d, "Background", None, (0, 0, 1000, 1000));
+        d
+    }
+
+    fn param(r: &Rig, name: &str) -> Id {
+        r.params.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("a slider called {name}: {:?}", r.params.iter().map(|p| p.name.clone()).collect::<Vec<_>>())).id
+    }
+
+    fn mesh_of<'a>(d: &'a Document, r: &'a Rig, name: &str) -> &'a super::super::ArtMesh {
+        let id = d.layers.iter().find(|l| l.name == name).unwrap().id;
+        r.mesh_of(id).unwrap_or_else(|| panic!("a mesh for {name}"))
+    }
+
+    fn extent(v: &[[f32; 2]]) -> (f32, f32, f32, f32) {
+        let f = |k: usize, m: bool| v.iter().map(|p| p[k]).fold(if m { f32::MIN } else { f32::MAX }, |a, b| if m { a.max(b) } else { a.min(b) });
+        (f(0, false), f(1, false), f(0, true), f(1, true))
+    }
+
+    #[test]
+    fn rig_face_makes_meshes_sliders_and_changers_from_the_tags() {
+        let d = face();
+        let mut r = Rig::default();
+        let rep = rig_face(&mut r, &d.layers, d.w, d.h, &FaceOptions::default()).unwrap();
+        assert_eq!(rep.meshes, 10, "every tagged face layer has a mesh, the background does not");
+        assert!(r.mesh_of(d.layers.iter().find(|l| l.name == "Background").unwrap().id).is_none());
+        for n in ["Angle X", "Angle Y", "Angle Z", "Eyes open", "Brows", "Mouth open", "Mouth A", "Mouth I", "Mouth U", "Mouth E", "Mouth O"] {
+            param(&r, n);
+        }
+        assert_eq!(rep.params, 11);
+        assert!(rep.changers >= 10, "{}", rep.changers);
+        assert!(r.mesh_of(d.layers.iter().find(|l| l.name == "Mouth").unwrap().id).unwrap().parent.is_some());
+        // it all survives cleaning
+        let cleaned = r.clone().sanitized();
+        assert_eq!(cleaned.changers.len(), r.changers.len());
+        assert_eq!(cleaned.bindings.len(), r.bindings.len());
+    }
+
+    #[test]
+    fn turning_the_head_moves_near_parts_more_than_far_ones() {
+        let d = face();
+        let mut r = Rig::default();
+        rig_face(&mut r, &d.layers, d.w, d.h, &FaceOptions::default()).unwrap();
+        let ax = param(&r, "Angle X");
+        let mut v = Values::default();
+        v.set(ax, 30.0);
+        let pose = r.pose(&v);
+        let shift = |name: &str| {
+            let m = mesh_of(&d, &r, name);
+            let now = r.deformed(m, &pose);
+            now.iter().zip(&m.verts).map(|(a, b)| a[0] - b[0]).sum::<f32>() / now.len() as f32
+        };
+        let (nose, face, back) = (shift("Nose"), shift("Face"), shift("Hair back"));
+        assert!(nose > face && face > back && back > 0.0, "nose {nose}, face {face}, hair back {back}");
+        v.set(ax, -30.0);
+        let left = r.pose(&v);
+        let m = mesh_of(&d, &r, "Nose");
+        assert!(r.deformed(m, &left)[0][0] < m.verts[0][0], "the other way");
+        // Angle Y moves things up and down
+        let ay = param(&r, "Angle Y");
+        let mut w = Values::default();
+        w.set(ay, 30.0);
+        let m = mesh_of(&d, &r, "Eye L");
+        assert!(r.deformed(m, &r.pose(&w))[0][1] < m.verts[0][1], "looking up moves the eyes up");
+    }
+
+    #[test]
+    fn eyes_close_brows_move_and_the_mouth_opens_with_its_inside() {
+        let d = face();
+        let mut r = Rig::default();
+        rig_face(&mut r, &d.layers, d.w, d.h, &FaceOptions::default()).unwrap();
+        let (open, brows, a, i) = (param(&r, "Eyes open"), param(&r, "Brows"), param(&r, "Mouth A"), param(&r, "Mouth I"));
+        let rest_height = |name: &str| {
+            let m = mesh_of(&d, &r, name);
+            let e = extent(&m.verts);
+            e.3 - e.1
+        };
+        let mut v = Values::default();
+        assert!((v.0.get(&open).is_none()), "nothing set: the default is open");
+        let closed_h = |v: &Values, name: &str| {
+            let m = mesh_of(&d, &r, name);
+            let e = extent(&r.deformed(m, &r.pose(v)));
+            e.3 - e.1
+        };
+        assert!((closed_h(&v, "Eye L") - rest_height("Eye L")).abs() < 0.5, "open at rest");
+        v.set(open, 0.0);
+        assert!(closed_h(&v, "Eye L") < rest_height("Eye L") * 0.25 && closed_h(&v, "Eye R") < rest_height("Eye R") * 0.25, "both eyes close together");
+        // brows go up
+        let mut b = Values::default();
+        b.set(brows, 1.0);
+        let m = mesh_of(&d, &r, "Brow L");
+        assert!(r.deformed(m, &r.pose(&b))[0][1] < m.verts[0][1] - 10.0);
+        // A opens the mouth wide and the inside follows
+        let mut va = Values::default();
+        va.set(a, 1.0);
+        for name in ["Mouth", "Mouth inside"] {
+            assert!(closed_h(&va, name) > rest_height(name) + 20.0, "{name} opens");
+        }
+        // I is wide but not open: the corners go out
+        let mut vi = Values::default();
+        vi.set(i, 1.0);
+        let m = mesh_of(&d, &r, "Mouth");
+        let (w0, w1) = (extent(&m.verts), extent(&r.deformed(m, &r.pose(&vi))));
+        assert!(w1.2 - w1.0 > w0.2 - w0.0 + 10.0 && (w1.3 - w1.1) < (w0.3 - w0.1) + 10.0);
+    }
+
+    #[test]
+    fn tilting_turns_the_whole_head_together() {
+        let d = face();
+        let mut r = Rig::default();
+        rig_face(&mut r, &d.layers, d.w, d.h, &FaceOptions::default()).unwrap();
+        let az = param(&r, "Angle Z");
+        let mut v = Values::default();
+        v.set(az, 30.0);
+        let pose = r.pose(&v);
+        let m = mesh_of(&d, &r, "Hair front");
+        let moved = r.deformed(m, &pose).iter().zip(&m.verts).map(|(a, b)| (a[0] - b[0]).hypot(a[1] - b[1])).fold(0.0, f32::max);
+        assert!(moved > 20.0, "{moved}");
+    }
+
+    #[test]
+    fn options_change_what_is_made_and_a_second_run_replaces_the_first_but_not_locked_things() {
+        let d = face();
+        let mut r = Rig::default();
+        rig_face(&mut r, &d.layers, d.w, d.h, &FaceOptions { together_eyes: false, together_brows: false, vowels: false, ..FaceOptions::default() }).unwrap();
+        for n in ["Eye L open", "Eye R open", "Brow L", "Brow R", "Mouth open"] {
+            param(&r, n);
+        }
+        assert!(r.params.iter().all(|p| !p.name.starts_with("Mouth A")), "no vowels");
+        let first_changers = r.changers.len();
+        // run again: no duplicates
+        rig_face(&mut r, &d.layers, d.w, d.h, &FaceOptions { together_eyes: false, together_brows: false, vowels: false, ..FaceOptions::default() }).unwrap();
+        assert_eq!(r.changers.len(), first_changers);
+        assert_eq!(r.meshes.len(), 10);
+        // lock the head tilt: it stays (and so does the slider it uses) when the rig is made again
+        let tilt = r.changers.iter().find(|c| c.name == "Head tilt").unwrap().id;
+        r.auto.as_mut().unwrap().locked.push(tilt);
+        rig_face(&mut r, &d.layers, d.w, d.h, &FaceOptions::default()).unwrap();
+        assert!(r.changer(tilt).is_some(), "the locked changer is kept");
+        assert!(r.auto.as_ref().unwrap().locked.contains(&tilt));
+        let z_sliders = r.params.iter().filter(|p| p.name == "Angle Z").count();
+        assert!(z_sliders >= 1);
+        // nothing tagged: a clear reason
+        let mut empty = Rig::default();
+        let mut e = Document::new(100, 100);
+        add(&mut e, "Layer", None, (10, 10, 50, 50));
+        let err = rig_face(&mut empty, &e.layers, 100, 100, &FaceOptions::default()).unwrap_err();
+        assert!(err.contains("Tag the face"));
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn the_strength_option_scales_the_head_turn() {
+        let d = face();
+        let mut weak = Rig::default();
+        let mut strong = Rig::default();
+        rig_face(&mut weak, &d.layers, d.w, d.h, &FaceOptions { turn: 0.5, ..FaceOptions::default() }).unwrap();
+        rig_face(&mut strong, &d.layers, d.w, d.h, &FaceOptions { turn: 2.0, ..FaceOptions::default() }).unwrap();
+        let shift = |r: &Rig| {
+            let ax = r.params.iter().find(|p| p.name == "Angle X").unwrap().id;
+            let mut v = Values::default();
+            v.set(ax, 30.0);
+            let m = mesh_of(&d, r, "Nose");
+            r.deformed(m, &r.pose(&v))[0][0] - m.verts[0][0]
+        };
+        assert!(shift(&strong) > shift(&weak) * 3.0, "{} vs {}", shift(&strong), shift(&weak));
+    }
+}
