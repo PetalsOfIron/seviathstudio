@@ -9,7 +9,7 @@ use std::sync::Arc;
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, TextureHandle, TextureOptions, Ui, Vec2, pos2, vec2};
 
 use super::SeviathApp;
-use crate::doc::LayerId;
+use crate::doc::{Document, LayerId};
 use crate::parts;
 use crate::rig::raster::{self, Item, LayerTex};
 use crate::rig::{self, ArtMesh, Form, Id, Kind, Rig, Values};
@@ -25,6 +25,26 @@ enum Mode {
     Look,
     /// The next click on the picture is the pivot of the selected Rotation changer.
     Pivot,
+    /// Drag on the picture from the head of a new bone to its tail.
+    Bone,
+    /// Paint the weights of the picked bone (the picture is shown at rest).
+    Weight,
+}
+
+/// What dragging does in weight mode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WTool {
+    Brush(rig::skin::Brush),
+    /// Draw an outline: everything inside goes to the bone.
+    Lasso,
+    /// Draw an outline: everything inside is taken from the bone.
+    LassoRemove,
+}
+
+impl Default for WTool {
+    fn default() -> Self {
+        WTool::Brush(rig::skin::Brush::Add)
+    }
 }
 
 impl RigState {
@@ -67,6 +87,22 @@ pub struct RigState {
     pub soft_grow: f32,
     /// A second slider: the shape is then saved for the two sliders together (a grid).
     pub sel_param2: Option<Id>,
+    skin_detail: f32,
+    pub heat: bool,
+    skin_tex: Option<(u64, Option<Arc<LayerTex>>)>,
+    heat_tex: Option<((usize, u64), TextureHandle)>,
+    bone_from: Option<[f32; 2]>,
+    bone_chain: bool,
+    pub wtool: WTool,
+    wopts: rig::skin::BrushOpts,
+    feather: f32,
+    lasso_pts: Vec<[f32; 2]>,
+    last_dab: Option<[f32; 2]>,
+    weight_before: Option<crate::history::DocState>,
+    weight_gen: u64,
+    pub mirror_axis: f32,
+    pub mirror_to: Option<Id>,
+    tag_pick: Option<parts::Part>,
     glue_reach: f32,
     pub new_param: (String, f32, f32),
     turn_deg: f32,
@@ -106,6 +142,29 @@ impl SeviathApp {
         &mut self.rigs
     }
 
+    /// Paint one dab (a test stand-in for dragging), as one undo step.
+    #[cfg(test)]
+    pub fn test_paint(&mut self, at: [f32; 2], brush: rig::skin::Brush, opts: rig::skin::BrushOpts) {
+        let Some(bi) = self.rigs.sel_changer.and_then(|c| self.draw.doc.rig.skin.as_ref().and_then(|s| s.bone_index(c))) else { return };
+        let before = self.draw.doc.snapshot();
+        if let Some(sk) = self.skin_mut() {
+            sk.paint(bi, at[0], at[1], brush, &opts);
+        }
+        self.rigs.weight_gen += 1;
+        let after = self.draw.doc.snapshot();
+        self.history.push("Paint weights".into(), Tab::Rig, before, after, 0.0);
+    }
+
+    #[cfg(test)]
+    pub fn test_weight_mode(&mut self, on: bool) {
+        self.rigs.mode = if on { Mode::Weight } else { Mode::Look };
+    }
+
+    #[cfg(test)]
+    pub fn test_add_bone(&mut self, head: [f32; 2], tail: [f32; 2]) {
+        self.add_bone(head, tail, 0.0);
+    }
+
     #[cfg(test)]
     pub fn test_rig_edit(&mut self, f: impl FnOnce(&mut Rig)) {
         self.rig_edit("Rig edit", 0.0, f);
@@ -131,16 +190,49 @@ impl SeviathApp {
         t
     }
 
+    /// The layers of the skin drawn together as one picture.
+    fn skin_texture(&mut self) -> Option<Arc<LayerTex>> {
+        let skin = self.draw.doc.rig.skin.clone()?;
+        let d = &self.draw.doc;
+        let mut key: Vec<u64> = vec![d.w as u64, d.h as u64];
+        for l in d.layers.iter().filter(|l| skin.layers.contains(&l.id)) {
+            key.extend([l.id, l.rev, l.visible as u64, l.opacity.to_bits() as u64, format!("{:?}", l.blend).len() as u64]);
+        }
+        let key = hash_of(&key);
+        if let Some((k, t)) = &self.rigs.skin_tex {
+            if *k == key {
+                return t.clone();
+            }
+        }
+        let t = skin_composite(d, &skin.layers).map(|img| Arc::new(LayerTex::from_rgba(&img)));
+        self.rigs.skin_tex = Some((key, t.clone()));
+        t
+    }
+
     /// Everything that is drawn, bottom first: (layer, mesh or a plain box, opacity).
     fn rig_items(&mut self) -> Vec<(LayerId, Arc<LayerTex>, Vec<[f32; 2]>, Vec<[f32; 2]>, Vec<[u32; 3]>, f32)> {
         let rig = self.draw.doc.rig.clone();
-        let mut pose = rig.pose(&self.rigs.values);
+        let painting = self.rigs.mode == Mode::Weight;
+        let mut pose = if painting { rig.pose(&Values::default()) } else { rig.pose(&self.rigs.values) };
         // a Warp being edited shows the shape being dragged
         self.rigs.put_edit(&rig, &mut pose);
         let all = rig.deformed_all(&pose);
         let ids: Vec<(LayerId, f32)> = self.draw.doc.layers.iter().rev().filter(|l| l.visible && matches!(l.kind, crate::doc::LayerKind::Raster | crate::doc::LayerKind::Vector)).map(|l| (l.id, l.opacity / 100.0)).collect();
         let mut out = Vec::new();
+        let skin = rig.skin.clone();
+        let skin_tex = skin.as_ref().and_then(|_| self.skin_texture());
+        let mut skin_done = false;
         for (id, op) in ids {
+            // the layers of the skin are drawn as one picture, where the lowest of them is
+            if let (Some(sk), Some(tex)) = (&skin, &skin_tex) {
+                if sk.layers.contains(&id) {
+                    if !skin_done {
+                        skin_done = true;
+                        out.push((u64::MAX, tex.clone(), sk.verts.clone(), sk.skinned(&rig, &pose), sk.tris.clone(), 1.0));
+                    }
+                    continue;
+                }
+            }
             let Some(tex) = self.layer_tex(id) else { continue };
             match rig.meshes.iter().position(|m| m.layer == id) {
                 Some(mi) => {
@@ -164,6 +256,8 @@ impl SeviathApp {
         for l in &d.layers {
             key.extend([l.id, l.rev, l.visible as u64, l.opacity.to_bits() as u64]);
         }
+        key.push(self.rigs.weight_gen);
+        key.push((self.rigs.mode == Mode::Weight) as u64);
         let mut vals: Vec<(Id, u32)> = self.rigs.values.0.iter().map(|(k, v)| (*k, v.to_bits())).collect();
         vals.sort();
         for (k, v) in vals {
@@ -231,6 +325,52 @@ impl SeviathApp {
         b
     }
 
+    /// One mesh over the given layers (kept bones and weights stay when the mesh is made again).
+    fn make_skin(&mut self, ids: Vec<LayerId>, now: f64) {
+        let d = &self.draw.doc;
+        let Some(img) = skin_composite(d, &ids) else {
+            self.rigs.message = Some("Nothing to mesh: no visible layer has paint.".into());
+            return;
+        };
+        let mut scratch = Document::new(d.w, d.h);
+        let mut tmp = scratch.new_layer("skin", crate::doc::LayerKind::Raster);
+        tmp.tiles = crate::files::tiles_from_rgba(&img, 0, 0, d.w, d.h);
+        let (w, h) = (d.w, d.h);
+        let Some((verts, tris)) = rig::mesh::generate(&tmp, w, h, self.rigs.skin_detail) else {
+            self.rigs.message = Some("Nothing to mesh: no visible layer has paint.".into());
+            return;
+        };
+        let nt = tris.len();
+        self.rig_edit("Make the uncut skin", now, |r| match r.skin.as_mut() {
+            Some(s) => {
+                s.layers = ids.clone();
+                s.verts = verts;
+                s.tris = tris;
+            }
+            None => r.skin = Some(rig::skin::Skin::new(ids.clone(), verts, tris, w, h)),
+        });
+        self.rigs.skin_tex = None;
+        self.rigs.message = Some(format!("One mesh with {nt} triangles over {} layers.", ids.len()));
+    }
+
+    fn add_bone(&mut self, head: [f32; 2], tail: [f32; 2], now: f64) {
+        let n = self.draw.doc.rig.skin.as_ref().map(|s| s.bones.len()).unwrap_or(0) + 1;
+        let parent = if self.rigs.bone_chain {
+            self.rigs.sel_changer.filter(|c| self.draw.doc.rig.skin.as_ref().is_some_and(|s| s.bone_index(*c).is_some()))
+        } else {
+            None
+        };
+        let mut new_id = 0;
+        self.rig_edit("Add a bone", now, |r| {
+            let id = r.add_changer(&format!("Bone {n}"), Kind::Rotation { pivot: head }, parent);
+            if let Some(s) = r.skin.as_mut() {
+                s.add_bone(id, tail);
+            }
+            new_id = id;
+        });
+        self.rigs.sel_changer = Some(new_id);
+    }
+
     fn make_meshes(&mut self, ids: Vec<LayerId>, now: f64) {
         let density = self.rigs.density;
         let d = &self.draw.doc;
@@ -261,6 +401,12 @@ impl SeviathApp {
             self.rigs.turn_deg = 30.0;
             self.rigs.cols_rows = (3, 3);
             self.rigs.glue_reach = 30.0;
+            self.rigs.skin_detail = 0.6;
+            self.rigs.bone_chain = true;
+            self.rigs.wopts = rig::skin::BrushOpts::default();
+            self.rigs.feather = 60.0;
+            self.rigs.mirror_axis = self.draw.doc.w as f32 / 2.0;
+            self.rigs.tag_pick = Some(parts::Part::ArmL);
             self.rigs.new_param = ("Head tilt".into(), -30.0, 30.0);
             self.rigs.zoom = 1.0;
             self.rigs.inited = true;
@@ -312,7 +458,7 @@ impl SeviathApp {
 
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(14, 20, 18))).show(ui, |ui| self.rig_view(ui, now, &mut picked));
 
-        if let Some((id, c, s)) = picked {
+        if let Some((id, c, s)) = picked.filter(|p| p.0 != u64::MAX) {
             self.rig_select(id, c, s);
         }
     }
@@ -346,6 +492,88 @@ impl SeviathApp {
         }
         let (nm, nt) = (self.draw.doc.rig.meshes.len(), self.draw.doc.rig.meshes.iter().map(|m| m.tris.len()).sum::<usize>());
         ui.label(RichText::new(format!("{nm} meshes, {nt} triangles. Parts without a mesh stay where they are.")).size(11.5).color(TEXT_DIM));
+
+        // ---- uncut skin ----
+        section_title(ui, "Uncut skin: the whole drawing in one piece");
+        ui.label(RichText::new("No cutting: one mesh over the drawing, bones on top, and weights say how much each part follows each bone.").size(11.5).color(TEXT_DIM));
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Detail").size(12.0).color(TEXT_DIM));
+            ui.add(egui::Slider::new(&mut self.rigs.skin_detail, 0.0..=1.0).show_value(false));
+        });
+        let has_skin = self.draw.doc.rig.skin.is_some();
+        ui.horizontal_wrapped(|ui| {
+            let label = if has_skin { "Make the skin mesh again" } else { "Make one mesh of the drawing" };
+            if ui.button(label).on_hover_text("Uses the picked parts, or every visible layer when none is picked").clicked() {
+                let ids: Vec<LayerId> = if sel.is_empty() {
+                    self.draw.doc.layers.iter().filter(|l| l.visible && matches!(l.kind, crate::doc::LayerKind::Raster | crate::doc::LayerKind::Vector)).map(|l| l.id).collect()
+                } else {
+                    sel.clone()
+                };
+                self.make_skin(ids, now);
+            }
+            if has_skin && ui.button("Remove the skin").clicked() {
+                self.rig_edit("Remove the skin", now, |r| r.skin = None);
+                self.rigs.skin_tex = None;
+            }
+        });
+        if has_skin {
+            let on = self.rigs.mode == Mode::Bone;
+            ui.horizontal_wrapped(|ui| {
+                if widgets::chip(ui, if on { "Drag on the picture: head to tail…" } else { "Add a bone" }, on).clicked() {
+                    self.rigs.mode = if on { Mode::Look } else { Mode::Bone };
+                }
+                ui.checkbox(&mut self.rigs.bone_chain, "Inside the picked bone");
+            });
+            let bones: Vec<(Id, String)> = self.draw.doc.rig.skin.as_ref().map(|s| s.bones.iter().filter_map(|b| self.draw.doc.rig.changer(b.changer).map(|c| (b.changer, c.name.clone()))).collect()).unwrap_or_default();
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                for (id, name) in &bones {
+                    if widgets::chip(ui, name, self.rigs.sel_changer == Some(*id)).clicked() {
+                        self.rigs.sel_changer = Some(*id);
+                        self.rigs.warp_edit = None;
+                    }
+                }
+            });
+            let picked_bone = self.rigs.sel_changer.filter(|c| bones.iter().any(|b| b.0 == *c));
+            ui.horizontal_wrapped(|ui| {
+                if ui.add_enabled(!bones.is_empty(), egui::Button::new("Weights from the bones")).on_hover_text("Close to a bone it follows that bone, fading out with distance").clicked() {
+                    self.rig_edit("Automatic weights", now, |r| {
+                        let rc = r.clone();
+                        if let Some(s) = r.skin.as_mut() {
+                            s.auto_weights(&rc);
+                        }
+                    });
+                }
+                if ui.add_enabled(picked_bone.is_some(), egui::Button::new("Slider for this bone")).on_hover_text("A slider that turns the picked bone").clicked() {
+                    if let Some(bid) = picked_bone {
+                        let name = self.draw.doc.rig.changer(bid).map(|c| c.name.clone()).unwrap_or_default();
+                        let mut pid = 0;
+                        self.rig_edit("Slider for a bone", now, |r| {
+                            pid = r.add_param(&format!("{name} turn"), -45.0, 45.0, 0.0);
+                            r.bind_rotation(bid, pid, 45.0);
+                        });
+                        self.rigs.sel_param = Some(pid);
+                    }
+                }
+                if ui.add_enabled(picked_bone.is_some(), egui::Button::new("Delete the bone")).clicked() {
+                    if let Some(bid) = picked_bone {
+                        self.rig_edit("Delete a bone", now, |r| {
+                            r.changers.retain(|c| c.id != bid);
+                            r.bindings.retain(|b| b.changer != bid);
+                            for c in r.changers.iter_mut().filter(|c| c.parent == Some(bid)) {
+                                c.parent = None;
+                            }
+                            if let Some(s) = r.skin.as_mut() {
+                                s.remove_bone(bid);
+                            }
+                        });
+                        self.rigs.sel_changer = None;
+                    }
+                }
+            });
+            ui.checkbox(&mut self.rigs.heat, "Show the picked bone's weights (blue little, red a lot)");
+            self.rig_weight_tools(ui, now, picked_bone, &bones);
+        }
 
         // ---- changers ----
         section_title(ui, "Changers");
@@ -607,6 +835,166 @@ impl SeviathApp {
         }
     }
 
+    /// The skin of the document, to change (a step is added to the history by the caller).
+    fn skin_mut(&mut self) -> Option<&mut rig::skin::Skin> {
+        Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut()
+    }
+
+    /// Manual weights: the weight brush, lasso, mirror, normalize and weights from tags.
+    fn rig_weight_tools(&mut self, ui: &mut Ui, now: f64, picked: Option<Id>, bones: &[(Id, String)]) {
+        section_title(ui, "Paint the weights yourself");
+        let on = self.rigs.mode == Mode::Weight;
+        ui.horizontal_wrapped(|ui| {
+            if widgets::chip(ui, if on { "Painting: pick a tool and drag on the picture" } else { "Paint weights" }, on).on_hover_text("Shows the picture at rest, so you paint where things really are").clicked() {
+                self.rigs.mode = if on { Mode::Look } else { Mode::Weight };
+                if !on {
+                    self.rigs.heat = true;
+                }
+            }
+        });
+        if picked.is_none() {
+            ui.label(RichText::new("Pick a bone above first.").size(11.5).color(TEXT_DIM));
+        }
+        use rig::skin::Brush;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            for (t, name) in [
+                (WTool::Brush(Brush::Add), "Add"),
+                (WTool::Brush(Brush::Subtract), "Subtract"),
+                (WTool::Brush(Brush::Smooth), "Smooth"),
+                (WTool::Brush(Brush::Flood), "Flood"),
+                (WTool::Lasso, "Lasso: give"),
+                (WTool::LassoRemove, "Lasso: take away"),
+            ] {
+                if widgets::chip(ui, name, self.rigs.wtool == t).clicked() {
+                    self.rigs.wtool = t;
+                    self.rigs.mode = Mode::Weight;
+                    self.rigs.heat = true;
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Size").size(12.0).color(TEXT_DIM));
+            ui.add(egui::Slider::new(&mut self.rigs.wopts.radius, 10.0..=600.0).suffix(" px").logarithmic(true));
+        });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(if matches!(self.rigs.wtool, WTool::Brush(Brush::Flood)) { "Weight" } else { "Strength" }).size(12.0).color(TEXT_DIM));
+            ui.add(egui::Slider::new(&mut self.rigs.wopts.strength, 0.01..=1.0));
+        });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Hardness").size(12.0).color(TEXT_DIM));
+            ui.add(egui::Slider::new(&mut self.rigs.wopts.hardness, 0.0..=1.0));
+            ui.label(RichText::new("Lasso edge").size(12.0).color(TEXT_DIM));
+            ui.add(egui::DragValue::new(&mut self.rigs.feather).speed(1.0).range(0.0..=400.0).suffix(" px"));
+        });
+        ui.checkbox(&mut self.rigs.wopts.keep_normalized, "Keep each point's total at 100%").on_hover_text("Weight given to this bone is taken from the other bones");
+        let b_idx = picked.and_then(|c| self.draw.doc.rig.skin.as_ref().and_then(|s| s.bone_index(c)));
+        ui.horizontal_wrapped(|ui| {
+            if ui.add_enabled(b_idx.is_some(), egui::Button::new("Flood the whole bone")).on_hover_text("Sets the bone's weight everywhere to the strength above").clicked() {
+                let v = self.rigs.wopts.strength;
+                let bi = b_idx.unwrap_or(0);
+                self.rig_edit("Flood weights", now, |r| {
+                    if let Some(s) = r.skin.as_mut() {
+                        s.flood_all(bi, v);
+                    }
+                });
+                self.rigs.weight_gen += 1;
+            }
+            if ui.button("Clear this bone").clicked() {
+                if let Some(bi) = b_idx {
+                    self.rig_edit("Clear weights", now, |r| {
+                        if let Some(s) = r.skin.as_mut() {
+                            s.flood_all(bi, 0.0);
+                        }
+                    });
+                    self.rigs.weight_gen += 1;
+                }
+            }
+            if ui.button("Limit to 100%").on_hover_text("Where the bones add up to more than everything, scale them down together").clicked() {
+                self.rig_edit("Limit weights", now, |r| {
+                    if let Some(s) = r.skin.as_mut() {
+                        s.limit_all();
+                    }
+                });
+                self.rigs.weight_gen += 1;
+            }
+            if ui.button("Add up to exactly 100%").on_hover_text("Where any bone has weight, nothing is left to stay behind").clicked() {
+                self.rig_edit("Normalize weights", now, |r| {
+                    if let Some(s) = r.skin.as_mut() {
+                        s.fill_to_one();
+                    }
+                });
+                self.rigs.weight_gen += 1;
+            }
+        });
+        // mirror left to right
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Mirror onto").size(12.0).color(TEXT_DIM));
+            let target = self.rigs.mirror_to.filter(|t| bones.iter().any(|b| b.0 == *t) && Some(*t) != picked);
+            egui::ComboBox::from_id_salt("mirror_to").selected_text(target.and_then(|t| bones.iter().find(|b| b.0 == t)).map(|b| b.1.clone()).unwrap_or_else(|| "pick a bone".into())).show_ui(ui, |ui| {
+                for (id, name) in bones.iter().filter(|b| Some(b.0) != picked) {
+                    if ui.selectable_label(target == Some(*id), name).clicked() {
+                        self.rigs.mirror_to = Some(*id);
+                    }
+                }
+            });
+            ui.label(RichText::new("line at x").size(12.0).color(TEXT_DIM));
+            ui.add(egui::DragValue::new(&mut self.rigs.mirror_axis).speed(2.0));
+            if ui.add_enabled(b_idx.is_some() && target.is_some(), egui::Button::new("Mirror")).on_hover_text("Copies this bone's weights, flipped left to right, onto the other bone").clicked() {
+                let (axis, to) = (self.rigs.mirror_axis, target.and_then(|t| self.draw.doc.rig.skin.as_ref().and_then(|s| s.bone_index(t))));
+                if let (Some(from), Some(to)) = (b_idx, to) {
+                    self.rig_edit("Mirror weights", now, |r| {
+                        if let Some(s) = r.skin.as_mut() {
+                            s.mirror_plane(from, to, axis);
+                        }
+                    });
+                    self.rigs.weight_gen += 1;
+                }
+            }
+        });
+        // from tags
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("From a tag").size(12.0).color(TEXT_DIM));
+            let tags: Vec<parts::Part> = parts::Part::ALL.iter().copied().filter(|p| self.draw.doc.layers.iter().any(|l| l.part == Some(*p))).collect();
+            let cur = self.rigs.tag_pick.filter(|t| tags.contains(t)).or_else(|| tags.first().copied());
+            egui::ComboBox::from_id_salt("tag_pick").selected_text(cur.map(|t| t.label()).unwrap_or("no tags yet")).show_ui(ui, |ui| {
+                for t in &tags {
+                    if ui.selectable_label(cur == Some(*t), t.label()).clicked() {
+                        self.rigs.tag_pick = Some(*t);
+                    }
+                }
+            });
+            if ui.add_enabled(b_idx.is_some() && cur.is_some(), egui::Button::new("Give the bone the parts with this tag")).on_hover_text("Weight where the layers with this tag have paint, softened at the edge. Tags are set in the Parts tab.").clicked() {
+                if let (Some(bi), Some(tag)) = (b_idx, cur) {
+                    let mask = self.tag_mask(tag);
+                    self.rig_edit("Weights from a tag", now, |r| {
+                        if let Some(s) = r.skin.as_mut() {
+                            s.assign_mask(bi, &mask, 2);
+                        }
+                    });
+                    self.rigs.weight_gen += 1;
+                }
+            }
+        });
+    }
+
+    /// Where the layers with a tag have paint, as a picture the size of the weight grid.
+    fn tag_mask(&self, tag: parts::Part) -> Vec<u8> {
+        let Some(sk) = self.draw.doc.rig.skin.as_ref() else { return Vec::new() };
+        let mut mask = vec![0u8; (sk.gw * sk.gh) as usize];
+        for l in self.draw.doc.layers.iter().filter(|l| l.part == Some(tag) && l.visible) {
+            for gy in 0..sk.gh {
+                for gx in 0..sk.gw {
+                    let (x, y) = (((gx as f32 + 0.5) * sk.cell as f32) as i32, ((gy as f32 + 0.5) * sk.cell as f32) as i32);
+                    if crate::prerig::px_get(l, x, y).a() > 20 {
+                        mask[(gy * sk.gw + gx) as usize] = 255;
+                    }
+                }
+            }
+        }
+        mask
+    }
+
     fn rig_keyforms(&mut self, ui: &mut Ui, now: f64, cid: Id, pid: Id) {
         let rig = self.draw.doc.rig.clone();
         let (Some(c), Some(p)) = (rig.changer(cid).cloned(), rig.param(pid).cloned()) else { return };
@@ -752,9 +1140,10 @@ impl SeviathApp {
             p.image(t.id(), page, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
         let to_screen = |v: [f32; 2]| pos2(page.min.x + v[0] * sc, page.min.y + v[1] * sc);
+        self.heat_overlay(ui.ctx(), &p, page);
         let to_page = |s: Pos2| [(s.x - page.min.x) / sc, (s.y - page.min.y) / sc];
         let rig = self.draw.doc.rig.clone();
-        let mut pose = rig.pose(&self.rigs.values);
+        let mut pose = if self.rigs.mode == Mode::Weight { rig.pose(&Values::default()) } else { rig.pose(&self.rigs.values) };
         self.rigs.put_edit(&rig, &mut pose);
         let all = rig.deformed_all(&pose);
         // triangles of the picked parts
@@ -857,6 +1246,42 @@ impl SeviathApp {
                 o[1] += d.y;
             }
         }
+        // the bones of the skin
+        if let Some(sk) = &rig.skin {
+            for b in &sk.bones {
+                let Some(c) = rig.changer(b.changer) else { continue };
+                let Kind::Rotation { pivot } = &c.kind else { continue };
+                let (head, tail) = (to_screen(rig.deform_point(&pose, c.parent, *pivot)), to_screen(rig.deform_point(&pose, Some(c.id), b.tail)));
+                let on = self.rigs.sel_changer == Some(c.id);
+                let col = if on { Color32::from_rgb(255, 200, 60) } else { Color32::from_rgb(90, 200, 255) };
+                p.line_segment([head, tail], Stroke::new(if on { 4.0 } else { 3.0 }, col));
+                p.circle_filled(head, 5.0, col);
+                p.circle_stroke(tail, 4.0, Stroke::new(2.0, col));
+            }
+        }
+        // paint the weights of the picked bone
+        if self.rigs.mode == Mode::Weight {
+            self.weight_input(ui, &resp, &p, &to_page, &to_screen, sc, now);
+        }
+        // add a bone: drag from its head to its tail
+        if self.rigs.mode == Mode::Bone {
+            if resp.drag_started_by(egui::PointerButton::Primary) {
+                if let Some(pos) = ui.input(|i| i.pointer.press_origin()) {
+                    self.rigs.bone_from = Some(to_page(pos));
+                }
+            }
+            if let (Some(from), Some(pos)) = (self.rigs.bone_from, ui.input(|i| i.pointer.latest_pos())) {
+                p.line_segment([to_screen(from), pos], Stroke::new(3.0, Color32::from_rgb(255, 200, 60)));
+                if resp.drag_stopped() {
+                    let tail = to_page(pos);
+                    if (tail[0] - from[0]).hypot(tail[1] - from[1]) > 10.0 {
+                        self.add_bone(from, tail, now);
+                    }
+                    self.rigs.bone_from = None;
+                    self.rigs.mode = Mode::Look;
+                }
+            }
+        }
         // click: place the pivot, or pick the part under the pointer
         if resp.clicked_by(egui::PointerButton::Primary) {
             if let Some(pos) = resp.interact_pointer_pos().filter(|q| page.contains(*q)) {
@@ -889,6 +1314,133 @@ impl SeviathApp {
                 ui.label(RichText::new("Wheel: zoom. Right drag: move. Blend modes are not shown here.").size(11.0).color(TEXT_DIM));
             });
         });
+    }
+
+    /// Painting weights with the mouse or pen on the picture.
+    #[allow(clippy::too_many_arguments)]
+    fn weight_input(&mut self, ui: &mut Ui, resp: &egui::Response, p: &egui::Painter, to_page: &dyn Fn(Pos2) -> [f32; 2], to_screen: &dyn Fn([f32; 2]) -> Pos2, sc: f32, now: f64) {
+        let bone = self.rigs.sel_changer.and_then(|c| self.draw.doc.rig.skin.as_ref().and_then(|s| s.bone_index(c)));
+        let radius = self.rigs.wopts.radius;
+        let hover = resp.hover_pos();
+        let brush_tool = matches!(self.rigs.wtool, WTool::Brush(_));
+        if let (Some(h), true) = (hover, brush_tool) {
+            p.circle_stroke(h, radius * sc, Stroke::new(1.5, Color32::from_rgb(255, 200, 60)));
+        }
+        let Some(bi) = bone else { return };
+        if resp.drag_started_by(egui::PointerButton::Primary) {
+            self.rigs.weight_before = Some(self.draw.doc.snapshot());
+            self.rigs.last_dab = None;
+            self.rigs.lasso_pts.clear();
+        }
+        if resp.dragged_by(egui::PointerButton::Primary) {
+            if let Some(pos) = ui.input(|i| i.pointer.latest_pos()) {
+                let pg = to_page(pos);
+                match self.rigs.wtool {
+                    WTool::Brush(brush) => {
+                        // dabs along the way, so a fast stroke has no gaps
+                        let step = (radius * 0.25).max(2.0);
+                        let from = self.rigs.last_dab.unwrap_or(pg);
+                        let dist = (pg[0] - from[0]).hypot(pg[1] - from[1]);
+                        let n = (dist / step).floor() as usize;
+                        let o = self.rigs.wopts;
+                        let mut changed = false;
+                        for i in 0..=n {
+                            let t = if n == 0 { 1.0 } else { i as f32 / n as f32 };
+                            let at = [from[0] + (pg[0] - from[0]) * t, from[1] + (pg[1] - from[1]) * t];
+                            if let Some(sk) = self.skin_mut() {
+                                changed |= sk.paint(bi, at[0], at[1], brush, &o);
+                            }
+                        }
+                        if changed {
+                            self.rigs.weight_gen += 1;
+                        }
+                        self.rigs.last_dab = Some(pg);
+                    }
+                    WTool::Lasso | WTool::LassoRemove => {
+                        if self.rigs.lasso_pts.last().is_none_or(|l| (l[0] - pg[0]).hypot(l[1] - pg[1]) > 4.0 / sc) {
+                            self.rigs.lasso_pts.push(pg);
+                        }
+                    }
+                }
+            }
+        }
+        if matches!(self.rigs.wtool, WTool::Lasso | WTool::LassoRemove) && self.rigs.lasso_pts.len() > 1 {
+            let pts: Vec<Pos2> = self.rigs.lasso_pts.iter().map(|q| to_screen(*q)).collect();
+            for w in pts.windows(2) {
+                p.line_segment([w[0], w[1]], Stroke::new(2.0, Color32::from_rgb(255, 200, 60)));
+            }
+        }
+        if resp.drag_stopped() {
+            if let WTool::Lasso | WTool::LassoRemove = self.rigs.wtool {
+                let poly = std::mem::take(&mut self.rigs.lasso_pts);
+                let (feather, remove) = (self.rigs.feather, self.rigs.wtool == WTool::LassoRemove);
+                if poly.len() >= 3 {
+                    if let Some(sk) = self.skin_mut() {
+                        sk.lasso(bi, &poly, feather, remove);
+                    }
+                    self.rigs.weight_gen += 1;
+                }
+            }
+            // the whole stroke is one step of the history
+            if let Some(before) = self.rigs.weight_before.take() {
+                let after = self.draw.doc.snapshot();
+                if !self.draw.doc.same_as(&before) {
+                    let label = match self.rigs.wtool {
+                        WTool::Brush(b) => format!("Paint weights · {b:?}"),
+                        WTool::Lasso => "Lasso weights".to_owned(),
+                        WTool::LassoRemove => "Lasso weights away".to_owned(),
+                    };
+                    self.log_step(&label, now);
+                    self.history.push(label, Tab::Rig, before, after, now);
+                }
+            }
+            self.rigs.last_dab = None;
+        }
+    }
+
+    /// The weights of the picked bone as a blue-to-red haze over the picture.
+    fn heat_overlay(&mut self, ctx: &egui::Context, p: &egui::Painter, page: Rect) {
+        if !self.rigs.heat {
+            return;
+        }
+        let Some(sk) = self.draw.doc.rig.skin.as_ref() else { return };
+        let Some(bi) = self.rigs.sel_changer.and_then(|c| sk.bone_index(c)) else { return };
+        let Some(plane) = sk.planes.get(bi) else { return };
+        let cover = self.rigs.skin_tex.as_ref().and_then(|t| t.1.clone());
+        let key = (bi, plane.iter().map(|v| *v as u64).sum::<u64>() ^ ((plane.len() as u64) << 32) ^ self.rigs.skin_tex.as_ref().map(|t| t.0).unwrap_or(0));
+        if self.rigs.heat_tex.as_ref().map(|t| t.0) != Some(key) {
+            let ramp = |w: f32| -> Color32 {
+                if w < 0.02 {
+                    return Color32::TRANSPARENT;
+                }
+                // blue, green, yellow, red
+                let (r, g, b) = if w < 0.5 { (0.0, w * 2.0, 1.0 - w * 2.0) } else { ((w - 0.5) * 2.0, 1.0 - (w - 0.5) * 2.0, 0.0) };
+                Color32::from_rgba_unmultiplied((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, 150)
+            };
+            // only where the drawing is
+            let px: Vec<Color32> = plane
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let (gx, gy) = ((i as u32 % sk.gw) as f32, (i as u32 / sk.gw) as f32);
+                    let (x, y) = (((gx + 0.5) * sk.cell as f32) as usize, ((gy + 0.5) * sk.cell as f32) as usize);
+                    match &cover {
+                        Some(t) if t.alpha_at(x, y) < 0.1 => Color32::TRANSPARENT,
+                        _ => ramp(*v as f32 / 255.0),
+                    }
+                })
+                .collect();
+            let img = egui::ColorImage::new([sk.gw as usize, sk.gh as usize], px);
+            let t = ctx.load_texture("rig_heat", img, TextureOptions::LINEAR);
+            self.rigs.heat_tex = Some((key, t));
+        }
+        if let Some((_, t)) = &self.rigs.heat_tex {
+            // the grid covers the page in whole cells: draw only the part that is the page
+            let (cw, ch) = (sk.gw as f32 * sk.cell as f32, sk.gh as f32 * sk.cell as f32);
+            let (dw, dh) = (self.draw.doc.w as f32, self.draw.doc.h as f32);
+            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(dw / cw, dh / ch));
+            p.image(t.id(), page, uv, Color32::WHITE);
+        }
     }
 
     /// The topmost part under a page point (looking at where things are now).
@@ -929,4 +1481,23 @@ fn kind_word(rig: &Rig, id: Id, is_rot: bool) -> &'static str {
         Some(Kind::Soft { .. }) => "soft",
         _ => "rotation",
     }
+}
+
+/// The given layers drawn together on a see-through page.
+fn skin_composite(d: &Document, ids: &[LayerId]) -> Option<image::RgbaImage> {
+    let layers: Vec<crate::doc::Layer> = d
+        .layers
+        .iter()
+        .filter(|l| ids.contains(&l.id) && l.visible && matches!(l.kind, crate::doc::LayerKind::Raster | crate::doc::LayerKind::Vector))
+        .cloned()
+        .map(|mut l| {
+            l.parent = None;
+            l
+        })
+        .collect();
+    if layers.is_empty() {
+        return None;
+    }
+    let tmp = Document::from_parts(d.w, d.h, Color32::TRANSPARENT, layers);
+    Some(crate::files::flatten(&tmp))
 }
