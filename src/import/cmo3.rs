@@ -657,6 +657,12 @@ pub fn import_bytes(data: Vec<u8>) -> Result<Imported, String> {
         let def = dom.child_f(p, "defaultValue").unwrap_or(0.0);
         let label = dom.child_text(p, "name").filter(|s| !s.is_empty()).map(str::to_owned).or_else(|| dom.child(p, "id").and_then(|i| dom.attr(dom.resolve(i), "idstr")).map(str::to_owned)).unwrap_or_else(|| "Slider".into());
         let id = imp.rig.add_param(&label, lo, hi, def);
+        // the Live2D id of the slider, for the physics, expressions and motions of the model
+        if let Some(idstr) = dom.child(p, "id").and_then(|i| dom.attr(dom.resolve(i), "idstr")) {
+            if let Some(pm) = imp.rig.params.last_mut() {
+                pm.cid = idstr.to_string();
+            }
+        }
         imp.params.insert(guid, ParamInfo { id, default: def.clamp(lo, hi) });
         imp.report.params += 1;
     }

@@ -27,15 +27,49 @@ pub struct PhysUi {
     /// The test motion running: index and seconds so far.
     pub motion: Option<(usize, f32)>,
     pub message: Option<String>,
+    /// The swinging of a Live2D model (parameter physics): where its chains are, and the slider values it gives now.
+    pub param_state: crate::rig::paramphys::PhysState,
+    pub param_out: HashMap<Id, f32>,
 }
 
 impl Default for PhysUi {
     fn default() -> Self {
-        Self { on: true, sim: PhysSim::default(), offs: HashMap::new(), sel: None, kind: PKind::Hair, material: Material::Normal, motion: None, message: None }
+        Self { on: true, sim: PhysSim::default(), offs: HashMap::new(), sel: None, kind: PKind::Hair, material: Material::Normal, motion: None, message: None, param_state: Default::default(), param_out: HashMap::new() }
+    }
+}
+
+/// The sliders of a rig by their Live2D id, for the parameter physics: the values read are the ones the user set, the values written
+/// are collected.
+struct RigSliders<'a> {
+    rig: &'a crate::rig::Rig,
+    values: &'a Values,
+    out: HashMap<Id, f32>,
+}
+
+impl crate::rig::paramphys::Sliders for RigSliders<'_> {
+    fn get(&self, id: &str) -> Option<(f32, f32, f32, f32)> {
+        let p = self.rig.params.iter().find(|p| !p.cid.is_empty() && p.cid == id)?;
+        let v = self.out.get(&p.id).copied().or_else(|| self.values.0.get(&p.id).copied()).unwrap_or(p.default);
+        Some((v, p.min, p.max, p.default))
+    }
+
+    fn set(&mut self, id: &str, value: f32) {
+        if let Some(p) = self.rig.params.iter().find(|p| !p.cid.is_empty() && p.cid == id) {
+            self.out.insert(p.id, value);
+        }
     }
 }
 
 impl super::rigtab::RigState {
+    /// The slider values to show: the ones the user set, and over them what the Live2D physics gives.
+    pub fn effective_values(&self) -> Values {
+        let mut v = self.values.clone();
+        for (id, x) in &self.phys.param_out {
+            v.set(*id, *x);
+        }
+        v
+    }
+
     /// Add what the physics does to a pose (after the sliders and IK).
     pub fn add_phys(&self, rig: &crate::rig::Rig, pose: &mut crate::rig::Pose) {
         if !self.phys.on {
@@ -72,6 +106,14 @@ impl SeviathApp {
     /// Move the simulation on by `dt` seconds (also runs the test motion).
     pub fn phys_advance(&mut self, dt: f32) {
         let rig = self.draw.doc.rig.clone();
+        // the swinging of a Live2D model moves sliders
+        if self.rigs.phys.on && rig.param_physics.on && !rig.param_physics.is_empty() {
+            let mut s = RigSliders { rig: &rig, values: &self.rigs.values, out: HashMap::new() };
+            rig.param_physics.step(&mut self.rigs.phys.param_state, &mut s, dt);
+            self.rigs.phys.param_out = s.out;
+        } else {
+            self.rigs.phys.param_out.clear();
+        }
         if !self.rigs.phys.on || rig.physics.is_empty() {
             self.rigs.phys.offs.clear();
             self.rigs.phys.motion = None;
@@ -103,7 +145,7 @@ impl SeviathApp {
     /// Called every frame the picture is shown.
     pub fn phys_tick(&mut self, ctx: &egui::Context) {
         let rig = &self.draw.doc.rig;
-        if rig.physics.is_empty() || !self.rigs.phys.on {
+        if (rig.physics.is_empty() && !(rig.param_physics.on && !rig.param_physics.is_empty())) || !self.rigs.phys.on {
             return;
         }
         let dt = ctx.input(|i| i.unstable_dt).clamp(0.0, 0.05);
@@ -161,6 +203,7 @@ impl SeviathApp {
     }
 
     fn physics_side(&mut self, ui: &mut Ui, now: f64) {
+        self.live2d_files_ui(ui, now);
         section_title(ui, "Physics");
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut self.rigs.phys.on, "Physics on").on_hover_text("Off: the picture only follows the sliders");
@@ -259,6 +302,72 @@ impl SeviathApp {
                 });
             }
         });
+    }
+
+    /// The files of a Live2D model (physics, expressions, motions, VTube Studio settings) put onto this rig.
+    fn live2d_files_ui(&mut self, ui: &mut Ui, now: f64) {
+        section_title(ui, "Live2D files");
+        ui.label(RichText::new("The swinging, expressions and motions of a Live2D model (a .model3.json with its files, as in a VTube Studio folder) can be put onto this rig. Sliders are matched by their Live2D ids.").size(11.5).color(TEXT_DIM));
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Add the files of a Live2D model...").on_hover_text("Pick the .model3.json: its physics, expressions, motions and VTube Studio settings are read").clicked() {
+                if let Some(path) = rfd::FileDialog::new().set_title("A Live2D model (.model3.json)").set_directory(self.settings.projects_folder()).add_filter("Live2D model", &["json"]).pick_file() {
+                    match crate::import::runtime::load_folder(&path) {
+                        Ok(files) => {
+                            let mut report = crate::import::runtime::Report::default();
+                            self.rig_edit("Live2D files", now, |r| report = crate::import::runtime::apply(r, &files));
+                            self.rigs.phys.param_state = Default::default();
+                            let mut m = format!("Read {}: {} swinging settings, {} expressions, {} motions as clips, {} sliders matched.", path.file_name().and_then(|n| n.to_str()).unwrap_or("the model"), report.physics_settings, report.expressions, report.motions, report.sliders_matched);
+                            if !report.sliders_missing.is_empty() {
+                                m += &format!(" The rig has no slider for: {}.", report.sliders_missing.iter().take(8).cloned().collect::<Vec<_>>().join(", "));
+                            }
+                            for n in report.notes.iter().take(3) {
+                                m += &format!(" {n}");
+                            }
+                            self.rigs.phys.message = Some(m);
+                        }
+                        Err(e) => self.rigs.phys.message = Some(e),
+                    }
+                }
+            }
+        });
+        let rig = self.draw.doc.rig.clone();
+        if !rig.param_physics.is_empty() {
+            let mut pp = rig.param_physics.clone();
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut pp.on, "Live2D physics on");
+                ui.label(RichText::new("Strength").size(12.0).color(TEXT_DIM));
+                ui.add(egui::Slider::new(&mut pp.strength, 0.0..=2.0).show_value(false)).on_hover_text("1 is as the model was set up");
+                if ui.small_button("Settle").on_hover_text("The chains hang still again").clicked() {
+                    self.rigs.phys.param_state = Default::default();
+                }
+            });
+            if pp != rig.param_physics {
+                self.rig_edit("Live2D physics", now, |r| r.param_physics = pp);
+            }
+            let names: Vec<String> = rig.param_physics.settings.iter().map(|s| s.name.clone()).collect();
+            ui.label(RichText::new(format!("{} swinging settings: {}", names.len(), names.join(", "))).size(11.0).color(TEXT_DIM));
+        }
+        if !rig.expressions.is_empty() {
+            ui.label(RichText::new("Expressions").size(12.0).color(TEXT_DIM));
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                for e in &rig.expressions {
+                    if ui.small_button(&e.name).on_hover_text("Put this expression on the sliders (All sliders to the middle in the Rig tab takes it off)").clicked() {
+                        for ep in &e.params {
+                            if let Some(p) = rig.params.iter().find(|p| p.cid == ep.id) {
+                                let cur = self.rigs.values.0.get(&p.id).copied().unwrap_or(p.default);
+                                if let Some(v) = e.blend(&ep.id, cur) {
+                                    self.rigs.values.set(p.id, v.clamp(p.min, p.max));
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        if let Some(m) = &self.rigs.phys.message {
+            ui.label(RichText::new(m).size(11.5).color(TEXT_DIM));
+        }
     }
 
     fn physics_chain_settings(&mut self, ui: &mut Ui, now: f64, i: usize) {
