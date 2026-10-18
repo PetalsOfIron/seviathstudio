@@ -117,6 +117,19 @@ fn load_any(path: &Path) -> Result<(Document, bool), String> {
         }
         "ora" => ora::read(path).map(|d| (d, false)),
         "kra" => kra::read(path).map(|d| (d, false)),
+        "cmo3" => {
+            let imp = crate::import::cmo3::import_file(path)?;
+            let mut doc = imp.doc;
+            let r = &imp.report;
+            let mut notes = format!("Opened from a Live2D model ({}): {} parts, {} sliders, {} warps, {} rotations, {} shapes fitted.", imp.name, r.meshes, r.params, r.warps, r.rotations, r.morphs);
+            for n in &r.notes {
+                notes.push_str("
+- ");
+                notes.push_str(n);
+            }
+            doc.meta.notes = notes;
+            Ok((doc, false))
+        }
         _ => {
             let img = files::read_picture(path)?;
             Ok((files::document_from_picture(&img, &stem(path)), false))
@@ -228,10 +241,11 @@ impl SeviathApp {
         let picked = rfd::FileDialog::new()
             .set_title("Open")
             .set_directory(&dir)
-            .add_filter("Everything SeviathStudio opens", &["seviath", "psd", "ora", "kra", "png", "jpg", "jpeg", "webp", "bmp", "gif"])
+            .add_filter("Everything SeviathStudio opens", &["seviath", "psd", "ora", "kra", "cmo3", "png", "jpg", "jpeg", "webp", "bmp", "gif"])
             .add_filter("SeviathStudio project", &["seviath"])
             .add_filter("Photoshop", &["psd"])
             .add_filter("Krita", &["kra"])
+            .add_filter("Live2D Cubism model", &["cmo3"])
             .add_filter("OpenRaster (Krita, GIMP, MyPaint)", &["ora"])
             .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "bmp", "gif"])
             .pick_file();

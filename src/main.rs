@@ -20,6 +20,7 @@ mod gradient;
 mod files;
 mod handfont;
 mod history;
+mod import;
 mod randomizer;
 mod recorder;
 mod refs;
