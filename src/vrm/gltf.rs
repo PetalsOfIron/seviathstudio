@@ -154,23 +154,32 @@ impl Builder {
         if !self.extensions.is_empty() {
             map.insert("extensions".into(), Value::Object(self.extensions));
         }
-        let mut js = serde_json::to_vec(&root).unwrap();
-        while js.len() % 4 != 0 {
-            js.push(b' ');
-        }
-        let total = 12 + 8 + js.len() + 8 + self.bin.len();
-        let mut out = Vec::with_capacity(total);
-        out.extend(MAGIC.to_le_bytes());
-        out.extend(2u32.to_le_bytes());
-        out.extend((total as u32).to_le_bytes());
-        out.extend((js.len() as u32).to_le_bytes());
-        out.extend(CHUNK_JSON.to_le_bytes());
-        out.extend(js);
-        out.extend((self.bin.len() as u32).to_le_bytes());
-        out.extend(CHUNK_BIN.to_le_bytes());
-        out.extend(self.bin);
-        out
+        pack(&root, &self.bin)
     }
+}
+
+/// A JSON description and a binary buffer as one .glb file.
+pub fn pack(root: &Value, bin: &[u8]) -> Vec<u8> {
+    let mut js = serde_json::to_vec(root).unwrap();
+    while js.len() % 4 != 0 {
+        js.push(b' ');
+    }
+    let mut bin = bin.to_vec();
+    while bin.len() % 4 != 0 {
+        bin.push(0);
+    }
+    let total = 12 + 8 + js.len() + 8 + bin.len();
+    let mut out = Vec::with_capacity(total);
+    out.extend(MAGIC.to_le_bytes());
+    out.extend(2u32.to_le_bytes());
+    out.extend((total as u32).to_le_bytes());
+    out.extend((js.len() as u32).to_le_bytes());
+    out.extend(CHUNK_JSON.to_le_bytes());
+    out.extend(js);
+    out.extend((bin.len() as u32).to_le_bytes());
+    out.extend(CHUNK_BIN.to_le_bytes());
+    out.extend(bin);
+    out
 }
 
 /// A file read back: its JSON and its binary chunk.

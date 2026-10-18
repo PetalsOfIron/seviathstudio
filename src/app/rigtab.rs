@@ -108,6 +108,7 @@ impl RigState {
 
 #[derive(Default)]
 pub struct RigState {
+    pub game: super::gameui::GameUi,
     /// The turn at every point of the curve(s) being edited (curves after curve), next to `warp_edit`.
     turn_edit: Option<Vec<f32>>,
     /// How many degrees the next *Turn* button turns by.
@@ -780,6 +781,7 @@ impl SeviathApp {
         self.rig_auto_section(ui, now);
         self.rig_quality_section(ui, now);
         self.rig_pose_section(ui, now);
+        self.rig_game_section(ui, now);
         if self.rigs.pro {
             self.rig_pro_sections(ui, now);
         }

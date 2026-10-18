@@ -19,6 +19,7 @@ mod layoutmenu;
 mod fontmaker;
 mod newproject;
 mod partstab;
+mod gameui;
 mod physicsui;
 mod prerigui;
 mod recording;
