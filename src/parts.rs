@@ -329,6 +329,166 @@ fn from_name(name: &str) -> Option<(NamePart, f32)> {
     None
 }
 
+/// The letters of a name, lower case, without the word copy: "Eyelinbotl Copy 2" is "eyelinbotl".
+fn compact(name: &str) -> String {
+    let s: String = name.to_lowercase().chars().filter(|c| c.is_alphabetic()).collect();
+    s.replace("copy", "")
+}
+
+/// A side written into the name without a space: "Rightleg", "earshadowl", "Irisl", "thumbR".
+fn loose_side(name: &str) -> Option<Side> {
+    let s = compact(name);
+    if s.starts_with("left") && s.len() > 4 {
+        return Some(Side::L);
+    }
+    if s.starts_with("right") && s.len() > 5 {
+        return Some(Side::R);
+    }
+    // a lone letter at the end after a word that names a thing or what is done to it
+    const BEFORE: [&str; 22] = ["shadow", "light", "highlight", "hightlight", "hilight", "bot", "top", "upper", "bottom", "lower", "lid", "lash", "line", "white", "iris", "brow", "eye", "ear", "hand", "thumb", "leg", "arm"];
+    let (head, last) = s.split_at(s.len().saturating_sub(1));
+    if head.len() >= 3 && BEFORE.iter().any(|w| head.ends_with(w)) {
+        return match last {
+            "l" => Some(Side::L),
+            "r" => Some(Side::R),
+            _ => None,
+        };
+    }
+    None
+}
+
+fn side_of_name(name: &str) -> Option<Side> {
+    side_of(&tokens(name)).or_else(|| loose_side(name))
+}
+
+/// A looser reading of a name for messy names ("Eyelinbotl", "Rightearline", "Hairhilight"): pieces of the letters are looked for.
+fn from_name_loose(name: &str) -> Option<(NamePart, f32)> {
+    let s = compact(name);
+    if s.len() < 3 {
+        return None;
+    }
+    let c = |w: &str| s.contains(w);
+    let side = side_of_name(name);
+    let pair = |l: Part, r: Part| {
+        Some(match side {
+            Some(Side::L) => (NamePart::One(l), 0.75),
+            Some(Side::R) => (NamePart::One(r), 0.75),
+            None => (NamePart::Pair(l, r), 0.55),
+        })
+    };
+    let one = |p: Part| Some((NamePart::One(p), 0.7));
+    if c("teeth") || c("tongue") || c("innermouth") {
+        return one(Part::MouthInside);
+    }
+    if c("eyebrow") || s.ends_with("brow") || s.ends_with("brows") {
+        return pair(Part::BrowL, Part::BrowR);
+    }
+    if c("iris") || c("pupil") || c("eyeball") {
+        return pair(Part::EyeballL, Part::EyeballR);
+    }
+    if c("eyelash") || c("eyelid") || c("eyeliner") || c("eyelin") || c("eyewhite") || c("eyeshadow") || c("undereye") || c("sclera") || s == "eye" || s == "eyes" || s.starts_with("eyes") || s.starts_with("eye") && !c("eyebrow") {
+        return pair(Part::EyeL, Part::EyeR);
+    }
+    if c("toplip") || c("botlip") || c("bptlip") || c("bottomlip") || c("upperlip") || c("lowerlip") || s.starts_with("lip") || s.ends_with("lips") || s.ends_with("mouth") || s.starts_with("mouth") {
+        return one(Part::Mouth);
+    }
+    if s.starts_with("nose") || s.ends_with("nose") || c("noseshadow") {
+        return one(Part::Nose);
+    }
+    if (s.starts_with("ear") || s.ends_with("ear") || c("earshadow") || c("earline") || c("rightear") || c("leftear")) && !c("earring") && !c("heart") && !c("pearl") {
+        return pair(Part::EarL, Part::EarR);
+    }
+    if c("blush") || c("cheek") {
+        return one(Part::Blush);
+    }
+    if c("hair") || c("bangs") || c("fringe") || c("ponytail") || c("braid") {
+        if c("back") {
+            return one(Part::HairBack);
+        }
+        if c("side") {
+            return pair(Part::HairSideL, Part::HairSideR);
+        }
+        if c("front") || c("bangs") || c("fringe") || c("upper") {
+            return one(Part::HairFront);
+        }
+        return Some((NamePart::One(Part::HairFront), 0.5));
+    }
+    if c("neck") {
+        return one(Part::Neck);
+    }
+    if c("hand") || c("finger") || c("thumb") || c("palm") {
+        return pair(Part::HandL, Part::HandR);
+    }
+    if c("torso") || s == "body" || c("chest") {
+        return one(Part::Torso);
+    }
+    if s.ends_with("leg") || s.ends_with("legs") || c("thigh") {
+        return pair(Part::LegL, Part::LegR);
+    }
+    if s.contains("face") || s.contains("skin") || s == "head" || s.starts_with("head") {
+        return one(Part::Face);
+    }
+    const CLOTHES: [&str; 18] = ["shirt", "skirt", "dress", "jacket", "coat", "pants", "lace", "sleeve", "collar", "cape", "cloak", "glove", "shorts", "bra", "sock", "boot", "shoe", "corset"];
+    if CLOTHES.iter().any(|w| c(w)) {
+        return one(Part::Clothing);
+    }
+    const EXTRAS: [&str; 13] = ["necklace", "earring", "ribbon", "crown", "horn", "wing", "tail", "halo", "mask", "glasses", "scarf", "petal", "flower"];
+    if EXTRAS.iter().any(|w| c(w)) {
+        return one(Part::Accessory);
+    }
+    None
+}
+
+fn is_feature(p: &NamePart) -> bool {
+    let f = |p: Part| matches!(p, Part::EyeL | Part::EyeR | Part::EyeballL | Part::EyeballR | Part::BrowL | Part::BrowR | Part::Nose | Part::Mouth | Part::MouthInside | Part::EarL | Part::EarR | Part::Blush);
+    match p {
+        NamePart::One(p) => f(*p),
+        NamePart::Pair(l, r) => f(*l) || f(*r),
+    }
+}
+
+fn is_skin_like(p: &NamePart) -> bool {
+    matches!(p, NamePart::One(Part::Face | Part::Neck | Part::Torso | Part::Clothing | Part::Accessory))
+}
+
+/// What the name of a layer says, or failing that what the folders around it say (a layer called "Highlight" in the folder "EyeR"),
+/// with the side from any of them.
+fn classify_with_context(layers: &[Layer], l: &Layer) -> Option<(NamePart, f32, String)> {
+    let own = from_name(&l.name).or_else(|| from_name_loose(&l.name)).map(|(p, c)| (p, c, format!("the name “{}”", l.name)));
+    let mut side = side_of_name(&l.name);
+    let mut anc: Option<(NamePart, f32, String)> = None;
+    let mut p = l.parent;
+    let mut guard = 0;
+    while let Some(pid) = p {
+        guard += 1;
+        let Some(f) = layers.iter().find(|x| x.id == pid) else { break };
+        if guard > 32 {
+            break;
+        }
+        if side.is_none() {
+            side = side_of_name(&f.name);
+        }
+        if anc.is_none() {
+            if let Some((np, c)) = from_name(&f.name).or_else(|| from_name_loose(&f.name)) {
+                anc = Some((np, c * 0.85, format!("the folder “{}”", f.name)));
+            }
+        }
+        p = f.parent;
+    }
+    let chosen = match (own, anc) {
+        // the skin of the mouth inside is not the skin of the face
+        (Some(o), Some(a)) if is_skin_like(&o.0) && is_feature(&a.0) => Some(a),
+        (Some(o), Some(a)) if o.1 < 0.6 && a.1 >= o.1 => Some(a),
+        (Some(o), _) => Some(o),
+        (None, a) => a,
+    };
+    chosen.map(|(np, c, why)| match (np, side) {
+        (NamePart::Pair(l, _), Some(Side::L)) => (NamePart::One(l), c.max(0.75), why),
+        (NamePart::Pair(_, r), Some(Side::R)) => (NamePart::One(r), c.max(0.75), why),
+        (np, _) => (np, c, why),
+    })
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum NamePart {
     One(Part),
@@ -454,9 +614,9 @@ pub fn suggest_with(layers: &[Layer], doc_w: u32, doc_h: u32, include_tagged: bo
         });
         // viewer's right is the character's left
         let side_from_place = |cx: f32| if cx > 0.5 { Part::EyeL } else { Part::EyeR };
-        if let Some((np, conf)) = from_name(&l.name) {
+        if let Some((np, conf, said)) = classify_with_context(layers, l) {
             let s = match np {
-                NamePart::One(p) => Suggestion { layer: l.id, part: p, confidence: conf, reason: format!("the name “{}”", l.name) },
+                NamePart::One(p) => Suggestion { layer: l.id, part: p, confidence: conf, reason: said },
                 NamePart::Pair(left, right) => {
                     let (part, why) = match geo {
                         Some((cx, ..)) if (cx - 0.5).abs() > 0.03 => (if cx > 0.5 { left } else { right }, "the name, and it sits on the right of the picture"),

@@ -1065,7 +1065,7 @@ impl SeviathApp {
         let list = self.stream_checklist();
         let done = list.iter().filter(|(ok, _)| *ok).count();
         for (ok, text) in &list {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(if *ok { "Yes" } else { "Not yet" }).size(11.5).color(if *ok { VENOM } else { GOLD }));
                 ui.label(RichText::new(text).size(11.5).color(if *ok { TEXT } else { TEXT_DIM }));
             });

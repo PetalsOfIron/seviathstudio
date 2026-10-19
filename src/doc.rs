@@ -571,6 +571,53 @@ impl Document {
         Ok(mid)
     }
 
+    /// Bake several pixel layers into one new layer that takes the place of the lowest of them (so it stays under everything that was
+    /// above the lowest one). The layers are put together the way they look now (blend modes, opacity, clipping); hidden layers and
+    /// layers that are not pixel layers are left alone. Returns the new layer's id, or why nothing was done.
+    pub fn merge_layers(&mut self, ids: &[LayerId], name: &str) -> Result<LayerId, &'static str> {
+        let mut idx: Vec<usize> = ids.iter().filter_map(|id| self.index_of(*id)).filter(|i| self.layers[*i].kind == LayerKind::Raster && self.layers[*i].visible && self.layers[*i].text.is_none()).collect();
+        idx.sort_unstable();
+        idx.dedup();
+        if idx.is_empty() {
+            return Err("There are no pixel layers to put together.");
+        }
+        // the layers put together in a small document of their own (top first, as here)
+        let mut tmp = Document::new(self.w, self.h);
+        tmp.layers.clear();
+        let mut keys: HashSet<TileKey> = HashSet::new();
+        for &i in &idx {
+            let mut l = self.layers[i].clone();
+            l.parent = None;
+            keys.extend(l.tiles.keys().copied());
+            tmp.layers.push(l);
+        }
+        // what the lowest one was clipped to is not here
+        if let Some(last) = tmp.layers.last_mut() {
+            last.clip = false;
+        }
+        let mut tiles: HashMap<TileKey, TileData> = HashMap::new();
+        for key in keys {
+            let px = tmp.flatten_tile(key);
+            if px.iter().all(|p| p[3] <= 0.0) {
+                continue;
+            }
+            tiles.insert(key, Arc::new(px.iter().map(|p| blend::from_px(*p)).collect()));
+        }
+        let bottom = *idx.last().unwrap();
+        let parent = self.layers[bottom].parent;
+        let mut merged = self.new_layer(name, LayerKind::Raster);
+        merged.tiles = tiles;
+        merged.parent = parent;
+        merged.rev += 1;
+        let mid = merged.id;
+        for &i in idx.iter().rev() {
+            self.layers.remove(i);
+        }
+        self.layers.insert(bottom + 1 - idx.len(), merged);
+        self.mark_all_dirty();
+        Ok(mid)
+    }
+
     // ---------- Compositing ----------
 
     /// Composites one tile for display. Transparent areas show a checkerboard when the paper is hidden.
