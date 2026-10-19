@@ -18,6 +18,8 @@ pub struct GameUi {
     pub height_m: f32,
     pub puff: f32,
     pub yaw: f32,
+    /// The preview follows the face that the Stream tab tracks (the head turn and the expressions).
+    pub follow: bool,
     /// The expression shown in the preview.
     pub expr: Option<String>,
     pub model: Option<Model3d>,
@@ -60,7 +62,7 @@ pub struct GameUi {
 
 impl Default for GameUi {
     fn default() -> Self {
-        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, expr: None, model: None, message: None, svrm_notes: Vec::new(), template: None, ai_python: default_python(), guides: false, tex_dirty: false, paint_rev: 0, mesh_only: false, setup_job: None, setup_step: None, setup_text: String::new(), setup_agree: false, paint3d: false, brush: Default::default(), overlay: None, last_pt: None, paint_gen: 0, paint_undo: Vec::new(), paint_rebuild: false, ai_backend: 0, ai_job: None, shape: None, shape_job: None, tex: None, made: 0 }
+        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, follow: false, expr: None, model: None, message: None, svrm_notes: Vec::new(), template: None, ai_python: default_python(), guides: false, tex_dirty: false, paint_rev: 0, mesh_only: false, setup_job: None, setup_step: None, setup_text: String::new(), setup_agree: false, paint3d: false, brush: Default::default(), overlay: None, last_pt: None, paint_gen: 0, paint_undo: Vec::new(), paint_rebuild: false, ai_backend: 0, ai_job: None, shape: None, shape_job: None, tex: None, made: 0 }
     }
 }
 
@@ -511,6 +513,7 @@ impl SeviathApp {
             ui.label(RichText::new("Turn").size(12.0).color(TEXT_DIM));
             ui.add(egui::Slider::new(&mut self.rigs.game.yaw, -90.0..=90.0).suffix(" deg"));
         });
+        ui.checkbox(&mut self.rigs.game.follow, "Follow the tracking").on_hover_text("The 3D character turns its head and blinks, opens the mouth and smiles with the face that the Stream tab follows (turn a tracking source on there)");
         let names: Vec<String> = model.expressions.iter().map(|e| e.name.clone()).collect();
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
@@ -526,10 +529,23 @@ impl SeviathApp {
         self.paint3d_controls(ui);
         let paint = self.rigs.game.paint3d;
         let (pw, ph) = if paint { (420u32, 672u32) } else { (300, 480) };
-        let key = (self.rigs.game.yaw.round() as i32, self.rigs.game.expr.clone(), self.rigs.game.made, self.rigs.game.guides, self.rigs.game.paint_gen, paint);
+        // following the face: the head turn and the expressions come from the tracking (steps of a tenth, so the picture is not made again for
+        // a change nobody can see)
+        let tracked = if self.rigs.game.follow { Some(tracked_look(&self.rigs.stream.inputs)) } else { None };
+        if tracked.is_some() {
+            ui.ctx().request_repaint();
+        }
+        let (yaw_now, expr_key) = match &tracked {
+            Some((yaw, list)) => ((*yaw / 2.0).round() as i32 * 2, Some(format!("{:?}", list.iter().map(|(n, v)| (*n, (v * 10.0).round() as i32)).collect::<Vec<_>>()))),
+            None => (self.rigs.game.yaw.round() as i32, self.rigs.game.expr.clone()),
+        };
+        let key = (yaw_now, expr_key, self.rigs.game.made, self.rigs.game.guides, self.rigs.game.paint_gen, paint);
         if self.rigs.game.tex.as_ref().map(|t| &t.0) != Some(&key) {
             if let Some(m) = &self.rigs.game.model {
-                let active: Vec<(&str, f32)> = self.rigs.game.expr.as_deref().map(|e| vec![(e, 1.0)]).unwrap_or_default();
+                let active: Vec<(&str, f32)> = match &tracked {
+                    Some((_, list)) => list.iter().map(|(n, v)| (*n, (v * 10.0).round() / 10.0)).collect(),
+                    None => self.rigs.game.expr.as_deref().map(|e| vec![(e, 1.0)]).unwrap_or_default(),
+                };
                 let img = preview::render_guides(m, key.0 as f32, pw, ph, &active, key.3);
                 let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
                 let tex = ui.ctx().load_texture("game_preview", color, TextureOptions::LINEAR);
@@ -904,8 +920,67 @@ impl SeviathApp {
     }
 }
 
+/// What the tracked face does, as the head turn (degrees) and the expressions of a VRM (blink, aa, happy, look...), from the named inputs of
+/// the Stream tab. Only what is tracked is in the list.
+pub fn tracked_look(inputs: &[(&'static str, f32)]) -> (f32, Vec<(&'static str, f32)>) {
+    let get = |n: &str| inputs.iter().find(|i| i.0 == n).map(|i| i.1);
+    let mut list: Vec<(&'static str, f32)> = Vec::new();
+    let (l, r) = (get("EyeOpenLeft"), get("EyeOpenRight"));
+    match (l, r) {
+        (Some(l), Some(r)) => {
+            let (bl, br) = (1.0 - l.clamp(0.0, 1.0), 1.0 - r.clamp(0.0, 1.0));
+            if (bl - br).abs() < 0.25 {
+                list.push(("blink", (bl + br) / 2.0));
+            } else {
+                list.push(("blinkLeft", bl));
+                list.push(("blinkRight", br));
+            }
+        }
+        _ => {
+            if let Some(o) = get("EyeOpen") {
+                list.push(("blink", 1.0 - o.clamp(0.0, 1.0)));
+            }
+        }
+    }
+    if let Some(m) = get("MouthOpen") {
+        list.push(("aa", m.clamp(0.0, 1.0)));
+    }
+    if let Some(s) = get("MouthSmile") {
+        list.push(("happy", s.clamp(0.0, 1.0) * 0.8));
+    }
+    if let Some(y) = get("EyeY") {
+        list.push((if y >= 0.0 { "lookUp" } else { "lookDown" }, y.abs().min(1.0)));
+    }
+    if let Some(x) = get("EyeX") {
+        list.push((if x >= 0.0 { "lookRight" } else { "lookLeft" }, x.abs().min(1.0)));
+    }
+    let yaw = get("FaceAngleX").unwrap_or(0.0).clamp(-45.0, 45.0);
+    (yaw, list)
+}
+
 /// The Python that has the AI packages: the one in the SeviathAI folder of the user when it is there, else plain `python`.
 fn default_python() -> String {
     let p = crate::aisetup::venv_python(&crate::aisetup::root());
     if p.exists() { p.to_string_lossy().to_string() } else { "python".to_string() }
+}
+
+#[cfg(test)]
+mod tracked_tests {
+    use super::tracked_look;
+
+    #[test]
+    fn the_tracked_face_becomes_a_head_turn_and_expressions() {
+        let inputs: Vec<(&'static str, f32)> = vec![("FaceAngleX", 20.0), ("EyeOpenLeft", 0.0), ("EyeOpenRight", 0.1), ("MouthOpen", 0.6), ("MouthSmile", 1.0)];
+        let (yaw, list) = tracked_look(&inputs);
+        assert_eq!(yaw, 20.0);
+        let g = |n: &str| list.iter().find(|x| x.0 == n).map(|x| x.1);
+        assert!(g("blink").unwrap() > 0.9, "both eyes shut: blink");
+        assert_eq!(g("aa"), Some(0.6));
+        assert!((g("happy").unwrap() - 0.8).abs() < 1e-5);
+        // one eye shut: a wink
+        let (_, wink) = tracked_look(&[("EyeOpenLeft", 0.0), ("EyeOpenRight", 1.0)]);
+        assert!(wink.iter().any(|x| x.0 == "blinkLeft" && x.1 > 0.9) && wink.iter().any(|x| x.0 == "blinkRight" && x.1 < 0.1));
+        // nothing tracked: no turn, no expressions
+        assert_eq!(tracked_look(&[]), (0.0, vec![]));
+    }
 }
