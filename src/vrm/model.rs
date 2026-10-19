@@ -515,7 +515,7 @@ pub fn build(doc: &Document, opt: &Options) -> Option<Model3d> {
     let mut index_of_mesh: HashMap<usize, usize> = HashMap::new();
     for (rank, info) in infos.iter().enumerate() {
         let m = &rig.meshes[info.mesh];
-        let Some(tex) = LayerTex::of(doc.layers.iter().find(|l| l.id == info.layer)?, doc.w, doc.h) else { continue };
+        let Some(tex) = LayerTex::of_in(doc, doc.layers.iter().find(|l| l.id == info.layer)?) else { continue };
         let side_left = (info.bb[0] + info.bb[2]) / 2.0 > xc;
         let cat = category(info.tag, side_left);
         // depth: the stack order, plus roundness inside the outline

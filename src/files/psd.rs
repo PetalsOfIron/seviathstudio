@@ -926,7 +926,7 @@ fn real_psds_run_the_pipeline() {
                         op *= f.opacity / 100.0;
                         p = f.parent;
                     }
-                    let Some(tex) = LayerTex::of(l, w, h) else { continue };
+                    let Some(tex) = LayerTex::of_in(&doc, l) else { continue };
                     if !shown {
                         continue;
                     }
@@ -964,7 +964,7 @@ fn real_psds_run_the_pipeline() {
             for (tag, vals) in [("rest", Values::default()), ("turned", turned), ("closed", closed)] {
                 let pose = rig.pose(&vals);
                 let all = rig.deformed_all(&pose);
-                let texes: Vec<_> = doc.layers.iter().rev().filter_map(|l| rig.mesh_of(l.id).map(|m| (m, LayerTex::of(l, w, h), l.blend))).collect();
+                let texes: Vec<_> = doc.layers.iter().rev().filter_map(|l| rig.mesh_of(l.id).map(|m| (m, LayerTex::of_in(&doc, l), l.blend))).collect();
                 let items: Vec<Item> = texes.iter().filter_map(|(m, t, b)| t.as_ref().map(|t| Item { tex: t, rest: &m.verts, now: all[rig.meshes.iter().position(|x| x.id == m.id).unwrap()].clone(), tris: &m.tris, opacity: 1.0, blend: *b })).collect();
                 let px = raster::render(&items, pw, ph, scale, Some(eframe::egui::Color32::from_rgb(244, 242, 236)));
                 let mut img = image::RgbaImage::new(pw as u32, ph as u32);

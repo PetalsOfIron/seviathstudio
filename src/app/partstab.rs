@@ -276,7 +276,7 @@ impl SeviathApp {
         });
         ui.horizontal_wrapped(|ui| {
             for (label, merge, tip) in [
-                ("Tidy for rigging", false, "For a finished drawing with many layers for every part: tags every layer from its name and the folders around it. The order of your layers, the folders, the blend modes and the opacity are not changed. A layer that is clipped to another is tagged like its base and its clipping is baked in, so it stays inside the part. One step in the history."),
+                ("Tidy for rigging", false, "For a finished drawing with many layers for every part: tags every layer from its name and the folders around it. The order of your layers, the folders, the blend modes and the opacity are not changed. A layer that is clipped to another is tagged like its base and it stays clipped, as in the file. One step in the history."),
                 ("Also put each part together", true, "Tags the layers like Tidy for rigging, and then puts the layers of one part together into one layer, but only where no other part lies between them in the stack (so the picture does not change). A smaller model for a game. One step in the history."),
             ] {
                 if ui.add(egui::Button::new(if merge { RichText::new(label) } else { RichText::new(label).strong() })).on_hover_text(tip).clicked() {
