@@ -31,7 +31,7 @@ expected, what happened. Things marked **needs hardware** were only tested with 
 - Auto-rig a character (Parts tab first to tag layers), move the sliders. **Views**: add views, put layers in them, Build the views,
   move the View slider.
 - **Rig for games**: Make the 3D character, turn it, try the expressions, save as VRM 1.0 / 0.x / GLB. Tick **Follow the tracking** under the preview and turn a tracking source on in the Stream tab: the 3D head turns and blinks with your face (**needs hardware**). The notes in gold are
-  things a game maker should know (the SVRM description). Open the VRM in VRoid, VSeeFace or a game and look for problems.
+  things a game maker should know (the SVRM description). Open the VRM in VRoid, VSeeFace or a game and look for problems. For Unreal Engine: **Get VRM4U** (the button under the save buttons) opens the free plugin; turn it on in your project and drag the saved `.vrm` into the Content Browser (**needs Unreal**, not tried).
 - The AI files (Hunyuan3D, face finder) are downloaded from the card in this section (**needs the internet, several GB**).
 
 ## Physics
