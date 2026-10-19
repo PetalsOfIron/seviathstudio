@@ -91,6 +91,11 @@ Performance check: `cargo test --release bench_full_redraw -- --ignored --nocapt
 - `src/select.rs`, `src/fill.rs`, `src/transform.rs`, `src/symmetry.rs` — selections (masks, magic wand, grow/shrink/feather, outlines), paint bucket, move & transform, live symmetry; their panels are in `src/tabs/draw/tools.rs`
 - `src/theme.rs`, `src/snake.rs`, `src/icons.rs`, `src/widgets.rs`, `src/colorpick.rs` — the look: colors, snake art, icons and widgets, all drawn in code
 
+## Guides
+
+- `docs/TESTING.md`: what to try, tab by tab, and which parts need hardware.
+- `docs/virtual-camera.md`: show the model in Discord, Zoom or a browser through OBS Studio.
+
 ## Contributing
 
 Issues and pull requests are welcome. Please run `cargo test --release` before sending a change, and keep new UI text short and plain.
