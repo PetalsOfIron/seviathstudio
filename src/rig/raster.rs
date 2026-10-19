@@ -8,6 +8,96 @@ use rayon::prelude::*;
 use crate::doc::{Layer, TILE};
 use crate::files::layer_bounds;
 
+/// Where it is inside the black outline of a part (the line layers of the part, filled from outside): 1 inside and not on the line.
+struct Inside {
+    x0: i32,
+    y0: i32,
+    w: usize,
+    h: usize,
+    cells: Vec<bool>,
+}
+
+impl Inside {
+    fn get(&self, x: i32, y: i32) -> f32 {
+        let (gx, gy) = (x - self.x0, y - self.y0);
+        if gx < 0 || gy < 0 || gx >= self.w as i32 || gy >= self.h as i32 {
+            return 0.0;
+        }
+        self.cells[gy as usize * self.w + gx as usize] as u8 as f32
+    }
+}
+
+/// The inside of the outline drawn by the layers of the part whose name says "line". None when there is no closed outline.
+fn inside_of_outline(doc: &crate::doc::Document, part: crate::parts::Part) -> Option<Inside> {
+    let lines: Vec<&Layer> = doc.layers.iter().filter(|x| x.part == Some(part) && !x.clip && x.visible && x.name.to_lowercase().contains("line")).collect();
+    let mut bounds: Option<(i32, i32, i32, i32)> = None;
+    for l in &lines {
+        if let Some(b) = layer_bounds(l, doc.w, doc.h) {
+            bounds = Some(match bounds {
+                None => b,
+                Some(a) => (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)),
+            });
+        }
+    }
+    let (x0, y0, x1, y1) = bounds?;
+    let (x0, y0) = (x0 - 2, y0 - 2);
+    let (w, h) = ((x1 - x0 + 2) as usize, (y1 - y0 + 2) as usize);
+    let tt = TILE as i32;
+    let mut line = vec![false; w * h];
+    for l in &lines {
+        for y in 0..h {
+            for x in 0..w {
+                let (px, py) = (x0 + x as i32, y0 + y as i32);
+                if let Some(b) = l.tiles.get(&(px.div_euclid(tt), py.div_euclid(tt))) {
+                    if b[(py.rem_euclid(tt) * tt + px.rem_euclid(tt)) as usize].a() > 90 {
+                        line[y * w + x] = true;
+                    }
+                }
+            }
+        }
+    }
+    // fill from the border over everything that is not the line
+    let mut outside = vec![false; w * h];
+    let mut stack: Vec<usize> = Vec::new();
+    for x in 0..w {
+        stack.push(x);
+        stack.push((h - 1) * w + x);
+    }
+    for y in 0..h {
+        stack.push(y * w);
+        stack.push(y * w + w - 1);
+    }
+    while let Some(i) = stack.pop() {
+        if outside[i] || line[i] {
+            continue;
+        }
+        outside[i] = true;
+        let (x, y) = (i % w, i / w);
+        if x > 0 {
+            stack.push(i - 1);
+        }
+        if x + 1 < w {
+            stack.push(i + 1);
+        }
+        if y > 0 {
+            stack.push(i - w);
+        }
+        if y + 1 < h {
+            stack.push(i + w);
+        }
+    }
+    let cells: Vec<bool> = (0..w * h).map(|i| !outside[i] && !line[i]).collect();
+    // an outline with a gap lets the fill in: then there is nothing to go by
+    let inner = cells.iter().filter(|c| **c).count();
+    if std::env::var("TAGS").is_ok() {
+        eprintln!("   outline of {:?}: {} layers, inside {} of {} cells", part, lines.len(), inner, w * h);
+    }
+    if inner * 10 < w * h {
+        return None;
+    }
+    Some(Inside { x0, y0, w, h, cells })
+}
+
 /// A layer's pixels in one piece (premultiplied, 0..1), over its bounding box.
 pub struct LayerTex {
     pub x0: i32,
@@ -48,6 +138,54 @@ impl LayerTex {
     /// where that layer has pixels. The layer in the file keeps its clipping; only this picture is cut.
     pub fn of_in(doc: &crate::doc::Document, l: &Layer) -> Option<LayerTex> {
         let mut t = LayerTex::of(l, doc.w, doc.h)?;
+        // a layer that is cut to parts (the skin patch that hides the inside of the mouth: cut to the face and to the inside of the mouth),
+        // so it never lies outside them
+        for to in doc.rig.clip_to.iter().filter(|(id, _)| *id == l.id).map(|c| c.1) {
+            let faces: Vec<&Layer> = doc.layers.iter().filter(|x| x.id != l.id && x.part == Some(to) && !x.clip && x.visible && !x.name.to_lowercase().contains("line")).collect();
+            if faces.is_empty() {
+                continue;
+            }
+            let tt = TILE as i32;
+            let mut mask = vec![0.0f32; t.w * t.h];
+            let inside = if to == crate::parts::Part::Face { inside_of_outline(doc, to) } else { None };
+            for y in 0..t.h {
+                for x in 0..t.w {
+                    let (px, py) = (t.x0 + x as i32, t.y0 + y as i32);
+                    if let Some(g) = &inside {
+                        mask[y * t.w + x] = g.get(px, py);
+                        continue;
+                    }
+                    mask[y * t.w + x] = faces.iter().map(|f| f.tiles.get(&(px.div_euclid(tt), py.div_euclid(tt))).map(|b| b[(py.rem_euclid(tt) * tt + px.rem_euclid(tt)) as usize].a() as f32 / 255.0).unwrap_or(0.0)).fold(0.0, f32::max);
+                }
+            }
+            // the face: a little inside it, so the patch never hangs out when the head turns; the mouth: a little wider than the inside, so the
+            // soft edge of the patch is kept
+            let grow = to != crate::parts::Part::Face;
+            let r = ((t.w.max(t.h) as f32 * if grow { 0.05 } else { 0.035 }) as usize).max(2);
+            let pass = |src: &[f32], horizontal: bool| -> Vec<f32> {
+                let mut out = vec![0.0f32; src.len()];
+                for y in 0..t.h {
+                    for x in 0..t.w {
+                        let mut m = if grow { 0.0f32 } else { 1.0f32 };
+                        let (lo, hi) = if horizontal { (x.saturating_sub(r), (x + r).min(t.w - 1)) } else { (y.saturating_sub(r), (y + r).min(t.h - 1)) };
+                        for k in lo..=hi {
+                            let v = if horizontal { src[y * t.w + k] } else { src[k * t.w + x] };
+                            m = if grow { m.max(v) } else { m.min(v) };
+                        }
+                        out[y * t.w + x] = m;
+                    }
+                }
+                out
+            };
+            let mask = pass(&pass(&mask, true), false);
+            for (p, a) in t.px.iter_mut().zip(mask) {
+                if a < 1.0 {
+                    for c in p.iter_mut() {
+                        *c *= a;
+                    }
+                }
+            }
+        }
         if l.clip {
             let i = doc.layers.iter().position(|x| x.id == l.id)?;
             if let Some(base) = doc.layers[i + 1..].iter().find(|b| b.parent == l.parent && !b.clip) {

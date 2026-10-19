@@ -301,6 +301,8 @@ pub struct Rig {
     pub hotkeys: Vec<crate::hotkeys::Binding>,
     /// Views of the character (front, side, back) that one slider switches between.
     pub views: views::Views,
+    /// Layers that are cut to the shape of a part (a skin patch to the face), so they never go outside it.
+    pub clip_to: Vec<(LayerId, crate::parts::Part)>,
     next_id: Id,
 }
 

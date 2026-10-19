@@ -488,8 +488,7 @@ fn classify_with_context(layers: &[Layer], l: &Layer) -> Option<(NamePart, f32, 
     }
     let chosen = match (own, anc) {
         // the skin of the mouth inside is not the skin of the face
-        // (but a layer that says "face" in its own name, like a face patch, is the face wherever it lies)
-        (Some(o), Some(a)) if is_skin_like(&o.0) && is_feature(&a.0) && !(compact(&l.name).contains("face") && !compact(&l.name).contains("skin")) => Some(a),
+        (Some(o), Some(a)) if is_skin_like(&o.0) && is_feature(&a.0) => Some(a),
         (Some(o), Some(a)) if o.1 < 0.6 && a.1 >= o.1 => Some(a),
         (Some(o), _) => Some(o),
         (None, a) => a,
@@ -840,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn a_face_patch_in_the_mouth_folder_is_still_the_face() {
+    fn a_face_patch_in_the_mouth_folder_moves_with_the_mouth() {
         use crate::doc::{Document, LayerKind};
         let mut d = Document::new(100, 100);
         d.layers.clear();
@@ -852,7 +851,7 @@ mod tests {
         p.parent = Some(fid);
         d.layers.insert(0, p);
         let l = d.layers[0].clone();
-        assert_eq!(classify_with_context(&d.layers, &l).map(|x| x.0), Some(NamePart::One(Part::Face)));
+        assert_eq!(classify_with_context(&d.layers, &l).map(|x| x.0), Some(NamePart::One(Part::Mouth)));
     }
 
     #[test]

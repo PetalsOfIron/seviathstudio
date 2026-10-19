@@ -19,6 +19,8 @@ const PREVIEW: u32 = 1024;
 #[derive(Default)]
 pub struct PartsState {
     pub selected: Vec<LayerId>,
+    /// The part the "Clip" button cuts the selected layers to (the face when nothing is picked).
+    clip_choice: Option<Part>,
     anchor: Option<LayerId>,
     pub suggestions: Vec<Suggestion>,
     /// Look at layers that already have a tag too.
@@ -524,6 +526,60 @@ impl SeviathApp {
         if must {
             ui.label(RichText::new("Some lines say Must: tag those layers first.").size(11.5).color(TEXT_DIM));
         }
+
+        // 8. clipping, and how to layer
+        section_title(ui, "How to layer");
+        egui::CollapsingHeader::new(RichText::new("The order that rigs well").size(12.0)).id_salt("how_to_layer").show(ui, |ui| {
+            for line in [
+                "Keep your layers as you drew them: the program does not move them. Folders per part help (Eye L, Mouth, Hair front).",
+                "Bottom to top: body, neck, face, then the parts on the face, then the hair on top.",
+                "Neck goes behind the torso. Legs go behind the skirt. Back hair is the lowest layer of the head.",
+                "In the mouth: face, inner mouth, teeth, then the skin patch that hides them, then the lips.",
+                "A shade or a colour layer on a base: clip it to the layer below, like in Photoshop or Clip Studio. It is kept as it is.",
+                "Name the layers by what they are (Eyelash L, Iris R, Toplip). Left is the character's left: the right side of the picture.",
+                "Put the black outline of the face on its own layer named Faceline. Teeth and patches are cut to it so they never go over the edge.",
+                "Eye parts in one folder per eye: white, iris, lashes, liner, lid. They move and blink together.",
+            ] {
+                ui.label(RichText::new(format!("• {line}")).size(11.5).color(TEXT_DIM));
+            }
+        });
+        // clipping: cut layers to the shape of a part
+        section_title(ui, "Clip the selected layers");
+        ui.label(RichText::new("Cuts them to the shape of a part, so they never go outside it (a skin patch on the face).").size(11.5).color(TEXT_DIM));
+        let to = self.parts.clip_choice.unwrap_or(Part::Face);
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("clip_to_part").selected_text(to.label()).width(130.0).show_ui(ui, |ui| {
+                for p in Part::ALL {
+                    if ui.selectable_label(to == p, p.label()).clicked() {
+                        self.parts.clip_choice = Some(p);
+                    }
+                }
+            });
+            if ui.add_enabled(n > 0, egui::Button::new("Clip")).clicked() {
+                for id in self.parts.selected.clone() {
+                    std::sync::Arc::make_mut(&mut self.draw.doc.rig).clip_to.retain(|c| c.0 != id);
+                    std::sync::Arc::make_mut(&mut self.draw.doc.rig).clip_to.push((id, to));
+                    if let Some(l) = self.draw.doc.layers.iter_mut().find(|l| l.id == id) {
+                        l.rev += 1;
+                    }
+                }
+                self.draw.doc.mark_all_dirty();
+                self.parts.message = Some(format!("{n} layers are clipped to {}.", to.label()));
+            }
+            if ui.add_enabled(n > 0, egui::Button::new("Unclip")).clicked() {
+                let sel = self.parts.selected.clone();
+                std::sync::Arc::make_mut(&mut self.draw.doc.rig).clip_to.retain(|c| !sel.contains(&c.0));
+                for l in self.draw.doc.layers.iter_mut().filter(|l| sel.contains(&l.id)) {
+                    l.rev += 1;
+                }
+                self.draw.doc.mark_all_dirty();
+            }
+        });
+        let clipped: Vec<String> = self.parts.selected.iter().filter_map(|id| self.draw.doc.rig.clip_to.iter().find(|c| c.0 == *id).map(|c| c.1.label().to_owned())).collect();
+        if !clipped.is_empty() {
+            ui.label(RichText::new(format!("Clipped to: {}", clipped.join(", "))).size(11.5).color(TEXT_DIM));
+        }
+
     }
 
     fn parts_model(&mut self, ui: &mut Ui, picked: &mut Option<(LayerId, bool, bool)>) {

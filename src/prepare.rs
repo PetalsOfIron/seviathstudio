@@ -149,6 +149,22 @@ pub fn tidy(doc: &mut Document, rules: &[NameRule], merge: bool) -> Report {
         kinds.sort_by_key(|p| Part::ALL.iter().position(|q| q == p));
         kinds.dedup();
         report.parts = kinds.len();
+        // the inside of the mouth (inner mouth, teeth) and a skin patch that lies in a feature ("Facepatch" in the mouth folder) are cut to the
+        // black outline of the face, so they never go outside it. The stacking stays as drawn: face, inner mouth, teeth, patch.
+        let cut: Vec<LayerId> = doc
+            .layers
+            .iter()
+            .filter(|l| {
+                let n = l.name.to_lowercase();
+                !l.clip && (l.part == Some(Part::MouthInside) || (l.part.is_some_and(|p| p != Part::Face && p != Part::Neck) && n.contains("face") && n.contains("pa") && !n.contains("line")))
+            })
+            .map(|l| l.id)
+            .collect();
+        for id in cut {
+            if !doc.rig.clip_to.iter().any(|c| c.0 == id) {
+                std::sync::Arc::make_mut(&mut doc.rig).clip_to.push((id, Part::Face));
+            }
+        }
         report.left_alone = doc.layers.iter().filter(|l| parts::is_part_layer(l) && l.visible && !l.tiles.is_empty() && l.part.is_none()).map(|l| l.name.clone()).collect();
         doc.mark_all_dirty();
         return report;
@@ -407,5 +423,28 @@ mod tests {
         square(&mut d, "Face", None, 300, 200, [240, 205, 180]);
         tidy(&mut d, &[], true);
         assert_eq!(d.layers.iter().find(|l| l.id == skin).unwrap().part, Some(Part::MouthInside));
+    }
+
+    #[test]
+    fn teeth_and_a_face_patch_are_cut_to_the_face_and_the_stacking_stays() {
+        let mut d = Document::new(1000, 1000);
+        d.layers.clear();
+        let mouth = {
+            let mut f = d.new_layer("Mouth", LayerKind::Group);
+            f.expanded = true;
+            let id = f.id;
+            d.layers.insert(0, f);
+            id
+        };
+        let patch = square(&mut d, "Facepatch", Some(mouth), 450, 600, [240, 205, 180]);
+        let teeth = square(&mut d, "Upperteeth", Some(mouth), 460, 610, [255, 255, 255]);
+        let inner = square(&mut d, "Innermouth", Some(mouth), 455, 605, [120, 40, 50]);
+        let face = square(&mut d, "Face", None, 300, 200, [240, 205, 180]);
+        let order: Vec<LayerId> = d.layers.iter().map(|l| l.id).collect();
+        tidy(&mut d, &[], false);
+        assert_eq!(order, d.layers.iter().map(|l| l.id).collect::<Vec<_>>(), "the stacking is as drawn");
+        let cut: Vec<LayerId> = d.rig.clip_to.iter().filter(|c| c.1 == Part::Face).map(|c| c.0).collect();
+        assert!(cut.contains(&patch) && cut.contains(&teeth) && cut.contains(&inner));
+        assert!(!cut.contains(&face));
     }
 }

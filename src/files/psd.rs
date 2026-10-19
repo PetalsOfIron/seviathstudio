@@ -870,6 +870,7 @@ fn real_psds_run_the_pipeline() {
         let checks = crate::parts::checklist(&doc.layers);
         eprintln!("   parts: {} suggestions, {tagged} tagged; checklist: {}", sug.len(), checks.iter().map(|c| format!("{:?} {}", c.level, c.text)).collect::<Vec<_>>().join(" | "));
         let mut rig = Rig::default();
+        rig.clip_to = doc.rig.clip_to.clone();
         let t1 = std::time::Instant::now();
         match rig_face(&mut rig, &doc.layers, doc.w, doc.h, &FaceOptions::default()) {
             Ok(r) => eprintln!("   face rig ok in {:?}: {:?}", t1.elapsed(), r.notes.iter().take(4).collect::<Vec<_>>()),
@@ -917,7 +918,7 @@ fn real_psds_run_the_pipeline() {
                     blend: crate::doc::Blend,
                 }
                 let mut pieces: Vec<Piece> = Vec::new();
-                for l in doc.layers.iter().rev().filter(|l| l.kind == LayerKind::Raster && l.visible) {
+                for l in doc.layers.iter().rev().filter(|l| l.kind == LayerKind::Raster && l.visible && std::env::var("HIDE").map_or(true, |h| !l.name.contains(&h))) {
                     let (mut shown, mut op) = (true, l.opacity / 100.0);
                     let mut p = l.parent;
                     while let Some(pid) = p {
@@ -964,7 +965,7 @@ fn real_psds_run_the_pipeline() {
             for (tag, vals) in [("rest", Values::default()), ("turned", turned), ("closed", closed)] {
                 let pose = rig.pose(&vals);
                 let all = rig.deformed_all(&pose);
-                let texes: Vec<_> = doc.layers.iter().rev().filter_map(|l| rig.mesh_of(l.id).map(|m| (m, LayerTex::of_in(&doc, l), l.blend))).collect();
+                let texes: Vec<_> = doc.layers.iter().rev().filter(|l| std::env::var("HIDE").map_or(true, |h| !l.name.contains(&h))).filter_map(|l| rig.mesh_of(l.id).map(|m| (m, LayerTex::of_in(&doc, l), l.blend))).collect();
                 let items: Vec<Item> = texes.iter().filter_map(|(m, t, b)| t.as_ref().map(|t| Item { tex: t, rest: &m.verts, now: all[rig.meshes.iter().position(|x| x.id == m.id).unwrap()].clone(), tris: &m.tris, opacity: 1.0, blend: *b })).collect();
                 let px = raster::render(&items, pw, ph, scale, Some(eframe::egui::Color32::from_rgb(244, 242, 236)));
                 let mut img = image::RgbaImage::new(pw as u32, ph as u32);
@@ -999,6 +1000,15 @@ fn real_psds_run_the_pipeline() {
                             }
                         }
                         let _ = crop.save(format!("target/screens/psd_{name}_face_{tag}.png"));
+                        // CROP=x0,y0,x1,y1 (pixels of the face picture): the same place three times bigger
+                        if let Ok(c) = std::env::var("CROP") {
+                            let n: Vec<u32> = c.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                            if n.len() == 4 && n[2] > n[0] && n[3] > n[1] && n[2] <= crop.width() && n[3] <= crop.height() {
+                                let sub = image::imageops::crop_imm(&crop, n[0], n[1], n[2] - n[0], n[3] - n[1]).to_image();
+                                let big = image::imageops::resize(&sub, sub.width() * 3, sub.height() * 3, image::imageops::FilterType::Nearest);
+                                let _ = big.save(format!("target/screens/psd_{name}_crop_{tag}.png"));
+                            }
+                        }
                     }
                 }
             }
