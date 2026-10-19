@@ -158,6 +158,11 @@ impl Player {
                         if let Some(s) = sink.take() {
                             s.stop();
                         }
+                        // the tests play test tones: they must not come out of the speakers
+                        if cfg!(test) {
+                            *w2.lock().unwrap() = Some(false);
+                            continue;
+                        }
                         if out.is_none() {
                             out = rodio::OutputStream::try_default().ok();
                             *w2.lock().unwrap() = Some(out.is_some());
