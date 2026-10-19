@@ -431,7 +431,7 @@ fn from_name_loose(name: &str) -> Option<(NamePart, f32)> {
     if s.contains("face") || s.contains("skin") || s == "head" || s.starts_with("head") {
         return one(Part::Face);
     }
-    const CLOTHES: [&str; 20] = ["scarf", "shawl", "shirt", "skirt", "dress", "jacket", "coat", "pants", "lace", "sleeve", "collar", "cape", "cloak", "glove", "shorts", "bra", "sock", "boot", "shoe", "corset"];
+    const CLOTHES: [&str; 23] = ["paldron", "pauldron", "strap", "scarf", "shawl", "shirt", "skirt", "dress", "jacket", "coat", "pants", "lace", "sleeve", "collar", "cape", "cloak", "glove", "shorts", "bra", "sock", "boot", "shoe", "corset"];
     if CLOTHES.iter().any(|w| c(w)) {
         return one(Part::Clothing);
     }
