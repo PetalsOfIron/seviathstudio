@@ -737,7 +737,7 @@ fn the_ai_shape_of_the_midlander_becomes_a_textured_rigged_character() {
     use super::model::build_any;
     use super::shape::Shape;
     let dir = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("SeviathAI/jobs/midlander");
-    let (Ok(png), Ok(glb)) = (std::fs::read(dir.join("original.png")), std::fs::read(dir.join("shape.glb"))) else { return };
+    let (Ok(png), Ok(glb)) = (std::fs::read(dir.join("original.png")), std::fs::read(dir.join(std::env::var("SHAPE").unwrap_or_else(|_| "shape.glb".into())))) else { return };
     let img = image::load_from_memory(&png).unwrap().to_rgba8();
     let shape = Shape::from_glb(&glb).unwrap();
     let mut d = uncut_doc(&img);
@@ -940,7 +940,7 @@ fn hair_strands_and_the_hair_brush_edit_the_hair_of_the_midlander() {
     use super::model::build_any;
     use super::shape::Shape;
     let dir = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("SeviathAI/jobs/midlander");
-    let (Ok(png), Ok(glb)) = (std::fs::read(dir.join("original.png")), std::fs::read(dir.join("shape.glb"))) else { return };
+    let (Ok(png), Ok(glb)) = (std::fs::read(dir.join("original.png")), std::fs::read(dir.join(std::env::var("SHAPE").unwrap_or_else(|_| "shape.glb".into())))) else { return };
     let img = image::load_from_memory(&png).unwrap().to_rgba8();
     let mut d = uncut_doc(&img);
     let ids: Vec<crate::doc::LayerId> = d.layers.iter().map(|l| l.id).collect();
