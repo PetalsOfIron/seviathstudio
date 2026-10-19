@@ -77,6 +77,12 @@ pub struct StreamUi {
     /// Where OBS Studio is on this computer (looked for when the panel is first shown), and what the last step of the set up said.
     pub obs_exe: Option<Option<std::path::PathBuf>>,
     pub vcam_message: Option<String>,
+    /// Looking for OBS being open, connecting to it by itself when it is (with what its own settings say), and how it is going.
+    pub obs_watch: Option<crate::obs::Watcher>,
+    pub obs_auto: bool,
+    obs_tries: u32,
+    obs_last_try: f64,
+    obs_was_running: bool,
 }
 
 impl Default for StreamUi {
@@ -128,6 +134,12 @@ impl Default for StreamUi {
             hk_scene: String::new(),
             obs_exe: None,
             vcam_message: None,
+            obs_watch: None,
+            // the tests must not reach for an OBS that happens to be open on the computer
+            obs_auto: !cfg!(test),
+            obs_tries: 0,
+            obs_last_try: 0.0,
+            obs_was_running: false,
         }
     }
 }
@@ -148,6 +160,7 @@ impl SeviathApp {
         if self.rigs.stream.hub.is_none() {
             self.rigs.stream.hub = Some(crate::hotkeys::Hub::new());
         }
+        self.stream_obs_watch(&ctx);
         self.stream_drive(&ctx);
         self.phys_tick(&ctx);
         self.rig_render(&ctx);
@@ -265,6 +278,54 @@ impl SeviathApp {
         let any_on = self.rigs.stream.sources.iter().any(|s| s.enabled) || rig.tracking.auto_blink || rig.tracking.breathing || rig.tracking.look_at_mouse;
         if any_on {
             ctx.request_repaint();
+        }
+    }
+
+    /// Notice OBS being open, and connect to it by itself with what its own WebSocket settings say (while Connect by itself is on).
+    fn stream_obs_watch(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        if self.rigs.stream.obs_watch.is_none() {
+            self.rigs.stream.obs_watch = Some(crate::obs::Watcher::start());
+        }
+        let running = self.rigs.stream.obs_watch.as_ref().map(|w| w.running()).unwrap_or(false);
+        let st = &mut self.rigs.stream;
+        if running != st.obs_was_running {
+            st.obs_was_running = running;
+            st.obs_tries = 0;
+            if !running {
+                // OBS was closed: the connection is over
+                st.obs = None;
+            } else {
+                // OBS was started: look for it again (it may have just been installed)
+                st.obs_exe = None;
+            }
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(1500));
+        if !st.obs_auto || !running {
+            return;
+        }
+        let status = st.obs.as_ref().map(|o| o.snapshot().status);
+        let failed = matches!(status, Some(crate::obs::Status::Failed(_)));
+        if (st.obs.is_none() || failed) && st.obs_tries < 8 && now - st.obs_last_try > 4.0 {
+            let cfg = crate::obs::user_config_dir().and_then(|d| crate::obs::read_websocket_config(&d));
+            st.obs_last_try = now;
+            match cfg {
+                Some(c) if c.enabled => {
+                    st.obs_tries += 1;
+                    st.obs_host = "localhost".into();
+                    st.obs_port = c.port;
+                    if let Some(p) = &c.password {
+                        st.obs_password = p.clone();
+                    }
+                    st.obs = Some(crate::obs::Obs::connect("localhost", c.port, &st.obs_password));
+                    st.vcam_message = Some("OBS is open: connecting to it.".into());
+                }
+                _ => {
+                    // its remote control is off: say how to switch it on, once
+                    st.obs_tries = 8;
+                    st.vcam_message = Some("OBS is open, but its remote control is off. Press Let this program control OBS (close OBS first), or switch it on in OBS: Tools, WebSocket Server Settings.".into());
+                }
+            }
         }
     }
 
@@ -526,9 +587,14 @@ impl SeviathApp {
             self.rigs.stream.obs_exe = Some(crate::obs::find_install());
         }
         let exe = self.rigs.stream.obs_exe.clone().flatten();
+        let running = self.rigs.stream.obs_was_running;
         match &exe {
             Some(p) => {
                 ui.label(RichText::new(format!("OBS Studio is installed: {}", p.display())).size(11.5).color(VENOM));
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(if running { "OBS is open now." } else { "OBS is not open." }).size(11.5).color(if running { VENOM } else { TEXT_DIM }));
+                    ui.checkbox(&mut self.rigs.stream.obs_auto, "Connect to it by itself").on_hover_text("When OBS is open, this program connects to it using the WebSocket settings OBS keeps itself");
+                });
             }
             None => {
                 ui.label(RichText::new("OBS Studio is not installed (or not in the usual place).").size(11.5).color(GOLD));
@@ -988,7 +1054,7 @@ impl SeviathApp {
             (st.server.is_some() || st.window, "The model goes out: the OBS browser source or the model window is on".to_string()),
         ];
         let obs = st.obs.as_ref().map(|o| o.snapshot().status);
-        v.push((obs == Some(crate::obs::Status::Connected), "OBS Studio is connected (only needed for scene switching and the stream buttons)".to_string()));
+        v.push((obs == Some(crate::obs::Status::Connected), format!("OBS Studio is connected{} (only needed for scene switching and the stream buttons)", if st.obs_was_running { "" } else { ": it is not open" })));
         v.push((!crate::expressions::defs(rig).is_empty(), "There are expressions to switch".to_string()));
         v.push((!rig.hotkeys.is_empty(), "There are hotkeys for them".to_string()));
         v

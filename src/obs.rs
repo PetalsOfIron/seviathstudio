@@ -128,6 +128,68 @@ pub fn find_install_in(roots: &[std::path::PathBuf]) -> Option<std::path::PathBu
     roots.iter().map(|r| r.join("obs-studio").join("bin").join("64bit").join("obs64.exe")).find(|p| p.exists())
 }
 
+/// What OBS says about its own WebSocket server: whether it is on, its port, and the password (None when it asks for none).
+#[derive(Clone, PartialEq, Debug)]
+pub struct WebsocketConfig {
+    pub enabled: bool,
+    pub port: u16,
+    pub password: Option<String>,
+}
+
+/// Read the settings of the WebSocket server from the folder `obs-studio` in the application data. None when there is no file.
+pub fn read_websocket_config(config_dir: &std::path::Path) -> Option<WebsocketConfig> {
+    let text = std::fs::read_to_string(config_dir.join("plugin_config").join("obs-websocket").join("config.json")).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    let auth = v["auth_required"].as_bool().unwrap_or(false);
+    Some(WebsocketConfig {
+        enabled: v["server_enabled"].as_bool().unwrap_or(false),
+        port: v["server_port"].as_u64().and_then(|p| u16::try_from(p).ok()).unwrap_or(4455),
+        password: auth.then(|| v["server_password"].as_str().unwrap_or("").to_string()),
+    })
+}
+
+/// The folder of OBS's settings of the user (`%APPDATA%/obs-studio`).
+pub fn user_config_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("APPDATA").map(|a| std::path::PathBuf::from(a).join("obs-studio"))
+}
+
+/// Looks every few seconds whether OBS is running, in a thread of its own (asking Windows takes a moment).
+pub struct Watcher {
+    running: Arc<std::sync::atomic::AtomicBool>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Watcher {
+    pub fn start() -> Watcher {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let running = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (r2, s2) = (running.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !s2.load(Ordering::Relaxed) {
+                r2.store(is_running(), Ordering::Relaxed);
+                for _ in 0..30 {
+                    if s2.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        });
+        Watcher { running, stop }
+    }
+
+    pub fn running(&self) -> bool {
+        self.running.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Start OBS (it must be started from its own folder). Returns at once.
 pub fn launch(exe: &std::path::Path) -> Result<(), String> {
     let dir = exe.parent().ok_or("OBS has no folder?")?;
@@ -444,6 +506,11 @@ mod tests {
         assert_eq!((v["server_enabled"].as_bool(), v["server_password"].as_str(), v["server_port"].as_u64(), v["auth_required"].as_bool()), (Some(true), Some("pw12345"), Some(4455), Some(true)));
         assert_eq!(std::fs::read_to_string(folder.join("config.json.before-seviath")).unwrap(), "{\"server_enabled\": false}");
         // passwords are different every time and plain letters and numbers
+        // what OBS says about its own server is read back: with a password, without one, and nothing when there is no file
+        assert_eq!(read_websocket_config(&cfg), Some(WebsocketConfig { enabled: true, port: 4455, password: Some("pw12345".into()) }));
+        std::fs::write(folder.join("config.json"), "{\"server_enabled\": true, \"server_port\": 4466, \"auth_required\": false}").unwrap();
+        assert_eq!(read_websocket_config(&cfg), Some(WebsocketConfig { enabled: true, port: 4466, password: None }));
+        assert_eq!(read_websocket_config(&dir.join("nothing")), None);
         let (a, b) = (make_password(), make_password());
         assert!(a.len() == 16 && a.chars().all(|c| c.is_ascii_alphanumeric()), "{a}");
         assert_ne!(a, b);
