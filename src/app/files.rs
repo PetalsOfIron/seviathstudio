@@ -854,3 +854,20 @@ impl SeviathApp {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_open_takes_a_clip_studio_file_by_its_extension() {
+        let dir = std::env::temp_dir().join(format!("seviath_open_clip_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("drawing.clip");
+        std::fs::write(&path, crate::files::clip::tests::tiny_clip()).unwrap();
+        let (doc, from_project) = load_any(&path).unwrap();
+        assert!(!from_project);
+        assert!(doc.layers.iter().any(|l| l.name == "Base"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
