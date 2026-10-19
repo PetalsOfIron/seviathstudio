@@ -63,3 +63,4 @@ The user's PC has 8 GB VRAM and can't do several heavy things at once. Screensho
 - **FEEDBACK.md**: the user tests the app and writes bugs and ideas there. Read it at the start of every session: fix the bugs first, do the ideas that fit (a better solution than the one written is welcome, say what was done), and move handled items to its Done part.
 
 - Tests and builds are limited to about half of the processor threads by `.cargo/config.toml` (6 test threads, 6 rayon threads, 8 build jobs): the owner's processor is the weakest part (RAM and GPU are stronger). Do not raise it without being asked.
+- Long runs (the full test suite) start at below-normal priority so a game can run at the same time: `$p = Start-Process cargo -ArgumentList "test","--release" -NoNewWindow -PassThru; $p.PriorityClass = "BelowNormal"; $p.WaitForExit()` in PowerShell. Between changes run only the tests of the part that changed.
