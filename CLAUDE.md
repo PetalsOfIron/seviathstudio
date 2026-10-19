@@ -7,6 +7,8 @@
 - **`ROADMAP.md`** = build order of the whole plan (milestones 1–56, each with the technique). When the user says "continue" / "next task": build the next roadmap milestone.
 - The old Svelte web app is at `C:\Users\SaphiresSilver\Projects\seviathstudio` (reference only, e.g. `src/lib/*.ts` to port). **Never commit or push there** (its push URL is disabled on purpose). Claude Code sessions may start with that folder as cwd — always work with absolute paths into `seviathstudio-rs`.
 
+- Guides for the user: `docs/TESTING.md` (what to test) and `docs/virtual-camera.md`. Keep them current when a feature changes.
+
 ## The user
 - An artist (Seviath, @SnakeSeviath), not a programmer. Has a **Huion tablet** (pressure via Windows Ink → `Event::Touch { force }`).
 - Writes English or **Latvian** — answer in the language of their message. Keep replies plain and short; explain what they can now do in the app.
