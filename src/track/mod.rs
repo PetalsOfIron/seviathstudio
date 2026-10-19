@@ -47,6 +47,8 @@ pub const CHANNELS: &[(&str, &str, f32, f32)] = &[
     ("ForearmRightAngle", "Right forearm (0 down, 90 out, 180 up)", 0.0, 180.0),
     ("BodyTilt", "Shoulders tilt", -30.0, 30.0),
     ("BodyLeanX", "Body leans left and right", -1.0, 1.0),
+    ("HandLeftTurn", "Left hand bent from the arm (degrees)", -90.0, 90.0),
+    ("HandRightTurn", "Right hand bent from the arm (degrees)", -90.0, 90.0),
     ("HandLeftOpen", "Left hand open", 0.0, 1.0),
     ("HandRightOpen", "Right hand open", 0.0, 1.0),
     ("FingerLeftThumb", "Left thumb open", 0.0, 1.0),
@@ -172,6 +174,13 @@ pub fn channels(f: &Frame) -> HashMap<&'static str, f32> {
             c.insert(ch.0, *v);
         }
     }
+    // how far the forearm is turned from the upper arm: the hand slider of a body rig is a turn from the arm
+    for (side, arm, fore, out) in [("Left", "ArmLeftAngle", "ForearmLeftAngle", "HandLeftTurn"), ("Right", "ArmRightAngle", "ForearmRightAngle", "HandRightTurn")] {
+        let _ = side;
+        if let (Some(a), Some(b)) = (c.get(arm).copied(), c.get(fore).copied()) {
+            c.insert(out, (b - a).clamp(-90.0, 90.0));
+        }
+    }
     c
 }
 
@@ -263,6 +272,16 @@ impl TrackMapping {
                 "armr" | "armright" => Some("ArmRightAngle"),
                 _ => None,
             };
+            // the hand of the body rig turns from the arm
+            let hand = match n.as_str() {
+                "handl" | "handleft" => Some("HandLeftTurn"),
+                "handr" | "handright" => Some("HandRightTurn"),
+                _ => None,
+            };
+            if let Some(input) = hand {
+                m.maps.push(Map { param: p.id, input: input.to_string(), in_lo: -60.0, in_hi: 60.0, out_lo: p.min, out_hi: p.max, clamp: true, smoothing: 8.0, invert: false });
+                continue;
+            }
             if let Some(input) = arm {
                 m.maps.push(Map { param: p.id, input: input.to_string(), in_lo: 0.0, in_hi: 90.0, out_lo: 0.0, out_hi: p.max, clamp: true, smoothing: 8.0, invert: false });
                 continue;
@@ -553,5 +572,12 @@ mod tests {
         let ml = m.maps.iter().find(|x| x.param == l).expect("a map for Arm L");
         assert_eq!((ml.input.as_str(), ml.in_lo, ml.in_hi, ml.out_lo, ml.out_hi), ("ArmLeftAngle", 0.0, 90.0, 0.0, 45.0));
         assert!(m.maps.iter().any(|x| x.input == "ArmRightAngle"));
+        // the hand turns from the arm: a forearm 30 degrees above the upper arm is a hand turn of 30
+        let ch = channels(&Frame { body: [("ArmLeftAngle".to_string(), 60.0), ("ForearmLeftAngle".to_string(), 90.0)].into_iter().collect(), ..Default::default() });
+        assert_eq!(ch.get("HandLeftTurn"), Some(&30.0));
+        let mut rig2 = Rig::default();
+        let hl = rig2.add_param("Hand L", -40.0, 40.0, 0.0);
+        let m2 = TrackMapping::auto(&rig2);
+        assert!(m2.maps.iter().any(|x| x.param == hl && x.input == "HandLeftTurn"));
     }
 }

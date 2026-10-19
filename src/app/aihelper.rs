@@ -21,8 +21,29 @@ enum Purpose {
     Test,
 }
 
+/// The window part that asks a ComfyUI for a picture.
+pub struct ComfyUi {
+    checkpoints: Vec<String>,
+    ckpt: usize,
+    prompt: String,
+    negative: String,
+    width: u32,
+    height: u32,
+    /// A workflow of the user's own (saved from ComfyUI as API format), else the plain one.
+    workflow: Option<std::path::PathBuf>,
+    job: Option<Receiver<Result<image::RgbaImage, String>>>,
+    listing: Option<Receiver<Result<Vec<String>, String>>>,
+}
+
+impl Default for ComfyUi {
+    fn default() -> Self {
+        Self { checkpoints: Vec::new(), ckpt: 0, prompt: String::new(), negative: "blurry, low quality".into(), width: 768, height: 1024, workflow: None, job: None, listing: None }
+    }
+}
+
 #[derive(Default)]
 pub struct AiUi {
+    comfy: ComfyUi,
     pub open: bool,
     prompt_brush: String,
     prompt_colors: String,
@@ -58,8 +79,103 @@ impl SeviathApp {
         self.ai.message = Some("Asking the AI...".into());
     }
 
+    /// ComfyUI: the list of checkpoints and the finished picture are picked up here.
+    fn comfy_poll(&mut self, ctx: &egui::Context) {
+        if self.ai.comfy.job.is_some() || self.ai.comfy.listing.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        if let Some(rx) = &self.ai.comfy.listing {
+            if let Ok(r) = rx.try_recv() {
+                self.ai.comfy.listing = None;
+                match r {
+                    Ok(list) => {
+                        self.ai.message = Some(format!("ComfyUI has {} checkpoints.", list.len()));
+                        self.ai.comfy.ckpt = 0;
+                        self.ai.comfy.checkpoints = list;
+                    }
+                    Err(e) => self.ai.message = Some(e),
+                }
+            }
+        }
+        if let Some(rx) = &self.ai.comfy.job {
+            if let Ok(r) = rx.try_recv() {
+                self.ai.comfy.job = None;
+                match r {
+                    Ok(img) => {
+                        self.draw.import_picture_layer(&img, "ComfyUI");
+                        self.ai.message = Some("The picture is a new layer in the Draw tab.".into());
+                    }
+                    Err(e) => self.ai.message = Some(e),
+                }
+            }
+        }
+    }
+
+    fn comfy_ui(&mut self, ui: &mut egui::Ui) {
+        section_title(ui, "A picture from ComfyUI");
+        ui.label(RichText::new("Asks the ComfyUI that runs on this computer to make a picture, and puts it on a new layer. Start ComfyUI first; nothing is sent anywhere else.").size(11.5).color(TEXT_DIM));
+        let busy = self.ai.comfy.job.is_some();
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.settings.comfy_url).desired_width(220.0));
+            if ui.add_enabled(self.ai.comfy.listing.is_none(), egui::Button::new("Find its checkpoints")).clicked() {
+                let url = self.settings.comfy_url.clone();
+                let (tx, rx) = channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::comfy::Comfy::new(&url).checkpoints());
+                });
+                self.ai.comfy.listing = Some(rx);
+                self.ai.message = Some("Asking ComfyUI...".into());
+            }
+        });
+        let c = &mut self.ai.comfy;
+        let using_own = c.workflow.is_some();
+        if !using_own && !c.checkpoints.is_empty() {
+            egui::ComboBox::from_id_salt("comfy_ckpt").selected_text(c.checkpoints.get(c.ckpt).cloned().unwrap_or_default()).width(300.0).show_ui(ui, |ui| {
+                for (i, n) in c.checkpoints.iter().enumerate() {
+                    ui.selectable_value(&mut c.ckpt, i, n);
+                }
+            });
+        }
+        ui.add(egui::TextEdit::singleline(&mut c.prompt).hint_text("a fox in the snow, soft light").desired_width(400.0));
+        ui.add(egui::TextEdit::singleline(&mut c.negative).hint_text("what to leave out").desired_width(400.0));
+        ui.horizontal(|ui| {
+            ui.add(egui::DragValue::new(&mut c.width).range(256..=2048).speed(8.0).prefix("width "));
+            ui.add(egui::DragValue::new(&mut c.height).range(256..=2048).speed(8.0).prefix("height "));
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Use my own workflow…").on_hover_text("A workflow saved from ComfyUI with Save (API format). Put {{prompt}}, {{negative}}, {{seed}}, {{width}}, {{height}} and {{checkpoint}} where they belong.").clicked() {
+                if let Some(p) = rfd::FileDialog::new().add_filter("ComfyUI workflow", &["json"]).pick_file() {
+                    c.workflow = Some(p);
+                }
+            }
+            if let Some(p) = &c.workflow {
+                ui.label(RichText::new(p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).size(11.5).color(TEXT_DIM));
+                if ui.small_button("Use the plain one").clicked() {
+                    c.workflow = None;
+                }
+            }
+        });
+        let ready = !c.prompt.trim().is_empty() && (using_own || !c.checkpoints.is_empty());
+        if ui.add_enabled(ready && !busy, egui::Button::new(RichText::new("Make the picture").strong())).on_disabled_hover_text("Write what you want, and find the checkpoints first").clicked() {
+            let url = self.settings.comfy_url.clone();
+            let template = match &c.workflow {
+                Some(p) => std::fs::read_to_string(p).map_err(|e| e.to_string()),
+                None => Ok(crate::comfy::DEFAULT_WORKFLOW.to_string()),
+            };
+            let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) % 4_000_000_000;
+            let fill = crate::comfy::Fill { prompt: c.prompt.trim().to_owned(), negative: c.negative.clone(), checkpoint: c.checkpoints.get(c.ckpt).cloned().unwrap_or_default(), seed, width: c.width / 8 * 8, height: c.height / 8 * 8 };
+            let (tx, rx) = channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(template.and_then(|t| crate::comfy::Comfy::new(&url).make(&t, &fill)));
+            });
+            c.job = Some(rx);
+            self.ai.message = Some("ComfyUI is making the picture (it can take a minute)...".into());
+        }
+    }
+
     /// What the AI answered becomes a brush, colours, or text to read.
     pub(super) fn ai_poll(&mut self, ctx: &egui::Context) {
+        self.comfy_poll(ctx);
         let Some((purpose, rx)) = &self.ai.job else { return };
         ctx.request_repaint_after(std::time::Duration::from_millis(150));
         let Ok(answer) = rx.try_recv() else { return };
@@ -133,6 +249,7 @@ impl SeviathApp {
                 let _ = small.write_to(&mut png, image::ImageFormat::Png);
                 self.ai_ask(Purpose::Check, aibridge::CHECK_SYSTEM.to_string(), "Look at this drawing.".to_string(), vec![png.into_inner()]);
             }
+            self.comfy_ui(ui);
             if let Some(m) = &self.ai.message {
                 ui.label(RichText::new(m).size(11.5).color(GOLD));
             }
