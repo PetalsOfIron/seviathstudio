@@ -272,7 +272,9 @@ pub fn rig_face(rig: &mut Rig, layers: &[Layer], doc_w: u32, doc_h: u32, o: &Fac
             // how far it can look: a share of the eye it sits in
             let e = rect_of(&[eye]).unwrap_or_else(|| grow(r, (r[2] - r[0]) * 0.5));
             let (ew, eh) = ((e[2] - e[0]).max(1.0), (e[3] - e[1]).max(1.0));
-            let c = mk.changer(&format!("{} look", part.label()), Kind::Warp { rect: grow(r, 2.0), cols: 1, rows: 1 }, Some(p));
+            // the eyeball closes with the eye it is in (it hangs in the blink of that eye), so it does not stay open on a closed lid
+            let in_eye = parent_of.iter().find(|e| e.0 == eye).and_then(|e| e.1).unwrap_or(p);
+            let c = mk.changer(&format!("{} look", part.label()), Kind::Warp { rect: grow(r, 2.0), cols: 1, rows: 1 }, Some(in_eye));
             let (dx, dy) = (0.22 * ew, 0.30 * eh);
             mk.slide(c, px, 1.0, [dx, 0.0]);
             mk.slide(c, px, -1.0, [-dx, 0.0]);
