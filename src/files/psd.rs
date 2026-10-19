@@ -854,6 +854,18 @@ fn real_psds_run_the_pipeline() {
         let t_tidy = std::time::Instant::now();
         let rep = crate::prepare::tidy(&mut doc, &[], false);
         let (sug, tagged): (Vec<()>, usize) = (Vec::new(), rep.parts);
+        if std::env::var("TAGS").is_ok() {
+            for l in doc.layers.iter().filter(|l| crate::parts::is_part_layer(l) && !l.tiles.is_empty()) {
+                let mut chain = String::new();
+                let mut p = l.parent;
+                while let Some(pid) = p {
+                    let Some(f) = doc.layers.iter().find(|x| x.id == pid) else { break };
+                    chain += &format!(" < {}", f.name);
+                    p = f.parent;
+                }
+                eprintln!("   tag {:?} <- {} (blend {:?}, clip {}){chain}", l.part, l.name, l.blend, l.clip);
+            }
+        }
         eprintln!("   tidy in {:?}: {} layers tagged, {} kinds, {} clips baked, left alone: {} ({})", t_tidy.elapsed(), rep.tagged, rep.parts, rep.clips_baked, rep.left_alone.len(), rep.left_alone.iter().take(8).cloned().collect::<Vec<_>>().join(", "));
         let checks = crate::parts::checklist(&doc.layers);
         eprintln!("   parts: {} suggestions, {tagged} tagged; checklist: {}", sug.len(), checks.iter().map(|c| format!("{:?} {}", c.level, c.text)).collect::<Vec<_>>().join(" | "));
@@ -878,9 +890,16 @@ fn real_psds_run_the_pipeline() {
             let (w, h) = (doc.w, doc.h);
             let scale = (900.0 / w.max(h) as f32).min(1.0);
             let (pw, ph) = (((w as f32 * scale) as usize).max(8), ((h as f32 * scale) as usize).max(8));
+            // the head turned (eyes open), and the eyes closed
             let mut turned = Values::default();
-            for p in rig.params.iter().filter(|p| p.name.starts_with("Angle X") || p.name.starts_with("Eyes open")) {
-                turned.set(p.id, if p.name.starts_with("Eyes") { p.min } else { p.max * 0.8 });
+            let mut closed = Values::default();
+            for p in rig.params.iter() {
+                if p.name.starts_with("Angle X") {
+                    turned.set(p.id, p.max * 0.8);
+                }
+                if p.name.starts_with("Eyes open") {
+                    closed.set(p.id, p.min);
+                }
             }
             // how close the rig at rest is to the drawing as the file shows it (both on white, 600 pixels): the stacking must be the same
             if let Some(theirs) = merged_preview(&bytes_for_compare) {
@@ -925,17 +944,24 @@ fn real_psds_run_the_pipeline() {
                 let px = raster::render(&items, sw, sh, k, Some(eframe::egui::Color32::WHITE));
                 let small = image::imageops::resize(&theirs, sw as u32, sh as u32, image::imageops::FilterType::Triangle);
                 let mut sum = 0.0f64;
+                let mut diff_img = image::RgbaImage::new(sw as u32, sh as u32);
                 for (i, p) in px.iter().enumerate() {
                     let q = small.get_pixel((i % sw) as u32, (i / sw) as u32).0;
                     let a = q[3] as f64 / 255.0;
+                    let mut d = 0.0;
                     for (ch, mine) in [p.r(), p.g(), p.b()].into_iter().enumerate() {
                         let theirs_on_white = q[ch] as f64 * a + 255.0 * (1.0 - a);
-                        sum += (mine as f64 - theirs_on_white).abs() / 3.0;
+                        d += (mine as f64 - theirs_on_white).abs() / 3.0;
                     }
+                    sum += d;
+                    // where the rig differs from the drawing: dark is the same, bright is different (x4)
+                    let v = (d * 4.0).min(255.0) as u8;
+                    diff_img.put_pixel((i % sw) as u32, (i / sw) as u32, image::Rgba([v, v, v, 255]));
                 }
+                let _ = diff_img.save(format!("target/screens/psd_{name}_rigdiff.png"));
                 eprintln!("   rig at rest against the file's own picture: mean difference {:.2} of 255", sum / (sw * sh) as f64);
             }
-            for (tag, vals) in [("rest", Values::default()), ("turned", turned)] {
+            for (tag, vals) in [("rest", Values::default()), ("turned", turned), ("closed", closed)] {
                 let pose = rig.pose(&vals);
                 let all = rig.deformed_all(&pose);
                 let texes: Vec<_> = doc.layers.iter().rev().filter_map(|l| rig.mesh_of(l.id).map(|m| (m, LayerTex::of(l, w, h), l.blend))).collect();

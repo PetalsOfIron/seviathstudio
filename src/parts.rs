@@ -363,7 +363,9 @@ fn side_of_name(name: &str) -> Option<Side> {
 
 /// A looser reading of a name for messy names ("Eyelinbotl", "Rightearline", "Hairhilight"): pieces of the letters are looked for.
 fn from_name_loose(name: &str) -> Option<(NamePart, f32)> {
-    let s = compact(name);
+    // "Righteye" is an eye (the side is read separately)
+    let full = compact(name);
+    let s = full.trim_start_matches("right").trim_start_matches("left").to_string();
     if s.len() < 3 {
         return None;
     }
@@ -383,7 +385,8 @@ fn from_name_loose(name: &str) -> Option<(NamePart, f32)> {
     if c("eyebrow") || s.ends_with("brow") || s.ends_with("brows") {
         return pair(Part::BrowL, Part::BrowR);
     }
-    if c("iris") || c("pupil") || c("eyeball") {
+    // (also the usual typing mistakes of "iris")
+    if c("iris") || c("irirs") || c("irris") || c("iriis") || c("pupil") || c("eyeball") {
         return pair(Part::EyeballL, Part::EyeballR);
     }
     if c("eyelash") || c("eyelid") || c("eyeliner") || c("eyelin") || c("eyewhite") || c("eyeshadow") || c("undereye") || c("sclera") || s == "eye" || s == "eyes" || s.starts_with("eyes") || s.starts_with("eye") && !c("eyebrow") {
@@ -454,7 +457,15 @@ fn is_skin_like(p: &NamePart) -> bool {
 /// What the name of a layer says, or failing that what the folders around it say (a layer called "Highlight" in the folder "EyeR"),
 /// with the side from any of them.
 fn classify_with_context(layers: &[Layer], l: &Layer) -> Option<(NamePart, f32, String)> {
-    let own = from_name(&l.name).or_else(|| from_name_loose(&l.name)).map(|(p, c)| (p, c, format!("the name “{}”", l.name)));
+    // a name that has an eye in it ("EyelineR Top") is an eye even when another word in it ("top") sounds like clothes
+    let strict = from_name(&l.name);
+    let loose = from_name_loose(&l.name);
+    let own = match (strict, loose) {
+        (Some((np, _)), Some(lo)) if is_skin_like(&np) && is_feature(&lo.0) => Some(lo),
+        (Some(s), _) => Some(s),
+        (None, lo) => lo,
+    }
+    .map(|(p, c)| (p, c, format!("the name “{}”", l.name)));
     let mut side = side_of_name(&l.name);
     let mut anc: Option<(NamePart, f32, String)> = None;
     let mut p = l.parent;
@@ -825,6 +836,13 @@ mod tests {
 
     fn doc() -> Document {
         Document::new(1000, 1000)
+    }
+
+    #[test]
+    fn eye_names_with_clothes_words_or_typos_are_still_eyes() {
+        let l = |n: &str| from_name_loose(n).map(|x| x.0);
+        assert_eq!(l("Righteye"), Some(NamePart::One(Part::EyeR)));
+        assert_eq!(l("Rightirirs"), Some(NamePart::One(Part::EyeballR)));
     }
 
     #[test]
