@@ -41,6 +41,24 @@ pub const CHANNELS: &[(&str, &str, f32, f32)] = &[
     ("MousePositionX", "Mouse left and right", -1.0, 1.0),
     ("MousePositionY", "Mouse up and down", -1.0, 1.0),
     ("Breath", "Breathing", 0.0, 1.0),
+    ("ArmLeftAngle", "Left upper arm (0 down, 90 out, 180 up)", 0.0, 180.0),
+    ("ArmRightAngle", "Right upper arm (0 down, 90 out, 180 up)", 0.0, 180.0),
+    ("ForearmLeftAngle", "Left forearm (0 down, 90 out, 180 up)", 0.0, 180.0),
+    ("ForearmRightAngle", "Right forearm (0 down, 90 out, 180 up)", 0.0, 180.0),
+    ("BodyTilt", "Shoulders tilt", -30.0, 30.0),
+    ("BodyLeanX", "Body leans left and right", -1.0, 1.0),
+    ("HandLeftOpen", "Left hand open", 0.0, 1.0),
+    ("HandRightOpen", "Right hand open", 0.0, 1.0),
+    ("FingerLeftThumb", "Left thumb open", 0.0, 1.0),
+    ("FingerLeftIndex", "Left index finger open", 0.0, 1.0),
+    ("FingerLeftMiddle", "Left middle finger open", 0.0, 1.0),
+    ("FingerLeftRing", "Left ring finger open", 0.0, 1.0),
+    ("FingerLeftPinky", "Left little finger open", 0.0, 1.0),
+    ("FingerRightThumb", "Right thumb open", 0.0, 1.0),
+    ("FingerRightIndex", "Right index finger open", 0.0, 1.0),
+    ("FingerRightMiddle", "Right middle finger open", 0.0, 1.0),
+    ("FingerRightRing", "Right ring finger open", 0.0, 1.0),
+    ("FingerRightPinky", "Right little finger open", 0.0, 1.0),
 ];
 
 fn avg(f: &Frame, names: &[&str]) -> Option<f32> {
@@ -147,6 +165,12 @@ pub fn channels(f: &Frame) -> HashMap<&'static str, f32> {
     }
     if let Some(v) = f.get("tongueOut") {
         c.insert("TongueOut", v);
+    }
+    // the body and the hands
+    for (n, v) in &f.body {
+        if let Some(ch) = CHANNELS.iter().find(|x| x.0 == n.as_str()) {
+            c.insert(ch.0, *v);
+        }
     }
     c
 }

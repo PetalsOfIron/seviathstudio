@@ -69,6 +69,19 @@ impl Status {
 
 const FACE_MODEL_URL: &str = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task";
 
+const POSE_MODEL_URL: &str = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task";
+const HAND_MODEL_URL: &str = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task";
+
+/// The body model of the camera tracker (the arms and the lean), when it has been downloaded.
+pub fn pose_model() -> PathBuf {
+    root().join("models").join("pose_landmarker.task")
+}
+
+/// The hand model of the camera tracker (the fingers), when it has been downloaded.
+pub fn hand_model() -> PathBuf {
+    root().join("models").join("hand_landmarker.task")
+}
+
 /// The face model of the camera tracker.
 pub fn tracker_model() -> PathBuf {
     root().join("models").join("face_landmarker.task")
@@ -227,6 +240,15 @@ pub fn install(step: &Sender<String>) -> Result<(), String> {
         let mut cmd = Command::new("curl");
         cmd.args(["-L", "--fail", "--silent", "--show-error", "-o"]).arg(tracker_model()).arg(FACE_MODEL_URL);
         run_logged(cmd, &log)?;
+    }
+    for (path, url, what) in [(pose_model(), POSE_MODEL_URL, "body (9 MB)"), (hand_model(), HAND_MODEL_URL, "hand (8 MB)")] {
+        if !path.exists() {
+            let _ = step.send(format!("Downloading the {what} model for the camera"));
+            std::fs::create_dir_all(root.join("models")).map_err(|e| e.to_string())?;
+            let mut cmd = Command::new("curl");
+            cmd.args(["-L", "--fail", "--silent", "--show-error", "-o"]).arg(&path).arg(url);
+            run_logged(cmd, &log)?;
+        }
     }
     // a last look: do the packages start?
     let _ = step.send("Checking that it works".into());

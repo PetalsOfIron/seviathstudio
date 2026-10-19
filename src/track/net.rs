@@ -22,6 +22,9 @@ pub struct Frame {
     pub blend: HashMap<String, f32>,
     /// Where the eyes look, in degrees: (left eye yaw, left eye pitch, right eye yaw, right eye pitch).
     pub eyes: Option<[f32; 4]>,
+    /// The body and the hands from the camera program (`/Seviath/Body name value`): arm angles in degrees, the tilt of the shoulders,
+    /// how open each hand and finger is (0 to 1).
+    pub body: HashMap<String, f32>,
 }
 
 impl Frame {
@@ -171,6 +174,12 @@ pub fn parse_vmc(d: &[u8]) -> Option<Frame> {
                 let v: Vec<f32> = args.iter().filter_map(arg_f).collect();
                 if v.len() >= 3 {
                     f.head = Some([v[0], v[1], v[2]]);
+                    any = true;
+                }
+            }
+            "/Seviath/Body" => {
+                if let (Some(Arg::Str(n)), Some(v)) = (args.first(), args.get(1).and_then(arg_f)) {
+                    f.body.insert(n.clone(), v);
                     any = true;
                 }
             }
@@ -452,6 +461,17 @@ pub(crate) mod tests {
         let mut cut = osc_message("/VMC/Ext/Blend/Val", &[Arg::Str("A".into()), Arg::Float(1.0)]);
         cut.truncate(cut.len() - 2);
         let _ = parse_vmc(&cut);
+    }
+
+    #[test]
+    fn the_body_numbers_of_the_camera_program_are_read_as_inputs() {
+        let mut d = osc_message("/Seviath/Body", &[Arg::Str("ArmLeftAngle".into()), Arg::Float(90.0)]);
+        d.extend(osc_message("/Seviath/Body", &[Arg::Str("HandRightOpen".into()), Arg::Float(0.25)]));
+        // one message at a time (a bundle is made of them)
+        let f = parse_vmc(&osc_message("/Seviath/Body", &[Arg::Str("ArmLeftAngle".into()), Arg::Float(90.0)])).unwrap();
+        assert_eq!(f.body.get("ArmLeftAngle"), Some(&90.0));
+        let ch = crate::track::channels(&f);
+        assert_eq!(ch.get("ArmLeftAngle"), Some(&90.0));
     }
 
     #[test]

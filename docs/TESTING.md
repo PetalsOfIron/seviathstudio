@@ -56,7 +56,7 @@ Start here: make a rig, open the Stream tab.
 
 - **Tracking** (**needs hardware**): turn on a source and send your face to it: VMC (Waidayo and similar), iFacialMocap,
   OpenSeeFace, or the camera of this computer (needs the AI files, from the Rig tab card). Watch the bars under
-  *What the face does now*. Press **Make the mapping**, then **Calibrate** looking at the camera. Say how the movement feels
+  *What the face does now* (with the body and hand models the arms, the lean and the fingers show there too: raise an arm, open and close a hand, **needs hardware**). Press **Make the mapping**, then **Calibrate** looking at the camera. Say how the movement feels
   (too slow, too jumpy, wrong direction: *Turn it round*).
 - **Expressions**: pose the sliders, give the look a name, Save. Click it to switch it on and off. Under *Layers it shows or hides*
   pick a prop layer.
