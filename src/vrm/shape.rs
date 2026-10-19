@@ -325,7 +325,56 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
     let inward_px = 0.02 * (vb[3] - vb[1]);
     let head_x = head_box(rig).map(|h| h[0] + h[2] / 2.0).unwrap_or((vb[0] + vb[2]) / 2.0);
     let head_bottom = head_box(rig).map(|h| h[1] + 0.1 * (h[2] / 2.0) + h[2] / 2.0 + 0.02 * (vb[3] - vb[1])).unwrap_or(vb[1]);
+    // What the AI made outside the outline of the drawing has no picture to wear (a wing in another place, a skirt that is wider): it would
+    // be stretched colour. Triangles whose three points and middle all lie outside the drawn outline (a few pixels wider) are left out.
+    let (mw, mh) = (fw as i32, fh as i32);
+    let kk = fwf / tw;
+    let reach = ((0.006 * fwf.max(fhf)).round() as i32).max(3);
+    let mut near_drawing = vec![false; mask.len()];
+    {
+        // dilate the outline with two passes (along the rows, then along the columns)
+        let mut rows = vec![false; mask.len()];
+        for y in 0..mh {
+            let mut last: i32 = i32::MIN / 2;
+            let mut next: i32 = i32::MAX / 2;
+            let row: Vec<i32> = (0..mw).filter(|x| mask[(y * mw + x) as usize]).collect();
+            let mut at = 0usize;
+            for x in 0..mw {
+                while at < row.len() && row[at] < x {
+                    last = row[at];
+                    at += 1;
+                }
+                next = if at < row.len() { row[at] } else { i32::MAX / 2 };
+                rows[(y * mw + x) as usize] = (x - last).abs() <= reach || (next - x).abs() <= reach;
+            }
+            let _ = (last, next);
+        }
+        for x in 0..mw {
+            let col: Vec<i32> = (0..mh).filter(|y| rows[(y * mw + x) as usize]).collect();
+            let mut at = 0usize;
+            let mut last: i32 = i32::MIN / 2;
+            for y in 0..mh {
+                while at < col.len() && col[at] < y {
+                    last = col[at];
+                    at += 1;
+                }
+                let next = if at < col.len() { col[at] } else { i32::MAX / 2 };
+                near_drawing[(y * mw + x) as usize] = (y - last).abs() <= reach || (next - y).abs() <= reach;
+            }
+        }
+    }
+    let on_drawing = |p: [f32; 3]| -> bool {
+        let (x, y) = (((p[0] - cx0 as f32) * kk) as i32, ((p[1] - cy0 as f32) * kk) as i32);
+        x >= 0 && y >= 0 && x < mw && y < mh && near_drawing[(y * mw + x) as usize]
+    };
+    let mut left_out = 0usize;
     for t in &tris {
+        let (pa, pb, pc) = (pts[t[0] as usize], pts[t[1] as usize], pts[t[2] as usize]);
+        let mid = [(pa[0] + pb[0] + pc[0]) / 3.0, (pa[1] + pb[1] + pc[1]) / 3.0, 0.0];
+        if !(on_drawing(pa) || on_drawing(pb) || on_drawing(pc) || on_drawing(mid)) {
+            left_out += 1;
+            continue;
+        }
         let (a, b, c) = (model_pts[t[0] as usize], model_pts[t[1] as usize], model_pts[t[2] as usize]);
         let (u, v) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
         let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
@@ -346,7 +395,13 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
             for k in 0..3 {
                 // under the chin the sides of the neck are hidden behind the hair in the drawing: take the skin down its middle
                 let neck = cy > head_bottom - 0.01 * (vb[3] - vb[1]) && near_head;
-                let sh = if neck { [head_x - pts[t[k] as usize][0], 0.0] } else { shift };
+                let mut sh = if neck { [head_x - pts[t[k] as usize][0], 0.0] } else { shift };
+                // a step that would land outside the drawing (the tip of a wing, the edge of a skirt) takes colour from nowhere: no step
+                let p = pts[t[k] as usize];
+                let (sx, sy) = (((p[0] + sh[0] - cx0 as f32) * kk) as i32, ((p[1] + sh[1] - cy0 as f32) * kk) as i32);
+                if sx < 0 || sy < 0 || sx >= mw || sy >= mh || !mask[(sy * mw + sx) as usize] {
+                    sh = [0.0, 0.0];
+                }
                 made.push((t[k], is_back, Some(sh)));
                 o[k] = (made.len() - 1) as u32;
             }
@@ -359,6 +414,9 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
             }
         }
         out_tris.push(o);
+    }
+    if std::env::var("SEVIATH_DEBUG_FACE").is_ok() {
+        eprintln!("triangles outside the drawn outline left out: {left_out} of {}", tris.len());
     }
     let verts: Vec<[f32; 3]> = made.iter().map(|(i, _, _)| model_pts[*i as usize]).collect();
     // how far the drawing is moved down at a height of the picture
@@ -389,6 +447,29 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
             }
         })
         .collect();
+    if std::env::var("SEVIATH_DEBUG_FACE").is_ok() {
+        let outside = made.iter().filter(|(i, _, side)| {
+            let p = pts[*i as usize];
+            let sh = side.unwrap_or([0.0, 0.0]);
+            let (u, v) = ((p[0] + sh[0] - cx0 as f32) / tw, (p[1] + sh[1] - cy0 as f32) / th);
+            !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v)
+        }).count();
+        let (mut stretched, mut total) = (0usize, 0usize);
+        for t in &out_tris {
+            let uv = |k: usize| uvs[t[k] as usize];
+            let (a, b, c) = (uv(0), uv(1), uv(2));
+            let area_uv = ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])).abs() * 0.5;
+            let (p, q, r) = (verts[t[0] as usize], verts[t[1] as usize], verts[t[2] as usize]);
+            let (u, w) = ([q[0] - p[0], q[1] - p[1], q[2] - p[2]], [r[0] - p[0], r[1] - p[1], r[2] - p[2]]);
+            let n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+            let area3 = 0.5 * (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            total += 1;
+            if area3 > 1e-9 && area_uv / area3 < 1e-3 {
+                stretched += 1;
+            }
+        }
+        eprintln!("points whose picture lies outside the drawing's frame: {outside} of {}; triangles whose picture is a thin sliver: {stretched} of {total}", made.len());
+    }
     let normals = normals_of(&verts, &out_tris);
     // skin weights: what is painted for the skeleton at the place of the point on the picture
     let ix_of: Vec<Option<usize>> = sk.bones.iter().map(|b| rig.changer(b.changer).and_then(|c| slot.get(c.name.as_str()).copied())).collect();

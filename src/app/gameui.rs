@@ -516,6 +516,13 @@ impl SeviathApp {
                 self.game_save(Format::Glb);
             }
         });
+        // the engines: the free plugins that read the file we save
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Unreal Engine").size(12.0).color(TEXT_DIM));
+            if ui.button("Get VRM4U (free plugin)").on_hover_text("VRM4U (MIT licence) puts a VRM file into Unreal Engine 4.20 to 5.4 with its bones, face shapes, spring bones and a humanoid rig: save as VRM 1.0 here, turn the plugin on in your Unreal project and drag the .vrm file into the Content Browser. Opens github.com/ruyo/VRM4U").clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab("https://github.com/ruyo/VRM4U"));
+            }
+        });
         if let Some(m) = &self.rigs.game.message {
             ui.label(RichText::new(m).size(11.5).color(TEXT_DIM));
         }
