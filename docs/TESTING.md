@@ -17,6 +17,13 @@ expected, what happened. Things marked **needs hardware** were only tested with 
   (**needs a real AI**).
 - File, New: the new stream sizes (Twitch banner, offline screen, profile picture, YouTube and Discord banners).
 
+## Parts (before rigging a finished drawing)
+
+- Open one of your finished PSDs (many layers in folders). Press **Tidy for rigging**. Every layer gets a tag, your layer order is
+  not changed. Check the Parts checklist, fix the tags that are wrong by hand, then go to the Rig tab and press the rig buttons.
+- **Also put each part together** makes a smaller model (the layers of one part become one layer, only where nothing else is
+  between them).
+
 ## Rig
 
 - Auto-rig a character (Parts tab first to tag layers), move the sliders. **Views**: add views, put layers in them, Build the views,

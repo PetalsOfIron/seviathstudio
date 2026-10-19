@@ -161,7 +161,7 @@ fn real_models_open_and_draw() {
             let pose = rig.pose(vals);
             let all = rig.deformed_all(&pose);
             let texes: Vec<_> = imp.doc.layers.iter().rev().filter_map(|l| rig.mesh_of(l.id).map(|m| (m, LayerTex::of(l, w, h)))).collect();
-            let items: Vec<Item> = texes.iter().filter_map(|(m, t)| t.as_ref().map(|t| Item { tex: t, rest: &m.verts, now: all[rig.meshes.iter().position(|x| x.id == m.id).unwrap()].clone(), tris: &m.tris, opacity: 1.0 })).collect();
+            let items: Vec<Item> = texes.iter().filter_map(|(m, t)| t.as_ref().map(|t| Item { tex: t, rest: &m.verts, now: all[rig.meshes.iter().position(|x| x.id == m.id).unwrap()].clone(), tris: &m.tris, opacity: 1.0, blend: crate::doc::Blend::Normal })).collect();
             let px = raster::render(&items, pw, ph, scale, Some(eframe::egui::Color32::from_rgb(244, 242, 236)));
             let mut img = image::RgbaImage::new(pw as u32, ph as u32);
             for (i, p) in px.iter().enumerate() {
@@ -219,7 +219,7 @@ fn real_moc3_models_open_and_draw() {
             let pose = rig.pose(vals);
             let all = rig.deformed_all(&pose);
             let texes: Vec<_> = imp.doc.layers.iter().rev().filter_map(|l| rig.mesh_of(l.id).map(|m| (m, LayerTex::of(l, w, h)))).collect();
-            let items: Vec<Item> = texes.iter().filter_map(|(m, t)| t.as_ref().map(|t| Item { tex: t, rest: &m.verts, now: all[rig.meshes.iter().position(|x| x.id == m.id).unwrap()].clone(), tris: &m.tris, opacity: 1.0 })).collect();
+            let items: Vec<Item> = texes.iter().filter_map(|(m, t)| t.as_ref().map(|t| Item { tex: t, rest: &m.verts, now: all[rig.meshes.iter().position(|x| x.id == m.id).unwrap()].clone(), tris: &m.tris, opacity: 1.0, blend: crate::doc::Blend::Normal })).collect();
             let px = raster::render(&items, pw, ph, scale, Some(eframe::egui::Color32::from_rgb(244, 242, 236)));
             let mut img = image::RgbaImage::new(pw as u32, ph as u32);
             for (i, p) in px.iter().enumerate() {

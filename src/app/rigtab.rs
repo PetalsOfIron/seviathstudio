@@ -379,7 +379,7 @@ impl SeviathApp {
     }
 
     /// Everything that is drawn, bottom first: (layer, mesh or a plain box, opacity).
-    pub(super) fn rig_items(&mut self) -> Vec<(LayerId, Arc<LayerTex>, Vec<[f32; 2]>, Vec<[f32; 2]>, Vec<[u32; 3]>, f32)> {
+    pub(super) fn rig_items(&mut self) -> Vec<(LayerId, Arc<LayerTex>, Vec<[f32; 2]>, Vec<[f32; 2]>, Vec<[u32; 3]>, f32, crate::doc::Blend)> {
         let rig = self.draw.doc.rig.clone();
         let painting = self.rigs.mode == Mode::Weight;
         let mut pose = if painting { rig.pose(&Values::default()) } else { rig.pose(&self.rigs.values) };
@@ -390,16 +390,36 @@ impl SeviathApp {
         let all = rig.deformed_all(&pose);
         // what an expression shows or hides (Stream tab) is put over how the layers are
         let over = &self.rigs.expr_layers;
+        // a layer in a folder that is hidden is hidden, and a folder that is see-through makes what is in it see-through
+        let layers = &self.draw.doc.layers;
+        let folders = |l: &crate::doc::Layer| -> (bool, f32) {
+            let (mut shown, mut op) = (true, 1.0f32);
+            let mut p = l.parent;
+            let mut guard = 0;
+            while let Some(pid) = p {
+                guard += 1;
+                let Some(f) = layers.iter().find(|x| x.id == pid) else { break };
+                shown &= f.visible;
+                op *= f.opacity / 100.0;
+                p = f.parent;
+                if guard > 32 {
+                    break;
+                }
+            }
+            (shown, op)
+        };
         let look = |l: &crate::doc::Layer| -> (bool, f32) {
-            match over.get(&l.id) {
+            let (folder_shown, folder_op) = folders(l);
+            let (shown, op) = match over.get(&l.id) {
                 Some((true, lv)) => (*lv > 0.0, l.opacity / 100.0 * if l.visible { 1.0 } else { *lv }),
                 Some((false, lv)) => (l.visible && *lv < 1.0, l.opacity / 100.0 * (1.0 - *lv)),
                 None => (l.visible, l.opacity / 100.0),
-            }
+            };
+            (shown && folder_shown, op * folder_op)
         };
-        let ids: Vec<(LayerId, f32)> = self.draw.doc.layers.iter().rev().filter(|l| matches!(l.kind, crate::doc::LayerKind::Raster | crate::doc::LayerKind::Vector)).filter_map(|l| {
+        let ids: Vec<(LayerId, f32, crate::doc::Blend)> = self.draw.doc.layers.iter().rev().filter(|l| matches!(l.kind, crate::doc::LayerKind::Raster | crate::doc::LayerKind::Vector)).filter_map(|l| {
             let (shown, op) = look(l);
-            shown.then_some((l.id, op))
+            shown.then_some((l.id, op, l.blend))
         }).collect();
         let mut out = Vec::new();
         // (place in `out`, how far forward an Order changer moves it)
@@ -407,13 +427,13 @@ impl SeviathApp {
         let skin = rig.skin.clone();
         let skin_tex = skin.as_ref().and_then(|_| self.skin_texture());
         let mut skin_done = false;
-        for (id, op) in ids {
+        for (id, op, blend) in ids {
             // the layers of the skin are drawn as one picture, where the lowest of them is
             if let (Some(sk), Some(tex)) = (&skin, &skin_tex) {
                 if sk.layers.contains(&id) {
                     if !skin_done {
                         skin_done = true;
-                        out.push((u64::MAX, tex.clone(), sk.verts.clone(), sk.skinned(&rig, &pose), sk.tris.clone(), 1.0));
+                        out.push((u64::MAX, tex.clone(), sk.verts.clone(), sk.skinned(&rig, &pose), sk.tris.clone(), 1.0, crate::doc::Blend::Normal));
                     }
                     continue;
                 }
@@ -426,16 +446,16 @@ impl SeviathApp {
                     shifts.push((out.len(), rig.mesh_order(m, &pose)));
                     if self.rigs.hq && rig::refine::bends(&rig, m) {
                         let r = rig::refine::refine(&rig, m, &all[mi], &pose, 0.35, 5.0);
-                        out.push((id, tex, r.rest, r.now, r.tris, op));
+                        out.push((id, tex, r.rest, r.now, r.tris, op, blend));
                     } else {
-                        out.push((id, tex, m.verts.clone(), all[mi].clone(), m.tris.clone(), op));
+                        out.push((id, tex, m.verts.clone(), all[mi].clone(), m.tris.clone(), op, blend));
                     }
                 }
                 None => {
                     // no mesh: stays where it is
                     let (x0, y0, x1, y1) = (tex.x0 as f32, tex.y0 as f32, (tex.x0 + tex.w as i32) as f32, (tex.y0 + tex.h as i32) as f32);
                     let v = vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
-                    out.push((id, tex, v.clone(), v, vec![[0, 1, 2], [0, 2, 3]], op));
+                    out.push((id, tex, v.clone(), v, vec![[0, 1, 2], [0, 2, 3]], op, blend));
                 }
             }
         }
@@ -462,7 +482,7 @@ impl SeviathApp {
         if items.is_empty() {
             return None;
         }
-        let list: Vec<Item> = items.iter().map(|(_, tex, rest, now, tris, op)| Item { tex, rest, now: now.clone(), tris, opacity: *op }).collect();
+        let list: Vec<Item> = items.iter().map(|(_, tex, rest, now, tris, op, blend)| Item { tex, rest, now: now.clone(), tris, opacity: *op, blend: *blend }).collect();
         let px = raster::render(&list, size.0 as usize, size.1 as usize, scale, paper);
         let mut img = image::RgbaImage::new(size.0, size.1);
         for (i, c) in px.iter().enumerate() {
@@ -521,7 +541,7 @@ impl SeviathApp {
         let scale = (self.settings.preview_px() / w.max(h)).min(1.0);
         let (pw, ph) = (((w * scale) as usize).max(8), ((h * scale) as usize).max(8));
         let items = self.rig_items();
-        let list: Vec<Item> = items.iter().map(|(_, tex, rest, now, tris, op)| Item { tex, rest, now: now.clone(), tris, opacity: *op }).collect();
+        let list: Vec<Item> = items.iter().map(|(_, tex, rest, now, tris, op, blend)| Item { tex, rest, now: now.clone(), tris, opacity: *op, blend: *blend }).collect();
         let paper = Color32::from_rgb(244, 242, 236);
         let px = raster::render(&list, pw, ph, scale, Some(paper));
         let img = egui::ColorImage::new([pw, ph], px);
@@ -3129,7 +3149,7 @@ impl SeviathApp {
     /// The topmost part under a page point (looking at where things are now).
     fn rig_pick(&mut self, pg: [f32; 2]) -> Option<LayerId> {
         let items = self.rig_items();
-        for (id, tex, rest, now, tris, _) in items.iter().rev() {
+        for (id, tex, rest, now, tris, ..) in items.iter().rev() {
             for t in tris {
                 let (a, b, c) = (now[t[0] as usize], now[t[1] as usize], now[t[2] as usize]);
                 let d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);

@@ -4045,3 +4045,22 @@ fn animate_tab_rig_and_cels_together() {
     save(&mut h, "animate_8_rig_and_cels");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The Stream and Animate tabs in a small window (laptop size): nothing may be cut off or overlap badly; the screens are looked at.
+#[test]
+fn small_window_screens_of_the_new_tabs() {
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1280.0, 720.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    h.state_mut().test_rig_edit(|r| {
+        r.anim.set_marker(0, "Idle");
+        r.own_exprs.push(crate::expressions::OwnExpr { name: "Happy".into(), ..Default::default() });
+    });
+    for (action, name) in [("tab.5", "small_animate"), ("tab.6", "small_stream"), ("tab.3", "small_rig")] {
+        h.state_mut().test_run_action_now(action);
+        h.run_steps(5);
+        save(&mut h, name);
+    }
+}

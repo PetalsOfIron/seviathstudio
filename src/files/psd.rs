@@ -796,3 +796,253 @@ mod tests {
         assert!(read(&bad).is_err());
     }
 }
+
+/// A real VTuber PSD from the user's folder, when it is on this computer: it must open, and the layers are listed.
+#[test]
+fn a_real_vtuber_psd_opens() {
+    let path = std::path::PathBuf::from(r"C:\Users\SaphiresSilver\Downloads\art\Finished2D3D\Sellablebeija.psd");
+    if !path.exists() {
+        return;
+    }
+    let t0 = std::time::Instant::now();
+    let bytes = std::fs::read(&path).unwrap();
+    let doc = read(&bytes).unwrap_or_else(|e| panic!("{e}"));
+    eprintln!("opened in {:?}: {}x{}, {} layers", t0.elapsed(), doc.w, doc.h, doc.layers.len());
+    let mut depth = |i: usize| {
+        let mut d = 0;
+        let mut p = doc.layers[i].parent;
+        while let Some(pid) = p {
+            d += 1;
+            p = doc.layers.iter().find(|l| l.id == pid).and_then(|l| l.parent);
+        }
+        d
+    };
+    for i in 0..doc.layers.len().min(400) {
+        let l = &doc.layers[i];
+        eprintln!("{}{} [{:?}] {}", "  ".repeat(depth(i)), l.name, l.kind, if l.visible { "" } else { "(hidden)" });
+    }
+    assert!(doc.layers.len() > 5);
+}
+
+/// The user's real VTuber PSDs, through the whole pipeline: open, tag the parts from the names, rig the face and the body, build the 3D
+/// character, save it as VRM and check the file. A report is printed; run it with `cargo test --release -- --ignored --nocapture real_psds`.
+#[test]
+#[ignore]
+fn real_psds_run_the_pipeline() {
+    use crate::rig::Rig;
+    use crate::rig::autorig::{BodyOptions, FaceOptions, rig_body, rig_face};
+    let dir = std::path::PathBuf::from(r"C:\Users\SaphiresSilver\Downloads\Vroids and psd 2dstarted");
+    let only = std::env::var("PSD").ok();
+    for name in ["Beija", "Evielina", "Semi", "vtuberscale", "dreija", "elfie"] {
+        if only.as_deref().is_some_and(|o| o != name) {
+            continue;
+        }
+        let path = dir.join(format!("{name}.psd"));
+        if !path.exists() {
+            continue;
+        }
+        let t0 = std::time::Instant::now();
+        let bytes_for_compare = std::fs::read(&path).unwrap();
+        let mut doc = match read(&bytes_for_compare) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("== {name}: DOES NOT OPEN: {e}");
+                continue;
+            }
+        };
+        eprintln!("== {name}: {}x{}, {} layers, opened in {:?}", doc.w, doc.h, doc.layers.len(), t0.elapsed());
+        let t_tidy = std::time::Instant::now();
+        let rep = crate::prepare::tidy(&mut doc, &[], false);
+        let (sug, tagged): (Vec<()>, usize) = (Vec::new(), rep.parts);
+        eprintln!("   tidy in {:?}: {} layers tagged, {} kinds, {} clips baked, left alone: {} ({})", t_tidy.elapsed(), rep.tagged, rep.parts, rep.clips_baked, rep.left_alone.len(), rep.left_alone.iter().take(8).cloned().collect::<Vec<_>>().join(", "));
+        let checks = crate::parts::checklist(&doc.layers);
+        eprintln!("   parts: {} suggestions, {tagged} tagged; checklist: {}", sug.len(), checks.iter().map(|c| format!("{:?} {}", c.level, c.text)).collect::<Vec<_>>().join(" | "));
+        let mut rig = Rig::default();
+        let t1 = std::time::Instant::now();
+        match rig_face(&mut rig, &doc.layers, doc.w, doc.h, &FaceOptions::default()) {
+            Ok(r) => eprintln!("   face rig ok in {:?}: {:?}", t1.elapsed(), r.notes.iter().take(4).collect::<Vec<_>>()),
+            Err(e) => eprintln!("   FACE RIG FAILED: {e}"),
+        }
+        match rig_body(&mut rig, &doc.layers, doc.w, doc.h, &BodyOptions::default()) {
+            Ok(r) => eprintln!("   body rig ok: {:?}", r.notes.iter().take(4).collect::<Vec<_>>()),
+            Err(e) => eprintln!("   BODY RIG FAILED: {e}"),
+        }
+        eprintln!("   rig: {} meshes, {} changers, {} sliders", rig.meshes.len(), rig.changers.len(), rig.params.len());
+        doc.rig = std::sync::Arc::new(rig);
+        // a picture of the rig at rest, and with the head turned, to look at (target/screens/psd_<name>_*.png)
+        {
+            use crate::rig::raster::{self, Item, LayerTex};
+            use crate::rig::Values;
+            let _ = std::fs::create_dir_all("target/screens");
+            let rig = &*doc.rig;
+            let (w, h) = (doc.w, doc.h);
+            let scale = (900.0 / w.max(h) as f32).min(1.0);
+            let (pw, ph) = (((w as f32 * scale) as usize).max(8), ((h as f32 * scale) as usize).max(8));
+            let mut turned = Values::default();
+            for p in rig.params.iter().filter(|p| p.name.starts_with("Angle X") || p.name.starts_with("Eyes open")) {
+                turned.set(p.id, if p.name.starts_with("Eyes") { p.min } else { p.max * 0.8 });
+            }
+            // how close the rig at rest is to the drawing as the file shows it (both on white, 600 pixels): the stacking must be the same
+            if let Some(theirs) = merged_preview(&bytes_for_compare) {
+                let k = 600.0 / w.max(h) as f32;
+                let (sw, sh) = (((w as f32 * k) as usize).max(8), ((h as f32 * k) as usize).max(8));
+                let pose = rig.pose(&Values::default());
+                let all = rig.deformed_all(&pose);
+                // every layer that is shown, as the app draws them: a layer with a mesh by its mesh, any other as a flat picture
+                struct Piece {
+                    tex: LayerTex,
+                    rest: Vec<[f32; 2]>,
+                    now: Vec<[f32; 2]>,
+                    tris: Vec<[u32; 3]>,
+                    op: f32,
+                    blend: crate::doc::Blend,
+                }
+                let mut pieces: Vec<Piece> = Vec::new();
+                for l in doc.layers.iter().rev().filter(|l| l.kind == LayerKind::Raster && l.visible) {
+                    let (mut shown, mut op) = (true, l.opacity / 100.0);
+                    let mut p = l.parent;
+                    while let Some(pid) = p {
+                        let Some(f) = doc.layers.iter().find(|x| x.id == pid) else { break };
+                        shown &= f.visible;
+                        op *= f.opacity / 100.0;
+                        p = f.parent;
+                    }
+                    let Some(tex) = LayerTex::of(l, w, h) else { continue };
+                    if !shown {
+                        continue;
+                    }
+                    let (rest, now, tris) = match rig.meshes.iter().position(|m| m.layer == l.id) {
+                        Some(mi) => (rig.meshes[mi].verts.clone(), all[mi].clone(), rig.meshes[mi].tris.clone()),
+                        None => {
+                            let (x0, y0, x1, y1) = (tex.x0 as f32, tex.y0 as f32, (tex.x0 + tex.w as i32) as f32, (tex.y0 + tex.h as i32) as f32);
+                            let v = vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+                            (v.clone(), v, vec![[0, 1, 2], [0, 2, 3]])
+                        }
+                    };
+                    pieces.push(Piece { tex, rest, now, tris, op, blend: l.blend });
+                }
+                let items: Vec<Item> = pieces.iter().map(|p| Item { tex: &p.tex, rest: &p.rest, now: p.now.clone(), tris: &p.tris, opacity: p.op, blend: p.blend }).collect();
+                let px = raster::render(&items, sw, sh, k, Some(eframe::egui::Color32::WHITE));
+                let small = image::imageops::resize(&theirs, sw as u32, sh as u32, image::imageops::FilterType::Triangle);
+                let mut sum = 0.0f64;
+                for (i, p) in px.iter().enumerate() {
+                    let q = small.get_pixel((i % sw) as u32, (i / sw) as u32).0;
+                    let a = q[3] as f64 / 255.0;
+                    for (ch, mine) in [p.r(), p.g(), p.b()].into_iter().enumerate() {
+                        let theirs_on_white = q[ch] as f64 * a + 255.0 * (1.0 - a);
+                        sum += (mine as f64 - theirs_on_white).abs() / 3.0;
+                    }
+                }
+                eprintln!("   rig at rest against the file's own picture: mean difference {:.2} of 255", sum / (sw * sh) as f64);
+            }
+            for (tag, vals) in [("rest", Values::default()), ("turned", turned)] {
+                let pose = rig.pose(&vals);
+                let all = rig.deformed_all(&pose);
+                let texes: Vec<_> = doc.layers.iter().rev().filter_map(|l| rig.mesh_of(l.id).map(|m| (m, LayerTex::of(l, w, h), l.blend))).collect();
+                let items: Vec<Item> = texes.iter().filter_map(|(m, t, b)| t.as_ref().map(|t| Item { tex: t, rest: &m.verts, now: all[rig.meshes.iter().position(|x| x.id == m.id).unwrap()].clone(), tris: &m.tris, opacity: 1.0, blend: *b })).collect();
+                let px = raster::render(&items, pw, ph, scale, Some(eframe::egui::Color32::from_rgb(244, 242, 236)));
+                let mut img = image::RgbaImage::new(pw as u32, ph as u32);
+                for (i, p) in px.iter().enumerate() {
+                    img.put_pixel((i % pw) as u32, (i / pw) as u32, image::Rgba([p.r(), p.g(), p.b(), 255]));
+                }
+                let _ = img.save(format!("target/screens/psd_{name}_{tag}.png"));
+            }
+        }
+        let t2 = std::time::Instant::now();
+        match crate::vrm::model::build(&doc, &crate::vrm::model::Options { name: name.into(), author: "test".into(), ..Default::default() }) {
+            Some(m) => {
+                eprintln!("   3D built in {:?}: {} parts, {} bones, {} expressions", t2.elapsed(), m.parts.len(), m.bones.len(), m.expressions.len());
+                match crate::vrm::export::export(&m, crate::vrm::export::Format::Vrm1).and_then(|b| crate::vrm::export::validate(&b).map(|s| (b.len(), s))) {
+                    Ok((n, s)) => eprintln!("   VRM 1.0 ok: {} KB, {:?}", n / 1024, s),
+                    Err(e) => eprintln!("   VRM FAILED: {e}"),
+                }
+            }
+            None => eprintln!("   3D BUILD FAILED: nothing could be built (no meshed parts?)"),
+        }
+    }
+}
+
+/// The flattened picture that Photoshop saved inside the file (what other programs show as the preview), for comparing with ours.
+#[cfg(test)]
+fn merged_preview(bytes: &[u8]) -> Option<image::RgbaImage> {
+    let mut c = Cur { b: bytes, p: 0 };
+    c.take(4).ok()?;
+    c.u16().ok()?;
+    c.skip(6).ok()?;
+    let nchan = c.u16().ok()? as usize;
+    let (h, w) = (c.u32().ok()? as usize, c.u32().ok()? as usize);
+    c.u16().ok()?;
+    c.u16().ok()?;
+    // the colour mode data, the image resources and the layers
+    for _ in 0..3 {
+        let n = c.u32().ok()? as usize;
+        c.skip(n).ok()?;
+    }
+    let comp = c.u16().ok()?;
+    let rest = &bytes[c.p..];
+    if comp != 1 || nchan < 3 {
+        return None;
+    }
+    let counts_len = nchan * h * 2;
+    let mut at = counts_len;
+    let mut planes: Vec<Vec<u8>> = Vec::new();
+    for k in 0..nchan.min(4) {
+        let mut plane = Vec::with_capacity(w * h);
+        for y in 0..h {
+            let i = (k * h + y) * 2;
+            let len = u16::from_be_bytes([*rest.get(i)?, *rest.get(i + 1)?]) as usize;
+            let end = (at + len).min(rest.len());
+            plane.extend(unpackbits(&rest[at.min(end)..end], w).ok()?);
+            at = end;
+        }
+        planes.push(plane);
+    }
+    Some(image::RgbaImage::from_fn(w as u32, h as u32, |x, y| {
+        let i = y as usize * w + x as usize;
+        image::Rgba([planes[0][i], planes[1][i], planes[2][i], planes.get(3).map(|p| p[i]).unwrap_or(255)])
+    }))
+}
+
+/// Is the order of the layers as the file has it? Our flattened picture of the layers is compared with the preview inside the file.
+/// A big difference means layers are in the wrong place (or a blend mode is not matched). The pictures are saved side by side.
+#[test]
+#[ignore]
+fn real_psds_have_their_layer_order_as_in_the_file() {
+    let dir = std::path::PathBuf::from(r"C:\Users\SaphiresSilver\Downloads\Vroids and psd 2dstarted");
+    let only = std::env::var("PSD").ok();
+    let _ = std::fs::create_dir_all("target/screens");
+    for name in ["Beija", "Evielina", "Semi", "vtuberscale", "dreija", "elfie"] {
+        if only.as_deref().is_some_and(|o| o != name) {
+            continue;
+        }
+        let path = dir.join(format!("{name}.psd"));
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        let doc = read(&bytes).unwrap();
+        let Some(theirs) = merged_preview(&bytes) else {
+            eprintln!("== {name}: the file has no preview I can read");
+            continue;
+        };
+        let ours = crate::files::flatten(&doc);
+        let small = |img: &image::RgbaImage| {
+            let k = 600.0 / img.width().max(img.height()) as f32;
+            let s = image::imageops::resize(img, (img.width() as f32 * k) as u32, (img.height() as f32 * k) as u32, image::imageops::FilterType::Triangle);
+            // on white, so see-through places compare as the same
+            let mut out = s.clone();
+            for p in out.pixels_mut() {
+                let a = p.0[3] as u32;
+                for ch in 0..3 {
+                    p.0[ch] = ((p.0[ch] as u32 * a + 255 * (255 - a)) / 255) as u8;
+                }
+                p.0[3] = 255;
+            }
+            out
+        };
+        let (a, b) = (small(&ours), small(&theirs));
+        let diff: f64 = a.pixels().zip(b.pixels()).map(|(p, q)| (0..3).map(|k| (p.0[k] as f64 - q.0[k] as f64).abs()).sum::<f64>() / 3.0).sum::<f64>() / (a.width() * a.height()) as f64;
+        eprintln!("== {name}: mean difference from the file's own preview: {diff:.2} of 255 ({} layers)", doc.layers.len());
+        let mut both = image::RgbaImage::new(a.width() * 2, a.height());
+        image::imageops::replace(&mut both, &a, 0, 0);
+        image::imageops::replace(&mut both, &b, a.width() as i64, 0);
+        let _ = both.save(format!("target/screens/psd_{name}_order.png"));
+    }
+}

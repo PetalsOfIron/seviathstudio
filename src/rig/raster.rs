@@ -106,6 +106,8 @@ pub struct Item<'a> {
     pub tris: &'a [[u32; 3]],
     /// 0..1
     pub opacity: f32,
+    /// How it is put on what is under it (Multiply for a shadow, Screen for a glow...).
+    pub blend: crate::doc::Blend,
 }
 
 /// Draw the items (bottom first) into a `w` x `h` picture, `scale` pixels per page pixel.
@@ -173,12 +175,8 @@ pub fn render(items: &[Item], w: usize, h: usize, scale: f32, backdrop: Option<C
                     if src[3] <= 0.0 {
                         continue;
                     }
-                    let k = it.opacity;
                     let d = &mut acc[(y as usize - by0) * w + x as usize];
-                    let inv = 1.0 - src[3] * k;
-                    for i in 0..4 {
-                        d[i] = src[i] * k + d[i] * inv;
-                    }
+                    *d = crate::blend::over(*d, src, it.opacity, it.blend);
                 }
             }
         }
@@ -228,7 +226,7 @@ mod tests {
         let l = rect_layer(&mut d, 20, 20, 60, 50, red);
         let tex = LayerTex::of(&l, 100, 100).unwrap();
         let (v, t) = quad(20.0, 20.0, 60.0, 50.0);
-        let out = render(&[Item { tex: &tex, rest: &v, now: v.clone(), tris: &t, opacity: 1.0 }], 100, 100, 1.0, None);
+        let out = render(&[Item { tex: &tex, rest: &v, now: v.clone(), tris: &t, opacity: 1.0, blend: crate::doc::Blend::Normal }], 100, 100, 1.0, None);
         for y in 0..100usize {
             for x in 0..100usize {
                 let inside = (20..60).contains(&x) && (20..50).contains(&y);
@@ -258,7 +256,7 @@ mod tests {
         vals.set(p, 90.0);
         let pose = rig.pose(&vals);
         let now: Vec<[f32; 2]> = v.iter().map(|q| rig.deform_point(&pose, Some(c), *q)).collect();
-        let out = render(&[Item { tex: &tex, rest: &v, now, tris: &t, opacity: 1.0 }], 200, 200, 1.0, None);
+        let out = render(&[Item { tex: &tex, rest: &v, now, tris: &t, opacity: 1.0, blend: crate::doc::Blend::Normal }], 200, 200, 1.0, None);
         assert_eq!(out[150 * 200 + 100], blue, "the bar now hangs below the pivot");
         assert_eq!(out[100 * 200 + 150].a(), 0, "and it is gone from where it was");
     }
@@ -272,8 +270,8 @@ mod tests {
         let (va, ia) = quad(10.0, 10.0, 40.0, 40.0);
         let (vb, ib) = quad(20.0, 20.0, 50.0, 50.0);
         let items = [
-            Item { tex: &ta, rest: &va, now: va.clone(), tris: &ia, opacity: 1.0 },
-            Item { tex: &tb, rest: &vb, now: vb.clone(), tris: &ib, opacity: 0.5 },
+            Item { tex: &ta, rest: &va, now: va.clone(), tris: &ia, opacity: 1.0, blend: crate::doc::Blend::Normal },
+            Item { tex: &tb, rest: &vb, now: vb.clone(), tris: &ib, opacity: 0.5, blend: crate::doc::Blend::Normal },
         ];
         let out = render(&items, 60, 60, 1.0, Some(Color32::WHITE));
         assert_eq!(out[15 * 60 + 15], Color32::from_rgb(255, 0, 0));
@@ -290,7 +288,7 @@ mod tests {
         let l = rect_layer(&mut d, 0, 0, 200, 200, Color32::from_rgb(10, 200, 10));
         let tex = LayerTex::of(&l, 200, 200).unwrap();
         let (v, t) = quad(0.0, 0.0, 200.0, 200.0);
-        let out = render(&[Item { tex: &tex, rest: &v, now: v.clone(), tris: &t, opacity: 1.0 }], 50, 50, 0.25, None);
+        let out = render(&[Item { tex: &tex, rest: &v, now: v.clone(), tris: &t, opacity: 1.0, blend: crate::doc::Blend::Normal }], 50, 50, 0.25, None);
         assert_eq!(out.len(), 2500);
         assert!(out.iter().all(|c| *c == Color32::from_rgb(10, 200, 10)));
     }

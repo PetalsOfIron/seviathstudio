@@ -274,6 +274,23 @@ impl SeviathApp {
             }
             ui.checkbox(&mut self.parts.auto_guesses, "Also use guesses from shape and place");
         });
+        ui.horizontal_wrapped(|ui| {
+            for (label, merge, tip) in [
+                ("Tidy for rigging", false, "For a finished drawing with many layers for every part: tags every layer from its name and the folders around it. The order of your layers, the folders, the blend modes and the opacity are not changed. A layer that is clipped to another is tagged like its base and its clipping is baked in, so it stays inside the part. One step in the history."),
+                ("Also put each part together", true, "Tags the layers like Tidy for rigging, and then puts the layers of one part together into one layer, but only where no other part lies between them in the stack (so the picture does not change). A smaller model for a game. One step in the history."),
+            ] {
+                if ui.add(egui::Button::new(if merge { RichText::new(label) } else { RichText::new(label).strong() })).on_hover_text(tip).clicked() {
+                    let rules = self.parts.rules.clone();
+                    let mut report = None;
+                    self.parts_edit(label, now, |d| report = Some(crate::prepare::tidy(d, &rules, merge)));
+                    if let Some(r) = report {
+                        let left = if r.left_alone.is_empty() { String::new() } else { format!(" {} layers have no part (for example {}).", r.left_alone.len(), r.left_alone.iter().take(3).cloned().collect::<Vec<_>>().join(", ")) };
+                        let baked = if r.clips_baked > 0 { format!(" {} clipped layers were baked.", r.clips_baked) } else { String::new() };
+                        self.parts.message = Some(if merge { format!("{} parts; {} layers were put together.{baked}{left}", r.parts, r.layers_put_together) } else { format!("{} layers tagged, {} kinds of part.{baked}{left}", r.tagged, r.parts) });
+                    }
+                }
+            }
+        });
 
         // 1. tags
         section_title(ui, "Tag the selected layers");

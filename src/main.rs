@@ -48,6 +48,7 @@ mod oklab;
 mod outputs;
 mod parts;
 mod pigment;
+mod prepare;
 mod prerig;
 mod processlog;
 mod settings;
