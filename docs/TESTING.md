@@ -21,6 +21,8 @@ expected, what happened. Things marked **needs hardware** were only tested with 
 
 - Open one of your finished PSDs (many layers in folders). Press **Tidy for rigging**. Every layer gets a tag, your layer order is
   not changed. Check the Parts checklist, fix the tags that are wrong by hand, then go to the Rig tab and press the rig buttons.
+- At the end of the Parts side panel: **How to layer** (the order that rigs well) and **Clip the selected layers** (cut layers to the shape of a part).
+  Your own clipping from the PSD is kept; the face patch, teeth and inner mouth are cut to the Faceline.
 - **Also put each part together** makes a smaller model (the layers of one part become one layer, only where nothing else is
   between them).
 

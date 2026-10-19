@@ -215,8 +215,28 @@ pub fn rig_face(rig: &mut Rig, layers: &[Layer], doc_w: u32, doc_h: u32, o: &Fac
         let c = mk.changer(&format!("Turn {}", part.label()), Kind::Warp { rect: grow(r, 4.0), cols: 1, rows: 1 }, Some(tilt));
         let d = depth(part);
         let (dx, dy) = (d * 0.14 * hw * o.turn, d * 0.10 * hh * o.turn);
-        mk.slide(c, ax, 30.0, [dx, 0.0]);
-        mk.slide(c, ax, -30.0, [-dx, 0.0]);
+        // an eye on the side the nose turns towards is seen from the side: it gets narrower (its outer edge stays, the edge by the nose comes
+        // over) and is pushed a little away from the nose, so it does not crowd it. That is what makes the turn look 3D.
+        let eye_x = matches!(part, Part::EyeL | Part::EyeR).then(|| (r[0] + r[2]) / 2.0);
+        match eye_x {
+            Some(cx) => {
+                let w = r[2] - r[0];
+                let (away, squeeze) = (0.12 * w * o.turn, 0.08 * w * o.turn);
+                let right_side = cx > (head[0] + head[2]) / 2.0;
+                // corners: top left, top right, bottom left, bottom right
+                let (plus, minus) = if right_side {
+                    ([dx + away + squeeze, dx + away - squeeze, dx + away + squeeze, dx + away - squeeze], [-dx, -dx, -dx, -dx])
+                } else {
+                    ([dx, dx, dx, dx], [-dx - away + squeeze, -dx - away - squeeze, -dx - away + squeeze, -dx - away - squeeze])
+                };
+                mk.rig.set_keyform(c, ax, 30.0, Form::Warp { offsets: plus.iter().map(|x| [*x, 0.0]).collect() });
+                mk.rig.set_keyform(c, ax, -30.0, Form::Warp { offsets: minus.iter().map(|x| [*x, 0.0]).collect() });
+            }
+            None => {
+                mk.slide(c, ax, 30.0, [dx, 0.0]);
+                mk.slide(c, ax, -30.0, [-dx, 0.0]);
+            }
+        }
         mk.slide(c, ay, 30.0, [0.0, -dy]);
         mk.slide(c, ay, -30.0, [0.0, dy]);
         parallax.push((part, c));
