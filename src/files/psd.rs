@@ -946,12 +946,52 @@ fn real_psds_run_the_pipeline() {
                     img.put_pixel((i % pw) as u32, (i / pw) as u32, image::Rgba([p.r(), p.g(), p.b(), 255]));
                 }
                 let _ = img.save(format!("target/screens/psd_{name}_{tag}.png"));
+                // with FACE=1 a bigger picture of the face, to look at the details
+                if std::env::var("FACE").is_ok() {
+                    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+                    for m in &rig.meshes {
+                        if doc.layers.iter().find(|l| l.id == m.layer).and_then(|l| l.part) == Some(crate::parts::Part::Face) {
+                            for v in &m.verts {
+                                for a in 0..2 {
+                                    lo[a] = lo[a].min(v[a]);
+                                    hi[a] = hi[a].max(v[a]);
+                                }
+                            }
+                        }
+                    }
+                    if lo[0] < hi[0] {
+                        let s = 700.0 / (hi[0] - lo[0]).max(hi[1] - lo[1]);
+                        let (fw, fh) = (((w as f32 * s) as usize).max(8), ((h as f32 * s) as usize).max(8));
+                        let px = raster::render(&items, fw, fh, s, Some(eframe::egui::Color32::from_rgb(244, 242, 236)));
+                        let (x0, y0) = (((lo[0] - 40.0).max(0.0) * s) as usize, ((lo[1] - 40.0).max(0.0) * s) as usize);
+                        let (cw, ch) = ((((hi[0] - lo[0]) + 80.0) * s) as usize, (((hi[1] - lo[1]) + 80.0) * s) as usize);
+                        let mut crop = image::RgbaImage::new(cw.min(fw - x0) as u32, ch.min(fh - y0) as u32);
+                        for y in 0..crop.height() {
+                            for x in 0..crop.width() {
+                                let p = px[(y0 + y as usize) * fw + x0 + x as usize];
+                                crop.put_pixel(x, y, image::Rgba([p.r(), p.g(), p.b(), 255]));
+                            }
+                        }
+                        let _ = crop.save(format!("target/screens/psd_{name}_face_{tag}.png"));
+                    }
+                }
             }
         }
         let t2 = std::time::Instant::now();
         match crate::vrm::model::build(&doc, &crate::vrm::model::Options { name: name.into(), author: "test".into(), ..Default::default() }) {
             Some(m) => {
                 eprintln!("   3D built in {:?}: {} parts, {} bones, {} expressions", t2.elapsed(), m.parts.len(), m.bones.len(), m.expressions.len());
+                // the 3D character from the front, and with the guide lines of the face (blue the eyes, red the mouth...)
+                if std::env::var("FACE").is_ok() {
+                    let img = crate::vrm::preview::render_guides(&m, 0.0, 700, 1000, &[], true);
+                    let _ = img.save(format!("target/screens/psd_{name}_3d_guides.png"));
+                    let img = crate::vrm::preview::render(&m, 0.0, 700, 1000, &[]);
+                    let _ = img.save(format!("target/screens/psd_{name}_3d.png"));
+                    for (n, v) in [("blink", 1.0f32), ("happy", 1.0)] {
+                        let img = crate::vrm::preview::render(&m, 0.0, 700, 1000, &[(n, v)]);
+                        let _ = img.save(format!("target/screens/psd_{name}_3d_{n}.png"));
+                    }
+                }
                 match crate::vrm::export::export(&m, crate::vrm::export::Format::Vrm1).and_then(|b| crate::vrm::export::validate(&b).map(|s| (b.len(), s))) {
                     Ok((n, s)) => eprintln!("   VRM 1.0 ok: {} KB, {:?}", n / 1024, s),
                     Err(e) => eprintln!("   VRM FAILED: {e}"),
