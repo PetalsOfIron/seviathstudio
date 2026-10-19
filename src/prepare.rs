@@ -156,7 +156,7 @@ pub fn tidy(doc: &mut Document, rules: &[NameRule], merge: bool) -> Report {
             .iter()
             .filter(|l| {
                 let n = l.name.to_lowercase();
-                !l.clip && (l.part == Some(Part::MouthInside) || (l.part.is_some_and(|p| p != Part::Face && p != Part::Neck) && n.contains("face") && n.contains("pa") && !n.contains("line")))
+                !l.clip && (l.part == Some(Part::MouthInside) || (l.part.is_some_and(|p| p != Part::Face && p != Part::Neck) && ((n.contains("face") && n.contains("pa")) || (l.part == Some(Part::Mouth) && n.contains("skin"))) && !n.contains("line")))
             })
             .map(|l| l.id)
             .collect();
@@ -446,5 +446,24 @@ mod tests {
         let cut: Vec<LayerId> = d.rig.clip_to.iter().filter(|c| c.1 == Part::Face).map(|c| c.0).collect();
         assert!(cut.contains(&patch) && cut.contains(&teeth) && cut.contains(&inner));
         assert!(!cut.contains(&face));
+    }
+
+    #[test]
+    fn a_layer_with_no_side_goes_with_the_eye_it_lies_on_in_a_drawing_named_the_other_way_round() {
+        let mut d = Document::new(1000, 1000);
+        d.layers.clear();
+        // this artist's L is what the viewer sees on the left
+        let l_white = square(&mut d, "EyewhiteL", None, 400, 300, [255, 255, 255]);
+        let r_white = square(&mut d, "EyewhiteR", None, 560, 300, [255, 255, 255]);
+        let l_line = square(&mut d, "eyelinetopL", None, 400, 290, [20, 20, 40]);
+        let r_line = square(&mut d, "eyelinetopR", None, 560, 290, [20, 20, 40]);
+        // no side in the name, on the left eye as the viewer sees it
+        let loose = square(&mut d, "Eyelinebot", None, 405, 340, [20, 20, 40]);
+        tidy(&mut d, &[], false);
+        let part = |id| d.layers.iter().find(|l| l.id == id).unwrap().part;
+        assert_eq!(part(loose), part(l_white), "with the eye it lies on");
+        assert_eq!(part(l_line), part(l_white));
+        assert_eq!(part(r_line), part(r_white));
+        assert_ne!(part(l_white), part(r_white));
     }
 }

@@ -181,7 +181,16 @@ pub fn rig_face(rig: &mut Rig, layers: &[Layer], doc_w: u32, doc_h: u32, o: &Fac
     }
     let rect_of = |parts: &[Part]| -> Option<[f32; 4]> { items.iter().filter(|i| parts.contains(&i.1)).map(|i| i.2).reduce(union) };
     let head = rect_of(&[Part::Face]).or_else(|| rect_of(&[Part::EyeL, Part::EyeR, Part::Nose, Part::Mouth, Part::BrowL, Part::BrowR])).unwrap_or([0.0, 0.0, doc_w as f32, doc_h as f32]);
-    let (hw, hh) = ((head[2] - head[0]).max(10.0), (head[3] - head[1]).max(10.0));
+    let (mut hw, mut hh) = ((head[2] - head[0]).max(10.0), (head[3] - head[1]).max(10.0));
+    // a face layer that is wider than a face (braids and hair tufts tagged as face) must not make the head turn too big: a face is about
+    // two and a half eye distances wide and three high
+    if let (Some(l), Some(r)) = (rect_of(&[Part::EyeL]), rect_of(&[Part::EyeR])) {
+        let dist = ((l[0] + l[2]) / 2.0 - (r[0] + r[2]) / 2.0).abs();
+        if dist > 10.0 {
+            hw = hw.min(2.6 * dist);
+            hh = hh.min(3.2 * dist);
+        }
+    }
     let mut report = Report::default();
 
     clear_generated(rig, "face");

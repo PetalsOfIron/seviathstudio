@@ -863,7 +863,8 @@ fn real_psds_run_the_pipeline() {
                     chain += &format!(" < {}", f.name);
                     p = f.parent;
                 }
-                eprintln!("   tag {:?} <- {} (blend {:?}, clip {}){chain}", l.part, l.name, l.blend, l.clip);
+                let at = crate::files::layer_bounds(l, doc.w, doc.h).map(|b| format!("x {:.2}-{:.2} y {:.2}", b.0 as f32 / doc.w as f32, b.2 as f32 / doc.w as f32, (b.1 + b.3) as f32 / 2.0 / doc.h as f32)).unwrap_or_default();
+                eprintln!("   tag {:?} <- {} (blend {:?}, clip {}, {at}){chain}", l.part, l.name, l.blend, l.clip);
             }
         }
         eprintln!("   tidy in {:?}: {} layers tagged, {} kinds, {} clips baked, left alone: {} ({})", t_tidy.elapsed(), rep.tagged, rep.parts, rep.clips_baked, rep.left_alone.len(), rep.left_alone.iter().take(8).cloned().collect::<Vec<_>>().join(", "));
