@@ -431,7 +431,7 @@ fn from_name_loose(name: &str) -> Option<(NamePart, f32)> {
     if s.contains("face") || s.contains("skin") || s == "head" || s.starts_with("head") {
         return one(Part::Face);
     }
-    const CLOTHES: [&str; 18] = ["shirt", "skirt", "dress", "jacket", "coat", "pants", "lace", "sleeve", "collar", "cape", "cloak", "glove", "shorts", "bra", "sock", "boot", "shoe", "corset"];
+    const CLOTHES: [&str; 20] = ["scarf", "shawl", "shirt", "skirt", "dress", "jacket", "coat", "pants", "lace", "sleeve", "collar", "cape", "cloak", "glove", "shorts", "bra", "sock", "boot", "shoe", "corset"];
     if CLOTHES.iter().any(|w| c(w)) {
         return one(Part::Clothing);
     }
@@ -480,7 +480,8 @@ fn classify_with_context(layers: &[Layer], l: &Layer) -> Option<(NamePart, f32, 
             side = side_of_name(&f.name);
         }
         if anc.is_none() {
-            if let Some((np, c)) = from_name(&f.name).or_else(|| from_name_loose(&f.name)) {
+            // (a folder named after many things at once, "earsmouthfacecolorscarf", says nothing about one of them)
+            if let Some((np, c)) = from_name(&f.name).or_else(|| if compact(&f.name).len() <= 14 { from_name_loose(&f.name) } else { None }) {
                 anc = Some((np, c * 0.85, format!("the folder “{}”", f.name)));
             }
         }
@@ -874,6 +875,22 @@ mod tests {
 
     fn doc() -> Document {
         Document::new(1000, 1000)
+    }
+
+    #[test]
+    fn a_folder_named_after_many_things_does_not_make_the_face_an_ear() {
+        use crate::doc::{Document, LayerKind};
+        let mut d = Document::new(100, 100);
+        d.layers.clear();
+        let mut f = d.new_layer("earsmouthfacecolorscarf", LayerKind::Group);
+        f.expanded = true;
+        let fid = f.id;
+        d.layers.insert(0, f);
+        let mut face = d.new_layer("Face", LayerKind::Raster);
+        face.parent = Some(fid);
+        d.layers.insert(0, face);
+        let l = d.layers[0].clone();
+        assert_eq!(classify_with_context(&d.layers, &l).map(|x| x.0), Some(NamePart::One(Part::Face)));
     }
 
     #[test]
