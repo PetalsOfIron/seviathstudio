@@ -257,6 +257,16 @@ impl TrackMapping {
                 "breath" | "breathing" => Some(("Breath", p.min, p.max)),
                 _ => None,
             };
+            // the arms of the body rig follow the arms from the camera: hanging is 0, straight out is 90 (the slider is a swing from hanging)
+            let arm = match n.as_str() {
+                "arml" | "armleft" => Some("ArmLeftAngle"),
+                "armr" | "armright" => Some("ArmRightAngle"),
+                _ => None,
+            };
+            if let Some(input) = arm {
+                m.maps.push(Map { param: p.id, input: input.to_string(), in_lo: 0.0, in_hi: 90.0, out_lo: 0.0, out_hi: p.max, clamp: true, smoothing: 8.0, invert: false });
+                continue;
+            }
             if let Some((input, lo, hi)) = pick {
                 let (il, ih) = range_of(input);
                 m.maps.push(Map { param: p.id, input: input.to_string(), in_lo: il, in_hi: ih, out_lo: lo, out_hi: hi, clamp: true, smoothing: if input == "Breath" { 0.0 } else { 8.0 }, invert: false });
@@ -423,7 +433,7 @@ mod tests {
         let x = rig.add_param("Angle X", -30.0, 30.0, 0.0);
         let open = rig.add_param("Eyes open", 0.0, 1.0, 1.0);
         let mouth = rig.add_param("Mouth open", 0.0, 1.0, 0.0);
-        rig.add_param("Arm L", -1.0, 1.0, 0.0);
+        rig.add_param("Wing flap", -1.0, 1.0, 0.0);
         let map = TrackMapping::auto(&rig);
         assert_eq!(map.maps.len(), 3, "only the sliders a face moves");
         let mut st = TrackState::default();
@@ -532,5 +542,16 @@ mod tests {
         let vmc = net::parse_vmc(&osc_bundle(&[osc_message("/VMC/Ext/Bone/Pos", &[net::Arg::Str("Head".into()), net::Arg::Float(0.0), net::Arg::Float(0.0), net::Arg::Float(0.0), net::Arg::Float(q[0]), net::Arg::Float(q[1]), net::Arg::Float(q[2]), net::Arg::Float(q[3])])])).unwrap();
         let osf = net::parse_osf(&osf_packet([0.0, 20.0, 0.0], 1.0, 1.0, 0.0, 0.0, true)).unwrap();
         assert!((channels(&vmc)["FaceAngleX"] - channels(&osf)["FaceAngleX"]).abs() < 0.1);
+    }
+
+    #[test]
+    fn the_arm_sliders_of_the_body_rig_follow_the_arms_of_the_camera() {
+        let mut rig = Rig::default();
+        let l = rig.add_param("Arm L", -45.0, 45.0, 0.0);
+        let _r = rig.add_param("Arm R", -45.0, 45.0, 0.0);
+        let m = TrackMapping::auto(&rig);
+        let ml = m.maps.iter().find(|x| x.param == l).expect("a map for Arm L");
+        assert_eq!((ml.input.as_str(), ml.in_lo, ml.in_hi, ml.out_lo, ml.out_hi), ("ArmLeftAngle", 0.0, 90.0, 0.0, 45.0));
+        assert!(m.maps.iter().any(|x| x.input == "ArmRightAngle"));
     }
 }
