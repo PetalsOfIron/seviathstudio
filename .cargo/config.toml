@@ -1,0 +1,8 @@
+# The development PC (i5-10400: 6 cores, 12 threads; 32 GB RAM; RTX 3060 Ti): builds and tests use about half of the processor threads, so the
+# computer stays usable. RAM is plentiful, the processor is the weakest part.
+[build]
+jobs = 8
+
+[env]
+RUST_TEST_THREADS = "6"
+RAYON_NUM_THREADS = "6"

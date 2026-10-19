@@ -61,3 +61,5 @@ The app is **offline for now**: no accounts, no online library, no shop, no chat
 The user's PC has 8 GB VRAM and can't do several heavy things at once. Screenshot tests take one GPU lock (`lock_gpu()` in `src/screens.rs`): never run GPU jobs in parallel. The whole test run takes about 3 to 4 minutes for that reason.
 
 - **FEEDBACK.md**: the user tests the app and writes bugs and ideas there. Read it at the start of every session: fix the bugs first, do the ideas that fit (a better solution than the one written is welcome, say what was done), and move handled items to its Done part.
+
+- Tests and builds are limited to about half of the processor threads by `.cargo/config.toml` (6 test threads, 6 rayon threads, 8 build jobs): the owner's processor is the weakest part (RAM and GPU are stronger). Do not raise it without being asked.
