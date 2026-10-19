@@ -348,7 +348,7 @@ fn new_layer(id: u64, parent: Option<u64>, name: &str) -> Layer {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -398,7 +398,7 @@ mod tests {
     }
 
     /// A small `.clip` file made here: a folder with two layers (the upper one multiplied, half see-through and clipped, hidden is the third).
-    fn tiny_clip() -> Vec<u8> {
+    pub(crate) fn tiny_clip() -> Vec<u8> {
         let path = temp_db();
         {
             let db = Connection::open(&path).unwrap();
