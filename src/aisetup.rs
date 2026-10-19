@@ -44,11 +44,19 @@ pub struct Status {
     pub python_env: bool,
     pub packages: bool,
     pub hunyuan: bool,
+    /// The TripoSR code and its model (MIT licence, the shape model that may be used everywhere).
+    pub triposr: bool,
 }
 
 impl Status {
+    /// The Python environment, the packages and at least one shape model.
     pub fn ready(&self) -> bool {
-        self.python_env && self.packages && self.hunyuan
+        self.python_env && self.packages && (self.hunyuan || self.triposr)
+    }
+
+    /// Can this shape model be used now.
+    pub fn shape_ready(&self, model: crate::ai::ShapeModel) -> bool {
+        self.python_env && self.packages && if model == crate::ai::ShapeModel::Hunyuan { self.hunyuan } else { self.triposr }
     }
 
     /// What is missing, in words.
@@ -60,11 +68,25 @@ impl Status {
         if !self.packages {
             v.push("the AI packages (PyTorch, MediaPipe, Transformers...)");
         }
-        if !self.hunyuan {
-            v.push("the Hunyuan3D code");
+        if !self.hunyuan && !self.triposr {
+            v.push("a 3D shape model (TripoSR)");
         }
         v
     }
+}
+
+const TRIPOSR_ZIP: &str = "https://github.com/VAST-AI-Research/TripoSR/archive/refs/heads/main.zip";
+const TRIPOSR_CKPT_URL: &str = "https://huggingface.co/stabilityai/TripoSR/resolve/main/model.ckpt";
+const TRIPOSR_CONFIG_URL: &str = "https://huggingface.co/stabilityai/TripoSR/resolve/main/config.yaml";
+
+/// The TripoSR code.
+pub fn triposr_code() -> PathBuf {
+    root().join("TripoSR")
+}
+
+/// The folder with the TripoSR model (`config.yaml` and `model.ckpt`, 1.7 GB).
+pub fn triposr_model_dir() -> PathBuf {
+    root().join("models").join("TripoSR")
 }
 
 const FACE_MODEL_URL: &str = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task";
@@ -101,7 +123,8 @@ pub fn status_in(root: &Path) -> Status {
     let python_env = venv_python(root).exists();
     let packages = python_env && (site_packages(root).join("torch").exists() || site_packages(root).join("python3.10").join("site-packages").join("torch").exists()) && root.join("venv").exists();
     let hunyuan = root.join("Hunyuan3D-2").join("hy3dgen").exists();
-    Status { python_env, packages, hunyuan }
+    let triposr = root.join("TripoSR").join("tsr").join("system.py").exists() && root.join("models").join("TripoSR").join("model.ckpt").exists();
+    Status { python_env, packages, hunyuan, triposr }
 }
 
 /// A Python of a version the AI packages exist for (3.10 to 3.12), found among the ones the computer has: the command to start it.
@@ -198,7 +221,8 @@ pub fn log_path() -> PathBuf {
 
 /// Download and install everything that is missing. `step` tells what is being done now (for the window); the long output goes to
 /// `setup.log` in the folder of the tools. Takes a good while (several GB).
-pub fn install(step: &Sender<String>) -> Result<(), String> {
+/// With `with_hunyuan` also the Hunyuan3D code (its licence does not apply in the European Union, the United Kingdom and South Korea).
+pub fn install(step: &Sender<String>, with_hunyuan: bool) -> Result<(), String> {
     let root = root();
     std::fs::create_dir_all(&root).map_err(|e| format!("Could not make {}: {e}", root.display()))?;
     let log = log_path();
@@ -224,7 +248,31 @@ pub fn install(step: &Sender<String>) -> Result<(), String> {
         cmd.args(["-m", "pip", "install"]).args(PACKAGES);
         run_logged(cmd, &log)?;
     }
-    if !have.hunyuan {
+    if !have.triposr {
+        let _ = step.send("Downloading the TripoSR code".into());
+        std::fs::create_dir_all(root.join("models").join("TripoSR")).map_err(|e| e.to_string())?;
+        if !root.join("TripoSR").join("tsr").join("system.py").exists() {
+            let zip_path = root.join("triposr.zip");
+            let mut cmd = Command::new("curl");
+            cmd.args(["-L", "--fail", "--silent", "--show-error", "-o"]).arg(&zip_path).arg(TRIPOSR_ZIP);
+            run_logged(cmd, &log)?;
+            let bytes = std::fs::read(&zip_path).map_err(|e| e.to_string())?;
+            unzip_stripped(&bytes, &root.join("TripoSR"))?;
+            let _ = std::fs::remove_file(&zip_path);
+        }
+        for (name, url, what) in [("config.yaml", TRIPOSR_CONFIG_URL, "settings"), ("model.ckpt", TRIPOSR_CKPT_URL, "model (1.7 GB)")] {
+            let path = triposr_model_dir().join(name);
+            if !path.exists() {
+                let _ = step.send(format!("Downloading the TripoSR {what}"));
+                let part = path.with_extension("part");
+                let mut cmd = Command::new("curl");
+                cmd.args(["-L", "--fail", "--silent", "--show-error", "-o"]).arg(&part).arg(url);
+                run_logged(cmd, &log)?;
+                std::fs::rename(&part, &path).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    if with_hunyuan && !have.hunyuan {
         let _ = step.send("Downloading the Hunyuan3D code".into());
         let zip_path = root.join("hunyuan3d.zip");
         let mut cmd = Command::new("curl");
@@ -282,10 +330,18 @@ mod tests {
         std::fs::write(&py, b"").unwrap();
         std::fs::create_dir_all(site_packages(&d).join("torch")).unwrap();
         let s = status_in(&d);
-        assert!(s.python_env && s.packages && !s.hunyuan);
-        assert_eq!(s.missing(), vec!["the Hunyuan3D code"]);
+        assert!(s.python_env && s.packages && !s.hunyuan && !s.triposr);
+        assert_eq!(s.missing(), vec!["a 3D shape model (TripoSR)"]);
+        // TripoSR needs its code and its model; Hunyuan3D only its code
+        std::fs::create_dir_all(d.join("TripoSR").join("tsr")).unwrap();
+        std::fs::write(d.join("TripoSR").join("tsr").join("system.py"), b"").unwrap();
+        assert!(!status_in(&d).ready(), "the model file is missing");
+        std::fs::create_dir_all(d.join("models").join("TripoSR")).unwrap();
+        std::fs::write(d.join("models").join("TripoSR").join("model.ckpt"), b"").unwrap();
+        let s = status_in(&d);
+        assert!(s.ready() && s.shape_ready(crate::ai::ShapeModel::TripoSr) && !s.shape_ready(crate::ai::ShapeModel::Hunyuan));
         std::fs::create_dir_all(d.join("Hunyuan3D-2").join("hy3dgen")).unwrap();
-        assert!(status_in(&d).ready());
+        assert!(status_in(&d).shape_ready(crate::ai::ShapeModel::Hunyuan));
         let _ = std::fs::remove_dir_all(&d);
     }
 

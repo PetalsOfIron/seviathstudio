@@ -15,6 +15,17 @@ use crate::vrm::face::FaceMarks;
 const FACE_SCRIPT: &str = include_str!("../tools/ai/face_points.py");
 const TRACK_SCRIPT: &str = include_str!("../tools/ai/track.py");
 const SHAPE_SCRIPT: &str = include_str!("../tools/ai/shape3d.py");
+const TRIPOSR_SCRIPT: &str = include_str!("../tools/ai/shape_triposr.py");
+
+/// The AI that makes the 3D shape from the picture.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ShapeModel {
+    /// TripoSR: MIT licence, about 6 GB of video memory, a rougher shape (usable everywhere).
+    #[default]
+    TripoSr,
+    /// Hunyuan3D 2 mini: a finer shape, but its licence does not apply in the European Union, the United Kingdom and South Korea.
+    Hunyuan,
+}
 
 /// Only one helper at a time.
 static BUSY: Mutex<()> = Mutex::new(());
@@ -95,22 +106,40 @@ pub fn hunyuan_folder() -> PathBuf {
 
 /// Make the shape of the character from the picture with Hunyuan3D 2 mini: the bytes of a GLB with the points and triangles.
 /// It takes a minute or two on the graphics card, and the first time it downloads the model.
-pub fn make_shape(python: &str, page: &RgbaImage, turbo: bool) -> Result<Vec<u8>, String> {
-    let repo = hunyuan_folder();
-    if !repo.join("hy3dgen").exists() {
-        return Err(format!("The Hunyuan3D code is not in {} (clone https://github.com/Tencent/Hunyuan3D-2 there).", repo.display()));
+pub fn make_shape(python: &str, page: &RgbaImage, model: ShapeModel, turbo: bool) -> Result<Vec<u8>, String> {
+    let repo = match model {
+        ShapeModel::Hunyuan => hunyuan_folder(),
+        ShapeModel::TripoSr => crate::aisetup::triposr_code(),
+    };
+    let (probe, hint) = match model {
+        ShapeModel::Hunyuan => (repo.join("hy3dgen"), "clone https://github.com/Tencent/Hunyuan3D-2 there"),
+        ShapeModel::TripoSr => (repo.join("tsr"), "press Download the AI files"),
+    };
+    if !probe.exists() {
+        return Err(format!("The shape model code is not in {} ({hint}).", repo.display()));
     }
     let dir = helper_folder();
     std::fs::create_dir_all(&dir).map_err(|e| format!("Could not make the helper folder: {e}"))?;
-    let script = dir.join("shape3d.py");
-    std::fs::write(&script, SHAPE_SCRIPT).map_err(|e| format!("Could not write the helper: {e}"))?;
+    let (script_name, script_text) = match model {
+        ShapeModel::Hunyuan => ("shape3d.py", SHAPE_SCRIPT),
+        ShapeModel::TripoSr => ("shape_triposr.py", TRIPOSR_SCRIPT),
+    };
+    let script = dir.join(script_name);
+    std::fs::write(&script, script_text).map_err(|e| format!("Could not write the helper: {e}"))?;
     let png = dir.join("shape_input.png");
     page.save(&png).map_err(|e| format!("Could not write the picture: {e}"))?;
     let out = dir.join("shape.glb");
     let _ = std::fs::remove_file(&out);
     let mut args = vec!["--image".to_string(), png.to_string_lossy().to_string(), "--out".to_string(), out.to_string_lossy().to_string(), "--repo".to_string(), repo.to_string_lossy().to_string()];
-    if turbo {
+    if model == ShapeModel::Hunyuan && turbo {
         args.push("--turbo".into());
+    }
+    if model == ShapeModel::TripoSr {
+        let dir = crate::aisetup::triposr_model_dir();
+        if dir.join("model.ckpt").exists() {
+            args.push("--model".into());
+            args.push(dir.to_string_lossy().to_string());
+        }
     }
     run_json(python, &script, &args)?;
     std::fs::read(&out).map_err(|e| format!("The shape file was not made: {e}"))
