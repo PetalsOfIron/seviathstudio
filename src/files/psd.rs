@@ -833,17 +833,23 @@ fn real_psds_run_the_pipeline() {
     use crate::rig::autorig::{BodyOptions, FaceOptions, rig_body, rig_face};
     let dir = std::path::PathBuf::from(r"C:\Users\SaphiresSilver\Downloads\Vroids and psd 2dstarted");
     let only = std::env::var("PSD").ok();
-    for name in ["Beija", "Evielina", "Semi", "vtuberscale", "dreija", "elfie"] {
+    // CLIPSRC=1: the same pictures from the Clip Studio files
+    let clip_src = std::env::var("CLIPSRC").is_ok();
+    let names: &[&str] = if clip_src { &["jph", "Beijaforremake", "dreija", "Evielina", "elfie"] } else { &["Beija", "Evielina", "Semi", "vtuberscale", "dreija", "elfie"] };
+    for name in names.iter().copied() {
         if only.as_deref().is_some_and(|o| o != name) {
             continue;
         }
-        let path = dir.join(format!("{name}.psd"));
+        let path = dir.join(format!("{name}.{}", if clip_src { "clip" } else { "psd" }));
         if !path.exists() {
             continue;
         }
         let t0 = std::time::Instant::now();
-        let bytes_for_compare = std::fs::read(&path).unwrap();
-        let mut doc = match read(&bytes_for_compare) {
+        let bytes = std::fs::read(&path).unwrap();
+        let name = if clip_src { format!("{name}_clip") } else { name.to_string() };
+        let name = name.as_str();
+        let bytes_for_compare = if clip_src { Vec::new() } else { bytes.clone() };
+        let mut doc = match if clip_src { crate::files::clip::read(&bytes) } else { read(&bytes) } {
             Ok(d) => d,
             Err(e) => {
                 eprintln!("== {name}: DOES NOT OPEN: {e}");
