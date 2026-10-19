@@ -736,7 +736,7 @@ fn a_character_is_built_on_an_ai_shape_with_texture_weights_and_face_shapes() {
 fn the_ai_shape_of_the_midlander_becomes_a_textured_rigged_character() {
     use super::model::build_any;
     use super::shape::Shape;
-    let dir = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("SeviathAI/jobs/midlander");
+    let dir = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("SeviathAI/jobs").join(std::env::var("JOB").unwrap_or_else(|_| "midlander".into()));
     let (Ok(png), Ok(glb)) = (std::fs::read(dir.join("original.png")), std::fs::read(dir.join(std::env::var("SHAPE").unwrap_or_else(|_| "shape.glb".into())))) else { return };
     let img = image::load_from_memory(&png).unwrap().to_rgba8();
     let shape = Shape::from_glb(&glb).unwrap();
@@ -782,7 +782,7 @@ fn the_ai_shape_of_the_midlander_becomes_a_textured_rigged_character() {
         let view = super::preview::render_posed(&m, *yaw, w, h, &[], pose);
         image::imageops::replace(&mut sheet, &view, (k as u32 * w) as i64, 0);
     }
-    sheet.save("target/screens/ai_midlander.png").unwrap();
+    sheet.save(format!("target/screens/ai_{}.png", std::env::var("JOB").unwrap_or_else(|_| "midlander".into()))).unwrap();
     // the head close up, turned
     {
         let (hw, hh, bw, bh) = (400u32, 480u32, 1400u32, 2800u32);
@@ -939,7 +939,7 @@ fn hair_strands_and_the_hair_brush_edit_the_hair_of_the_midlander() {
     use super::hairedit::{HairChain, HairDab};
     use super::model::build_any;
     use super::shape::Shape;
-    let dir = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("SeviathAI/jobs/midlander");
+    let dir = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("SeviathAI/jobs").join(std::env::var("JOB").unwrap_or_else(|_| "midlander".into()));
     let (Ok(png), Ok(glb)) = (std::fs::read(dir.join("original.png")), std::fs::read(dir.join(std::env::var("SHAPE").unwrap_or_else(|_| "shape.glb".into())))) else { return };
     let img = image::load_from_memory(&png).unwrap().to_rgba8();
     let mut d = uncut_doc(&img);
