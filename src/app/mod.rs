@@ -14,6 +14,7 @@ use crate::theme::{self, *};
 use crate::widgets::{self, icon_button, segmented, tab_button};
 
 mod aihelper;
+mod downloadsui;
 mod animtab;
 mod celtab;
 mod streamtab;
@@ -61,6 +62,7 @@ pub struct SeviathApp {
     maker: fontmaker::FontMaker,
     rec: recording::RecUi,
     ai: aihelper::AiUi,
+    downloads: downloadsui::DownloadsUi,
     work: worklog::WorkClock,
     palette: commands::Palette,
     parts: partstab::PartsState,
@@ -109,6 +111,7 @@ impl SeviathApp {
             maker: Default::default(),
             rec: Default::default(),
             ai: Default::default(),
+            downloads: Default::default(),
             work: Default::default(),
             palette: Default::default(),
             parts: Default::default(),
@@ -659,6 +662,7 @@ impl eframe::App for SeviathApp {
         self.font_maker_window(&ctx);
         self.recorder_window(&ctx);
         self.ai_window(&ctx);
+        self.downloads_window(&ctx);
         self.prerig_window(&ctx);
         self.palette_window(&ctx);
         self.recorder_tick(&ctx);

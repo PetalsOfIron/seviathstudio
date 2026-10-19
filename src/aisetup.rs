@@ -75,9 +75,9 @@ impl Status {
     }
 }
 
-const TRIPOSR_ZIP: &str = "https://github.com/VAST-AI-Research/TripoSR/archive/refs/heads/main.zip";
-const TRIPOSR_CKPT_URL: &str = "https://huggingface.co/stabilityai/TripoSR/resolve/main/model.ckpt";
-const TRIPOSR_CONFIG_URL: &str = "https://huggingface.co/stabilityai/TripoSR/resolve/main/config.yaml";
+pub(crate) const TRIPOSR_ZIP: &str = "https://github.com/VAST-AI-Research/TripoSR/archive/refs/heads/main.zip";
+pub(crate) const TRIPOSR_CKPT_URL: &str = "https://huggingface.co/stabilityai/TripoSR/resolve/main/model.ckpt";
+pub(crate) const TRIPOSR_CONFIG_URL: &str = "https://huggingface.co/stabilityai/TripoSR/resolve/main/config.yaml";
 
 /// The TripoSR code.
 pub fn triposr_code() -> PathBuf {
@@ -89,10 +89,10 @@ pub fn triposr_model_dir() -> PathBuf {
     root().join("models").join("TripoSR")
 }
 
-const FACE_MODEL_URL: &str = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task";
+pub(crate) const FACE_MODEL_URL: &str = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task";
 
-const POSE_MODEL_URL: &str = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task";
-const HAND_MODEL_URL: &str = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task";
+pub(crate) const POSE_MODEL_URL: &str = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task";
+pub(crate) const HAND_MODEL_URL: &str = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task";
 
 /// The body model of the camera tracker (the arms and the lean), when it has been downloaded.
 pub fn pose_model() -> PathBuf {
@@ -219,6 +219,38 @@ pub fn log_path() -> PathBuf {
     root().join("setup.log")
 }
 
+/// The TripoSR code (GitHub) and its model (Hugging Face, 1.7 GB): what is there already is kept.
+pub fn fetch_triposr(step: &Sender<String>) -> Result<(), String> {
+    let root = root();
+    if !root.join("TripoSR").join("tsr").join("system.py").exists() {
+        let _ = step.send("Downloading the TripoSR code".into());
+        let zip_path = root.join("triposr.zip");
+        crate::downloads::fetch_file(TRIPOSR_ZIP, &zip_path, "TripoSR code", step)?;
+        let bytes = std::fs::read(&zip_path).map_err(|e| e.to_string())?;
+        unzip_stripped(&bytes, &root.join("TripoSR"))?;
+        let _ = std::fs::remove_file(&zip_path);
+    }
+    for (name, url, what) in [("config.yaml", TRIPOSR_CONFIG_URL, "TripoSR settings"), ("model.ckpt", TRIPOSR_CKPT_URL, "TripoSR model")] {
+        let path = triposr_model_dir().join(name);
+        if !path.exists() {
+            crate::downloads::fetch_file(url, &path, what, step)?;
+        }
+    }
+    Ok(())
+}
+
+/// The Hunyuan3D code (GitHub). Its models come from Hugging Face the first time it makes a shape.
+pub fn fetch_hunyuan_code(step: &Sender<String>) -> Result<(), String> {
+    let root = root();
+    let _ = step.send("Downloading the Hunyuan3D code".into());
+    let zip_path = root.join("hunyuan3d.zip");
+    crate::downloads::fetch_file(HUNYUAN_ZIP, &zip_path, "Hunyuan3D code", step)?;
+    let bytes = std::fs::read(&zip_path).map_err(|e| e.to_string())?;
+    unzip_stripped(&bytes, &root.join("Hunyuan3D-2"))?;
+    let _ = std::fs::remove_file(&zip_path);
+    Ok(())
+}
+
 /// Download and install everything that is missing. `step` tells what is being done now (for the window); the long output goes to
 /// `setup.log` in the folder of the tools. Takes a good while (several GB).
 /// With `with_hunyuan` also the Hunyuan3D code (its licence does not apply in the European Union, the United Kingdom and South Korea).
@@ -249,38 +281,10 @@ pub fn install(step: &Sender<String>, with_hunyuan: bool) -> Result<(), String> 
         run_logged(cmd, &log)?;
     }
     if !have.triposr {
-        let _ = step.send("Downloading the TripoSR code".into());
-        std::fs::create_dir_all(root.join("models").join("TripoSR")).map_err(|e| e.to_string())?;
-        if !root.join("TripoSR").join("tsr").join("system.py").exists() {
-            let zip_path = root.join("triposr.zip");
-            let mut cmd = Command::new("curl");
-            cmd.args(["-L", "--fail", "--silent", "--show-error", "-o"]).arg(&zip_path).arg(TRIPOSR_ZIP);
-            run_logged(cmd, &log)?;
-            let bytes = std::fs::read(&zip_path).map_err(|e| e.to_string())?;
-            unzip_stripped(&bytes, &root.join("TripoSR"))?;
-            let _ = std::fs::remove_file(&zip_path);
-        }
-        for (name, url, what) in [("config.yaml", TRIPOSR_CONFIG_URL, "settings"), ("model.ckpt", TRIPOSR_CKPT_URL, "model (1.7 GB)")] {
-            let path = triposr_model_dir().join(name);
-            if !path.exists() {
-                let _ = step.send(format!("Downloading the TripoSR {what}"));
-                let part = path.with_extension("part");
-                let mut cmd = Command::new("curl");
-                cmd.args(["-L", "--fail", "--silent", "--show-error", "-o"]).arg(&part).arg(url);
-                run_logged(cmd, &log)?;
-                std::fs::rename(&part, &path).map_err(|e| e.to_string())?;
-            }
-        }
+        fetch_triposr(step)?;
     }
     if with_hunyuan && !have.hunyuan {
-        let _ = step.send("Downloading the Hunyuan3D code".into());
-        let zip_path = root.join("hunyuan3d.zip");
-        let mut cmd = Command::new("curl");
-        cmd.args(["-L", "--fail", "--silent", "--show-error", "-o"]).arg(&zip_path).arg(HUNYUAN_ZIP);
-        run_logged(cmd, &log)?;
-        let bytes = std::fs::read(&zip_path).map_err(|e| e.to_string())?;
-        unzip_stripped(&bytes, &root.join("Hunyuan3D-2"))?;
-        let _ = std::fs::remove_file(&zip_path);
+        fetch_hunyuan_code(step)?;
     }
     if !tracker_model().exists() {
         let _ = step.send("Downloading the face model for the camera (4 MB)".into());
