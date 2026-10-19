@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Files: SeviathStudio projects (.seviath), PSD, OpenRaster (.ora) and flat pictures.
 
+pub mod clip;
 pub mod kra;
 pub mod ora;
 pub mod project;

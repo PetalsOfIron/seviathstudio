@@ -30,6 +30,7 @@ midir = "0.11.1"
 gilrs = "0.11.2"
 tungstenite = "0.30.0"
 ureq = { version = "2", features = ["json"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["wgpu", "snapshot", "eframe"] }

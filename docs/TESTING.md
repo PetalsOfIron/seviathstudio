@@ -6,7 +6,7 @@ expected, what happened. Things marked **needs hardware** were only tested with 
 ## Start
 
 - Open the app (`cargo run --release` in `seviathstudio-rs`, or the built `.exe`). The tabs are Draw, Parts, Rig, Physics, Animate, Stream.
-- File, Open takes `.seviath`, `.psd`, `.ora`, `.kra`, `.cmo3`, `.moc3` (or the `.model3.json` next to it), pictures.
+- File, Open takes `.seviath`, `.psd`, `.clip` (Clip Studio), `.ora`, `.kra`, `.cmo3`, `.moc3` (or the `.model3.json` next to it), pictures.
   Try a Live2D model from your VTube Studio folder: it should open as a rig with sliders, and the physics, expressions and
   motions of the folder should come with it (Physics tab, Live2D files).
 

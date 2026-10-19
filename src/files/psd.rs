@@ -1055,6 +1055,65 @@ fn real_psds_run_the_pipeline() {
 
 /// The flattened picture that Photoshop saved inside the file (what other programs show as the preview), for comparing with ours.
 #[cfg(test)]
+/// The user's Clip Studio files: open them, say what came out, and for the drawings that also exist as PSD compare the flat picture with the
+/// PSD's own (the numbers are the mean difference out of 255 on white). `cargo test --release -- --ignored --nocapture real_clip_files`.
+#[test]
+#[ignore]
+fn real_clip_files_open_and_match_their_psds() {
+    let dir = std::path::Path::new("C:/Users/SaphiresSilver/Downloads/Vroids and psd 2dstarted");
+    let only = std::env::var("CLIP").ok();
+    let _ = std::fs::create_dir_all("target/screens");
+    for name in ["jph", "Beijaforremake", "dreija", "Evielina", "elfie", "Veriena"] {
+        if only.as_deref().is_some_and(|o| o != name) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(dir.join(format!("{name}.clip"))) else { continue };
+        let t = std::time::Instant::now();
+        let mut doc = match crate::files::clip::read(&bytes) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("== {name}.clip: {e}");
+                continue;
+            }
+        };
+        let groups = doc.layers.iter().filter(|l| l.kind == LayerKind::Group).count();
+        let clipped = doc.layers.iter().filter(|l| l.clip).count();
+        let hidden = doc.layers.iter().filter(|l| !l.visible).count();
+        let empty = doc.layers.iter().filter(|l| l.kind == LayerKind::Raster && l.tiles.is_empty()).count();
+        eprintln!("== {name}.clip: {}x{}, {} layers ({groups} folders, {clipped} clipped, {hidden} hidden, {empty} empty), opened in {:?}", doc.w, doc.h, doc.layers.len(), t.elapsed());
+        eprintln!("   {}", doc.meta.notes);
+        // the parts can be tagged from a Clip Studio drawing just like from a PSD
+        let rep = crate::prepare::tidy(&mut doc, &[], false);
+        eprintln!("   tidy: {} layers tagged, {} kinds of part, {} left alone", rep.tagged, rep.parts, rep.left_alone.len());
+        let flat = crate::files::flatten(&doc);
+        let k = 600.0 / doc.w.max(doc.h) as f32;
+        let (sw, sh) = (((doc.w as f32 * k) as u32).max(8), ((doc.h as f32 * k) as u32).max(8));
+        let mut small = image::imageops::resize(&flat, sw, sh, image::imageops::FilterType::Triangle);
+        for p in small.pixels_mut() {
+            let a = p.0[3] as f32 / 255.0;
+            for c in 0..3 {
+                p.0[c] = (p.0[c] as f32 * a + 244.0 * (1.0 - a)) as u8;
+            }
+            p.0[3] = 255;
+        }
+        let _ = small.save(format!("target/screens/clip_{name}.png"));
+        if let Ok(psd_bytes) = std::fs::read(dir.join(format!("{name}.psd"))) {
+            if let Some(theirs) = merged_preview(&psd_bytes) {
+                let theirs = image::imageops::resize(&theirs, sw, sh, image::imageops::FilterType::Triangle);
+                let mut sum = 0.0f64;
+                for (a, b) in small.pixels().zip(theirs.pixels()) {
+                    let ba = b.0[3] as f32 / 255.0;
+                    for c in 0..3 {
+                        let bv = b.0[c] as f32 * ba + 244.0 * (1.0 - ba);
+                        sum += (a.0[c] as f32 - bv).abs() as f64;
+                    }
+                }
+                eprintln!("   against {name}.psd: mean difference {:.2} of 255", sum / (sw * sh * 3) as f64);
+            }
+        }
+    }
+}
+
 fn merged_preview(bytes: &[u8]) -> Option<image::RgbaImage> {
     let mut c = Cur { b: bytes, p: 0 };
     c.take(4).ok()?;

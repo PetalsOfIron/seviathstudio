@@ -58,7 +58,7 @@ impl DrawState {
         for f in dropped {
             let p = f.path().to_path_buf();
             let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-            if ["seviath", "psd", "ora", "kra"].contains(&ext.as_str()) {
+            if ["seviath", "psd", "clip", "ora", "kra"].contains(&ext.as_str()) {
                 self.open_requests.push(p); // project files open as documents
                 continue;
             }
