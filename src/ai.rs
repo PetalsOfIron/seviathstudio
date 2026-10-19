@@ -180,7 +180,15 @@ pub fn start_tracker(python: &str, camera: i32, port: u16) -> Result<std::proces
     let log = std::fs::File::create(crate::aisetup::root().join("track.log")).map_err(|e| e.to_string())?;
     let err = log.try_clone().map_err(|e| e.to_string())?;
     let mut cmd = Command::new(python);
-    cmd.arg(&script).arg("--model").arg(&model).args(["--camera", &camera.to_string(), "--port", &port.to_string()]).stdout(log).stderr(err);
+    cmd.arg(&script).arg("--model").arg(&model).args(["--camera", &camera.to_string(), "--port", &port.to_string()]);
+    // the arms, the lean and the fingers too, when their models are there
+    if crate::aisetup::pose_model().exists() {
+        cmd.arg("--pose-model").arg(crate::aisetup::pose_model());
+    }
+    if crate::aisetup::hand_model().exists() {
+        cmd.arg("--hand-model").arg(crate::aisetup::hand_model());
+    }
+    cmd.stdout(log).stderr(err);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

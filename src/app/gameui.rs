@@ -536,17 +536,26 @@ impl SeviathApp {
             ui.ctx().request_repaint();
         }
         let (yaw_now, expr_key) = match &tracked {
-            Some((yaw, list)) => ((*yaw / 2.0).round() as i32 * 2, Some(format!("{:?}", list.iter().map(|(n, v)| (*n, (v * 10.0).round() as i32)).collect::<Vec<_>>()))),
+            Some((yaw, list, pose)) => (
+                (*yaw / 2.0).round() as i32 * 2,
+                Some(format!("{:?}{:?}", list.iter().map(|(n, v)| (*n, (v * 10.0).round() as i32)).collect::<Vec<_>>(), pose.iter().map(|(n, v)| (*n, (v / 3.0).round() as i32)).collect::<Vec<_>>())),
+            ),
             None => (self.rigs.game.yaw.round() as i32, self.rigs.game.expr.clone()),
         };
         let key = (yaw_now, expr_key, self.rigs.game.made, self.rigs.game.guides, self.rigs.game.paint_gen, paint);
         if self.rigs.game.tex.as_ref().map(|t| &t.0) != Some(&key) {
             if let Some(m) = &self.rigs.game.model {
                 let active: Vec<(&str, f32)> = match &tracked {
-                    Some((_, list)) => list.iter().map(|(n, v)| (*n, (v * 10.0).round() / 10.0)).collect(),
+                    Some((_, list, _)) => list.iter().map(|(n, v)| (*n, (v * 10.0).round() / 10.0)).collect(),
                     None => self.rigs.game.expr.as_deref().map(|e| vec![(e, 1.0)]).unwrap_or_default(),
                 };
-                let img = preview::render_guides(m, key.0 as f32, pw, ph, &active, key.3);
+                let img = match &tracked {
+                    Some((_, _, pose)) if !pose.is_empty() => {
+                        let pose: Vec<(&str, f32)> = pose.iter().map(|(n, v)| (*n, (v / 3.0).round() * 3.0)).collect();
+                        preview::render_posed(m, key.0 as f32, pw, ph, &active, &pose)
+                    }
+                    _ => preview::render_guides(m, key.0 as f32, pw, ph, &active, key.3),
+                };
                 let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
                 let tex = ui.ctx().load_texture("game_preview", color, TextureOptions::LINEAR);
                 self.rigs.game.tex = Some((key, tex));
@@ -922,7 +931,7 @@ impl SeviathApp {
 
 /// What the tracked face does, as the head turn (degrees) and the expressions of a VRM (blink, aa, happy, look...), from the named inputs of
 /// the Stream tab. Only what is tracked is in the list.
-pub fn tracked_look(inputs: &[(&'static str, f32)]) -> (f32, Vec<(&'static str, f32)>) {
+pub fn tracked_look(inputs: &[(&'static str, f32)]) -> (f32, Vec<(&'static str, f32)>, Vec<(&'static str, f32)>) {
     let get = |n: &str| inputs.iter().find(|i| i.0 == n).map(|i| i.1);
     let mut list: Vec<(&'static str, f32)> = Vec::new();
     let (l, r) = (get("EyeOpenLeft"), get("EyeOpenRight"));
@@ -955,7 +964,19 @@ pub fn tracked_look(inputs: &[(&'static str, f32)]) -> (f32, Vec<(&'static str, 
         list.push((if x >= 0.0 { "lookRight" } else { "lookLeft" }, x.abs().min(1.0)));
     }
     let yaw = get("FaceAngleX").unwrap_or(0.0).clamp(-45.0, 45.0);
-    (yaw, list)
+    // the arms: the model's arms stand out sideways (T pose), the tracked angle is 0 hanging down, 90 out, 180 up; a bone turns
+    // counter-clockwise seen from the front, the character's left arm is on the right of the picture
+    let mut pose: Vec<(&'static str, f32)> = Vec::new();
+    for (side, up_n, low_n, up_b, low_b, sign) in [("Left", "ArmLeftAngle", "ForearmLeftAngle", "leftUpperArm", "leftLowerArm", 1.0f32), ("Right", "ArmRightAngle", "ForearmRightAngle", "rightUpperArm", "rightLowerArm", -1.0f32)] {
+        let _ = side;
+        if let Some(u) = get(up_n) {
+            pose.push((up_b, sign * (u - 90.0)));
+            if let Some(f) = get(low_n) {
+                pose.push((low_b, sign * (f - u)));
+            }
+        }
+    }
+    (yaw, list, pose)
 }
 
 /// The Python that has the AI packages: the one in the SeviathAI folder of the user when it is there, else plain `python`.
@@ -971,16 +992,22 @@ mod tracked_tests {
     #[test]
     fn the_tracked_face_becomes_a_head_turn_and_expressions() {
         let inputs: Vec<(&'static str, f32)> = vec![("FaceAngleX", 20.0), ("EyeOpenLeft", 0.0), ("EyeOpenRight", 0.1), ("MouthOpen", 0.6), ("MouthSmile", 1.0)];
-        let (yaw, list) = tracked_look(&inputs);
+        let (yaw, list, _) = tracked_look(&inputs);
         assert_eq!(yaw, 20.0);
         let g = |n: &str| list.iter().find(|x| x.0 == n).map(|x| x.1);
         assert!(g("blink").unwrap() > 0.9, "both eyes shut: blink");
         assert_eq!(g("aa"), Some(0.6));
         assert!((g("happy").unwrap() - 0.8).abs() < 1e-5);
         // one eye shut: a wink
-        let (_, wink) = tracked_look(&[("EyeOpenLeft", 0.0), ("EyeOpenRight", 1.0)]);
+        let (_, wink, _) = tracked_look(&[("EyeOpenLeft", 0.0), ("EyeOpenRight", 1.0)]);
         assert!(wink.iter().any(|x| x.0 == "blinkLeft" && x.1 > 0.9) && wink.iter().any(|x| x.0 == "blinkRight" && x.1 < 0.1));
         // nothing tracked: no turn, no expressions
-        assert_eq!(tracked_look(&[]), (0.0, vec![]));
+        assert_eq!(tracked_look(&[]), (0.0, vec![], vec![]));
+        // arms: the left one straight out stays as the T pose, the right one hanging down turns a quarter turn the other way
+        let (_, _, pose) = tracked_look(&[("ArmLeftAngle", 90.0), ("ForearmLeftAngle", 180.0), ("ArmRightAngle", 0.0)]);
+        let p = |n: &str| pose.iter().find(|x| x.0 == n).map(|x| x.1);
+        assert_eq!(p("leftUpperArm"), Some(0.0));
+        assert_eq!(p("leftLowerArm"), Some(90.0), "the forearm up from an arm that is out");
+        assert_eq!(p("rightUpperArm"), Some(90.0), "hanging down is the other way round on the other side");
     }
 }
