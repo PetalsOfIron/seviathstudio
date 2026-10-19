@@ -3680,6 +3680,10 @@ fn stream_tab_follows_a_sent_face_and_serves_the_picture() {
     h.state_mut().test_stop_clip();
     assert!(std::fs::metadata(&clip).map(|m| m.len() > 500).unwrap_or(false), "the video file was written");
     let _ = std::fs::remove_file(&clip);
+    // the virtual camera panel knows if OBS is installed (it says so either way)
+    h.run_steps(3);
+    assert!(h.state_mut().test_stream().obs_exe.is_some(), "the panel looked for OBS");
+    save(&mut h, "stream_3_virtual_camera");
     // VRChat: the face goes out over OSC
     let vrc_rx = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     vrc_rx.set_read_timeout(Some(std::time::Duration::from_millis(1500))).unwrap();
