@@ -77,4 +77,4 @@ Start here: make a rig, open the Stream tab.
 ## What is not done
 
 See `ROADMAP.md`: every row says what is in and what is not. Big missing things: a virtual camera that does not need OBS, Inochi2D
-export, image generation (ComfyUI), Unity / Godot / Unreal runtimes.
+export, Unity / Godot / Unreal runtimes, the one-click AI picture to rigged 3D model.
