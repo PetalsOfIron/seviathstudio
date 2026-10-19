@@ -275,6 +275,58 @@ pub struct Item<'a> {
 /// Draw the items (bottom first) into a `w` x `h` picture, `scale` pixels per page pixel.
 /// `backdrop` is what shows through (None = see-through).
 pub fn render(items: &[Item], w: usize, h: usize, scale: f32, backdrop: Option<Color32>) -> Vec<Color32> {
+    render_with(items, &[], &[], w, h, scale, backdrop)
+}
+
+/// The pixels of one triangle of an item inside the band of rows `by0..by0 + nrows`: `f(row in band, x, picture value)` for each.
+fn raster_tri(it: &Item, t: [u32; 3], y0: f32, y1: f32, scale: f32, w: usize, by0: usize, nrows: usize, f: &mut dyn FnMut(usize, usize, [f32; 4])) {
+    let s = |i: u32| {
+        let v = it.now[i as usize];
+        [v[0] * scale, v[1] * scale]
+    };
+    let (a, mut b, mut c) = (s(t[0]), s(t[1]), s(t[2]));
+    let (ra, mut rb, mut rc) = (it.rest[t[0] as usize], it.rest[t[1] as usize], it.rest[t[2] as usize]);
+    let mut area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
+    if area.abs() < 1e-6 {
+        return;
+    }
+    if area < 0.0 {
+        std::mem::swap(&mut b, &mut c);
+        std::mem::swap(&mut rb, &mut rc);
+        area = -area;
+    }
+    let (minx, maxx) = (a[0].min(b[0]).min(c[0]), a[0].max(b[0]).max(c[0]));
+    let x_lo = (minx.floor() as i32).max(0);
+    let x_hi = (maxx.ceil() as i32).min(w as i32 - 1);
+    let y_lo = (y0.floor() as i32).max(by0 as i32);
+    let y_hi = (y1.ceil() as i32).min((by0 + nrows) as i32 - 1);
+    // a pixel on a shared edge belongs to one triangle only (the top-left rule)
+    let owns = |wv: f32, dx: f32, dy: f32| wv > 0.0 || (wv == 0.0 && (dy > 0.0 || (dy == 0.0 && dx < 0.0)));
+    for y in y_lo..=y_hi {
+        for x in x_lo..=x_hi {
+            let pt = [x as f32 + 0.5, y as f32 + 0.5];
+            let w0 = (c[0] - b[0]) * (pt[1] - b[1]) - (c[1] - b[1]) * (pt[0] - b[0]);
+            let w1 = (a[0] - c[0]) * (pt[1] - c[1]) - (a[1] - c[1]) * (pt[0] - c[0]);
+            let w2 = (b[0] - a[0]) * (pt[1] - a[1]) - (b[1] - a[1]) * (pt[0] - a[0]);
+            if !(owns(w0, c[0] - b[0], c[1] - b[1]) && owns(w1, a[0] - c[0], a[1] - c[1]) && owns(w2, b[0] - a[0], b[1] - a[1])) {
+                continue;
+            }
+            let (l0, l1, l2) = (w0 / area, w1 / area, w2 / area);
+            let (u, v) = (ra[0] * l0 + rb[0] * l1 + rc[0] * l2, ra[1] * l0 + rb[1] * l1 + rc[1] * l2);
+            let src = it.tex.sample(u, v);
+            if src[3] <= 0.0 {
+                continue;
+            }
+            f(y as usize - by0, x as usize, src);
+        }
+    }
+}
+
+/// Like `render`, and some items are cut live to the shape of a mask: `clips` pairs an item with a mask (an index into `masks`, items
+/// that are not drawn themselves, only their see-through shape counts). The mask moves with the rig, so what is cut to it never lies
+/// outside it, however the head turns.
+#[allow(clippy::too_many_arguments)]
+pub fn render_with(items: &[Item], masks: &[Item], clips: &[(usize, usize)], w: usize, h: usize, scale: f32, backdrop: Option<Color32>) -> Vec<Color32> {
     // the screen rows of every triangle, once
     struct Prep {
         item: usize,
@@ -282,65 +334,60 @@ pub fn render(items: &[Item], w: usize, h: usize, scale: f32, backdrop: Option<C
         y0: f32,
         y1: f32,
     }
-    let mut preps: Vec<Prep> = Vec::new();
-    for (ii, it) in items.iter().enumerate() {
-        for (ti, t) in it.tris.iter().enumerate() {
-            let ys = [it.now[t[0] as usize][1], it.now[t[1] as usize][1], it.now[t[2] as usize][1]];
-            preps.push(Prep { item: ii, tri: ti, y0: ys.iter().cloned().fold(f32::MAX, f32::min) * scale, y1: ys.iter().cloned().fold(f32::MIN, f32::max) * scale });
+    let preps_of = |list: &[Item]| -> Vec<Prep> {
+        let mut preps: Vec<Prep> = Vec::new();
+        for (ii, it) in list.iter().enumerate() {
+            for (ti, t) in it.tris.iter().enumerate() {
+                let ys = [it.now[t[0] as usize][1], it.now[t[1] as usize][1], it.now[t[2] as usize][1]];
+                preps.push(Prep { item: ii, tri: ti, y0: ys.iter().cloned().fold(f32::MAX, f32::min) * scale, y1: ys.iter().cloned().fold(f32::MIN, f32::max) * scale });
+            }
         }
-    }
+        preps
+    };
+    let preps = preps_of(items);
+    let mask_preps = preps_of(masks);
     let mut out = vec![Color32::TRANSPARENT; w * h];
     let band = 32usize;
     out.par_chunks_mut(w * band).enumerate().for_each(|(bi, rows)| {
         let (by0, nrows) = (bi * band, rows.len() / w);
         let mut acc: Vec<[f32; 4]> = vec![[0.0; 4]; w * nrows];
+        // how much of this band every mask covers, made when an item needs it
+        let mut cover: Vec<Option<Vec<f32>>> = vec![None; masks.len()];
         for p in &preps {
             if p.y1 < by0 as f32 - 1.0 || p.y0 > (by0 + nrows) as f32 + 1.0 {
                 continue;
             }
             let it = &items[p.item];
             let t = it.tris[p.tri];
-            let s = |i: u32| {
-                let v = it.now[i as usize];
-                [v[0] * scale, v[1] * scale]
-            };
-            let (a, mut b, mut c) = (s(t[0]), s(t[1]), s(t[2]));
-            let (ra, mut rb, mut rc) = (it.rest[t[0] as usize], it.rest[t[1] as usize], it.rest[t[2] as usize]);
-            let mut area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
-            if area.abs() < 1e-6 {
-                continue;
-            }
-            if area < 0.0 {
-                std::mem::swap(&mut b, &mut c);
-                std::mem::swap(&mut rb, &mut rc);
-                area = -area;
-            }
-            let (minx, maxx) = (a[0].min(b[0]).min(c[0]), a[0].max(b[0]).max(c[0]));
-            let x_lo = (minx.floor() as i32).max(0);
-            let x_hi = (maxx.ceil() as i32).min(w as i32 - 1);
-            let y_lo = (p.y0.floor() as i32).max(by0 as i32);
-            let y_hi = (p.y1.ceil() as i32).min((by0 + nrows) as i32 - 1);
-            // a pixel on a shared edge belongs to one triangle only (the top-left rule)
-            let owns = |wv: f32, dx: f32, dy: f32| wv > 0.0 || (wv == 0.0 && (dy > 0.0 || (dy == 0.0 && dx < 0.0)));
-            for y in y_lo..=y_hi {
-                for x in x_lo..=x_hi {
-                    let pt = [x as f32 + 0.5, y as f32 + 0.5];
-                    let w0 = (c[0] - b[0]) * (pt[1] - b[1]) - (c[1] - b[1]) * (pt[0] - b[0]);
-                    let w1 = (a[0] - c[0]) * (pt[1] - c[1]) - (a[1] - c[1]) * (pt[0] - c[0]);
-                    let w2 = (b[0] - a[0]) * (pt[1] - a[1]) - (b[1] - a[1]) * (pt[0] - a[0]);
-                    if !(owns(w0, c[0] - b[0], c[1] - b[1]) && owns(w1, a[0] - c[0], a[1] - c[1]) && owns(w2, b[0] - a[0], b[1] - a[1])) {
-                        continue;
+            let clip = match clips.iter().find(|c| c.0 == p.item) {
+                Some(&(_, m)) if m < masks.len() => {
+                    if cover[m].is_none() {
+                        let mut c = vec![0.0f32; w * nrows];
+                        for mp in mask_preps.iter().filter(|q| q.item == m && !(q.y1 < by0 as f32 - 1.0 || q.y0 > (by0 + nrows) as f32 + 1.0)) {
+                            raster_tri(&masks[m], masks[m].tris[mp.tri], mp.y0, mp.y1, scale, w, by0, nrows, &mut |row, x, src| {
+                                let v = &mut c[row * w + x];
+                                *v = v.max(src[3]);
+                            });
+                        }
+                        cover[m] = Some(c);
                     }
-                    let (l0, l1, l2) = (w0 / area, w1 / area, w2 / area);
-                    let (u, v) = (ra[0] * l0 + rb[0] * l1 + rc[0] * l2, ra[1] * l0 + rb[1] * l1 + rc[1] * l2);
-                    let src = it.tex.sample(u, v);
-                    if src[3] <= 0.0 {
-                        continue;
-                    }
-                    let d = &mut acc[(y as usize - by0) * w + x as usize];
-                    *d = crate::blend::over(*d, src, it.opacity, it.blend);
+                    Some(m)
                 }
-            }
+                _ => None,
+            };
+            raster_tri(it, t, p.y0, p.y1, scale, w, by0, nrows, &mut |row, x, mut src| {
+                if let Some(m) = clip {
+                    let k = cover[m].as_ref().map(|c| c[row * w + x]).unwrap_or(1.0);
+                    if k <= 0.0 {
+                        return;
+                    }
+                    for v in src.iter_mut() {
+                        *v *= k;
+                    }
+                }
+                let d = &mut acc[row * w + x];
+                *d = crate::blend::over(*d, src, it.opacity, it.blend);
+            });
         }
         let back = backdrop.map(|c| [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0, c.a() as f32 / 255.0]);
         for (i, px) in rows.iter_mut().enumerate() {
@@ -356,6 +403,19 @@ pub fn render(items: &[Item], w: usize, h: usize, scale: f32, backdrop: Option<C
         }
     });
     out
+}
+
+/// The picture of the inside of the outline of a part (the lines of the part, filled from outside): white where it is inside and not on the
+/// line, over the box of the outline. The mask for the live cut of what must stay inside a face.
+pub fn outline_mask(doc: &crate::doc::Document, part: crate::parts::Part) -> Option<LayerTex> {
+    let g = inside_of_outline(doc, part)?;
+    let mut px = vec![[0.0f32; 4]; g.w * g.h];
+    for (i, c) in g.cells.iter().enumerate() {
+        if *c {
+            px[i] = [1.0; 4];
+        }
+    }
+    Some(LayerTex { x0: g.x0, y0: g.y0, w: g.w, h: g.h, px })
 }
 
 #[cfg(test)]
@@ -453,5 +513,25 @@ mod tests {
         let out = render(&[Item { tex: &tex, rest: &v, now: v.clone(), tris: &t, opacity: 1.0, blend: crate::doc::Blend::Normal }], 50, 50, 0.25, None);
         assert_eq!(out.len(), 2500);
         assert!(out.iter().all(|c| *c == Color32::from_rgb(10, 200, 10)));
+    }
+
+    #[test]
+    fn what_is_cut_to_a_mask_shows_only_where_the_moving_mask_is() {
+        let mut d = Document::new(100, 100);
+        let red = Color32::from_rgb(200, 30, 30);
+        let patch = rect_layer(&mut d, 0, 0, 100, 100, red);
+        let white = rect_layer(&mut d, 0, 0, 100, 100, Color32::WHITE);
+        let (tp, tm) = (LayerTex::of(&patch, 100, 100).unwrap(), LayerTex::of(&white, 100, 100).unwrap());
+        let (v, t) = quad(0.0, 0.0, 100.0, 100.0);
+        // the mask has moved to the right by 50: the patch shows only on the right half
+        let moved: Vec<[f32; 2]> = v.iter().map(|p| [p[0] + 50.0, p[1]]).collect();
+        let items = [Item { tex: &tp, rest: &v, now: v.clone(), tris: &t, opacity: 1.0, blend: crate::doc::Blend::Normal }];
+        let masks = [Item { tex: &tm, rest: &v, now: moved, tris: &t, opacity: 1.0, blend: crate::doc::Blend::Normal }];
+        let out = render_with(&items, &masks, &[(0, 0)], 100, 100, 1.0, None);
+        assert_eq!(out[50 * 100 + 25].a(), 0, "left half: outside the mask");
+        assert_eq!(out[50 * 100 + 75].a(), 255, "right half: inside the mask");
+        // with no cut it is everywhere
+        let free = render_with(&items, &masks, &[], 100, 100, 1.0, None);
+        assert_eq!(free[50 * 100 + 25].a(), 255);
     }
 }
