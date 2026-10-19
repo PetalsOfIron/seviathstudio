@@ -14,7 +14,7 @@ expected, what happened. Things marked **needs hardware** were only tested with 
 
 - Brushes, layers, selections, filters, vector layers, text: the earlier milestones. Try your normal work and say what feels wrong.
 - File, **AI helper**: set up Ollama or a Gemini key, then try a brush from words, colours from words, a look at the drawing
-  (**needs a real AI**).
+  (**needs a real AI**). *A picture from ComfyUI*: start your ComfyUI, press *Find its checkpoints*, write what you want, *Make the picture* (**needs ComfyUI**, only tried with a fake one).
 - File, New: the new stream sizes (Twitch banner, offline screen, profile picture, YouTube and Discord banners).
 
 ## Parts (before rigging a finished drawing)

@@ -40,6 +40,8 @@ pub struct Settings {
     /// The AIs that are set up (see aibridge.rs) and the one in use.
     pub ai_providers: Vec<crate::aibridge::Provider>,
     pub ai_active: usize,
+    /// The address of the ComfyUI that makes pictures (see comfy.rs).
+    pub comfy_url: String,
     /// Keys you changed: action id → shortcut text ("" = no key). See actions.rs.
     pub shortcuts: std::collections::BTreeMap<String, String>,
     // ---- Canvas & view
@@ -106,6 +108,7 @@ impl Default for Settings {
             stream_fps: 30,
             ai_providers: Vec::new(),
             ai_active: 0,
+            comfy_url: "http://127.0.0.1:8188".into(),
             shortcuts: Default::default(),
             wheel: WheelAction::Zoom,
             zoom_speed: 1.0,
