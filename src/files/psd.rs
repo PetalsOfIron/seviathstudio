@@ -903,21 +903,17 @@ fn real_psds_run_the_pipeline() {
                     closed.set(p.id, p.min);
                 }
             }
-            // how close the rig at rest is to the drawing as the file shows it (both on white, 600 pixels): the stacking must be the same
-            if let Some(theirs) = merged_preview(&bytes_for_compare) {
-                let k = 600.0 / w.max(h) as f32;
-                let (sw, sh) = (((w as f32 * k) as usize).max(8), ((h as f32 * k) as usize).max(8));
-                let pose = rig.pose(&Values::default());
-                let all = rig.deformed_all(&pose);
-                // every layer that is shown, as the app draws them: a layer with a mesh by its mesh, any other as a flat picture
-                struct Piece {
-                    tex: LayerTex,
-                    rest: Vec<[f32; 2]>,
-                    now: Vec<[f32; 2]>,
-                    tris: Vec<[u32; 3]>,
-                    op: f32,
-                    blend: crate::doc::Blend,
-                }
+            // every layer that is shown, as the app draws them: a layer with a mesh by its mesh, any other as a flat picture
+            struct Piece {
+                id: crate::doc::LayerId,
+                tex: LayerTex,
+                rest: Vec<[f32; 2]>,
+                now: Vec<[f32; 2]>,
+                tris: Vec<[u32; 3]>,
+                op: f32,
+                blend: crate::doc::Blend,
+            }
+            fn pieces_for(doc: &crate::doc::Document, rig: &crate::rig::Rig, all: &[Vec<[f32; 2]>]) -> Vec<Piece> {
                 let mut pieces: Vec<Piece> = Vec::new();
                 for l in doc.layers.iter().rev().filter(|l| l.kind == LayerKind::Raster && l.visible && std::env::var("HIDE").map_or(true, |h| !l.name.contains(&h))) {
                     let (mut shown, mut op) = (true, l.opacity / 100.0);
@@ -928,7 +924,7 @@ fn real_psds_run_the_pipeline() {
                         op *= f.opacity / 100.0;
                         p = f.parent;
                     }
-                    let Some(tex) = LayerTex::of_in(&doc, l) else { continue };
+                    let Some(tex) = LayerTex::of_in(doc, l) else { continue };
                     if !shown {
                         continue;
                     }
@@ -940,8 +936,17 @@ fn real_psds_run_the_pipeline() {
                             (v.clone(), v, vec![[0, 1, 2], [0, 2, 3]])
                         }
                     };
-                    pieces.push(Piece { tex, rest, now, tris, op, blend: l.blend });
+                    pieces.push(Piece { id: l.id, tex, rest, now, tris, op, blend: l.blend });
                 }
+                pieces
+            }
+            // how close the rig at rest is to the drawing as the file shows it (both on white, 600 pixels): the stacking must be the same
+            if let Some(theirs) = merged_preview(&bytes_for_compare) {
+                let k = 600.0 / w.max(h) as f32;
+                let (sw, sh) = (((w as f32 * k) as usize).max(8), ((h as f32 * k) as usize).max(8));
+                let pose = rig.pose(&Values::default());
+                let all = rig.deformed_all(&pose);
+                let pieces = pieces_for(&doc, rig, &all);
                 let items: Vec<Item> = pieces.iter().map(|p| Item { tex: &p.tex, rest: &p.rest, now: p.now.clone(), tris: &p.tris, opacity: p.op, blend: p.blend }).collect();
                 let px = raster::render(&items, sw, sh, k, Some(eframe::egui::Color32::WHITE));
                 let small = image::imageops::resize(&theirs, sw as u32, sh as u32, image::imageops::FilterType::Triangle);
@@ -966,10 +971,10 @@ fn real_psds_run_the_pipeline() {
             for (tag, vals) in [("rest", Values::default()), ("turned", turned), ("closed", closed)] {
                 let pose = rig.pose(&vals);
                 let all = rig.deformed_all(&pose);
-                let texes: Vec<_> = doc.layers.iter().rev().filter(|l| std::env::var("HIDE").map_or(true, |h| !l.name.contains(&h))).filter_map(|l| rig.mesh_of(l.id).map(|m| (m, LayerTex::of_in(&doc, l), l.blend))).collect();
-                let items: Vec<Item> = texes.iter().filter_map(|(m, t, b)| t.as_ref().map(|t| Item { tex: t, rest: &m.verts, now: all[rig.meshes.iter().position(|x| x.id == m.id).unwrap()].clone(), tris: &m.tris, opacity: 1.0, blend: *b })).collect();
+                let pieces = pieces_for(&doc, rig, &all);
+                let items: Vec<Item> = pieces.iter().map(|p| Item { tex: &p.tex, rest: &p.rest, now: p.now.clone(), tris: &p.tris, opacity: p.op, blend: p.blend }).collect();
                 // what is cut to the face (teeth, a skin patch) is cut live to the outline of the face as it is moved
-                let ids: Vec<crate::doc::LayerId> = texes.iter().filter(|(_, t, _)| t.is_some()).map(|(m, _, _)| m.layer).collect();
+                let ids: Vec<crate::doc::LayerId> = pieces.iter().map(|p| p.id).collect();
                 let omask = raster::outline_mask(&doc, crate::parts::Part::Face);
                 let line = doc.layers.iter().find(|l| l.part == Some(crate::parts::Part::Face) && l.visible && !l.clip && l.name.to_lowercase().contains("line")).and_then(|l| rig.mesh_of(l.id));
                 let masks: Vec<Item> = match (&omask, line) {
