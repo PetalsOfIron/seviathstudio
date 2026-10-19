@@ -74,6 +74,9 @@ pub struct StreamUi {
     pub obs_port: u16,
     pub obs_password: String,
     pub hk_scene: String,
+    /// Where OBS Studio is on this computer (looked for when the panel is first shown), and what the last step of the set up said.
+    pub obs_exe: Option<Option<std::path::PathBuf>>,
+    pub vcam_message: Option<String>,
 }
 
 impl Default for StreamUi {
@@ -123,6 +126,8 @@ impl Default for StreamUi {
             obs_port: 4455,
             obs_password: String::new(),
             hk_scene: String::new(),
+            obs_exe: None,
+            vcam_message: None,
         }
     }
 }
@@ -227,6 +232,11 @@ impl SeviathApp {
                 crate::hotkeys::Action::ObsRecord => {
                     if let Some(o) = &self.rigs.stream.obs {
                         o.send(crate::obs::Cmd::ToggleRecord);
+                    }
+                }
+                crate::hotkeys::Action::ObsVirtualCam => {
+                    if let Some(o) = &self.rigs.stream.obs {
+                        o.send(crate::obs::Cmd::ToggleVirtualCam);
                     }
                 }
             }
@@ -363,6 +373,7 @@ impl SeviathApp {
 
         self.stream_expr_ui(ui);
         self.stream_obs_ui(ui);
+        self.stream_vcam_ui(ui);
         self.stream_link_ui(ui);
         self.stream_vrchat_ui(ui);
         self.stream_hotkeys_ui(ui);
@@ -505,6 +516,104 @@ impl SeviathApp {
                 ui.label(RichText::new(format!("{} messages sent", v.sent)).size(11.0).color(TEXT_DIM));
             }
         });
+    }
+
+    /// The virtual camera other programs can pick (Discord, Zoom, a browser, a game): OBS Studio makes it, this program sets OBS up.
+    fn stream_vcam_ui(&mut self, ui: &mut Ui) {
+        section_title(ui, "Virtual camera");
+        ui.label(RichText::new("Shows the model as a camera that Discord, Zoom, a browser and other programs can pick, through the free OBS Studio (its OBS Virtual Camera). This program makes the scene in OBS and starts the camera. The camera has no see-through background, so the colour chosen under Show the model in other programs is put behind the model.").size(11.5).color(TEXT_DIM));
+        if self.rigs.stream.obs_exe.is_none() {
+            self.rigs.stream.obs_exe = Some(crate::obs::find_install());
+        }
+        let exe = self.rigs.stream.obs_exe.clone().flatten();
+        match &exe {
+            Some(p) => {
+                ui.label(RichText::new(format!("OBS Studio is installed: {}", p.display())).size(11.5).color(VENOM));
+            }
+            None => {
+                ui.label(RichText::new("OBS Studio is not installed (or not in the usual place).").size(11.5).color(GOLD));
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Get OBS Studio (free)").on_hover_text("Opens obsproject.com/download").clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab("https://obsproject.com/download"));
+                    }
+                    if ui.button("Install it with winget").on_hover_text("Opens a window that runs: winget install OBSProject.OBSStudio. Windows asks you to allow it.").clicked() {
+                        let mut cmd = std::process::Command::new("cmd");
+                        cmd.args(["/C", "start", "", "cmd", "/K", "winget install --id OBSProject.OBSStudio -e --accept-package-agreements --accept-source-agreements"]);
+                        self.rigs.stream.vcam_message = Some(match cmd.spawn() {
+                            Ok(_) => "A window installs OBS Studio. When it says it is done, press Look again.".to_string(),
+                            Err(e) => format!("Could not start winget ({e}). Use Get OBS Studio instead."),
+                        });
+                    }
+                    if ui.button("Look again").clicked() {
+                        self.rigs.stream.obs_exe = None;
+                    }
+                });
+            }
+        }
+        let connected = self.rigs.stream.obs.as_ref().map(|o| o.snapshot().status == crate::obs::Status::Connected).unwrap_or(false);
+        if exe.is_some() && !connected {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Let this program control OBS").on_hover_text("Switches the WebSocket server of OBS on with a password made now (OBS must be closed; its old settings file is kept). The password is put in the OBS box above.").clicked() {
+                    self.rigs.stream.vcam_message = Some(if crate::obs::is_running() {
+                        "Close OBS first: it only reads this setting when it starts.".to_string()
+                    } else {
+                        let appdata = std::env::var_os("APPDATA").map(std::path::PathBuf::from).unwrap_or_default().join("obs-studio");
+                        let pw = crate::obs::make_password();
+                        match crate::obs::enable_websocket(&appdata, &pw) {
+                            Ok(_) => {
+                                self.rigs.stream.obs_password = pw;
+                                self.rigs.stream.obs_host = "localhost".into();
+                                self.rigs.stream.obs_port = 4455;
+                                "Done. Now start OBS, then press Connect above.".to_string()
+                            }
+                            Err(e) => e,
+                        }
+                    });
+                }
+                if ui.button("Start OBS").clicked() {
+                    if let Some(p) = &exe {
+                        self.rigs.stream.vcam_message = Some(match crate::obs::launch(p) {
+                            Ok(()) => "OBS is starting. When its window is there, press Connect above.".to_string(),
+                            Err(e) => e,
+                        });
+                    }
+                }
+            });
+        }
+        if connected {
+            let on = self.rigs.stream.obs.as_ref().map(|o| o.snapshot().virtualcam).unwrap_or(false);
+            ui.horizontal_wrapped(|ui| {
+                if !on && ui.button("Make the virtual camera").on_hover_text("Makes the scene in OBS with the model and the background colour, shows it and starts the camera").clicked() {
+                    // the model has to be served for OBS to show it
+                    if self.rigs.stream.server.is_none() {
+                        match BrowserSource::start(self.rigs.stream.server_port) {
+                            Ok(s) => self.rigs.stream.server = Some(s),
+                            Err(e) => self.rigs.stream.vcam_message = Some(e),
+                        }
+                    }
+                    if let Some(s) = &self.rigs.stream.server {
+                        let (w, h) = (self.draw.doc.w as f32, self.draw.doc.h as f32);
+                        let side = self.rigs.stream.server_side.clamp(360, 1080) as f32;
+                        let k = side / w.max(h);
+                        let (vw, vh) = (((w * k) as u32 / 2 * 2).max(2), ((h * k) as u32 / 2 * 2).max(2));
+                        let bg = self.stream_bg();
+                        if let Some(o) = &self.rigs.stream.obs {
+                            o.send(crate::obs::Cmd::SetupModel { url: s.url(), width: vw, height: vh, background: [bg.r(), bg.g(), bg.b()] });
+                            self.rigs.stream.vcam_message = Some("The camera starts. In Discord, Zoom or the browser pick the camera called OBS Virtual Camera.".into());
+                        }
+                    }
+                }
+                if on && ui.button("Stop the virtual camera").clicked() {
+                    if let Some(o) = &self.rigs.stream.obs {
+                        o.send(crate::obs::Cmd::StopVirtualCam);
+                    }
+                }
+                ui.label(RichText::new(if on { "The virtual camera is on: pick OBS Virtual Camera in the other program." } else { "The virtual camera is off." }).size(11.5).color(if on { VENOM } else { TEXT_DIM }));
+            });
+        }
+        if let Some(m) = &self.rigs.stream.vcam_message {
+            ui.label(RichText::new(m).size(11.5).color(TEXT_DIM));
+        }
     }
 
     fn stream_link_ui(&mut self, ui: &mut Ui) {
@@ -675,8 +784,8 @@ impl SeviathApp {
         });
         let names: Vec<String> = crate::expressions::defs(&rig).into_iter().map(|d| d.name).collect();
         ui.horizontal_wrapped(|ui| {
-            const ACTIONS: [&str; 7] = ["Switch on or off", "Show only", "While held", "All off", "OBS scene", "OBS stream on or off", "OBS recording on or off"];
-            egui::ComboBox::from_id_salt("hk_action").selected_text(ACTIONS[self.rigs.stream.hk_action as usize % 7]).width(150.0).show_ui(ui, |ui| {
+            const ACTIONS: [&str; 8] = ["Switch on or off", "Show only", "While held", "All off", "OBS scene", "OBS stream on or off", "OBS recording on or off", "OBS virtual camera on or off"];
+            egui::ComboBox::from_id_salt("hk_action").selected_text(ACTIONS[self.rigs.stream.hk_action as usize % 8]).width(150.0).show_ui(ui, |ui| {
                 for (i, n) in ACTIONS.iter().enumerate() {
                     if ui.selectable_label(self.rigs.stream.hk_action == i as u8, *n).clicked() {
                         self.rigs.stream.hk_action = i as u8;
@@ -725,6 +834,7 @@ impl SeviathApp {
                     4 => crate::hotkeys::Action::ObsScene(self.rigs.stream.hk_scene.trim().to_string()),
                     5 => crate::hotkeys::Action::ObsStream,
                     6 => crate::hotkeys::Action::ObsRecord,
+                    7 => crate::hotkeys::Action::ObsVirtualCam,
                     _ => crate::hotkeys::Action::Clear,
                 };
                 if let Some(input) = self.rigs.stream.hk_input.take() {

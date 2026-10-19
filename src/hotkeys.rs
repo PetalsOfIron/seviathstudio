@@ -58,6 +58,8 @@ pub enum Action {
     ObsStream,
     /// OBS starts or stops recording.
     ObsRecord,
+    /// OBS's virtual camera goes on or off.
+    ObsVirtualCam,
 }
 
 impl Action {
@@ -70,6 +72,7 @@ impl Action {
             Action::ObsScene(n) => format!("OBS scene {n}"),
             Action::ObsStream => "OBS start or stop streaming".into(),
             Action::ObsRecord => "OBS start or stop recording".into(),
+            Action::ObsVirtualCam => "OBS virtual camera on or off".into(),
         }
     }
 }
