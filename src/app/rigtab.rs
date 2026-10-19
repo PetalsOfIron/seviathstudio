@@ -354,7 +354,7 @@ impl SeviathApp {
                 return t.clone();
             }
         }
-        let t = LayerTex::of(l, d.w, d.h).map(Arc::new);
+        let t = LayerTex::of_in(d, l).map(Arc::new);
         self.rigs.tex.insert(id, (l.rev, t.clone()));
         t
     }

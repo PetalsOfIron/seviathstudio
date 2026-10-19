@@ -14,7 +14,7 @@ pub struct LayerTex {
     pub y0: i32,
     pub w: usize,
     pub h: usize,
-    px: Vec<[f32; 4]>,
+    pub px: Vec<[f32; 4]>,
 }
 
 impl LayerTex {
@@ -42,6 +42,30 @@ impl LayerTex {
             }
         }
         Some(LayerTex { x0, y0, w, h, px })
+    }
+
+    /// The texture of a layer of the document as it looks: a layer that is clipped to the layer below it (a shade on a base) shows only
+    /// where that layer has pixels. The layer in the file keeps its clipping; only this picture is cut.
+    pub fn of_in(doc: &crate::doc::Document, l: &Layer) -> Option<LayerTex> {
+        let mut t = LayerTex::of(l, doc.w, doc.h)?;
+        if l.clip {
+            let i = doc.layers.iter().position(|x| x.id == l.id)?;
+            if let Some(base) = doc.layers[i + 1..].iter().find(|b| b.parent == l.parent && !b.clip) {
+                let tt = TILE as i32;
+                for y in 0..t.h {
+                    for x in 0..t.w {
+                        let (px, py) = (t.x0 + x as i32, t.y0 + y as i32);
+                        let a = base.tiles.get(&(px.div_euclid(tt), py.div_euclid(tt))).map(|b| b[(py.rem_euclid(tt) * tt + px.rem_euclid(tt)) as usize].a() as f32 / 255.0).unwrap_or(0.0);
+                        if a < 1.0 {
+                            for c in t.px[y * t.w + x].iter_mut() {
+                                *c *= a;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Some(t)
     }
 
     /// A texture from a picture that covers the page (not premultiplied).

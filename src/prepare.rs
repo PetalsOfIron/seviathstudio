@@ -2,8 +2,8 @@
 // Getting a finished drawing ready for rigging in one step. A real drawing has a dozen layers for every part of the character (the
 // eye is a white, lashes, a liner, a lid, shadows and highlights, in folders). Every layer is tagged from its name and from the
 // folders around it, and the stacking of the artist is not touched: the order, the folders, the blend modes and the opacity stay as they
-// are. A layer that is clipped to another (a shadow on a base) is tagged with the part of its base and the clipping is baked into its
-// pixels, so it stays inside the part when the part moves. The layers of a part can also be put together into one layer each (a smaller
+// are. A layer that is clipped to another (a shadow on a base) is tagged with the part of its base and stays clipped, as in the file;
+// the rig picture cuts it to its base. The layers of a part can also be put together into one layer each (a smaller
 // model for a game), only where nothing else lies between them in the stack, so the picture does not change. All of it is one step in
 // the history.
 
@@ -149,7 +149,6 @@ pub fn tidy(doc: &mut Document, rules: &[NameRule], merge: bool) -> Report {
         kinds.sort_by_key(|p| Part::ALL.iter().position(|q| q == p));
         kinds.dedup();
         report.parts = kinds.len();
-        report.clips_baked = bake_clips(doc);
         report.left_alone = doc.layers.iter().filter(|l| parts::is_part_layer(l) && l.visible && !l.tiles.is_empty() && l.part.is_none()).map(|l| l.name.clone()).collect();
         doc.mark_all_dirty();
         return report;
@@ -243,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn clipping_is_baked_so_the_shade_stays_inside_its_base() {
+    fn clipping_stays_as_in_the_file_and_the_rig_picture_is_cut_to_the_base() {
         let mut d = Document::new(1000, 1000);
         d.layers.clear();
         let leg = square(&mut d, "Rightleg", None, 300, 300, [230, 190, 160]);
@@ -251,12 +250,13 @@ mod tests {
         let shade = square(&mut d, "Shade", None, 280, 300, [100, 60, 40]);
         d.layers.iter_mut().find(|l| l.id == shade).unwrap().clip = true;
         let r = tidy(&mut d, &[], false);
-        assert_eq!(r.clips_baked, 1);
+        assert_eq!(r.clips_baked, 0);
         let l = d.layers.iter().find(|l| l.id == shade).unwrap();
-        assert!(!l.clip, "no longer clipped");
-        let px = |x: i32, y: i32| l.tiles.get(&(x.div_euclid(256), y.div_euclid(256))).map(|t| t[(y.rem_euclid(256) * 256 + x.rem_euclid(256)) as usize]).unwrap_or_default();
-        assert_eq!(px(290, 320).a(), 0, "outside the leg it is cleared");
-        assert!(px(310, 320).a() == 255, "inside the leg it stays");
+        assert!(l.clip, "still clipped, as in the file");
+        let t = crate::rig::raster::LayerTex::of_in(&d, l).unwrap();
+        let a = |x: i32, y: i32| t.px[(y - t.y0) as usize * t.w + (x - t.x0) as usize][3];
+        assert_eq!(a(290, 320), 0.0, "outside the leg the picture is cut");
+        assert_eq!(a(310, 320), 1.0, "inside the leg it stays");
         assert_eq!(d.layers.iter().find(|l| l.id == leg).unwrap().part, Some(Part::LegR));
         assert_eq!(l.part, Some(Part::LegR));
     }
