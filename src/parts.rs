@@ -656,7 +656,45 @@ pub fn suggest_with(layers: &[Layer], doc_w: u32, doc_h: u32, include_tagged: bo
             out.push(Suggestion { layer: l.id, part, confidence: 0.35, reason: format!("{why} (a guess from the shape)") });
         }
     }
+    fix_sides_by_place(layers, doc_w, doc_h, &mut out);
     out
+}
+
+/// A layer whose name says one side but which lies clearly on the other side of its pair (an "eyelineR" drawn on the left eye) goes with the
+/// side it lies on: the names of a drawing are often a little wrong, and a part that sits on the wrong eye moves wrongly.
+fn fix_sides_by_place(layers: &[Layer], doc_w: u32, doc_h: u32, out: &mut [Suggestion]) {
+    let dw = doc_w.max(1) as f32;
+    let cx_of = |id: LayerId| -> Option<f32> {
+        let l = layers.iter().find(|l| l.id == id)?;
+        let (x0, _, x1, _) = layer_bounds(l, doc_w, doc_h)?;
+        Some((x0 + x1) as f32 / 2.0 / dw)
+    };
+    for (a, b) in [(Part::EyeL, Part::EyeR), (Part::BrowL, Part::BrowR), (Part::EyeballL, Part::EyeballR), (Part::EarL, Part::EarR)] {
+        let xs = |p: Part| -> Vec<f32> { out.iter().filter(|s| s.part == p).filter_map(|s| cx_of(s.layer)).collect() };
+        let (xa, xb) = (xs(a), xs(b));
+        if xa.is_empty() || xb.is_empty() {
+            continue;
+        }
+        let (ma, mb) = (xa.iter().sum::<f32>() / xa.len() as f32, xb.iter().sum::<f32>() / xb.len() as f32);
+        // the left half is normally on the right of the picture, but some drawings are named the other way round (L is what the viewer
+        // sees on the left): the two groups say which way this drawing is. If they are not apart, there is nothing to go by.
+        if (ma - mb).abs() < 0.01 {
+            continue;
+        }
+        let a_right = ma > mb;
+        let mid = (ma + mb) / 2.0;
+        for s in out.iter_mut() {
+            let Some(cx) = cx_of(s.layer) else { continue };
+            let wrong = |part_on_right: bool| if part_on_right { cx < mid - 0.003 } else { cx > mid + 0.003 };
+            if s.part == a && wrong(a_right) {
+                s.part = b;
+                s.reason = format!("{} (it lies on the other side)", s.reason);
+            } else if s.part == b && wrong(!a_right) {
+                s.part = a;
+                s.reason = format!("{} (it lies on the other side)", s.reason);
+            }
+        }
+    }
 }
 
 // ---------- pairs and the checklist ----------
