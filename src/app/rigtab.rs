@@ -172,6 +172,8 @@ pub struct RigState {
     skin_detail: f32,
     pub heat: bool,
     skin_tex: Option<(u64, Option<Arc<LayerTex>>)>,
+    /// The inside of the outline of the face, for cutting teeth and patches live to the face (made again when the outline layer changes).
+    clip_mask: Option<(u64, Option<Arc<LayerTex>>)>,
     heat_tex: Option<((usize, u64), TextureHandle)>,
     bone_from: Option<[f32; 2]>,
     bone_chain: bool,
@@ -379,6 +381,26 @@ impl SeviathApp {
     }
 
     /// Everything that is drawn, bottom first: (layer, mesh or a plain box, opacity).
+    /// Draw the items; what is cut to the face (teeth, a skin patch) is cut live to the outline of the face as it is moved now.
+    pub(super) fn draw_items(&mut self, items: &[(LayerId, Arc<LayerTex>, Vec<[f32; 2]>, Vec<[f32; 2]>, Vec<[u32; 3]>, f32, crate::doc::Blend)], w: usize, h: usize, scale: f32, paper: Option<Color32>) -> Vec<Color32> {
+        let list: Vec<Item> = items.iter().map(|(_, tex, rest, now, tris, op, blend)| Item { tex, rest, now: now.clone(), tris, opacity: *op, blend: *blend }).collect();
+        let d = &self.draw.doc;
+        let cut: Vec<usize> = d.rig.clip_to.iter().filter(|c| c.1 == parts::Part::Face).filter_map(|c| items.iter().position(|i| i.0 == c.0)).collect();
+        let line = d.layers.iter().find(|l| l.part == Some(parts::Part::Face) && l.visible && !l.clip && l.name.to_lowercase().contains("line")).map(|l| (l.id, l.rev));
+        let Some((line_id, rev)) = line.filter(|_| !cut.is_empty()) else { return raster::render(&list, w, h, scale, paper) };
+        let Some(line_item) = items.iter().position(|i| i.0 == line_id) else { return raster::render(&list, w, h, scale, paper) };
+        let key = rev ^ ((d.layers.len() as u64) << 40);
+        if self.rigs.clip_mask.as_ref().map(|c| c.0) != Some(key) {
+            let tex = raster::outline_mask(&self.draw.doc, parts::Part::Face).map(Arc::new);
+            self.rigs.clip_mask = Some((key, tex));
+        }
+        let Some(tex) = self.rigs.clip_mask.as_ref().and_then(|c| c.1.clone()) else { return raster::render(&list, w, h, scale, paper) };
+        let (_, _, rest, now, tris, _, _) = &items[line_item];
+        let masks = [Item { tex: &tex, rest, now: now.clone(), tris, opacity: 1.0, blend: crate::doc::Blend::Normal }];
+        let clips: Vec<(usize, usize)> = cut.iter().map(|i| (*i, 0)).collect();
+        raster::render_with(&list, &masks, &clips, w, h, scale, paper)
+    }
+
     pub(super) fn rig_items(&mut self) -> Vec<(LayerId, Arc<LayerTex>, Vec<[f32; 2]>, Vec<[f32; 2]>, Vec<[u32; 3]>, f32, crate::doc::Blend)> {
         let rig = self.draw.doc.rig.clone();
         let painting = self.rigs.mode == Mode::Weight;
@@ -482,8 +504,7 @@ impl SeviathApp {
         if items.is_empty() {
             return None;
         }
-        let list: Vec<Item> = items.iter().map(|(_, tex, rest, now, tris, op, blend)| Item { tex, rest, now: now.clone(), tris, opacity: *op, blend: *blend }).collect();
-        let px = raster::render(&list, size.0 as usize, size.1 as usize, scale, paper);
+        let px = self.draw_items(&items, size.0 as usize, size.1 as usize, scale, paper);
         let mut img = image::RgbaImage::new(size.0, size.1);
         for (i, c) in px.iter().enumerate() {
             let [r, g, b, a] = c.to_srgba_unmultiplied();
@@ -541,9 +562,8 @@ impl SeviathApp {
         let scale = (self.settings.preview_px() / w.max(h)).min(1.0);
         let (pw, ph) = (((w * scale) as usize).max(8), ((h * scale) as usize).max(8));
         let items = self.rig_items();
-        let list: Vec<Item> = items.iter().map(|(_, tex, rest, now, tris, op, blend)| Item { tex, rest, now: now.clone(), tris, opacity: *op, blend: *blend }).collect();
         let paper = Color32::from_rgb(244, 242, 236);
-        let px = raster::render(&list, pw, ph, scale, Some(paper));
+        let px = self.draw_items(&items, pw, ph, scale, Some(paper));
         let img = egui::ColorImage::new([pw, ph], px);
         self.rigs.image = Some(ctx.load_texture("rig_preview", img, TextureOptions::LINEAR));
         self.rigs.scale = scale;

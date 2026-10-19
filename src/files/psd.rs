@@ -968,7 +968,16 @@ fn real_psds_run_the_pipeline() {
                 let all = rig.deformed_all(&pose);
                 let texes: Vec<_> = doc.layers.iter().rev().filter(|l| std::env::var("HIDE").map_or(true, |h| !l.name.contains(&h))).filter_map(|l| rig.mesh_of(l.id).map(|m| (m, LayerTex::of_in(&doc, l), l.blend))).collect();
                 let items: Vec<Item> = texes.iter().filter_map(|(m, t, b)| t.as_ref().map(|t| Item { tex: t, rest: &m.verts, now: all[rig.meshes.iter().position(|x| x.id == m.id).unwrap()].clone(), tris: &m.tris, opacity: 1.0, blend: *b })).collect();
-                let px = raster::render(&items, pw, ph, scale, Some(eframe::egui::Color32::from_rgb(244, 242, 236)));
+                // what is cut to the face (teeth, a skin patch) is cut live to the outline of the face as it is moved
+                let ids: Vec<crate::doc::LayerId> = texes.iter().filter(|(_, t, _)| t.is_some()).map(|(m, _, _)| m.layer).collect();
+                let omask = raster::outline_mask(&doc, crate::parts::Part::Face);
+                let line = doc.layers.iter().find(|l| l.part == Some(crate::parts::Part::Face) && l.visible && !l.clip && l.name.to_lowercase().contains("line")).and_then(|l| rig.mesh_of(l.id));
+                let masks: Vec<Item> = match (&omask, line) {
+                    (Some(t), Some(m)) => vec![Item { tex: t, rest: &m.verts, now: all[rig.meshes.iter().position(|x| x.id == m.id).unwrap()].clone(), tris: &m.tris, opacity: 1.0, blend: crate::doc::Blend::Normal }],
+                    _ => Vec::new(),
+                };
+                let clips: Vec<(usize, usize)> = if masks.is_empty() { Vec::new() } else { doc.rig.clip_to.iter().filter(|c| c.1 == crate::parts::Part::Face).filter_map(|c| ids.iter().position(|i| *i == c.0)).map(|i| (i, 0)).collect() };
+                let px = raster::render_with(&items, &masks, &clips, pw, ph, scale, Some(eframe::egui::Color32::from_rgb(244, 242, 236)));
                 let mut img = image::RgbaImage::new(pw as u32, ph as u32);
                 for (i, p) in px.iter().enumerate() {
                     img.put_pixel((i % pw) as u32, (i / pw) as u32, image::Rgba([p.r(), p.g(), p.b(), 255]));
@@ -990,7 +999,7 @@ fn real_psds_run_the_pipeline() {
                     if lo[0] < hi[0] {
                         let s = 700.0 / (hi[0] - lo[0]).max(hi[1] - lo[1]);
                         let (fw, fh) = (((w as f32 * s) as usize).max(8), ((h as f32 * s) as usize).max(8));
-                        let px = raster::render(&items, fw, fh, s, Some(eframe::egui::Color32::from_rgb(244, 242, 236)));
+                        let px = raster::render_with(&items, &masks, &clips, fw, fh, s, Some(eframe::egui::Color32::from_rgb(244, 242, 236)));
                         let (x0, y0) = (((lo[0] - 40.0).max(0.0) * s) as usize, ((lo[1] - 40.0).max(0.0) * s) as usize);
                         let (cw, ch) = ((((hi[0] - lo[0]) + 80.0) * s) as usize, (((hi[1] - lo[1]) + 80.0) * s) as usize);
                         let mut crop = image::RgbaImage::new(cw.min(fw - x0) as u32, ch.min(fh - y0) as u32);
