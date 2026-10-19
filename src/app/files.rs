@@ -115,6 +115,10 @@ fn load_any(path: &Path) -> Result<(Document, bool), String> {
             let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
             psd::read(&bytes).map(|d| (d, false))
         }
+        "clip" => {
+            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            files::clip::read(&bytes).map(|d| (d, false))
+        }
         "ora" => ora::read(path).map(|d| (d, false)),
         "kra" => kra::read(path).map(|d| (d, false)),
         "cmo3" | "moc3" | "json" => {
@@ -242,9 +246,10 @@ impl SeviathApp {
         let picked = rfd::FileDialog::new()
             .set_title("Open")
             .set_directory(&dir)
-            .add_filter("Everything SeviathStudio opens", &["seviath", "psd", "ora", "kra", "cmo3", "moc3", "json", "png", "jpg", "jpeg", "webp", "bmp", "gif"])
+            .add_filter("Everything SeviathStudio opens", &["seviath", "psd", "clip", "ora", "kra", "cmo3", "moc3", "json", "png", "jpg", "jpeg", "webp", "bmp", "gif"])
             .add_filter("SeviathStudio project", &["seviath"])
             .add_filter("Photoshop", &["psd"])
+            .add_filter("Clip Studio Paint", &["clip"])
             .add_filter("Krita", &["kra"])
             .add_filter("Live2D Cubism model", &["cmo3", "moc3", "json"])
             .add_filter("OpenRaster (Krita, GIMP, MyPaint)", &["ora"])
