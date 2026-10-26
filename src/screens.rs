@@ -4172,3 +4172,33 @@ fn the_rig_workbench_is_the_same_in_the_rig_physics_and_animate_tabs() {
     assert!(h.query_by_label("Automatic rig").is_none(), "the automatic rig is not on the 3D page");
     save(&mut h, "workbench_4_3d");
 }
+
+/// The bones of the 3D character get sliders, which pose it and can be keyed in the Animate tab.
+#[test]
+fn the_bones_of_the_3d_character_get_sliders_that_pose_it() {
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    h.state_mut().test_run_action_now("tab.3");
+    rig_tool(&mut h, "3d");
+    h.get_by_label("Make the 3D character").click();
+    h.run_steps(4);
+    assert!(h.state_mut().test_game().model.is_some());
+    h.get_by_label("Sliders for the bones").click();
+    h.run_steps(3);
+    let id = h.state().draw_mut_ref().doc.rig.params.iter().find(|p| p.name == "3D leftUpperArm").map(|p| p.id).expect("a slider for the left upper arm");
+    assert_eq!(h.state().bone_pose_for_test().len(), 0, "all in the middle: no pose");
+    h.state_mut().test_rig().values.set(id, 40.0);
+    h.run_steps(3);
+    let pose = h.state().bone_pose_for_test();
+    assert_eq!(pose, vec![("leftUpperArm".to_string(), 40.0)]);
+    save(&mut h, "bones_1_posed");
+    // the Animate tab shows it too
+    h.state_mut().test_run_action_now("tab.5");
+    h.state_mut().test_rig().bench.anim_3d = true;
+    h.run_steps(4);
+    save(&mut h, "bones_2_animate");
+}

@@ -837,7 +837,7 @@ impl SeviathApp {
         // the tools of rigging by hand along the top, the parts and the parameters on the left, the automatic rig on the right
         egui::Panel::top("rig_toolbar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.rig_toolbar(ui, true, false, false));
         egui::Panel::left("rig_layers").default_size(270.0).size_range(210.0..=440.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
-            picked = self.rig_left_panel(ui, &ctx, now, "rig", !view3d, false);
+            picked = self.rig_left_panel(ui, &ctx, now, "rig", true, false);
         });
         egui::Panel::right("rig_tools").default_size(330.0).size_range(280.0..=500.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("rig_right").show(ui, |ui| self.rig_side(ui, now));
@@ -3214,7 +3214,9 @@ fn pad_widget(ui: &mut Ui, a: &PadAxis, b: &PadAxis, vx: &mut f32, vy: &mut f32)
 
 /// The heading a slider is listed under (like the groups of the parameter palettes in Live2D and Inochi2D).
 fn slider_group(name: &str) -> &'static str {
-    if name.starts_with("Angle") {
+    if name.starts_with("3D ") {
+        "3D bones"
+    } else if name.starts_with("Angle") {
         "Head angles"
     } else if name.starts_with("Eyeball") {
         "Eyeballs"
