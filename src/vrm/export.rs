@@ -269,7 +269,9 @@ pub fn export_full(model: &Model3d, fmt: Format, svrm: Option<&Value>, clips: &[
             })
             .collect();
         for c in clips {
-            super::vrma::add_animation(&mut b, &c.name, fps, &c.frames(fps), &targets, flip);
+            // a model that was not turned to a T-pose rests with its arms down, so the animations are the turns from there
+            let frames: Vec<crate::motion::Frame> = if model.t_pose { c.frames(fps) } else { c.frames(fps).iter().map(|f| f.minus_rest()).collect() };
+            super::vrma::add_animation(&mut b, &c.name, fps, &frames, &targets, flip);
         }
     }
     if let Some(s) = svrm {

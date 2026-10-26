@@ -102,7 +102,7 @@ impl Look {
         }
         p.push(POSE_WORDS.into());
         let mut n: Vec<String> = vec![
-            "blurry, low quality, deformed hands, extra limbs, extra fingers, cropped, cut off, text, watermark, signature, multiple characters, side view, back view, complex background, close-up, sitting, lying down, motion blur".into(),
+            "blurry, low quality, deformed hands, extra limbs, extra fingers, cropped, cut off, text, watermark, signature, multiple characters, side view, back view, complex background, close-up, sitting, lying down, motion blur, ground shadow, floor, cast shadow, drop shadow".into(),
         ];
         if !st.avoid.is_empty() {
             n.push(st.avoid.into());

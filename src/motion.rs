@@ -47,6 +47,21 @@ impl Frame {
         self.rot.get(bone).copied().unwrap_or([0.0; 3])
     }
 
+    /// The same frame, as turns from the relaxed stand (arms down): for a model that is built in that pose and not in a T-pose.
+    pub fn minus_rest(&self) -> Frame {
+        let rest = Frame::rest();
+        let mut out = Frame::default();
+        for b in BONES {
+            let (a, r) = (self.get(b), rest.get(b));
+            let v = [a[0] - r[0], a[1] - r[1], a[2] - r[2]];
+            if v.iter().any(|x| x.abs() > 1e-6) {
+                out.rot.insert(b, v);
+            }
+        }
+        out.hips = self.hips;
+        out
+    }
+
     /// This frame mixed with another: 0 is this one, 1 the other.
     pub fn mix(&self, other: &Frame, t: f32) -> Frame {
         let mut out = Frame::default();
