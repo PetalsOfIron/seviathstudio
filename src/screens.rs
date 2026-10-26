@@ -4468,6 +4468,8 @@ fn make_the_example_character() {
     let mut h = Harness::builder().with_size([1500.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     h.state_mut().test_run_action_now("tab.7");
+    let painted_weights = std::env::var("SEVIATH_NO_AI_SKIN").is_ok();
+    h.state_mut().test_game().use_ai_skin = !painted_weights && std::env::var("SEVIATH_AI_SKIN").is_ok();
     h.state_mut().test_gen().page = crate::app::generate_page_characters();
     h.state_mut().test_gen_set_pictures(vec![girl.clone()]);
     h.state_mut().test_gen_make_character();
@@ -4497,6 +4499,31 @@ fn make_the_example_character() {
     let (bytes, _) = h.state_mut().test_game_glb_with(&all, 30.0).expect("the animated file");
     std::fs::write(dir.join("ExampleGirl_game_animated.glb"), &bytes).unwrap();
     println!("ExampleGirl_game_animated.glb: {} bytes, {} animations", bytes.len(), all.len());
+    // a few poses of the character, to look at how it bends
+    {
+        let model = h.state_mut().test_game().model.take().unwrap();
+        let (cw, ch) = (260u32, 400u32);
+        {
+            let mut rest_sheet = image::RgbaImage::new(cw * 4, ch);
+            let frames = [crate::motion::Frame::default(), crate::motion::Frame::rest(), crate::motion::eval(crate::motion::Motion::IdleBreathe, 0.25), crate::motion::eval(crate::motion::Motion::Wave, 0.5)];
+            for (k, f) in frames.iter().enumerate() {
+                let img = crate::vrm::preview::render_motion(&model, 0.0, cw, ch, f, 1.0);
+                image::imageops::replace(&mut rest_sheet, &img, (k as u32 * cw) as i64, 0);
+            }
+            rest_sheet.save(dir.join("ExampleGirl_rest.png")).unwrap();
+        }
+        let mut sheet = image::RgbaImage::new(cw * 6, ch * 2);
+        for (row, m) in [crate::motion::Motion::Walk, crate::motion::Motion::Cheer].into_iter().enumerate() {
+            let clip = crate::motion::Clip::new(m, crate::motion::Style::default());
+            for k in 0..6u32 {
+                let t = clip.seconds() * k as f32 / 6.0 + 0.04;
+                let img = crate::vrm::preview::render_motion(&model, 20.0, cw, ch, &clip.at(t), 1.3);
+                image::imageops::replace(&mut sheet, &img, (k * cw) as i64, (row as u32 * ch) as i64);
+            }
+        }
+        sheet.save(dir.join(if painted_weights { "ExampleGirl_poses_painted_weights.png" } else { "ExampleGirl_poses.png" })).unwrap();
+        h.state_mut().test_game().model = Some(model);
+    }
     girl.save(dir.join("ExampleGirl_picture.png")).unwrap();
 }
 

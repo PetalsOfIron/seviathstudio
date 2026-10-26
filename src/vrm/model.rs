@@ -38,11 +38,13 @@ pub struct Options {
     pub hair: bool,
     /// Build the character on the AI shape with a plain, neutral texture instead of the drawing, to be painted by hand.
     pub mesh_only: bool,
+    /// Skin weights an AI worked out for the points of the AI shape (see `aiskin.rs`); used instead of the weights painted on the drawing.
+    pub ai_skin: Option<std::sync::Arc<super::aiskin::AiSkin>>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { name: "Character".into(), author: "Unknown".into(), height_m: 1.6, puff: 1.0, layer_gap: 0.003, max_texture: 2048, fingers: true, face: true, template: None, shape: None, hair: true, mesh_only: false }
+        Self { name: "Character".into(), author: "Unknown".into(), height_m: 1.6, puff: 1.0, layer_gap: 0.003, max_texture: 2048, fingers: true, face: true, template: None, shape: None, hair: true, mesh_only: false, ai_skin: None }
     }
 }
 

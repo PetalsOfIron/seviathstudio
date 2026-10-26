@@ -476,8 +476,17 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
     // The painted weights belong to the drawing; an AI shape is never quite the drawing (an arm a little higher, a leg a little
     // wider), and where it differs the painted weights would say "body" for a point that is really on the arm. So the weights
     // are also worked out from the distance to the bones, and where the two do not agree on the limb the distance wins.
+    let n_shape = shape.verts.len();
+    let ai = opt.ai_skin.as_ref().filter(|a| a.weights.len() == n_shape);
     let weights_of: Vec<Vec<(usize, f32)>> = (0..model_pts.len())
         .map(|i| {
+            // the weights an AI worked out for the shape itself (the points made later, around the eyes and the mouth, are the head's)
+            if let Some(ai) = ai.filter(|_| i < n_shape) {
+                let w = ai.weights_for(i, &slot, 0);
+                if !w.is_empty() {
+                    return w;
+                }
+            }
             let plane = point_weights(rig, sk, &bones, &slot, &frames, &ix_of, [pts[i][0], pts[i][1]], model_pts[i]);
             let near = distance_weights(&bones, model_pts[i]);
             let limb = dominant_limb(&bones, &near);

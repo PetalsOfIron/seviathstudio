@@ -2,6 +2,7 @@
 // The VRM engine: our own glTF reader and writer, and (next to it) the VRM 1.0 and 0.x model builder for games.
 
 pub mod gltf;
+pub mod aiskin;
 pub mod export;
 pub mod face;
 pub mod hair;
