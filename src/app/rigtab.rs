@@ -1725,8 +1725,8 @@ impl SeviathApp {
 
     /// All the sliders (parameters) of the rig, then the joined squares: always on the left of the Rig, Physics and Animate tabs.
     pub(super) fn rig_params_body(&mut self, ui: &mut Ui, now: f64) {
-        self.rig_sliders_list(ui, now);
         egui::CollapsingHeader::new(RichText::new("Joined sliders").size(13.0).strong()).id_salt("params_pads").default_open(true).show(ui, |ui| self.rig_pads_body(ui, now));
+        self.rig_sliders_list(ui, now);
     }
 
     fn rig_pads_body(&mut self, ui: &mut Ui, now: f64) {
@@ -1823,36 +1823,56 @@ impl SeviathApp {
                 self.rigs.sel_param = Some(new_id);
             }
         });
+        if ui.button("Add all the standard sliders").on_hover_text("The usual Live2D sliders (angles, eyes, brows, mouth, body, hair), so none is missing: the ones that are not made yet are listed grey under each group").clicked() {
+            self.rig_edit("Standard sliders", now, |r| add_standard_params(r, &(0..STANDARD_PARAMS.len()).collect::<Vec<_>>()));
+        }
         let params: Vec<(Id, String, f32, f32, f32)> = rig.params.iter().map(|p| (p.id, p.name.clone(), p.min, p.max, p.default)).collect();
         let mut del_param: Option<Id> = None;
-        let mut last_group = "";
-        for (id, name, lo, hi, def) in &params {
-            let g = slider_group(name);
-            if g != last_group {
-                last_group = g;
-                ui.add_space(2.0);
-                ui.label(RichText::new(g).size(12.0).strong().color(TEXT_DIM));
+        let mut add_standard: Vec<usize> = Vec::new();
+        for (g, col) in SLIDER_GROUPS {
+            let missing: Vec<usize> = STANDARD_PARAMS.iter().enumerate().filter(|(_, sp)| sp.0 == g && !has_standard(&params, sp.1)).map(|(i, _)| i).collect();
+            let mine: Vec<&(Id, String, f32, f32, f32)> = params.iter().filter(|p| slider_group(&p.1) == g).collect();
+            if mine.is_empty() && missing.is_empty() {
+                continue;
             }
-            let mut v = rig.value(&self.rigs.values, *id);
-            let on = self.rigs.sel_param == Some(*id);
-            let keys = rig.display_points(*id);
-            let set: Vec<f32> = keys.iter().copied().filter(|k| rig.key_is_set(*id, *k)).collect();
-            ui.horizontal(|ui| {
-                if widgets::chip(ui, name, on).clicked() {
-                    self.rigs.sel_param = Some(*id);
+            egui::CollapsingHeader::new(RichText::new(format!("{g}  ({})", mine.len())).size(12.5).strong().color(col)).id_salt(("slider_group", g)).default_open(true).show(ui, |ui| {
+                for (id, name, lo, hi, def) in mine {
+                    let mut v = rig.value(&self.rigs.values, *id);
+                    let on = self.rigs.sel_param == Some(*id);
+                    let keys = rig.display_points(*id);
+                    let set: Vec<f32> = keys.iter().copied().filter(|k| rig.key_is_set(*id, *k)).collect();
+                    ui.horizontal(|ui| {
+                        if widgets::chip(ui, name, on).clicked() {
+                            self.rigs.sel_param = Some(*id);
+                        }
+                        if key_slider(ui, &mut v, *lo, *hi, *def, &keys, &set, 150.0) {
+                            self.rigs.values.set(*id, v);
+                            self.rigs.sel_param = Some(*id);
+                        }
+                        ui.label(RichText::new(format!("{v:.1}")).size(11.5).color(TEXT_DIM));
+                        if ui.small_button("Original").on_hover_text("Back to the original drawing (the filled mark)").clicked() {
+                            self.rigs.values.set(*id, *def);
+                        }
+                        if on && ui.small_button("Delete").clicked() {
+                            del_param = Some(*id);
+                        }
+                    });
+
                 }
-                if key_slider(ui, &mut v, *lo, *hi, *def, &keys, &set, 150.0) {
-                    self.rigs.values.set(*id, v);
-                    self.rigs.sel_param = Some(*id);
-                }
-                ui.label(RichText::new(format!("{v:.1}")).size(11.5).color(TEXT_DIM));
-                if ui.small_button("Original").on_hover_text("Back to the original drawing (the filled mark)").clicked() {
-                    self.rigs.values.set(*id, *def);
-                }
-                if on && ui.small_button("Delete").clicked() {
-                    del_param = Some(*id);
+                for i in missing {
+                    let sp = &STANDARD_PARAMS[i];
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(sp.1).size(12.0).color(Color32::from_gray(110)));
+                        ui.label(RichText::new(format!("{} to {}, not made yet", sp.2, sp.3)).size(11.0).color(Color32::from_gray(100)));
+                        if ui.small_button("Add").clicked() {
+                            add_standard.push(i);
+                        }
+                    });
                 }
             });
+        }
+        if !add_standard.is_empty() {
+            self.rig_edit("Standard sliders", now, |r| add_standard_params(r, &add_standard));
         }
         if let Some(id) = del_param {
             self.rig_edit("Delete slider", now, |r| {
@@ -3436,24 +3456,103 @@ fn pad_widget(ui: &mut Ui, a: &PadAxis, b: &PadAxis, vx: &mut f32, vy: &mut f32)
 }
 
 /// The heading a slider is listed under (like the groups of the parameter palettes in Live2D and Inochi2D).
+/// The folders of the sliders, in the order and the colours of the Live2D parameter list.
+const SLIDER_GROUPS: [(&str, Color32); 9] = [
+    ("Eyes open and close", Color32::from_rgb(240, 130, 130)),
+    ("Angles", Color32::from_rgb(240, 180, 110)),
+    ("Eyeballs", Color32::from_rgb(230, 220, 90)),
+    ("Brows", Color32::from_rgb(190, 150, 230)),
+    ("Mouth", Color32::from_rgb(120, 170, 240)),
+    ("Hair", Color32::from_rgb(130, 220, 130)),
+    ("Arms and legs", Color32::from_rgb(120, 210, 200)),
+    ("3D bones", Color32::from_rgb(200, 200, 200)),
+    ("Other", Color32::from_rgb(170, 170, 170)),
+];
+
+/// The usual Live2D sliders: folder, name, lowest, highest, middle.
+const STANDARD_PARAMS: &[(&str, &str, f32, f32, f32)] = &[
+    ("Eyes open and close", "Eye L Open", 0.0, 1.0, 1.0),
+    ("Eyes open and close", "Eye R Open", 0.0, 1.0, 1.0),
+    ("Eyes open and close", "Eye L Smile", 0.0, 1.0, 0.0),
+    ("Eyes open and close", "Eye R Smile", 0.0, 1.0, 0.0),
+    ("Angles", "Angle X", -30.0, 30.0, 0.0),
+    ("Angles", "Angle Y", -30.0, 30.0, 0.0),
+    ("Angles", "Angle Z", -30.0, 30.0, 0.0),
+    ("Angles", "Body X", -10.0, 10.0, 0.0),
+    ("Angles", "Body Y", -10.0, 10.0, 0.0),
+    ("Angles", "Body Z", -10.0, 10.0, 0.0),
+    ("Angles", "Breath", 0.0, 1.0, 0.0),
+    ("Eyeballs", "Eyeball X", -1.0, 1.0, 0.0),
+    ("Eyeballs", "Eyeball Y", -1.0, 1.0, 0.0),
+    ("Eyeballs", "Iris Size", -1.0, 1.0, 0.0),
+    ("Brows", "Brow L Y", -1.0, 1.0, 0.0),
+    ("Brows", "Brow R Y", -1.0, 1.0, 0.0),
+    ("Brows", "Brow L X", -1.0, 1.0, 0.0),
+    ("Brows", "Brow R X", -1.0, 1.0, 0.0),
+    ("Brows", "Brow L Angle", -1.0, 1.0, 0.0),
+    ("Brows", "Brow R Angle", -1.0, 1.0, 0.0),
+    ("Brows", "Brow L Form", -1.0, 1.0, 0.0),
+    ("Brows", "Brow R Form", -1.0, 1.0, 0.0),
+    ("Mouth", "Mouth Open", 0.0, 1.0, 0.0),
+    ("Mouth", "Mouth Form", -1.0, 1.0, 0.0),
+    ("Mouth", "Cheek", 0.0, 1.0, 0.0),
+    ("Hair", "Hair Front", -1.0, 1.0, 0.0),
+    ("Hair", "Hair Side", -1.0, 1.0, 0.0),
+    ("Hair", "Hair Back", -1.0, 1.0, 0.0),
+    ("Hair", "Hair Sway X", -1.0, 1.0, 0.0),
+    ("Hair", "Hair Sway Y", -1.0, 1.0, 0.0),
+    ("Arms and legs", "Arm L", -1.0, 1.0, 0.0),
+    ("Arms and legs", "Arm R", -1.0, 1.0, 0.0),
+];
+
+/// Names the automatic rig uses for what a standard slider also covers.
+fn standard_alias(name: &str) -> &'static [&'static str] {
+    match name {
+        "Eye L Open" | "Eye R Open" => &["Eyes open"],
+        "Eye L Smile" | "Eye R Smile" => &["Eyes smile"],
+        "Mouth Open" => &["Mouth open"],
+        "Mouth Form" => &["Mouth form"],
+        _ => &[],
+    }
+}
+
+fn has_standard(params: &[(Id, String, f32, f32, f32)], name: &str) -> bool {
+    let same = |a: &str, b: &str| a.replace(' ', "").eq_ignore_ascii_case(&b.replace(' ', ""));
+    params.iter().any(|p| same(&p.1, name) || standard_alias(name).iter().any(|a| same(&p.1, a)))
+}
+
+/// Make the standard sliders with these numbers (the ones that already exist are left alone).
+fn add_standard_params(r: &mut Rig, which: &[usize]) {
+    for &i in which {
+        let sp = &STANDARD_PARAMS[i];
+        let have: Vec<(Id, String, f32, f32, f32)> = r.params.iter().map(|p| (p.id, p.name.clone(), p.min, p.max, p.default)).collect();
+        if has_standard(&have, sp.1) {
+            continue;
+        }
+        let id = r.add_param(sp.1, sp.2, sp.3, sp.4);
+        if let Some(p) = r.params.iter_mut().find(|p| p.id == id) {
+            p.cid = format!("Param{}", sp.1.replace(' ', ""));
+        }
+    }
+}
+
 fn slider_group(name: &str) -> &'static str {
+    let n = name.to_lowercase();
     if name.starts_with("3D ") {
         "3D bones"
-    } else if name.starts_with("Angle") {
-        "Head angles"
-    } else if name.starts_with("Eyeball") {
+    } else if n.starts_with("eyeball") || n.starts_with("iris") {
         "Eyeballs"
-    } else if name.starts_with("Eye") {
-        "Eyes"
-    } else if name.starts_with("Brow") {
+    } else if n.starts_with("eye") {
+        "Eyes open and close"
+    } else if n.starts_with("brow") {
         "Brows"
-    } else if name.starts_with("Mouth") {
+    } else if n.starts_with("mouth") || n.starts_with("cheek") || n.starts_with("tongue") {
         "Mouth"
-    } else if name.starts_with("Body") || name.starts_with("Breath") {
-        "Body"
-    } else if name.starts_with("Arm") || name.starts_with("Hand") || name.starts_with("Leg") {
+    } else if n.starts_with("angle") || n.starts_with("body") || n.starts_with("breath") {
+        "Angles"
+    } else if n.starts_with("arm") || n.starts_with("hand") || n.starts_with("leg") {
         "Arms and legs"
-    } else if name.starts_with("Hair") {
+    } else if n.starts_with("hair") {
         "Hair"
     } else {
         "Other"

@@ -32,3 +32,5 @@ fine: it is explained in the "Done" part below).
 
 - Click zoom that happens only sometimes: the only way a click zooms is the Zoom tool, so a stray Z key (a pen's express key, for example) was turning it on and leaving it on. Z now zooms for one click and gives the tool you had back. Picking Zoom in the toolbar still keeps it on.
 - Saving the 3D bone animation: the Animate tab has "Save the 3D bones as a VRM animation (.vrma)" when bone sliders have keys.
+
+- Not all parameters visible: the Parameters column (Rig, Physics, Animate) now has the folders of the Live2D list (Eyes open and close, Angles, Eyeballs, Brows, Mouth, Hair, Arms and legs) with every usual slider listed; the ones not made yet are grey with an Add button, and "Add all the standard sliders" makes them all (the automatic rig's own names, such as Eyes open, count as made). The joined sliders moved to the top of the column.
