@@ -4,6 +4,7 @@
 // A tool opens a small window of its own where its details are set: the grid of a warp, the pivot of a rotation, what it sits inside. Nothing
 // here needs the parts to be tagged: tags are only for the automatic rig.
 
+use crate::widgets::HelpExt;
 use eframe::egui::{self, Align2, Color32, RichText, Sense, Ui, vec2};
 
 use super::SeviathApp;
@@ -144,10 +145,10 @@ impl SeviathApp {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
             if with_view_switch {
-                if widgets::chip(ui, "2D rig", !self.rigs.bench.view3d).on_hover_text("Rig a drawing by hand or automatically: meshes, changers, sliders").clicked() {
+                if widgets::chip(ui, "2D rig", !self.rigs.bench.view3d).help("Rig a drawing by hand or automatically: meshes, changers, sliders").clicked() {
                     self.rigs.bench.view3d = false;
                 }
-                if widgets::chip(ui, "3D character", self.rigs.bench.view3d).on_hover_text("Turn the drawing into a 3D character with a skeleton, for games and VRM apps").clicked() {
+                if widgets::chip(ui, "3D character", self.rigs.bench.view3d).help("Turn the drawing into a 3D character with a skeleton, for games and VRM apps").clicked() {
                     self.rigs.bench.view3d = true;
                 }
                 ui.separator();
@@ -157,7 +158,7 @@ impl SeviathApp {
             }
             ui.label(RichText::new("Rig by hand").size(12.0).color(TEXT_DIM));
             let mut set = |ui: &mut Ui, bench: &mut Bench, tool: Tool, label: &str, tip: &str| {
-                if widgets::chip(ui, label, bench.open == Some(tool)).on_hover_text(tip).clicked() {
+                if widgets::chip(ui, label, bench.open == Some(tool)).help(tip).clicked() {
                     bench.open = if bench.open == Some(tool) { None } else { Some(tool) };
                     bench.name.clear();
                     bench.parent = None;
@@ -184,12 +185,12 @@ impl SeviathApp {
             if with_edit_here {
                 ui.separator();
                 let on = self.rigs.bench.edit_here;
-                if widgets::chip(ui, if on { "Editing the rig on the picture" } else { "Edit the rig on the picture" }, on).on_hover_text("Shows the rig editor in the middle (drag the points of a changer, pick parts by clicking them) instead of the finished picture").clicked() {
+                if widgets::chip(ui, if on { "Editing the rig on the picture" } else { "Edit the rig on the picture" }, on).help("Shows the rig editor in the middle (drag the points of a changer, pick parts by clicking them) instead of the finished picture").clicked() {
                     self.rigs.bench.edit_here = !on;
                     self.rigs.bench.anim_3d = false;
                 }
                 let on3 = self.rigs.bench.anim_3d;
-                if widgets::chip(ui, "3D view", on3).on_hover_text("Shows the 3D character, posed by the 3D bones sliders on the left (make them on the Rig tab, 3D character page): key them like any slider").clicked() {
+                if widgets::chip(ui, "3D view", on3).help("Shows the 3D character, posed by the 3D bones sliders on the left (make them on the Rig tab, 3D character page): key them like any slider").clicked() {
                     self.rigs.bench.anim_3d = !on3;
                     self.rigs.bench.edit_here = false;
                 }
@@ -232,12 +233,12 @@ impl SeviathApp {
         let marks = self.rigs.face_edit || self.rigs.hair_edit;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-            if widgets::chip(ui, "3D character", !self.rigs.bench.picture && !marks).clicked() {
+            if widgets::chip(ui, "3D character", !self.rigs.bench.picture && !marks).help("Show the 3D character page: the skeleton, the face and the file for games.").clicked() {
                 self.rigs.bench.picture = false;
                 self.rigs.face_edit = false;
                 self.rigs.hair_edit = false;
             }
-            if widgets::chip(ui, "The drawing (face marks, hair)", self.rigs.bench.picture || marks).on_hover_text("The drawing, to drag the eyes and the mouth or the strands of the hair").clicked() {
+            if widgets::chip(ui, "The drawing (face marks, hair)", self.rigs.bench.picture || marks).help("The drawing, to drag the eyes and the mouth or the strands of the hair").clicked() {
                 self.rigs.bench.picture = true;
             }
         });
@@ -298,11 +299,11 @@ impl SeviathApp {
                 .selected_text(cur.and_then(|p| parents.iter().find(|x| x.0 == p)).map(|x| x.1.clone()).unwrap_or_else(|| "nothing: on its own".into()))
                 .width(180.0)
                 .show_ui(ui, |ui| {
-                    if ui.selectable_label(cur.is_none(), "nothing: on its own").clicked() {
+                    if ui.selectable_label(cur.is_none(), "nothing: on its own").help("Nothing moves it: it works on its own.").clicked() {
                         self.rigs.bench.parent = None;
                     }
                     for (id, name) in &parents {
-                        if ui.selectable_label(cur == Some(*id), name).clicked() {
+                        if ui.selectable_label(cur == Some(*id), name).help("Pick this one.").clicked() {
                             self.rigs.bench.parent = Some(*id);
                         }
                     }
@@ -316,7 +317,7 @@ impl SeviathApp {
                     ui.add(egui::DragValue::new(&mut self.rigs.cols_rows.0).range(1..=rig::MAX_WARP).suffix(" across"));
                     ui.add(egui::DragValue::new(&mut self.rigs.cols_rows.1).range(1..=rig::MAX_WARP).suffix(" down"));
                 });
-                ui.checkbox(&mut self.rigs.bench.smooth, "Bend smoothly (a curve through the points)");
+                ui.checkbox(&mut self.rigs.bench.smooth, "Bend smoothly (a curve through the points)").help("The line is a smooth curve through the points, not straight pieces.");
             }
             NewKind::Line => {
                 ui.horizontal(|ui| {
@@ -325,7 +326,7 @@ impl SeviathApp {
                 });
             }
             NewKind::Flip => {
-                ui.checkbox(&mut self.rigs.bench.flip_vertical, "Turn over top to bottom (not left to right)");
+                ui.checkbox(&mut self.rigs.bench.flip_vertical, "Turn over top to bottom (not left to right)").help("Flip top to bottom instead of left to right.");
             }
             NewKind::Rotation => {
                 ui.label(RichText::new("The pivot starts in the middle of the parts. Drag it on the picture afterwards (Changers tool, Move the pivot).").size(11.5).color(TEXT_DIM));
@@ -421,8 +422,8 @@ impl SeviathApp {
     /// The Physics tab's window: the picture with the physics running.
     fn physics_check_body(&mut self, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut self.rigs.phys.on, "Physics on");
-            if ui.button("Reset").on_hover_text("Things hang still again").clicked() {
+            ui.checkbox(&mut self.rigs.phys.on, "Physics on").help("Turn the physics on or off.");
+            if ui.button("Reset").help("Things hang still again").clicked() {
                 self.rigs.phys.sim.reset();
                 self.rigs.phys.offs.clear();
             }
@@ -434,7 +435,7 @@ impl SeviathApp {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
             ui.label(RichText::new("Wind").size(12.0).color(TEXT_DIM));
             for k in crate::rig::physics::Wind::ALL {
-                if widgets::chip(ui, k.label(), world.wind == k).clicked() {
+                if widgets::chip(ui, k.label(), world.wind == k).help("Pick how the wind blows.").clicked() {
                     world.wind = k;
                 }
             }

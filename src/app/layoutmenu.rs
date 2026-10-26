@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // The Layout menu: switch workspaces, keep your own, share them as files, show or hide panels.
 
+use crate::widgets::HelpExt;
 use eframe::egui::{self, RichText, Ui};
 
 use super::SeviathApp;
@@ -18,7 +19,7 @@ impl SeviathApp {
             for name in ls.names() {
                 let on = name == ls.active;
                 let label = if on && ls.changed() { format!("{name} (changed)") } else { name.clone() };
-                if ui.selectable_label(on, label).on_hover_text(if on { "Click to put the panels back as saved" } else { "Switch to this workspace" }).clicked() {
+                if ui.selectable_label(on, label).help(if on { "Click to put the panels back as saved" } else { "Switch to this workspace" }).clicked() {
                     ls.switch(&name);
                     ui.close();
                 }
@@ -27,14 +28,14 @@ impl SeviathApp {
             ui.label(RichText::new("Panels").size(11.5).color(TEXT_DIM));
             for id in PanelId::ALL {
                 let mut shown = ls.working.get(id).mode != Mode::Hidden;
-                if ui.checkbox(&mut shown, id.title()).changed() {
+                if ui.checkbox(&mut shown, id.title()).help("Show or hide this panel.").changed() {
                     ls.working.toggle_hidden(id);
                 }
             }
             ui.separator();
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.layout_name).hint_text("Name").desired_width(120.0).char_limit(40));
-                if ui.button("Save as workspace").clicked() {
+                if ui.button("Save as workspace").help("Remember this arrangement of panels under a name.").clicked() {
                     let name = self.layout_name.clone();
                     match self.draw.layouts.save_as(&name) {
                         Ok(()) => {
@@ -46,12 +47,12 @@ impl SeviathApp {
                 }
             });
             let active = self.draw.layouts.active.clone();
-            if !Layouts::is_builtin(&active) && ui.button(format!("Delete “{active}”")).clicked() {
+            if !Layouts::is_builtin(&active) && ui.button(format!("Delete “{active}”")).help("Delete this workspace layout.").clicked() {
                 self.draw.layouts.delete(&active);
                 ui.close();
             }
             ui.horizontal(|ui| {
-                if ui.button("Export…").on_hover_text("Save this layout as a file to share").clicked() {
+                if ui.button("Export…").help("Save this layout as a file to share").clicked() {
                     ui.close();
                     let name = self.draw.layouts.active.clone();
                     if let Some(p) = rfd::FileDialog::new().set_title("Export the workspace").set_file_name(format!("{name}.seviathworkspace")).add_filter("Workspace", &["seviathworkspace", "json"]).save_file() {
@@ -61,7 +62,7 @@ impl SeviathApp {
                         });
                     }
                 }
-                if ui.button("Import…").clicked() {
+                if ui.button("Import…").help("Load this from a file.").clicked() {
                     ui.close();
                     if let Some(p) = rfd::FileDialog::new().set_title("Import a workspace").add_filter("Workspace", &["seviathworkspace", "json"]).pick_file() {
                         say = Some(match layout::import(&p) {

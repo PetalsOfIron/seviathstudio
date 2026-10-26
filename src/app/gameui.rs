@@ -3,6 +3,7 @@
 // turning round, and saves it as a VRM file (1.0 or 0.x) for games and VRM apps. No tracking is needed to move it:
 // the skeleton and the expressions are what a game drives.
 
+use crate::widgets::HelpExt;
 use eframe::egui::{self, RichText, TextureOptions, Ui, vec2};
 
 use super::SeviathApp;
@@ -63,6 +64,13 @@ pub struct GameUi {
     made: u64,
 }
 
+impl GameUi {
+    /// How many times the character was made (so a picture of it knows to change).
+    pub(super) fn made_count(&self) -> u64 {
+        self.made
+    }
+}
+
 impl Default for GameUi {
     fn default() -> Self {
         Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, follow: false, expr: None, model: None, shape_model: Default::default(), setup_hunyuan: false, message: None, svrm_notes: Vec::new(), template: None, ai_python: default_python(), guides: false, tex_dirty: false, paint_rev: 0, mesh_only: false, setup_job: None, setup_step: None, setup_text: String::new(), setup_agree: false, paint3d: false, brush: Default::default(), overlay: None, last_pt: None, paint_gen: 0, paint_undo: Vec::new(), paint_rebuild: false, ai_backend: 0, ai_job: None, shape: None, shape_job: None, tex: None, made: 0 }
@@ -116,7 +124,7 @@ impl SeviathApp {
         Ok((bytes, summary))
     }
 
-    fn game_save(&mut self, fmt: Format) {
+    pub(super) fn game_save(&mut self, fmt: Format) {
         let (bytes, summary) = match self.game_bytes(fmt) {
             Ok(b) => b,
             Err(e) => {
@@ -150,10 +158,10 @@ impl SeviathApp {
         section_title(ui, "Texture parts");
         ui.label(RichText::new("Each part of the picture can be moved on the 3D face, in pixels of the drawing (x right, y down). The place it leaves is filled with skin. Guide lines: blue for where the texture has the eyes, nose and mouth, pink for the nose and the chin of the shape itself.").size(11.5).color(TEXT_DIM));
         ui.horizontal_wrapped(|ui| {
-            if widgets::chip(ui, "Show guide lines", self.rigs.game.guides).on_hover_text("Lines on the preview at the eyes, the nose and the mouth of the texture (blue) and the nose and the chin of the shape (pink)").clicked() {
+            if widgets::chip(ui, "Show guide lines", self.rigs.game.guides).help("Lines on the preview at the eyes, the nose and the mouth of the texture (blue) and the nose and the chin of the shape (pink)").clicked() {
                 self.rigs.game.guides = !self.rigs.game.guides;
             }
-            if ui.small_button("Reset all").clicked() {
+            if ui.small_button("Reset all").help("Put every setting back to the default.").clicked() {
                 t = crate::vrm::texedit::TexEdit::default();
             }
         });
@@ -162,7 +170,7 @@ impl SeviathApp {
                 ui.label(RichText::new(label).size(12.0).color(TEXT_DIM));
                 ui.add(egui::DragValue::new(&mut v[0]).range(-300.0..=300.0).speed(0.25).prefix("x ").suffix(" px"));
                 ui.add(egui::DragValue::new(&mut v[1]).range(-300.0..=300.0).speed(0.25).prefix("y ").suffix(" px"));
-                if ui.small_button("0").on_hover_text("Put it back").clicked() {
+                if ui.small_button("0").help("Put it back").clicked() {
                     *v = [0.0, 0.0];
                 }
             });
@@ -175,10 +183,10 @@ impl SeviathApp {
             ui.horizontal(|ui| {
                 ui.add_space(14.0);
                 let on = picking == Some(part);
-                if widgets::chip(ui, if on { "Drag a circle round it on the picture..." } else { "Pick it again" }, on).on_hover_text("The app found this part in the wrong place? Pick the right piece of the drawing: it is cut out and put where the part belongs, and the old one is painted over with skin").clicked() {
+                if widgets::chip(ui, if on { "Drag a circle round it on the picture..." } else { "Pick it again" }, on).help("The app found this part in the wrong place? Pick the right piece of the drawing: it is cut out and put where the part belongs, and the old one is painted over with skin").clicked() {
                     start_pick = Some(if on { None } else { Some(part) });
                 }
-                if t.pick_of(part).is_some() && ui.small_button("Forget the pick").clicked() {
+                if t.pick_of(part).is_some() && ui.small_button("Forget the pick").help("Let go of the picked picture.").clicked() {
                     t.picks.retain(|k| k.part != part);
                 }
             });
@@ -190,21 +198,21 @@ impl SeviathApp {
         let mut paint_now = false;
         let mut see_again = false;
         ui.horizontal_wrapped(|ui| {
-            if widgets::chip(ui, "Mesh only: plain texture", self.rigs.game.mesh_only).on_hover_text("Builds the character on the AI shape with one plain colour instead of your drawing, so the whole texture is painted by hand with the brushes of the drawing app (the drawing shows faintly on a locked layer to paint from)").clicked() {
+            if widgets::chip(ui, "Mesh only: plain texture", self.rigs.game.mesh_only).help("Builds the character on the AI shape with one plain colour instead of your drawing, so the whole texture is painted by hand with the brushes of the drawing app (the drawing shows faintly on a locked layer to paint from)").clicked() {
                 self.rigs.game.mesh_only = !self.rigs.game.mesh_only;
                 self.rigs.game.tex_dirty = true;
             }
-            if ui.button("Paint the texture").on_hover_text("Opens the Draw tab with the picture of the front of the character as it is now. Paint on the layer Texture paint with any brush of the drawing app (blend, smudge, the eyedropper picks colours from the texture), then come back: the paint is laid over the texture").clicked() {
+            if ui.button("Paint the texture").help("Opens the Draw tab with the picture of the front of the character as it is now. Paint on the layer Texture paint with any brush of the drawing app (blend, smudge, the eyedropper picks colours from the texture), then come back: the paint is laid over the texture").clicked() {
                 paint_now = true;
             }
-            if ui.small_button("Show the moved parts again").on_hover_text("Renews the locked layer under your paint with the parts as they are placed now").clicked() {
+            if ui.small_button("Show the moved parts again").help("Renews the locked layer under your paint with the parts as they are placed now").clicked() {
                 see_again = true;
             }
         });
-        ui.checkbox(&mut t.replace_old, "Paint the old part over with skin").on_hover_text("When a part is picked again, the place where the app thought it was is covered");
+        ui.checkbox(&mut t.replace_old, "Paint the old part over with skin").help("When a part is picked again, the place where the app thought it was is covered");
         ui.horizontal(|ui| {
             ui.label(RichText::new("Soft edges").size(12.0).color(TEXT_DIM));
-            ui.add(egui::Slider::new(&mut t.feather, 0.05..=0.7).show_value(false)).on_hover_text("How softly a moved part blends into the skin around it");
+            ui.add(egui::Slider::new(&mut t.feather, 0.05..=0.7).show_value(false)).help("How softly a moved part blends into the skin around it");
         });
         ui.label(RichText::new("The dark inside of the mouth").size(12.0).color(TEXT_DIM));
         ui.horizontal(|ui| {
@@ -253,7 +261,7 @@ impl SeviathApp {
     }
 
     /// The AI tools are not part of the app. When they are missing this says so and offers a button that downloads them.
-    fn ai_setup_ui(&mut self, ui: &mut Ui) {
+    pub(super) fn ai_setup_ui(&mut self, ui: &mut Ui) {
         // what the job says
         if let Some(rx) = &self.rigs.game.setup_step {
             while let Ok(s) = rx.try_recv() {
@@ -291,8 +299,8 @@ impl SeviathApp {
                 return;
             }
             ui.label(RichText::new(format!("Missing: {}. They are not part of the app: they are large and have their own licences, so they are downloaded to {}.", status.missing().join(", "), crate::aisetup::root().display())).size(11.5).color(TEXT_DIM));
-            ui.checkbox(&mut self.rigs.game.setup_agree, "I accept the licences: PyTorch (BSD), MediaPipe and Transformers (Apache 2.0), TripoSR (MIT).");
-            ui.checkbox(&mut self.rigs.game.setup_hunyuan, "Also Hunyuan3D 2 (a finer shape, but its Tencent licence does not apply in the European Union, the United Kingdom and South Korea; accept it only where it is allowed)");
+            ui.checkbox(&mut self.rigs.game.setup_agree, "I accept the licences: PyTorch (BSD), MediaPipe and Transformers (Apache 2.0), TripoSR (MIT).").help("Tick this to say you accept the licences of the AI files. The download needs it.");
+            ui.checkbox(&mut self.rigs.game.setup_hunyuan, "Also Hunyuan3D 2 (a finer shape, but its Tencent licence does not apply in the European Union, the United Kingdom and South Korea; accept it only where it is allowed)").help("Also download Hunyuan3D 2, which makes a finer 3D shape. Its licence does not apply in the EU, the UK and South Korea.");
             ui.label(RichText::new("About 3 GB now (Python packages and PyTorch with CUDA, so an NVIDIA graphics card is needed), and a few GB more the first time the AI models run. It needs Python 3.10, 3.11 or 3.12 and an internet connection.").size(11.0).color(TEXT_DIM));
             if ui.add_enabled(self.rigs.game.setup_agree, egui::Button::new(RichText::new("Download the AI files").strong())).clicked() {
                 let (tx, rx) = std::sync::mpsc::channel::<String>();
@@ -308,9 +316,28 @@ impl SeviathApp {
         });
     }
 
+    /// Start making the 3D shape of the picture with the chosen AI, in the background.
+    pub(super) fn shape_start(&mut self) {
+        let model = self.rigs.game.shape_model;
+        let page = self.draw.doc.rig.skin.as_ref().and_then(|sk| crate::rig::uncut::composite(&self.draw.doc, &sk.layers)).map(|p| crate::rig::uncut::cut_out_background(&p));
+        match page {
+            Some(page) => {
+                let python = self.rigs.game.ai_python.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::ai::make_shape(&python, &page, model, true));
+                });
+                self.rigs.game.shape_job = Some(rx);
+                self.rigs.game.message = Some("The AI is making the 3D shape. The first run downloads the model; after that it takes a minute or two.".into());
+            }
+            None => self.rigs.game.message = Some("Rig the whole picture first (Auto-rig), then the shape can be made.".into()),
+        }
+    }
+
     /// Make the 3D shape of the character with an AI helper (Hunyuan3D 2 mini), in the background. The character is then built on
     /// that shape (the drawing is laid on it) instead of on a card.
-    fn shape_ai_row(&mut self, ui: &mut Ui) {
+    /// Take the answer of the shape job when it is there.
+    pub(super) fn shape_poll(&mut self, ctx: &egui::Context) {
         if let Some(rx) = &self.rigs.game.shape_job {
             match rx.try_recv() {
                 Ok(Ok(bytes)) => {
@@ -329,39 +356,35 @@ impl SeviathApp {
                     self.rigs.game.shape_job = None;
                     self.rigs.game.message = Some(format!("The AI could not make the shape: {e}"));
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(500)),
+                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(500)),
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.rigs.game.shape_job = None,
             }
         }
+    }
+
+    pub(super) fn shape_busy(&self) -> bool {
+        self.rigs.game.shape_job.is_some()
+    }
+
+    fn shape_ai_row(&mut self, ui: &mut Ui) {
+        self.shape_poll(ui.ctx());
         let busy = self.rigs.game.shape_job.is_some();
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Shape AI").size(12.0).color(TEXT_DIM));
-            if widgets::chip(ui, "TripoSR", self.rigs.game.shape_model == crate::ai::ShapeModel::TripoSr).on_hover_text("MIT licence, usable everywhere, about 6 GB of video memory, about 20 seconds. A rougher shape.").clicked() {
+            if widgets::chip(ui, "TripoSR", self.rigs.game.shape_model == crate::ai::ShapeModel::TripoSr).help("MIT licence, usable everywhere, about 6 GB of video memory, about 20 seconds. A rougher shape.").clicked() {
                 self.rigs.game.shape_model = crate::ai::ShapeModel::TripoSr;
             }
-            if widgets::chip(ui, "Hunyuan3D", self.rigs.game.shape_model == crate::ai::ShapeModel::Hunyuan).on_hover_text("A finer shape, but Tencent's licence does not apply in the European Union, the United Kingdom and South Korea.").clicked() {
+            if widgets::chip(ui, "Hunyuan3D", self.rigs.game.shape_model == crate::ai::ShapeModel::Hunyuan).help("A finer shape, but Tencent's licence does not apply in the European Union, the United Kingdom and South Korea.").clicked() {
                 self.rigs.game.shape_model = crate::ai::ShapeModel::Hunyuan;
             }
         });
         ui.horizontal_wrapped(|ui| {
             let label = if busy { "Making the shape..." } else { "Make the 3D shape with AI" };
             let model = self.rigs.game.shape_model;
-            if ui.add_enabled(!busy && crate::aisetup::status().shape_ready(model), egui::Button::new(label)).on_hover_text("The chosen AI makes a 3D shape of the whole character from the picture (about a minute on the graphics card, one job at a time). Your drawing is then laid on it. It needs the AI files (see the card above when they are missing).").clicked() {
-                let page = self.draw.doc.rig.skin.as_ref().and_then(|sk| crate::rig::uncut::composite(&self.draw.doc, &sk.layers)).map(|p| crate::rig::uncut::cut_out_background(&p));
-                match page {
-                    Some(page) => {
-                        let python = self.rigs.game.ai_python.clone();
-                        let (tx, rx) = std::sync::mpsc::channel();
-                        std::thread::spawn(move || {
-                            let _ = tx.send(crate::ai::make_shape(&python, &page, model, true));
-                        });
-                        self.rigs.game.shape_job = Some(rx);
-                        self.rigs.game.message = Some("The AI is making the 3D shape. The first run downloads the model; after that it takes a minute or two.".into());
-                    }
-                    None => self.rigs.game.message = Some("Rig the whole picture first (Auto-rig), then the shape can be made.".into()),
-                }
+            if ui.add_enabled(!busy && crate::aisetup::status().shape_ready(model), egui::Button::new(label)).help("The chosen AI makes a 3D shape of the whole character from the picture (about a minute on the graphics card, one job at a time). Your drawing is then laid on it. It needs the AI files (see the card above when they are missing).").clicked() {
+                self.shape_start();
             }
-            if self.rigs.game.shape.is_some() && ui.small_button("Use the card instead").on_hover_text("Forget the AI shape: the character is a round card made from the drawing").clicked() {
+            if self.rigs.game.shape.is_some() && ui.small_button("Use the card instead").help("Forget the AI shape: the character is a round card made from the drawing").clicked() {
                 self.rigs.game.shape = None;
                 self.rigs.game.model = None;
             }
@@ -394,16 +417,16 @@ impl SeviathApp {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Find the face with").size(12.0).color(TEXT_DIM));
             for (i, n) in ["Auto", "MediaPipe (real faces)", "Grounding DINO (drawings)"].iter().enumerate() {
-                if widgets::chip(ui, n, self.rigs.game.ai_backend == i).clicked() {
+                if widgets::chip(ui, n, self.rigs.game.ai_backend == i).help("Pick which AI finds the face.").clicked() {
                     self.rigs.game.ai_backend = i;
                 }
             }
         });
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Python").size(12.0).color(TEXT_DIM));
-            ui.add(egui::TextEdit::singleline(&mut self.rigs.game.ai_python).desired_width(150.0)).on_hover_text("The command that starts Python with the AI packages installed (see the README, AI helpers)");
+            ui.add(egui::TextEdit::singleline(&mut self.rigs.game.ai_python).desired_width(150.0)).help("The command that starts Python with the AI packages installed (see the README, AI helpers)");
             let label = if busy { "Looking..." } else { "Find the face with AI" };
-            if ui.add_enabled(!busy && crate::aisetup::status().ready(), egui::Button::new(label)).on_hover_text("Runs a helper program on the picture. It needs Python and its packages installed; without them the app keeps its own guess.").clicked() {
+            if ui.add_enabled(!busy && crate::aisetup::status().ready(), egui::Button::new(label)).help("Runs a helper program on the picture. It needs Python and its packages installed; without them the app keeps its own guess.").clicked() {
                 let rig = self.draw.doc.rig.clone();
                 let page = rig.skin.as_ref().and_then(|sk| crate::rig::uncut::composite(&self.draw.doc, &sk.layers));
                 match (page, crate::vrm::model::head_box(&rig)) {
@@ -443,7 +466,7 @@ impl SeviathApp {
                 ui.label(RichText::new("Height").size(12.0).color(TEXT_DIM));
                 ui.add(egui::DragValue::new(&mut g.height_m).range(0.3..=3.0).speed(0.01).suffix(" m"));
                 ui.label(RichText::new("Roundness").size(12.0).color(TEXT_DIM));
-                ui.add(egui::Slider::new(&mut g.puff, 0.0..=2.0).show_value(false)).on_hover_text("0 is flat cards, 1 is the usual, 2 is very round");
+                ui.add(egui::Slider::new(&mut g.puff, 0.0..=2.0).show_value(false)).help("0 is flat cards, 1 is the usual, 2 is very round");
             });
         }
         if self.draw.doc.rig.skin.is_some() {
@@ -453,10 +476,10 @@ impl SeviathApp {
             self.texture_parts_ui(ui);
             self.hair_ui(ui);
             ui.horizontal_wrapped(|ui| {
-                if widgets::chip(ui, "Set the face", self.rigs.face_edit).on_hover_text("Shows the eyes and the mouth on the picture: drag them into place so the blink, the smile and the mouth move the right parts").clicked() {
+                if widgets::chip(ui, "Set the face", self.rigs.face_edit).help("Shows the eyes and the mouth on the picture: drag them into place so the blink, the smile and the mouth move the right parts").clicked() {
                     self.rigs.face_edit = !self.rigs.face_edit;
                 }
-                if widgets::chip(ui, "Click the eyes and mouth", self.rigs.face_click > 0).on_hover_text("Click the first eye, the other eye and then the middle of the mouth on the picture").clicked() {
+                if widgets::chip(ui, "Click the eyes and mouth", self.rigs.face_click > 0).help("Click the first eye, the other eye and then the middle of the mouth on the picture").clicked() {
                     self.rigs.face_click = if self.rigs.face_click > 0 { 0 } else { 1 };
                     self.rigs.face_edit = true;
                 }
@@ -480,7 +503,7 @@ impl SeviathApp {
                 Some((n, _)) => format!("Face shapes from {n}"),
                 None => "Face shapes from a model...".to_string(),
             };
-            if ui.button(label).on_hover_text("Pick a VRM 1.0 model with a VRoid-style face (Fcl_* shapes): its blink, smile, brows and mouth shapes are moved onto this face").clicked() {
+            if ui.button(label).help("Pick a VRM 1.0 model with a VRoid-style face (Fcl_* shapes): its blink, smile, brows and mouth shapes are moved onto this face").clicked() {
                 if let Some(path) = rfd::FileDialog::new().set_title("A VRM model with face shapes").set_directory(self.settings.projects_folder()).add_filter("VRM model", &["vrm"]).pick_file() {
                     self.rigs.game.message = Some(match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| crate::vrm::template::Template::from_vrm(&b)) {
                         Ok(t) => {
@@ -500,33 +523,33 @@ impl SeviathApp {
             }
         });
         ui.horizontal_wrapped(|ui| {
-            if ui.button(RichText::new("Make the 3D character").strong()).on_hover_text("Builds it from the parts with a mesh (the layers' order gives the depth), the Parts tags (the skeleton) and the face sliders (the expressions)").clicked() {
+            if ui.button(RichText::new("Make the 3D character").strong()).help("Builds it from the parts with a mesh (the layers' order gives the depth), the Parts tags (the skeleton) and the face sliders (the expressions)").clicked() {
                 self.game_make();
             }
             let has = self.rigs.game.model.is_some();
             ui.label(RichText::new("VTubers").size(12.0).color(TEXT_DIM));
-            if ui.add_enabled(has, egui::Button::new("Save as VRM 1.0")).on_hover_text("For VTuber apps: the newer format").clicked() {
+            if ui.add_enabled(has, egui::Button::new("Save as VRM 1.0")).help("For VTuber apps: the newer format").clicked() {
                 self.game_save(Format::Vrm1);
             }
-            if ui.add_enabled(has, egui::Button::new("Save as VRM 0.x")).on_hover_text("For VTuber apps: the older format many apps still use").clicked() {
+            if ui.add_enabled(has, egui::Button::new("Save as VRM 0.x")).help("For VTuber apps: the older format many apps still use").clicked() {
                 self.game_save(Format::Vrm0);
             }
             ui.label(RichText::new("Games").size(12.0).color(TEXT_DIM));
-            if ui.add_enabled(has, egui::Button::new("Save as GLB")).on_hover_text("For game engines (Unity, Unreal, Godot, Bevy): the skeleton, the skin and the blend shapes in one plain glTF file").clicked() {
+            if ui.add_enabled(has, egui::Button::new("Save as GLB")).help("For game engines (Unity, Unreal, Godot, Bevy): the skeleton, the skin and the blend shapes in one plain glTF file").clicked() {
                 self.game_save(Format::Glb);
             }
         });
         // the engines: the free plugins that read the file we save
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Unreal Engine").size(12.0).color(TEXT_DIM));
-            if ui.button("Get VRM4U (free plugin)").on_hover_text("VRM4U (MIT licence) puts a VRM file into Unreal Engine 4.20 to 5.4 with its bones, face shapes, spring bones and a humanoid rig: save as VRM 1.0 here, turn the plugin on in your Unreal project and drag the .vrm file into the Content Browser. Opens github.com/ruyo/VRM4U").clicked() {
+            if ui.button("Get VRM4U (free plugin)").help("VRM4U (MIT licence) puts a VRM file into Unreal Engine 4.20 to 5.4 with its bones, face shapes, spring bones and a humanoid rig: save as VRM 1.0 here, turn the plugin on in your Unreal project and drag the .vrm file into the Content Browser. Opens github.com/ruyo/VRM4U").clicked() {
                 ui.ctx().open_url(egui::OpenUrl::new_tab("https://github.com/ruyo/VRM4U"));
             }
         });
         // the bones as sliders: to pose the 3D character by hand, and to key the poses in the Animate tab
         ui.horizontal_wrapped(|ui| {
             let has = self.rigs.game.model.is_some();
-            if ui.add_enabled(has, egui::Button::new("Sliders for the bones")).on_hover_text("One slider for each main bone (arms, legs, spine, head): move them to pose the 3D character, and key them in the Animate tab (its 3D view button shows the pose)").clicked() {
+            if ui.add_enabled(has, egui::Button::new("Sliders for the bones")).help("One slider for each main bone (arms, legs, spine, head): move them to pose the 3D character, and key them in the Animate tab (its 3D view button shows the pose)").clicked() {
                 self.make_bone_sliders(_now);
             }
             if let Some(n) = self.bone_slider_count().filter(|n| *n > 0) {
@@ -545,7 +568,7 @@ impl SeviathApp {
             ui.label(RichText::new("Turn").size(12.0).color(TEXT_DIM));
             ui.add(egui::Slider::new(&mut self.rigs.game.yaw, -90.0..=90.0).suffix(" deg"));
         });
-        ui.checkbox(&mut self.rigs.game.follow, "Follow the tracking").on_hover_text("The 3D character turns its head and blinks, opens the mouth and smiles with the face that the Stream tab follows (turn a tracking source on there)");
+        ui.checkbox(&mut self.rigs.game.follow, "Follow the tracking").help("The 3D character turns its head and blinks, opens the mouth and smiles with the face that the Stream tab follows (turn a tracking source on there)");
         let names: Vec<String> = model.expressions.iter().map(|e| e.name.clone()).collect();
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
@@ -682,7 +705,7 @@ impl SeviathApp {
                     self.hair_adopt_auto();
                 }
             }
-            if ui.small_button("Reset the hair").on_hover_text("Forget every change: the app makes the strands and finds the hair again").clicked() {
+            if ui.small_button("Reset the hair").help("Forget every change: the app makes the strands and finds the hair again").clicked() {
                 if let Some(sk) = std::sync::Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut() {
                     sk.hair = Default::default();
                 }
@@ -696,7 +719,7 @@ impl SeviathApp {
         }
         ui.horizontal_wrapped(|ui| {
             for (i, name, tip) in [(0u8, "Move joints", "Drag the joints of the strands on the picture"), (1, "Add a strand", "Click the joints of a new strand from the scalp down, then Finish"), (2, "Hair brush +", "Paint over what the app took for something else: it becomes hair"), (3, "Hair brush -", "Paint over what is not hair: it stops being hair")] {
-                if widgets::chip(ui, name, self.rigs.hair_tool == i).on_hover_text(tip).clicked() {
+                if widgets::chip(ui, name, self.rigs.hair_tool == i).help(tip).clicked() {
                     self.rigs.hair_tool = i;
                     self.rigs.hair_new.clear();
                 }
@@ -893,7 +916,7 @@ impl SeviathApp {
         }
         use crate::vrm::paint3d::Tool;
         ui.horizontal_wrapped(|ui| {
-            if widgets::chip(ui, "Paint on the 3D character", self.rigs.game.paint3d).on_hover_text("Paint straight on the model in the preview, as in VRoid: drag on it. The preview gets bigger. Turn the model with the Turn slider to reach the sides").clicked() {
+            if widgets::chip(ui, "Paint on the 3D character", self.rigs.game.paint3d).help("Paint straight on the model in the preview, as in VRoid: drag on it. The preview gets bigger. Turn the model with the Turn slider to reach the sides").clicked() {
                 self.rigs.game.paint3d = !self.rigs.game.paint3d;
                 self.rigs.game.last_pt = None;
             }
@@ -904,7 +927,7 @@ impl SeviathApp {
         let b = &mut self.rigs.game.brush;
         ui.horizontal_wrapped(|ui| {
             for (tool, name, tip) in [(Tool::Brush, "Brush", "Paint with a colour"), (Tool::Eraser, "Eraser", "Take away what was painted by hand"), (Tool::Blend, "Blend", "Smudge: the colour becomes the average of what is around, so edges soften"), (Tool::Dropper, "Eyedropper", "Pick the colour under the pointer")] {
-                if widgets::chip(ui, name, b.tool == tool).on_hover_text(tip).clicked() {
+                if widgets::chip(ui, name, b.tool == tool).help(tip).clicked() {
                     b.tool = tool;
                 }
             }
@@ -1016,6 +1039,11 @@ impl SeviathApp {
         if on {
             self.hair_adopt_auto();
         }
+    }
+
+    #[cfg(test)]
+    pub fn test_game_bytes(&mut self, fmt: Format) -> Result<(Vec<u8>, Summary), String> {
+        self.game_bytes(fmt)
     }
 
     #[cfg(test)]

@@ -2,6 +2,7 @@
 // The Rig tab: parts on the left, the moving picture in the middle, meshes, changers and sliders on the right.
 // The picture is drawn through the meshes, so a slider moves the drawing the way the changers say.
 
+use crate::widgets::HelpExt;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -285,7 +286,7 @@ pub(super) fn eye_toggle(ui: &mut Ui, row: Rect, id: LayerId, visible: bool) -> 
     let r = ui.interact(eye, ui.id().with(("rig_eye", id)), Sense::click());
     let col = if r.hovered() { VENOM } else if visible { TEXT } else { TEXT_DIM };
     crate::icons::paint(ui.painter(), eye.shrink(3.0), if visible { crate::icons::Icon::Eye } else { crate::icons::Icon::EyeOff }, col);
-    r.on_hover_text("Show or hide this layer").clicked()
+    r.help("Show or hide this layer").clicked()
 }
 
 fn hash_of(items: &[u64]) -> u64 {
@@ -924,13 +925,13 @@ impl SeviathApp {
     /// Show everything, or only the picked parts.
     pub(super) fn rig_visibility_buttons(&mut self, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Show all").on_hover_text("Every layer is shown again").clicked() {
+            if ui.button("Show all").help("Every layer is shown again").clicked() {
                 for l in self.draw.doc.layers.iter_mut().filter(|l| parts::is_part_layer(l)) {
                     l.visible = true;
                 }
                 self.draw.doc.mark_all_dirty();
             }
-            if ui.add_enabled(!self.rigs.selected.is_empty(), egui::Button::new("Only the picked")).on_hover_text("Hides every part that is not picked").clicked() {
+            if ui.add_enabled(!self.rigs.selected.is_empty(), egui::Button::new("Only the picked")).help("Hides every part that is not picked").clicked() {
                 let keep = self.rigs.selected.clone();
                 for l in self.draw.doc.layers.iter_mut().filter(|l| parts::is_part_layer(l)) {
                     l.visible = keep.contains(&l.id);
@@ -949,7 +950,7 @@ impl SeviathApp {
         }
         section_title(ui, "Automatic rig");
         ui.label(RichText::new("Tags tell the automatic rig what each part is (Parts tab). Rigging by hand needs no tags: use the tools along the top.").size(11.5).color(TEXT_DIM));
-        ui.checkbox(&mut self.rigs.hq, "Sharp curves").on_hover_text("Adds triangles where a part bends, so the picture stays sharp. Turn it off if the picture is slow to move.");
+        ui.checkbox(&mut self.rigs.hq, "Sharp curves").help("Adds triangles where a part bends, so the picture stays sharp. Turn it off if the picture is slow to move.");
         self.rig_auto_section(ui, now);
         self.rig_quality_section(ui, now);
         self.rig_pose_section(ui, now);
@@ -984,7 +985,7 @@ impl SeviathApp {
                 let n = names.len();
                 names.push(crate::rig::views::Views::SUGGESTED.get(n).map(|s| s.to_string()).unwrap_or_else(|| format!("View {}", n + 1)));
             }
-            ui.checkbox(&mut crossfade, "Fade between views").on_hover_text("Off: the picture cuts from one view to the next");
+            ui.checkbox(&mut crossfade, "Fade between views").help("Off: the picture cuts from one view to the next");
         });
         if let Some(i) = remove {
             names.remove(i);
@@ -1033,7 +1034,7 @@ impl SeviathApp {
         let assigned = v.assign.len();
         ui.horizontal_wrapped(|ui| {
             let built = v.is_built();
-            if ui.add_enabled(names.len() >= 2 && assigned > 0, egui::Button::new(if built { "Build the views again" } else { "Build the views" })).on_hover_text("Makes the View slider and a fade for every drawing in a view").clicked() {
+            if ui.add_enabled(names.len() >= 2 && assigned > 0, egui::Button::new(if built { "Build the views again" } else { "Build the views" })).help("Makes the View slider and a fade for every drawing in a view").clicked() {
                 let has_mesh: std::collections::HashSet<u64> = rig.meshes.iter().map(|m| m.layer).collect();
                 let mut result = Ok(0);
                 self.rig_edit("Build views", now, |r| result = r.build_views(&|l| has_mesh.contains(&l)));
@@ -1059,16 +1060,16 @@ impl SeviathApp {
         section_title(ui, "Auto-rig");
         ui.label(RichText::new("Head turn, eyes, brows and a mouth that makes A I U E O, built from the Parts tags.").size(11.5).color(TEXT_DIM));
         ui.horizontal_wrapped(|ui| {
-            if ui.button(RichText::new("This is a face").strong()).on_hover_text("Tags the picked parts (or every layer) by their names, then rigs the face").clicked() {
+            if ui.button(RichText::new("This is a face").strong()).help("Tags the picked parts (or every layer) by their names, then rigs the face").clicked() {
                 self.this_is_a_face(now);
             }
-            if ui.button("Rig the face from the tags").on_hover_text("Replaces what the auto-rig made before, except what you locked").clicked() {
+            if ui.button("Rig the face from the tags").help("Replaces what the auto-rig made before, except what you locked").clicked() {
                 self.rig_the_face(now);
             }
-            if ui.button(RichText::new("Rig the whole picture (uncut)").strong()).on_hover_text("For one picture of a standing figure: finds the head, neck, arms, hips and legs from the outline, puts a skeleton there and gives the picture weights. Needs no cutting into parts.").clicked() {
+            if ui.button(RichText::new("Rig the whole picture (uncut)").strong()).help("For one picture of a standing figure: finds the head, neck, arms, hips and legs from the outline, puts a skeleton there and gives the picture weights. Needs no cutting into parts.").clicked() {
                 self.rig_the_uncut(now);
             }
-            if ui.button(if self.rigs.play { "Stop the test motion" } else { "Test motion" }).on_hover_text("Every slider moves by itself, so you can see what the rig does").clicked() {
+            if ui.button(if self.rigs.play { "Stop the test motion" } else { "Test motion" }).help("Every slider moves by itself, so you can see what the rig does").clicked() {
                 self.rigs.play = !self.rigs.play;
                 if !self.rigs.play {
                     self.rigs.values = Values::default();
@@ -1076,20 +1077,20 @@ impl SeviathApp {
             }
         });
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Rig the body").on_hover_text("Torso tilt and breathing, arms and legs that swing, hands that reach. Do the face first so the head leans with the body.").clicked() {
+            if ui.button("Rig the body").help("Torso tilt and breathing, arms and legs that swing, hands that reach. Do the face first so the head leans with the body.").clicked() {
                 self.rig_the_body(now);
             }
-            if ui.button("Hair sway").on_hover_text("Curves down the hair parts and one slider").clicked() {
+            if ui.button("Hair sway").help("Curves down the hair parts and one slider").clicked() {
                 self.rig_the_hair(now);
             }
             ui.checkbox(&mut self.rigs.body_opts.ik, "Hands reach (IK)");
         });
         if self.draw.doc.rig.skin.as_ref().is_some_and(|s| !s.bones.is_empty()) {
             ui.horizontal_wrapped(|ui| {
-                if widgets::chip(ui, "Move the joints", self.rigs.joint_edit).on_hover_text("Shows every joint of the skeleton on the picture: drag one where it should be. The bones on both sides follow. Then press Redo the bending if the bending should follow too.").clicked() {
+                if widgets::chip(ui, "Move the joints", self.rigs.joint_edit).help("Shows every joint of the skeleton on the picture: drag one where it should be. The bones on both sides follow. Then press Redo the bending if the bending should follow too.").clicked() {
                     self.rigs.joint_edit = !self.rigs.joint_edit;
                 }
-                if ui.button("Redo the bending").on_hover_text("Weights from the bones: close to a bone it follows that bone, fading out with distance").clicked() {
+                if ui.button("Redo the bending").help("Weights from the bones: close to a bone it follows that bone, fading out with distance").clicked() {
                     self.rig_edit("Automatic weights", now, |r| {
                         let rc = r.clone();
                         if let Some(s) = r.skin.as_mut() {
@@ -1104,13 +1105,13 @@ impl SeviathApp {
             use rig::uncut::Hold;
             ui.label(RichText::new("Uncut: arms").size(12.0).color(TEXT_DIM));
             for (h, name, tip) in [(Hold::Auto, "Auto", "Look at the outline"), (Hold::Out, "Out", "Held out to the sides (a T pose)"), (Hold::Down, "At the sides", "Hanging along the body")] {
-                if widgets::chip(ui, name, self.rigs.uncut_hints.arms == h).on_hover_text(tip).clicked() {
+                if widgets::chip(ui, name, self.rigs.uncut_hints.arms == h).help(tip).clicked() {
                     self.rigs.uncut_hints.arms = h;
                 }
             }
             ui.label(RichText::new("legs").size(12.0).color(TEXT_DIM));
             for (h, name, tip) in [(Hold::Auto, "Auto", "Look at the outline"), (Hold::Out, "Apart", "Legs apart"), (Hold::Down, "Together", "Legs together")] {
-                if widgets::chip(ui, name, self.rigs.uncut_hints.legs == h).on_hover_text(tip).clicked() {
+                if widgets::chip(ui, name, self.rigs.uncut_hints.legs == h).help(tip).clicked() {
                     self.rigs.uncut_hints.legs = h;
                 }
             }
@@ -1121,7 +1122,7 @@ impl SeviathApp {
             ui.add(egui::Slider::new(&mut o.turn, 0.2..=2.5).show_value(false));
         });
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut o.together_eyes, "Eyes together").on_hover_text("Off: one slider for each eye (for a face that is not symmetrical)");
+            ui.checkbox(&mut o.together_eyes, "Eyes together").help("Off: one slider for each eye (for a face that is not symmetrical)");
             ui.checkbox(&mut o.together_brows, "Brows together");
             ui.checkbox(&mut o.vowels, "Mouth A I U E O");
         });
@@ -1132,7 +1133,7 @@ impl SeviathApp {
         if let (Some(cid), Some(a)) = (self.rigs.sel_changer, self.draw.doc.rig.auto.as_ref()) {
             if a.changers.contains(&cid) {
                 let mut locked = a.locked.contains(&cid);
-                if ui.checkbox(&mut locked, "Keep my edits of this changer (lock)").on_hover_text("The next auto-rig leaves it as it is").changed() {
+                if ui.checkbox(&mut locked, "Keep my edits of this changer (lock)").help("The next auto-rig leaves it as it is").changed() {
                     self.rig_edit("Lock a changer", now, |r| {
                         if let Some(a) = r.auto.as_mut() {
                             a.locked.retain(|c| *c != cid);
@@ -1229,11 +1230,11 @@ impl SeviathApp {
     fn rig_pose_store(&mut self, ui: &mut Ui, now: f64) {
         let rig = self.draw.doc.rig.clone();
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Key this pose (K)").on_hover_text("Keeps the sliders as they are now").clicked() {
+            if ui.button("Key this pose (K)").help("Keeps the sliders as they are now").clicked() {
                 self.rig_key_pose(now);
             }
             let rec = self.rigs.recording.is_some();
-            if ui.button(if rec { "Stop recording" } else { "Record while posing" }).on_hover_text("Records the sliders as you move them, to use in the Animate tab").clicked() {
+            if ui.button(if rec { "Stop recording" } else { "Record while posing" }).help("Records the sliders as you move them, to use in the Animate tab").clicked() {
                 if rec {
                     if let Some((t0, _, frames)) = self.rigs.recording.take() {
                         if frames.len() >= 2 {
@@ -1309,7 +1310,7 @@ impl SeviathApp {
     fn rig_quality_section(&mut self, ui: &mut Ui, now: f64) {
         section_title(ui, "Quality check");
         ui.horizontal(|ui| {
-            if ui.button("Check the rig").on_hover_text("Moves every slider to its ends and looks for gaps, folds, parts without a mesh and sliders that do nothing").clicked() {
+            if ui.button("Check the rig").help("Moves every slider to its ends and looks for gaps, folds, parts without a mesh and sliders that do nothing").clicked() {
                 self.run_check();
             }
             if self.rigs.checked && self.rigs.issues.is_empty() {
@@ -1466,7 +1467,7 @@ impl SeviathApp {
             if ui.add_enabled(!sel.is_empty(), egui::Button::new("Make mesh for the picked parts")).clicked() {
                 self.make_meshes(sel.clone(), now);
             }
-            if ui.button("Mesh all parts").on_hover_text("Every layer that has paint").clicked() {
+            if ui.button("Mesh all parts").help("Every layer that has paint").clicked() {
                 let ids: Vec<LayerId> = self.draw.doc.layers.iter().filter(|l| parts::is_part_layer(l) && !l.tiles.is_empty()).map(|l| l.id).collect();
                 self.make_meshes(ids, now);
             }
@@ -1499,7 +1500,7 @@ impl SeviathApp {
         let has_skin = self.draw.doc.rig.skin.is_some();
         ui.horizontal_wrapped(|ui| {
             let label = if has_skin { "Make the skin mesh again" } else { "Make one mesh of the drawing" };
-            if ui.button(label).on_hover_text("Uses the picked parts, or every visible layer when none is picked").clicked() {
+            if ui.button(label).help("Uses the picked parts, or every visible layer when none is picked").clicked() {
                 let ids: Vec<LayerId> = if sel.is_empty() {
                     self.draw.doc.layers.iter().filter(|l| l.visible && matches!(l.kind, crate::doc::LayerKind::Raster | crate::doc::LayerKind::Vector)).map(|l| l.id).collect()
                 } else {
@@ -1532,7 +1533,7 @@ impl SeviathApp {
             });
             let picked_bone = self.rigs.sel_changer.filter(|c| bones.iter().any(|b| b.0 == *c));
             ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(!bones.is_empty(), egui::Button::new("Weights from the bones")).on_hover_text("Close to a bone it follows that bone, fading out with distance").clicked() {
+                if ui.add_enabled(!bones.is_empty(), egui::Button::new("Weights from the bones")).help("Close to a bone it follows that bone, fading out with distance").clicked() {
                     self.rig_edit("Automatic weights", now, |r| {
                         let rc = r.clone();
                         if let Some(s) = r.skin.as_mut() {
@@ -1540,7 +1541,7 @@ impl SeviathApp {
                         }
                     });
                 }
-                if ui.add_enabled(picked_bone.is_some(), egui::Button::new("Slider for this bone")).on_hover_text("A slider that turns the picked bone").clicked() {
+                if ui.add_enabled(picked_bone.is_some(), egui::Button::new("Slider for this bone")).help("A slider that turns the picked bone").clicked() {
                     if let Some(bid) = picked_bone {
                         let name = self.draw.doc.rig.changer(bid).map(|c| c.name.clone()).unwrap_or_default();
                         let mut pid = 0;
@@ -1646,7 +1647,7 @@ impl SeviathApp {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Copy to the other side, line at x").size(12.0).color(TEXT_DIM));
                 ui.add(egui::DragValue::new(&mut self.rigs.mirror_axis).speed(2.0));
-                if ui.button("Copy").on_hover_text("A copy on the other side that turns and bends the other way, moved by the same sliders").clicked() {
+                if ui.button("Copy").help("A copy on the other side that turns and bends the other way, moved by the same sliders").clicked() {
                     let axis = self.rigs.mirror_axis;
                     let name = self.draw.doc.rig.changer(cid).map(|c| format!("{} (other side)", c.name)).unwrap_or_default();
                     let mut new_id = None;
@@ -1732,7 +1733,7 @@ impl SeviathApp {
     fn rig_pads_body(&mut self, ui: &mut Ui, now: f64) {
         let rig = self.draw.doc.rig.clone();
         // ---- pads: two sliders joined into one square ----
-        ui.label(RichText::new("Drag inside a square to move two sliders at once.").size(11.5).color(TEXT_DIM)).on_hover_text("Orange line: the first slider. Blue line: the second. The dots are where the two lines cross (green: the original drawing, yellow: a saved shape, grey: nothing saved yet, red: where you are).");
+        ui.label(RichText::new("Drag inside a square to move two sliders at once.").size(11.5).color(TEXT_DIM)).help("Orange line: the first slider. Blue line: the second. The dots are where the two lines cross (green: the original drawing, yellow: a saved shape, grey: nothing saved yet, red: where you are).");
         let mut split: Option<usize> = None;
         self.rigs.pad_areas.clear();
         for (pi, pad) in rig.pads.iter().enumerate() {
@@ -1742,7 +1743,7 @@ impl SeviathApp {
                 ui.label(RichText::new(&pad.name).strong());
                 ui.label(RichText::new(format!("= {} + {}", px.name, py.name)).size(11.5).color(TEXT_DIM));
                 ui.label(RichText::new(format!("{:.2}  {:.2}", rig.value(&self.rigs.values, px.id), rig.value(&self.rigs.values, py.id))).size(11.5).monospace());
-                if ui.small_button("Split").on_hover_text("Back to two separate sliders").clicked() {
+                if ui.small_button("Split").help("Back to two separate sliders").clicked() {
                     split = Some(pi);
                 }
             });
@@ -1810,7 +1811,7 @@ impl SeviathApp {
         let rig = self.draw.doc.rig.clone();
         // ---- sliders ----
         section_title(ui, "Sliders");
-        ui.label(RichText::new("The circles are key points.").size(11.5).color(TEXT_DIM)).on_hover_text("Green: the original drawing. Yellow: a shape is saved there. Grey: nothing saved yet. The red dot is where the slider is.");
+        ui.label(RichText::new("The circles are key points.").size(11.5).color(TEXT_DIM)).help("Green: the original drawing. Yellow: a shape is saved there. Grey: nothing saved yet. The red dot is where the slider is.");
         ui.horizontal_wrapped(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.rigs.new_param.0).desired_width(110.0).char_limit(40));
             ui.add(egui::DragValue::new(&mut self.rigs.new_param.1).speed(0.5).prefix("from "));
@@ -1823,7 +1824,7 @@ impl SeviathApp {
                 self.rigs.sel_param = Some(new_id);
             }
         });
-        if ui.button("Add all the standard sliders").on_hover_text("The usual Live2D sliders (angles, eyes, brows, mouth, body, hair), so none is missing: the ones that are not made yet are listed grey under each group").clicked() {
+        if ui.button("Add all the standard sliders").help("The usual Live2D sliders (angles, eyes, brows, mouth, body, hair), so none is missing: the ones that are not made yet are listed grey under each group").clicked() {
             self.rig_edit("Standard sliders", now, |r| add_standard_params(r, &(0..STANDARD_PARAMS.len()).collect::<Vec<_>>()));
         }
         let params: Vec<(Id, String, f32, f32, f32)> = rig.params.iter().map(|p| (p.id, p.name.clone(), p.min, p.max, p.default)).collect();
@@ -1851,11 +1852,11 @@ impl SeviathApp {
                         }
                         let step = ((*hi - *lo) / 200.0).max(0.001);
                         let decimals = if *hi - *lo <= 5.0 { 2 } else { 1 };
-                        if ui.add(egui::DragValue::new(&mut v).range(*lo..=*hi).speed(step).max_decimals(decimals).min_decimals(1)).on_hover_text("Type a number, or drag").changed() {
+                        if ui.add(egui::DragValue::new(&mut v).range(*lo..=*hi).speed(step).max_decimals(decimals).min_decimals(1)).help("Type a number, or drag").changed() {
                             self.rigs.values.set(*id, v);
                             self.rigs.sel_param = Some(*id);
                         }
-                        if ui.small_button("Original").on_hover_text("Back to the original drawing (the filled mark)").clicked() {
+                        if ui.small_button("Original").help("Back to the original drawing (the filled mark)").clicked() {
                             self.rigs.values.set(*id, *def);
                         }
                         if on && ui.small_button("Delete").clicked() {
@@ -1925,14 +1926,14 @@ impl SeviathApp {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
             for k in &keys {
                 let label = if at(*k) { format!("{k:.1} (original)") } else { format!("{k:.1}") };
-                if widgets::chip(ui, &label, (value - k).abs() < 1e-3).on_hover_text("Go to this key point").clicked() {
+                if widgets::chip(ui, &label, (value - k).abs() < 1e-3).help("Go to this key point").clicked() {
                     self.rigs.values.set(pid, *k);
                 }
             }
         });
         if let Some(k) = keys.iter().copied().find(|k| (value - k).abs() < 1e-3) {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Put this key point back to the original drawing").on_hover_text("The shape saved at this key point is cleared").clicked() {
+                if ui.button("Put this key point back to the original drawing").help("The shape saved at this key point is cleared").clicked() {
                     self.rig_edit("Original drawing at a key point", now, |r| r.reset_key(pid, k));
                 }
                 if !at(k) && ui.button("Remove this key point").clicked() {
@@ -1958,7 +1959,7 @@ impl SeviathApp {
                     *v = (*v + 1).min(rig::MAX_WARP);
                 }
             }
-            if ui.small_button("Twice as fine").on_hover_text("Doubles the points both ways").clicked() {
+            if ui.small_button("Twice as fine").help("Doubles the points both ways").clicked() {
                 nc = (nc * 2).min(rig::MAX_WARP);
                 nr = (nr * 2).min(rig::MAX_WARP);
             }
@@ -1982,7 +1983,7 @@ impl SeviathApp {
         section_title(ui, "Paint the weights yourself");
         let on = self.rigs.mode == Mode::Weight;
         ui.horizontal_wrapped(|ui| {
-            if widgets::chip(ui, if on { "Painting: pick a tool and drag on the picture" } else { "Paint weights" }, on).on_hover_text("Shows the picture at rest, so you paint where things really are").clicked() {
+            if widgets::chip(ui, if on { "Painting: pick a tool and drag on the picture" } else { "Paint weights" }, on).help("Shows the picture at rest, so you paint where things really are").clicked() {
                 self.rigs.mode = if on { Mode::Look } else { Mode::Weight };
                 if !on {
                     self.rigs.heat = true;
@@ -2024,10 +2025,10 @@ impl SeviathApp {
             ui.label(RichText::new("Lasso edge").size(12.0).color(TEXT_DIM));
             ui.add(egui::DragValue::new(&mut self.rigs.feather).speed(1.0).range(0.0..=400.0).suffix(" px"));
         });
-        ui.checkbox(&mut self.rigs.wopts.keep_normalized, "Keep each point's total at 100%").on_hover_text("Weight given to this bone is taken from the other bones");
+        ui.checkbox(&mut self.rigs.wopts.keep_normalized, "Keep each point's total at 100%").help("Weight given to this bone is taken from the other bones");
         let b_idx = picked.and_then(|c| self.draw.doc.rig.skin.as_ref().and_then(|s| s.bone_index(c)));
         ui.horizontal_wrapped(|ui| {
-            if ui.add_enabled(b_idx.is_some(), egui::Button::new("Flood the whole bone")).on_hover_text("Sets the bone's weight everywhere to the strength above").clicked() {
+            if ui.add_enabled(b_idx.is_some(), egui::Button::new("Flood the whole bone")).help("Sets the bone's weight everywhere to the strength above").clicked() {
                 let v = self.rigs.wopts.strength;
                 let bi = b_idx.unwrap_or(0);
                 self.rig_edit("Flood weights", now, |r| {
@@ -2047,7 +2048,7 @@ impl SeviathApp {
                     self.rigs.weight_gen += 1;
                 }
             }
-            if ui.button("Limit to 100%").on_hover_text("Where the bones add up to more than everything, scale them down together").clicked() {
+            if ui.button("Limit to 100%").help("Where the bones add up to more than everything, scale them down together").clicked() {
                 self.rig_edit("Limit weights", now, |r| {
                     if let Some(s) = r.skin.as_mut() {
                         s.limit_all();
@@ -2055,7 +2056,7 @@ impl SeviathApp {
                 });
                 self.rigs.weight_gen += 1;
             }
-            if ui.button("Add up to exactly 100%").on_hover_text("Where any bone has weight, nothing is left to stay behind").clicked() {
+            if ui.button("Add up to exactly 100%").help("Where any bone has weight, nothing is left to stay behind").clicked() {
                 self.rig_edit("Normalize weights", now, |r| {
                     if let Some(s) = r.skin.as_mut() {
                         s.fill_to_one();
@@ -2077,7 +2078,7 @@ impl SeviathApp {
             });
             ui.label(RichText::new("line at x").size(12.0).color(TEXT_DIM));
             ui.add(egui::DragValue::new(&mut self.rigs.mirror_axis).speed(2.0));
-            if ui.add_enabled(b_idx.is_some() && target.is_some(), egui::Button::new("Mirror")).on_hover_text("Copies this bone's weights, flipped left to right, onto the other bone").clicked() {
+            if ui.add_enabled(b_idx.is_some() && target.is_some(), egui::Button::new("Mirror")).help("Copies this bone's weights, flipped left to right, onto the other bone").clicked() {
                 let (axis, to) = (self.rigs.mirror_axis, target.and_then(|t| self.draw.doc.rig.skin.as_ref().and_then(|s| s.bone_index(t))));
                 if let (Some(from), Some(to)) = (b_idx, to) {
                     self.rig_edit("Mirror weights", now, |r| {
@@ -2101,7 +2102,7 @@ impl SeviathApp {
                     }
                 }
             });
-            if ui.add_enabled(b_idx.is_some() && cur.is_some(), egui::Button::new("Give the bone the parts with this tag")).on_hover_text("Weight where the layers with this tag have paint, softened at the edge. Tags are set in the Parts tab.").clicked() {
+            if ui.add_enabled(b_idx.is_some() && cur.is_some(), egui::Button::new("Give the bone the parts with this tag")).help("Weight where the layers with this tag have paint, softened at the edge. Tags are set in the Parts tab.").clicked() {
                 if let (Some(bi), Some(tag)) = (b_idx, cur) {
                     let mask = self.tag_mask(tag);
                     self.rig_edit("Weights from a tag", now, |r| {
@@ -2145,7 +2146,7 @@ impl SeviathApp {
             ui.label(RichText::new("Turn").size(12.0).color(TEXT_DIM));
             ui.add(egui::DragValue::new(&mut self.rigs.turn_by).speed(0.5).range(-180.0..=180.0).suffix(" deg"));
             let deg = self.rigs.turn_by;
-            if ui.button("the whole shape").on_hover_text("Turns every point round the middle of the shape, as if the whole part was rotated").clicked() {
+            if ui.button("the whole shape").help("Turns every point round the middle of the shape, as if the whole part was rotated").clicked() {
                 let rest: Vec<[f32; 2]> = match &kind {
                     Kind::Warp { rect, cols, rows } => Rig::warp_rest(*rect, *cols, *rows),
                     Kind::Line { pts, .. } | Kind::Pins { pts } => pts.clone(),
@@ -2160,7 +2161,7 @@ impl SeviathApp {
                     }
                 }
             }
-            if matches!(kind, Kind::Line { .. } | Kind::Paths { .. }) && ui.button("every point").on_hover_text("Turns the picture at every point of the curves by this angle, without moving the points").clicked() {
+            if matches!(kind, Kind::Line { .. } | Kind::Paths { .. }) && ui.button("every point").help("Turns the picture at every point of the curves by this angle, without moving the points").clicked() {
                 if let Some(t) = self.rigs.turn_edit.as_mut() {
                     t.iter_mut().for_each(|x| *x += deg);
                 }
@@ -2183,7 +2184,7 @@ impl SeviathApp {
             Some(Kind::Paths { paths }) => {
                 ui.horizontal_wrapped(|ui| {
                     let on = self.rigs.mode == Mode::DrawPath;
-                    if widgets::chip(ui, if on { "Drag on the picture to draw…" } else { "Draw another path" }, on).on_hover_text("Drag across the part where the path should lie").clicked() {
+                    if widgets::chip(ui, if on { "Drag on the picture to draw…" } else { "Draw another path" }, on).help("Drag across the part where the path should lie").clicked() {
                         self.rigs.mode = if on { Mode::Look } else { Mode::DrawPath };
                         self.rigs.stroke.clear();
                     }
@@ -2196,7 +2197,7 @@ impl SeviathApp {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(format!("Path {}", k + 1)).size(12.0));
                         let mut w = sp.width;
-                        if ui.add(egui::DragValue::new(&mut w).range(2.0..=1000.0).suffix(" px")).on_hover_text("How far from the path the picture follows it").changed() {
+                        if ui.add(egui::DragValue::new(&mut w).range(2.0..=1000.0).suffix(" px")).help("How far from the path the picture follows it").changed() {
                             self.rig_edit("Path reach", now, |r| {
                                 if let Some(Kind::Paths { paths }) = r.changers.iter_mut().find(|c| c.id == cid).map(|c| &mut c.kind) {
                                     if let Some(s) = paths.get_mut(k) {
@@ -2217,7 +2218,7 @@ impl SeviathApp {
                                 }
                             }
                             None => {
-                                if ui.small_button("Make it flow").on_hover_text("Adds physics to this path: it swings and lags with the head (set the kind in the Physics tab)").clicked() {
+                                if ui.small_button("Make it flow").help("Adds physics to this path: it swings and lags with the head (set the kind in the Physics tab)").clicked() {
                                     let (kind, mat) = (self.rigs.phys.kind, self.rigs.phys.material);
                                     let name = format!("{} {}", rig.changer(cid).map(|c| c.name.clone()).unwrap_or_default(), k + 1);
                                     self.rig_edit("Path physics", now, |r| {
@@ -2240,7 +2241,7 @@ impl SeviathApp {
             Some(Kind::Pins { pts }) => {
                 ui.horizontal_wrapped(|ui| {
                     let on = self.rigs.mode == Mode::AddPin;
-                    if widgets::chip(ui, if on { "Click the picture to add pins…" } else { "Add pins" }, on).on_hover_text("Every click puts a pin on the picture").clicked() {
+                    if widgets::chip(ui, if on { "Click the picture to add pins…" } else { "Add pins" }, on).help("Every click puts a pin on the picture").clicked() {
                         self.rigs.mode = if on { Mode::Look } else { Mode::AddPin };
                     }
                     ui.label(RichText::new(format!("{} pins. Pins you do not move hold the picture still.", pts.len())).size(11.5).color(TEXT_DIM));
@@ -2297,14 +2298,14 @@ impl SeviathApp {
                     ui.add(egui::DragValue::new(&mut self.rigs.turn_deg).speed(0.5).suffix(" deg"));
                     ui.label(RichText::new("at the slider's end").size(12.0).color(TEXT_DIM));
                 });
-                if second.is_none() && ui.button("Bind: turn with the slider").on_hover_text("At the low end it turns the other way, in the middle it doesn't turn").clicked() {
+                if second.is_none() && ui.button("Bind: turn with the slider").help("At the low end it turns the other way, in the middle it doesn't turn").clicked() {
                     let deg = self.rigs.turn_deg;
                     self.rig_edit("Bind rotation to slider", now, |r| {
                         r.bindings.retain(|b| !(b.changer == cid && b.params == [pid]));
                         r.bind_rotation(cid, pid, deg);
                     });
                 }
-                if ui.button(if second.is_some() { "Set the turn at these two values" } else { "Set the turn at this value" }).on_hover_text("Adds one keyform at the slider value(s) now").clicked() {
+                if ui.button(if second.is_some() { "Set the turn at these two values" } else { "Set the turn at this value" }).help("Adds one keyform at the slider value(s) now").clicked() {
                     let deg = self.rigs.turn_deg;
                     save(self, "Rotation keyform", Form::Rot { deg });
                 }
@@ -2343,14 +2344,14 @@ impl SeviathApp {
                     self.rigs.vals_live = true;
                 }
                 ui.horizontal(|ui| {
-                    if ui.button(if second.is_some() { "Set at these two values" } else { "Set at this value" }).on_hover_text("Adds one keyform at the slider value(s) now").clicked() {
+                    if ui.button(if second.is_some() { "Set at these two values" } else { "Set at this value" }).help("Adds one keyform at the slider value(s) now").clicked() {
                         if let Some((_, v)) = self.rigs.vals_edit.clone() {
                             save(self, "Keyform", Form::Vals { v });
                             self.rigs.vals_live = false;
                             self.rigs.vals_edit = None;
                         }
                     }
-                    if ui.button("Back to the slider").on_hover_text("Forget the numbers you typed").clicked() {
+                    if ui.button("Back to the slider").help("Forget the numbers you typed").clicked() {
                         self.rigs.vals_edit = None;
                         self.rigs.vals_live = false;
                     }
@@ -2361,7 +2362,7 @@ impl SeviathApp {
                 let is_soft = matches!(c.kind, Kind::Soft { .. });
                 if matches!(c.kind, Kind::Warp { .. }) {
                     let mut smooth = rig.smooth.contains(&cid);
-                    if ui.checkbox(&mut smooth, "Smooth curves").on_hover_text("Bends in a smooth curve through the points instead of straight cells. Live2D models are opened with this off, so they look like the original.").changed() {
+                    if ui.checkbox(&mut smooth, "Smooth curves").help("Bends in a smooth curve through the points instead of straight cells. Live2D models are opened with this off, so they look like the original.").changed() {
                         self.rig_edit("Smooth curves", now, |r| {
                             r.smooth.retain(|x| *x != cid);
                             if smooth {
@@ -3370,7 +3371,7 @@ fn key_slider(ui: &mut Ui, v: &mut f32, lo: f32, hi: f32, def: f32, keys: &[f32]
             }
         }
     }
-    resp.on_hover_text(format!("Key points: {}. Green: the original drawing. Yellow: a saved shape. Grey: nothing saved yet. Red: where the slider is.", keys.iter().map(|k| format!("{k:.1}")).collect::<Vec<_>>().join(", ")));
+    resp.help(format!("Key points: {}. Green: the original drawing. Yellow: a saved shape. Grey: nothing saved yet. Red: where the slider is.", keys.iter().map(|k| format!("{k:.1}")).collect::<Vec<_>>().join(", ")));
     changed
 }
 

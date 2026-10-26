@@ -3,6 +3,7 @@
 // swatches, mixed as real paint (above the diagonal) next to what plain RGB averaging gives
 // (below it), so you see every combination before you commit to it.
 
+use crate::widgets::HelpExt;
 use eframe::egui::{self, Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind, vec2};
 
 use super::DrawState;
@@ -144,7 +145,7 @@ impl DrawState {
                 }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if widgets::chip(ui, "Make it a layer", false).on_hover_text("Puts the chart into your drawing as a picture, to keep or print").clicked() {
+                    if widgets::chip(ui, "Make it a layer", false).help("Puts the chart into your drawing as a picture, to keep or print").clicked() {
                         as_layer = true;
                     }
                 });

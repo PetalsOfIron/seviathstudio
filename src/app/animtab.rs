@@ -3,6 +3,7 @@
 // layer is) over time with keys; the playhead plays them at a frame rate (physics swings with it), a slider moved while Auto key is on
 // makes a key, and the animation can be saved as a PNG sequence, a GIF or an MP4.
 
+use crate::widgets::HelpExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -483,20 +484,20 @@ impl SeviathApp {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
             let playing = self.rigs.anim.playing;
-            if widgets::chip(ui, if playing { "Pause" } else { "Play" }, playing).on_hover_text("Space").clicked() {
+            if widgets::chip(ui, if playing { "Pause" } else { "Play" }, playing).help("Space").clicked() {
                 self.anim_toggle_play();
             }
-            if ui.button("Stop").on_hover_text("Back to the start, and the layers as they were").clicked() {
+            if ui.button("Stop").help("Back to the start, and the layers as they were").clicked() {
                 self.anim_stop();
             }
-            if ui.button("Previous key").clicked() {
+            if ui.button("Previous key").help("Jump to the key before.").clicked() {
                 let f = self.rigs.anim.frame;
                 if let Some(k) = self.draw.doc.rig.anim.tracks.iter().flat_map(|t| t.keys.iter().map(|k| k.frame)).filter(|k| *k < f - 0.5).fold(None, |a: Option<f32>, k| Some(a.map_or(k, |x| x.max(k)))) {
                     self.rigs.anim.frame = k;
                     self.rigs.anim.playing = false;
                 }
             }
-            if ui.button("Next key").clicked() {
+            if ui.button("Next key").help("Jump to the next key.").clicked() {
                 let f = self.rigs.anim.frame;
                 if let Some(k) = self.draw.doc.rig.anim.tracks.iter().flat_map(|t| t.keys.iter().map(|k| k.frame)).filter(|k| *k > f + 0.5).fold(None, |a: Option<f32>, k| Some(a.map_or(k, |x| x.min(k)))) {
                     self.rigs.anim.frame = k;
@@ -504,39 +505,39 @@ impl SeviathApp {
                 }
             }
             let xs = self.rigs.anim.xsheet;
-            if widgets::chip(ui, "X-sheet", xs).on_hover_text("The timing as a table: a row for every frame, a column for every cel track").clicked() {
+            if widgets::chip(ui, "X-sheet", xs).help("The timing as a table: a row for every frame, a column for every cel track").clicked() {
                 self.rigs.anim.xsheet = !xs;
             }
-            if ui.button("Add marker").on_hover_text("A named place at the playhead; markers cut the animation into parts").clicked() {
+            if ui.button("Add marker").help("A named place at the playhead; markers cut the animation into parts").clicked() {
                 let here = self.rigs.anim.frame.round().max(0.0) as u32;
                 let n = self.draw.doc.rig.anim.markers.len() + 1;
                 let name = format!("Part {n}");
                 self.anim_mut("Add marker").set_marker(here, &name);
             }
             let mut a = self.draw.doc.rig.anim.clone();
-            ui.checkbox(&mut a.looping, "Loop");
+            ui.checkbox(&mut a.looping, "Loop").help("Play again from the start when it ends.");
             ui.add_enabled(a.looping, egui::Checkbox::new(&mut a.ping_pong, "Back and forth"));
             ui.label(RichText::new("Frames a second").size(12.0).color(TEXT_DIM));
             ui.add(egui::DragValue::new(&mut a.fps).range(1.0..=120.0).speed(0.2));
             ui.label(RichText::new("Length").size(12.0).color(TEXT_DIM));
             ui.add(egui::DragValue::new(&mut a.length).range(2..=100_000).speed(0.5).suffix(" frames"));
             let here = self.rigs.anim.frame.round() as u32;
-            if ui.small_button("Start here").on_hover_text("The part that plays starts at the playhead").clicked() {
+            if ui.small_button("Start here").help("The part that plays starts at the playhead").clicked() {
                 let end = a.play_range().1.max(here + 1);
                 a.range = Some([here, end]);
             }
-            if ui.small_button("End here").on_hover_text("The part that plays ends at the playhead").clicked() {
+            if ui.small_button("End here").help("The part that plays ends at the playhead").clicked() {
                 let start = a.play_range().0.min(here.saturating_sub(1));
                 a.range = Some([start, here.max(1)]);
             }
-            if ui.small_button("Play all").clicked() {
+            if ui.small_button("Play all").help("Play every animation one after the other.").clicked() {
                 a.range = None;
             }
             if a != self.draw.doc.rig.anim {
                 *self.anim_mut("Animation settings") = a;
             }
             let autokey = self.rigs.anim.autokey;
-            if widgets::chip(ui, "Auto key", autokey).on_hover_text("A slider you move makes a key at the playhead").clicked() {
+            if widgets::chip(ui, "Auto key", autokey).help("A slider you move makes a key at the playhead").clicked() {
                 self.rigs.anim.autokey = !autokey;
             }
             let (f, a) = (self.rigs.anim.frame, &self.draw.doc.rig.anim);
@@ -776,21 +777,21 @@ impl SeviathApp {
             };
             ui.label(RichText::new("From this key to the next").size(12.0).color(TEXT_DIM));
             for (e, name) in Ease::NAMED {
-                if ui.button(name).clicked() {
+                if ui.button(name).help("Use this.").clicked() {
                     if let Some(k) = self.anim_mut("Easing").tracks.get_mut(ti).and_then(|t| t.keys.get_mut(ki)) {
                         k.ease = e;
                     }
                     ui.close();
                 }
             }
-            if ui.button("Curve").on_hover_text("A curve with two handles, set on the right").clicked() {
+            if ui.button("Curve").help("A curve with two handles, set on the right").clicked() {
                 if let Some(k) = self.anim_mut("Easing").tracks.get_mut(ti).and_then(|t| t.keys.get_mut(ki)) {
                     k.ease = Ease::Bezier([0.42, 0.0, 0.58, 1.0]);
                 }
                 ui.close();
             }
             ui.separator();
-            if ui.button("Delete the key").clicked() {
+            if ui.button("Delete the key").help("Take this key away. The slider no longer changes here.").clicked() {
                 if let Some(t) = self.anim_mut("Delete a key").tracks.get_mut(ti) {
                     if ki < t.keys.len() {
                         t.keys.remove(ki);
@@ -826,7 +827,7 @@ impl SeviathApp {
                 let w = (ui.available_width() - 60.0).max(60.0);
                 ui.spacing_mut().slider_width = w;
                 ui.add(egui::Slider::new(&mut v, *lo..=*hi).show_value(false));
-                if ui.small_button(if keyed { "Keyed" } else { "Key" }).on_hover_text("Key this slider at the playhead").clicked() {
+                if ui.small_button(if keyed { "Keyed" } else { "Key" }).help("Key this slider at the playhead").clicked() {
                     key_it.push((*id, name.clone(), v));
                 }
             });
@@ -860,11 +861,11 @@ impl SeviathApp {
                 });
                 ui.horizontal_wrapped(|ui| {
                     for (e, label) in Ease::NAMED {
-                        if widgets::chip(ui, label, k.ease == e).clicked() {
+                        if widgets::chip(ui, label, k.ease == e).help("Pick how the value moves from this key to the next.").clicked() {
                             k.ease = e;
                         }
                     }
-                    if widgets::chip(ui, "Curve", matches!(k.ease, Ease::Bezier(_))).clicked() && !matches!(k.ease, Ease::Bezier(_)) {
+                    if widgets::chip(ui, "Curve", matches!(k.ease, Ease::Bezier(_))).help("Change how the line bends.").clicked() && !matches!(k.ease, Ease::Bezier(_)) {
                         k.ease = Ease::Bezier([0.42, 0.0, 0.58, 1.0]);
                     }
                 });
@@ -897,7 +898,7 @@ impl SeviathApp {
                     }
                     self.rigs.anim.applied = None;
                 }
-                if ui.small_button("Delete the key").clicked() {
+                if ui.small_button("Delete the key").help("Take this key away. The slider no longer changes here.").clicked() {
                     self.anim_delete_selected();
                 }
             }
@@ -910,7 +911,7 @@ impl SeviathApp {
             egui::ComboBox::from_id_salt("anim_add_camera").selected_text("Add a camera track").width(150.0).show_ui(ui, |ui| {
                 let c = self.draw.doc.rig.anim.camera_at(self.rigs.anim.frame.round());
                 for (target, label, value) in [(Target::CameraX, "Camera: move across", c.x), (Target::CameraY, "Camera: move down", c.y), (Target::CameraZoom, "Camera: zoom", c.zoom), (Target::CameraRotate, "Camera: turn", c.rot)] {
-                    if ui.selectable_label(false, label).clicked() {
+                    if ui.selectable_label(false, label).help("Do this.").clicked() {
                         let frame = self.rigs.anim.frame.round();
                         let a = self.anim_mut("Add a camera track");
                         let t = a.track_for(target, label);
@@ -922,7 +923,7 @@ impl SeviathApp {
             egui::ComboBox::from_id_salt("anim_add_layer").selected_text("Add a layer track").width(150.0).show_ui(ui, |ui| {
                 for (id, name) in &layers {
                     for (target, label) in [(Target::Opacity(*id), format!("{name}: see-through")), (Target::Visible(*id), format!("{name}: shown"))] {
-                        if ui.selectable_label(false, &label).clicked() {
+                        if ui.selectable_label(false, &label).help("Do this.").clicked() {
                             let frame = self.rigs.anim.frame.round();
                             let (cur_op, cur_vis) = self.draw.doc.layers.iter().find(|l| l.id == *id).map(|l| (l.opacity, if l.visible { 1.0 } else { 0.0 })).unwrap_or((100.0, 1.0));
                             let a = self.anim_mut("Add a layer track");
@@ -939,14 +940,14 @@ impl SeviathApp {
         let mut mute: Option<usize> = None;
         for (i, name, muted, n) in &tracks {
             ui.horizontal(|ui| {
-                if widgets::chip(ui, name, self.rigs.anim.sel_track == Some(*i)).clicked() {
+                if widgets::chip(ui, name, self.rigs.anim.sel_track == Some(*i)).help("Pick this track.").clicked() {
                     self.rigs.anim.sel_track = Some(*i);
                 }
                 ui.label(RichText::new(format!("{n} keys")).size(11.0).color(TEXT_DIM));
-                if ui.small_button(if *muted { "Off" } else { "On" }).on_hover_text("Mute or unmute the track").clicked() {
+                if ui.small_button(if *muted { "Off" } else { "On" }).help("Mute or unmute the track").clicked() {
                     mute = Some(*i);
                 }
-                if ui.small_button("Delete").clicked() {
+                if ui.small_button("Delete").help("Delete this. Undo brings it back.").clicked() {
                     remove = Some(*i);
                 }
             });
@@ -969,7 +970,7 @@ impl SeviathApp {
             for (i, name, secs) in clips {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("{name} ({secs:.1} s)")).size(12.0));
-                    if ui.small_button("Add").clicked() {
+                    if ui.small_button("Add").help("Add it to the list.").clicked() {
                         let clip = self.draw.doc.rig.clips[i].clone();
                         let start = self.rigs.anim.frame.round();
                         let rig = self.draw.doc.rig.clone();
@@ -1010,7 +1011,7 @@ impl SeviathApp {
         ui.label(RichText::new("The camera looks at the finished picture: add tracks to move, zoom and turn it (Add a camera track), and a shake for hits and blasts.").size(11.5).color(TEXT_DIM));
         let mut s = self.draw.doc.rig.anim.shake;
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut s.on, "Shake");
+            ui.checkbox(&mut s.on, "Shake").help("Add a camera shake.");
             ui.add_enabled_ui(s.on, |ui| {
                 ui.label(RichText::new("size").size(12.0).color(TEXT_DIM));
                 ui.add(egui::DragValue::new(&mut s.amount).range(0.0..=400.0).speed(0.5).suffix(" px"));
@@ -1068,7 +1069,7 @@ impl SeviathApp {
         let a = self.draw.doc.rig.anim.clone();
         let Some(r) = a.audio.clone() else {
             ui.label(RichText::new("Add a voice or music: it plays with the timeline, is drawn above the tracks, and the mouth can be made from it.").size(11.5).color(TEXT_DIM));
-            if ui.button("Add a sound...").on_hover_text("WAV, MP3, OGG, FLAC or AAC").clicked() {
+            if ui.button("Add a sound...").help("WAV, MP3, OGG, FLAC or AAC").clicked() {
                 if let Some(p) = rfd::FileDialog::new().set_title("A sound").set_directory(self.settings.projects_folder()).add_filter("Sound", &["wav", "mp3", "ogg", "flac", "aac", "m4a"]).pick_file() {
                     self.anim_mut("Add a sound").audio = Some(crate::anim::AudioRef { path: p.to_string_lossy().to_string(), offset: 0.0 });
                     self.rigs.anim.audio_failed = None;
@@ -1086,7 +1087,7 @@ impl SeviathApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Starts at frame").size(12.0).color(TEXT_DIM));
             ui.add(egui::DragValue::new(&mut off).speed(0.5));
-            if ui.small_button("Remove").clicked() {
+            if ui.small_button("Remove").help("Take this out of the list.").clicked() {
                 self.anim_mut("Remove the sound").audio = None;
             }
         });
@@ -1110,13 +1111,13 @@ impl SeviathApp {
                 let label = params.iter().find(|p| p.0 == sel).map(|p| p.1.clone()).unwrap_or_default();
                 egui::ComboBox::from_id_salt("lip_param").selected_text(label).width(130.0).show_ui(ui, |ui| {
                     for p in &params {
-                        if ui.selectable_label(sel == p.0, &p.1).clicked() {
+                        if ui.selectable_label(sel == p.0, &p.1).help("Pick this one.").clicked() {
                             self.rigs.anim.lip_param = Some(p.0);
                         }
                     }
                 });
             });
-            if ui.button("Make the mouth from the sound").on_hover_text("A track for that slider: open when the sound is loud, shut when it is quiet").clicked() {
+            if ui.button("Make the mouth from the sound").help("A track for that slider: open when the sound is loud, shut when it is quiet").clicked() {
                 if let (Some((_, au)), Some((id, pname, lo, hi))) = (self.rigs.anim.audio.clone(), params.iter().find(|p| p.0 == sel).cloned()) {
                     let curve = au.mouth_open(a.fps.max(1.0), r.offset, a.length as usize);
                     let keys = self.anim_mut("Mouth from the sound").set_from_curve(id, &pname, &curve, lo, hi);
@@ -1141,13 +1142,13 @@ impl SeviathApp {
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut m.name).desired_width(110.0));
                 ui.label(RichText::new(format!("frame {}", m.frame)).size(11.5).color(TEXT_DIM));
-                if ui.small_button("Go").on_hover_text("Put the playhead here").clicked() {
+                if ui.small_button("Go").help("Put the playhead here").clicked() {
                     go = Some(m.frame);
                 }
-                if ui.small_button("Play this part").on_hover_text("The work area becomes this part").clicked() {
+                if ui.small_button("Play this part").help("The work area becomes this part").clicked() {
                     only = a.marker_range(i);
                 }
-                if ui.small_button("Delete").clicked() {
+                if ui.small_button("Delete").help("Delete this. Undo brings it back.").clicked() {
                     remove = Some(i);
                 }
             });
@@ -1172,7 +1173,7 @@ impl SeviathApp {
         section_title(ui, "Save the animation");
         ui.horizontal_wrapped(|ui| {
             for (i, n) in ["PNG pictures", "GIF", "MP4 video", "Sprite sheet"].iter().enumerate() {
-                if widgets::chip(ui, n, self.rigs.anim.export_kind == i as u8).clicked() {
+                if widgets::chip(ui, n, self.rigs.anim.export_kind == i as u8).help("Pick the kind of file the animation is saved as.").clicked() {
                     self.rigs.anim.export_kind = i as u8;
                 }
             }
@@ -1180,27 +1181,27 @@ impl SeviathApp {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Biggest side").size(12.0).color(TEXT_DIM));
             ui.add(egui::DragValue::new(&mut self.rigs.anim.export_side).range(64..=4096).speed(4.0).suffix(" px"));
-            ui.checkbox(&mut self.rigs.anim.export_work_area, "Only the part that plays");
+            ui.checkbox(&mut self.rigs.anim.export_work_area, "Only the part that plays").help("Save only the part inside the play range.");
             if self.rigs.anim.export_kind != 2 {
-                ui.checkbox(&mut self.rigs.anim.export_transparent, "See-through background");
+                ui.checkbox(&mut self.rigs.anim.export_transparent, "See-through background").help("The saved picture has no background color.");
             }
             if self.rigs.anim.export_kind == 3 {
                 ui.label(RichText::new("Columns").size(12.0).color(TEXT_DIM));
-                ui.add(egui::DragValue::new(&mut self.rigs.anim.export_cols).range(0..=64)).on_hover_text("0 chooses a square-ish sheet");
+                ui.add(egui::DragValue::new(&mut self.rigs.anim.export_cols).range(0..=64)).help("0 chooses a square-ish sheet");
             }
         });
         let busy = self.rigs.anim.job.is_some();
         if busy {
             let (n, total) = self.rigs.anim.job.as_ref().map(|j| (j.next, j.frames.len())).unwrap_or((0, 1));
             ui.add(egui::ProgressBar::new(n as f32 / total.max(1) as f32).text(format!("Frame {n} of {total}")));
-            if ui.button("Cancel").clicked() {
+            if ui.button("Cancel").help("Close this without doing anything.").clicked() {
                 self.anim_export_cancel();
             }
-        } else if ui.button("Save...").on_hover_text("Plays the animation frame by frame, with the physics, and writes it").clicked() {
+        } else if ui.button("Save...").help("Plays the animation frame by frame, with the physics, and writes it").clicked() {
             self.anim_export_start();
         }
         let have_bones = self.draw.doc.rig.anim.tracks.iter().any(|t| matches!(t.target, crate::anim::Target::Param(id) if self.draw.doc.rig.param(id).is_some_and(|p| p.name.starts_with("3D "))));
-        if have_bones && !busy && ui.button("Save the 3D bones as a VRM animation (.vrma)").on_hover_text("The keys of the 3D bones sliders as a VRM animation file that VRM apps and game engines play on any VRM model").clicked() {
+        if have_bones && !busy && ui.button("Save the 3D bones as a VRM animation (.vrma)").help("The keys of the 3D bones sliders as a VRM animation file that VRM apps and game engines play on any VRM model").clicked() {
             self.save_vrma();
         }
     }

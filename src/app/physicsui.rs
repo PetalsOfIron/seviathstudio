@@ -2,6 +2,7 @@
 // The Physics tab: pick parts, say what they are (hair, cloth, earring…), and they swing and lag when the head or body
 // moves. The preview is the Rig tab's picture; a test panel moves the head so you can see it.
 
+use crate::widgets::HelpExt;
 use std::collections::HashMap;
 
 use eframe::egui::{self, Color32, RichText, Sense, Ui, vec2};
@@ -186,8 +187,8 @@ impl SeviathApp {
         self.live2d_files_ui(ui, now);
         section_title(ui, "Physics");
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut self.rigs.phys.on, "Physics on").on_hover_text("Off: the picture only follows the sliders");
-            if ui.button("Reset").on_hover_text("Things hang still again").clicked() {
+            ui.checkbox(&mut self.rigs.phys.on, "Physics on").help("Off: the picture only follows the sliders");
+            if ui.button("Reset").help("Things hang still again").clicked() {
                 self.rigs.phys.sim.reset();
                 self.rigs.phys.offs.clear();
             }
@@ -198,7 +199,7 @@ impl SeviathApp {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
             for k in PKind::ALL {
-                if widgets::chip(ui, k.label(), self.rigs.phys.kind == k).on_hover_text(k.about()).clicked() {
+                if widgets::chip(ui, k.label(), self.rigs.phys.kind == k).help(k.about()).clicked() {
                     self.rigs.phys.kind = k;
                 }
             }
@@ -206,16 +207,16 @@ impl SeviathApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Material").size(12.0).color(TEXT_DIM));
             for m in Material::ALL {
-                if widgets::chip(ui, m.label(), self.rigs.phys.material == m).on_hover_text("Light cloth catches the wind. Heavy cloth hangs and moves slowly.").clicked() {
+                if widgets::chip(ui, m.label(), self.rigs.phys.material == m).help("Light cloth catches the wind. Heavy cloth hangs and moves slowly.").clicked() {
                     self.rigs.phys.material = m;
                 }
             }
         });
         ui.horizontal_wrapped(|ui| {
-            if ui.button(RichText::new("Make it move").strong()).on_hover_text("Adds a curve along each picked part and makes it swing").clicked() {
+            if ui.button(RichText::new("Make it move").strong()).help("Adds a curve along each picked part and makes it swing").clicked() {
                 self.add_physics(now);
             }
-            if ui.button("Hair and accessories from the tags").on_hover_text("Every part tagged as hair gets hair physics, every accessory a hanging one").clicked() {
+            if ui.button("Hair and accessories from the tags").help("Every part tagged as hair gets hair physics, every accessory a hanging one").clicked() {
                 self.add_physics_from_tags(now);
             }
         });
@@ -228,7 +229,7 @@ impl SeviathApp {
             section_title(ui, "Moving things");
             for (i, c) in rig.physics.iter().enumerate() {
                 ui.horizontal(|ui| {
-                    if widgets::chip(ui, &format!("{} ({})", c.name, c.kind.label()), self.rigs.phys.sel == Some(i)).clicked() {
+                    if widgets::chip(ui, &format!("{} ({})", c.name, c.kind.label()), self.rigs.phys.sel == Some(i)).help("Pick this choice.").clicked() {
                         self.rigs.phys.sel = Some(i);
                     }
                 });
@@ -243,17 +244,17 @@ impl SeviathApp {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
             for k in Wind::ALL {
-                if widgets::chip(ui, k.label(), w.wind == k).clicked() {
+                if widgets::chip(ui, k.label(), w.wind == k).help("Pick how the wind blows.").clicked() {
                     w.wind = k;
                 }
             }
         });
         ui.horizontal(|ui| {
             ui.label(RichText::new("Wind comes").size(12.0).color(TEXT_DIM));
-            if widgets::chip(ui, "From the left", w.wind_dir > 0.0).clicked() {
+            if widgets::chip(ui, "From the left", w.wind_dir > 0.0).help("The light comes from the left.").clicked() {
                 w.wind_dir = 1.0;
             }
-            if widgets::chip(ui, "From the right", w.wind_dir < 0.0).clicked() {
+            if widgets::chip(ui, "From the right", w.wind_dir < 0.0).help("The light comes from the right.").clicked() {
                 w.wind_dir = -1.0;
             }
         });
@@ -276,7 +277,7 @@ impl SeviathApp {
             for (i, (name, slider, ..)) in MOTIONS.iter().enumerate() {
                 let has = rig.params.iter().any(|p| p.name == *slider);
                 ui.add_enabled_ui(has, |ui| {
-                    if ui.button(*name).on_hover_text(if has { "Moves the head" } else { "Needs the face rig first" }).clicked() {
+                    if ui.button(*name).help(if has { "Moves the head" } else { "Needs the face rig first" }).clicked() {
                         self.rigs.phys.motion = Some((i, 0.0));
                     }
                 });
@@ -289,7 +290,7 @@ impl SeviathApp {
         section_title(ui, "Live2D files");
         ui.label(RichText::new("The swinging, expressions and motions of a Live2D model (a .model3.json with its files, as in a VTube Studio folder) can be put onto this rig. Sliders are matched by their Live2D ids.").size(11.5).color(TEXT_DIM));
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Add the files of a Live2D model...").on_hover_text("Pick the .model3.json: its physics, expressions, motions and VTube Studio settings are read").clicked() {
+            if ui.button("Add the files of a Live2D model...").help("Pick the .model3.json: its physics, expressions, motions and VTube Studio settings are read").clicked() {
                 if let Some(path) = rfd::FileDialog::new().set_title("A Live2D model (.model3.json)").set_directory(self.settings.projects_folder()).add_filter("Live2D model", &["json"]).pick_file() {
                     match crate::import::runtime::load_folder(&path) {
                         Ok(files) => {
@@ -314,10 +315,10 @@ impl SeviathApp {
         if !rig.param_physics.is_empty() {
             let mut pp = rig.param_physics.clone();
             ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut pp.on, "Live2D physics on");
+                ui.checkbox(&mut pp.on, "Live2D physics on").help("Turn the physics of the imported Live2D model on or off.");
                 ui.label(RichText::new("Strength").size(12.0).color(TEXT_DIM));
-                ui.add(egui::Slider::new(&mut pp.strength, 0.0..=2.0).show_value(false)).on_hover_text("1 is as the model was set up");
-                if ui.small_button("Settle").on_hover_text("The chains hang still again").clicked() {
+                ui.add(egui::Slider::new(&mut pp.strength, 0.0..=2.0).show_value(false)).help("1 is as the model was set up");
+                if ui.small_button("Settle").help("The chains hang still again").clicked() {
                     self.rigs.phys.param_state = Default::default();
                 }
             });
@@ -332,7 +333,7 @@ impl SeviathApp {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                 for e in &rig.expressions {
-                    if ui.small_button(&e.name).on_hover_text("Put this expression on the sliders (All sliders to the middle in the Rig tab takes it off)").clicked() {
+                    if ui.small_button(&e.name).help("Put this expression on the sliders (All sliders to the middle in the Rig tab takes it off)").clicked() {
                         for ep in &e.params {
                             if let Some(p) = rig.params.iter().find(|p| p.cid == ep.id) {
                                 let cur = self.rigs.values.0.get(&p.id).copied().unwrap_or(p.default);
@@ -356,11 +357,11 @@ impl SeviathApp {
         let mut n = c.clone();
         let row = |ui: &mut Ui, label: &str, tip: &str, v: &mut f32, hi: f32| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(label).size(12.0).color(TEXT_DIM)).on_hover_text(tip);
+                ui.label(RichText::new(label).size(12.0).color(TEXT_DIM)).help(tip);
                 ui.add(egui::Slider::new(v, 0.0..=hi).max_decimals(2));
             });
         };
-        ui.checkbox(&mut n.enabled, "This one moves");
+        ui.checkbox(&mut n.enabled, "This one moves").help("This part moves with the slider.");
         row(ui, "Stiff at the root", "How strongly the base is held in place", &mut n.stiff_root, 1.0);
         row(ui, "Stiff at the tip", "How strongly the end is held in place: low is floppy", &mut n.stiff_tip, 1.0);
         row(ui, "Slows down", "Higher: stops swinging sooner", &mut n.damping, 0.98);
@@ -369,7 +370,7 @@ impl SeviathApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Material").size(12.0).color(TEXT_DIM));
             for m in Material::ALL {
-                if widgets::chip(ui, m.label(), n.material == m).clicked() {
+                if widgets::chip(ui, m.label(), n.material == m).help("Pick what the layer is made of: it changes how light shows on it.").clicked() {
                     n = PhysChain { name: c.name.clone(), enabled: c.enabled, ..PhysChain::new(&c.name, c.kind, m, c.changer) };
                 }
             }
@@ -377,10 +378,10 @@ impl SeviathApp {
         let mut similar = false;
         let mut remove = false;
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Same for all of this type").on_hover_text("Copies these numbers to every other thing of the same type").clicked() {
+            if ui.button("Same for all of this type").help("Copies these numbers to every other thing of the same type").clicked() {
                 similar = true;
             }
-            if ui.button("Remove").on_hover_text("Takes the physics off this part").clicked() {
+            if ui.button("Remove").help("Takes the physics off this part").clicked() {
                 remove = true;
             }
         });
@@ -405,7 +406,7 @@ impl SeviathApp {
         section_title(ui, "Things that stop the hair");
         ui.label(RichText::new("Hair and cloth do not go through these round shapes.").size(11.5).color(TEXT_DIM));
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Face and body from the tags").on_hover_text("A circle over the face base and the torso").clicked() {
+            if ui.button("Face and body from the tags").help("A circle over the face base and the torso").clicked() {
                 let cs = self.colliders_from_tags();
                 if cs.is_empty() {
                     self.rigs.phys.message = Some("Tag a face base or a torso first (Parts tab).".into());
@@ -413,7 +414,7 @@ impl SeviathApp {
                     self.rig_edit("Colliders from the tags", now, |r| r.colliders = cs);
                 }
             }
-            if !self.draw.doc.rig.colliders.is_empty() && ui.button("Clear").clicked() {
+            if !self.draw.doc.rig.colliders.is_empty() && ui.button("Clear").help("Take everything away from this.").clicked() {
                 self.rig_edit("Clear colliders", now, |r| r.colliders.clear());
             }
         });

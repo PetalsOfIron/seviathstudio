@@ -105,6 +105,7 @@ pub fn apply_prefs(ctx: &egui::Context, set: &crate::settings::Settings) {
         s.animation_time = if set.reduced_motion { 0.0 } else { 1.0 / 12.0 };
         s.interaction.tooltip_delay = if set.show_tooltips { 0.5 } else { 1.0e9 };
     });
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("help_marks"), set.help_marks && set.show_tooltips));
     ctx.set_zoom_factor(set.ui_scale);
 }
 

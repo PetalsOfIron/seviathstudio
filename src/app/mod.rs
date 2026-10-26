@@ -2,6 +2,7 @@
 // App shell: top bar with the logo, workspace switch and tabs; status bar; undo history;
 // settings (saved to disk); account window.
 
+use crate::widgets::HelpExt;
 use eframe::egui::{self, Align, Align2, CornerRadius, FontId, Layout, Margin, Panel, RichText, Sense, Ui, vec2};
 
 use crate::history::{History, TabUndo};
@@ -27,6 +28,18 @@ mod fontmaker;
 mod newproject;
 mod partstab;
 mod gameui;
+mod animpage;
+mod generatetab;
+
+#[cfg(test)]
+pub fn generate_page_characters() -> generatetab::Page {
+    generatetab::Page::Characters
+}
+
+#[cfg(test)]
+pub fn generate_page_animations() -> generatetab::Page {
+    generatetab::Page::Animations
+}
 mod physicsui;
 mod prerigui;
 mod recording;
@@ -70,6 +83,7 @@ pub struct SeviathApp {
     parts: partstab::PartsState,
     prerig: prerigui::PreRig,
     rigs: rigtab::RigState,
+    genr: generatetab::GenerateUi,
     layout_name: String,
 }
 
@@ -119,6 +133,7 @@ impl SeviathApp {
             parts: Default::default(),
             prerig: Default::default(),
             rigs: Default::default(),
+            genr: Default::default(),
             layout_name: String::new(),
         }
     }
@@ -299,7 +314,7 @@ impl SeviathApp {
                 ui.add_space(8.0);
                 ui.spacing_mut().item_spacing.x = 4.0;
                 self.rec_light(ui);
-                if ui.add(egui::Button::new(RichText::new("Sign in").color(TEXT)).corner_radius(14)).on_hover_text("Account").clicked() {
+                if ui.add(egui::Button::new(RichText::new("Sign in").color(TEXT)).corner_radius(14)).help("Account").clicked() {
                     self.account_open = true;
                 }
                 if icon_button(ui, Icon::Settings, self.settings_open, 32.0, "Settings (Ctrl+,)").clicked() {
@@ -332,7 +347,7 @@ impl SeviathApp {
             for (group, label) in crate::filters::Group::ALL {
                 ui.menu_button(label, |ui| {
                     for def in crate::filters::FILTERS.iter().filter(|d| d.group == group) {
-                        if ui.button(def.label).on_hover_text(def.about).clicked() {
+                        if ui.button(def.label).help(def.about).clicked() {
                             self.tab = Tab::Draw;
                             self.workspace = Workspace::Character;
                             self.draw.open_filter(def.id);
@@ -440,7 +455,7 @@ impl SeviathApp {
                         );
                         let ago = ago(now - e.time);
                         p.text(row.right_center() - vec2(6.0, 0.0), Align2::RIGHT_CENTER, ago, FontId::proportional(10.5), TEXT_DIM);
-                        let resp = resp.on_hover_text(format!("{} tab{}", e.tab.label(), if applied { "" } else { " · undone (click to redo up to here)" }));
+                        let resp = resp.help(format!("{} tab{}", e.tab.label(), if applied { "" } else { " · undone (click to redo up to here)" }));
                         if resp.clicked() {
                             action = Some((false, i + 1));
                         }
@@ -462,7 +477,7 @@ impl SeviathApp {
                         p.rect_filled(row, CornerRadius::same(6), EMERALD_DEEP.gamma_multiply(0.6));
                     }
                     p.text(row.left_center() + vec2(24.0, 0.0), Align2::LEFT_CENTER, "Start", FontId::proportional(12.5), TEXT_DIM);
-                    if resp.on_hover_text("Before the oldest step kept").clicked() {
+                    if resp.help("Before the oldest step kept").clicked() {
                         action = Some((false, 0));
                     }
                 });
@@ -496,10 +511,10 @@ impl SeviathApp {
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Undo both").on_hover_text("Go back in time to before this step").clicked() {
+                if ui.button("Undo both").help("Go back in time to before this step").clicked() {
                     choice = Some(1);
                 }
-                if ui.button("Undo only this one").on_hover_text("Keep the other tabs' changes").clicked() {
+                if ui.button("Undo only this one").help("Keep the other tabs' changes").clicked() {
                     choice = Some(2);
                 }
                 if ui.button("Cancel").clicked() {
@@ -538,7 +553,7 @@ impl SeviathApp {
                             }
                         }
                         ui.add_space(16.0);
-                        if ui.small_button("Reset everything").on_hover_text("All settings back to default").clicked() {
+                        if ui.small_button("Reset everything").help("All settings back to default").clicked() {
                             self.settings = Settings::default();
                         }
                         if self.persist {
@@ -614,6 +629,7 @@ impl eframe::App for SeviathApp {
         self.apply_settings(&ctx);
         self.pen.update(&ctx);
         self.command_keys(&ctx);
+        self.gen_poll(&ctx, ctx.input(|i| i.time));
 
         Panel::top("top_bar")
             .exact_size(54.0)
@@ -643,6 +659,7 @@ impl eframe::App for SeviathApp {
             (_, Tab::Physics) => self.physics_ui(ui),
             (_, Tab::Animate) => self.anim_ui(ui),
             (_, Tab::Stream) => self.stream_ui(ui),
+            (_, Tab::Generate) => self.generate_ui(ui),
             (_, t) => tabs::placeholder::ui(ui, t),
         }
 

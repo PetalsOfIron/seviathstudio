@@ -92,6 +92,56 @@ fn pose_point(model: &Model3d, bone: usize, turn: &[f32], p: [f32; 3]) -> [f32; 
     }
 }
 
+/// How the skeleton is posed: a turn in the picture plane for some bones, or a full 3D turn (x, y, z in degrees as `motion.rs` gives them)
+/// for the bones and a move of the hips.
+enum Posing {
+    Plane(Vec<f32>),
+    Full(Vec<[f32; 3]>, [f32; 3]),
+}
+
+impl Posing {
+    fn active(&self) -> bool {
+        match self {
+            Posing::Plane(t) => t.iter().any(|v| *v != 0.0),
+            Posing::Full(r, h) => *h != [0.0; 3] || r.iter().any(|v| *v != [0.0; 3]),
+        }
+    }
+
+    /// Where a point of the model goes when it hangs on `bone`.
+    fn point(&self, model: &Model3d, bone: usize, p: [f32; 3]) -> [f32; 3] {
+        match self {
+            Posing::Plane(turn) => pose_point(model, bone, turn, p),
+            Posing::Full(rots, hips) => {
+                let q = pose_point3(model, bone, rots, p);
+                [q[0] + hips[0], q[1] + hips[1], q[2] + hips[2]]
+            }
+        }
+    }
+}
+
+/// A full 3D turn of the bones, parent after parent (the same as `pose_point`, with turns about every axis).
+fn pose_point3(model: &Model3d, bone: usize, rots: &[[f32; 3]], p: [f32; 3]) -> [f32; 3] {
+    let b = &model.bones[bone];
+    let d = [p[0] - b.pos[0], p[1] - b.pos[1], p[2] - b.pos[2]];
+    let r = crate::motion::euler_apply(rots[bone], d);
+    let q = [b.pos[0] + r[0], b.pos[1] + r[1], b.pos[2] + r[2]];
+    match b.parent {
+        Some(par) => pose_point3(model, par, rots, q),
+        None => q,
+    }
+}
+
+/// The character in a motion's frame (full 3D turns of the bones, the hips moved): `room` more than 1 leaves room above for a jump.
+pub fn render_motion(model: &Model3d, yaw_deg: f32, w: u32, h: u32, frame: &crate::motion::Frame, room: f32) -> RgbaImage {
+    let mut rots = vec![[0.0f32; 3]; model.bones.len()];
+    for (name, r) in &frame.rot {
+        if let Some(i) = model.bone(name) {
+            rots[i] = *r;
+        }
+    }
+    render_core(model, yaw_deg, w, h, &[], &Posing::Full(rots, frame.hips), room)
+}
+
 /// The same picture with the skeleton posed (the skin weights move the parts).
 pub fn render_posed(model: &Model3d, yaw_deg: f32, w: u32, h: u32, active: &[(&str, f32)], pose: &[(&str, f32)]) -> RgbaImage {
     let mut turn = vec![0.0f32; model.bones.len()];
@@ -100,11 +150,15 @@ pub fn render_posed(model: &Model3d, yaw_deg: f32, w: u32, h: u32, active: &[(&s
             turn[i] = *a;
         }
     }
+    render_core(model, yaw_deg, w, h, active, &Posing::Plane(turn), 1.0)
+}
+
+fn render_core(model: &Model3d, yaw_deg: f32, w: u32, h: u32, active: &[(&str, f32)], posing: &Posing, room: f32) -> RgbaImage {
     let mut img = RgbaImage::from_pixel(w, h, Rgba([244, 242, 236, 255]));
     let mut depth = vec![f32::MIN; (w * h) as usize];
     let (s, c) = yaw_deg.to_radians().sin_cos();
     let top = model.parts.iter().flat_map(|p| p.verts.iter().map(|v| v[1])).fold(0.0f32, f32::max).max(0.1);
-    let scale = h as f32 * 0.9 / top;
+    let scale = h as f32 * 0.9 / (top * room.max(1.0));
     for part in &model.parts {
         // the shapes of the expressions that are on
         let mut verts = part.verts.clone();
@@ -118,14 +172,14 @@ pub fn render_posed(model: &Model3d, yaw_deg: f32, w: u32, h: u32, active: &[(&s
             }
         }
         // the skeleton's pose moves the vertices by their skin weights
-        if turn.iter().any(|t| *t != 0.0) {
+        if posing.active() {
             let rest = verts.clone();
             for (i, v) in verts.iter_mut().enumerate() {
                 let mut acc = [0.0f32; 3];
                 for k in 0..4 {
                     let wt = part.weights[i][k];
                     if wt > 0.0 {
-                        let q = pose_point(model, part.joints[i][k] as usize, &turn, rest[i]);
+                        let q = posing.point(model, part.joints[i][k] as usize, rest[i]);
                         for a in 0..3 {
                             acc[a] += q[a] * wt;
                         }

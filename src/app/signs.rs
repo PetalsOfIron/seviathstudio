@@ -2,6 +2,7 @@
 // The Signatures window: draw your signature on a pad (pressure and timing are kept), keep it in one of
 // four slots, put it on the picture (stamp or written live), and set the rule that signs your exports.
 
+use crate::widgets::HelpExt;
 use eframe::egui::{self, Align2, Color32, Event, Pos2, RichText, Sense, Stroke, Vec2, vec2};
 
 use super::SeviathApp;
@@ -114,7 +115,7 @@ impl SeviathApp {
                     }
                     ui.separator();
                     ui.label(RichText::new("Clean").size(12.0).color(TEXT_DIM));
-                    ui.add(egui::Slider::new(&mut s.clean, 0.0..=1.0).show_value(false)).on_hover_text("Smooths the wobble and evens out the weight, but keeps your shapes");
+                    ui.add(egui::Slider::new(&mut s.clean, 0.0..=1.0).show_value(false)).help("Smooths the wobble and evens out the weight, but keeps your shapes");
                     if ui.button("Clean it").clicked() && !s.pad.is_empty() {
                         s.pad = s.pad.cleaned(s.clean);
                     }
@@ -155,16 +156,16 @@ impl SeviathApp {
                 size_row(ui, &mut rule);
                 ui.horizontal(|ui| {
                     let ok = !s.pad.is_empty();
-                    if ui.add_enabled(ok, egui::Button::new("Stamp it")).on_hover_text("A new layer you can still move, scale and turn").clicked() {
+                    if ui.add_enabled(ok, egui::Button::new("Stamp it")).help("A new layer you can still move, scale and turn").clicked() {
                         stamp = true;
                     }
-                    if ui.add_enabled(ok, egui::Button::new("Write it live")).on_hover_text("It is written on the picture again, with your timing (Esc: finish at once)").clicked() {
+                    if ui.add_enabled(ok, egui::Button::new("Write it live")).help("It is written on the picture again, with your timing (Esc: finish at once)").clicked() {
                         live = true;
                     }
                 });
 
                 section_title(ui, "Sign every export");
-                ui.checkbox(&mut rule.on, "Add my signature to exports of this project").on_hover_text("PNG, JPEG, WebP, PSD and OpenRaster. Turn it off here for one export.");
+                ui.checkbox(&mut rule.on, "Add my signature to exports of this project").help("PNG, JPEG, WebP, PSD and OpenRaster. Turn it off here for one export.");
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                     ui.label(RichText::new("Which").size(12.0).color(TEXT_DIM));

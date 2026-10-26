@@ -8,6 +8,7 @@ use eframe::egui::{
     Shape, Stroke, StrokeKind, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, pos2, vec2,
 };
 
+use crate::widgets::HelpExt;
 use super::{DrawState, Tool};
 use crate::doc::{LayerId, LayerKind};
 use crate::fill::{self, FillOpts};
@@ -952,14 +953,14 @@ impl DrawState {
                     ui.label("Soft edge");
                     ui.add(egui::Slider::new(&mut self.tools.feather, 0.0..=100.0).suffix(" px").max_decimals(0));
                 });
-                ui.checkbox(&mut self.tools.smooth, "Smooth edges (anti-aliasing)");
+                ui.checkbox(&mut self.tools.smooth, "Smooth edges (anti-aliasing)").help("Soft edges, no stairs.");
                 if self.tool == Tool::Select && self.tools.sel_shape == SelShape::Wand {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.label("Tolerance");
                         ui.add(egui::Slider::new(&mut self.tools.wand_tol, 0..=255));
                     });
-                    ui.checkbox(&mut self.tools.wand_contiguous, "Only the connected area");
+                    ui.checkbox(&mut self.tools.wand_contiguous, "Only the connected area").help("Only the area that touches the place you click.");
                     let mut all = self.tools.wand_all;
                     segmented(ui, &mut all, &[(true, "Look at all layers"), (false, "This layer only")]);
                     self.tools.wand_all = all;
@@ -1012,7 +1013,7 @@ impl DrawState {
                 if self.tools.floating.is_none() {
                     hint(ui, "Drag on the canvas to move the layer, or just the selected part of it. Arrow keys nudge after Ctrl+T.");
                     ui.add_space(6.0);
-                    if ui.button("Transform  (Ctrl+T)").clicked() {
+                    if ui.button("Transform  (Ctrl+T)").help("Move, scale or turn the layer (Ctrl+T).").clicked() {
                         self.start_transform();
                     }
                 } else {
@@ -1035,29 +1036,29 @@ impl DrawState {
     fn transform_buttons(&mut self, ui: &mut Ui, compact: bool) {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-            if ui.button(RichText::new("Apply").strong()).on_hover_text("Enter").clicked() {
+            if ui.button(RichText::new("Apply").strong()).help("Enter").clicked() {
                 self.apply_transform();
             }
-            if ui.button("Cancel").on_hover_text("Esc").clicked() {
+            if ui.button("Cancel").help("Esc").clicked() {
                 self.cancel_transform();
             }
             if let Some(f) = self.tools.floating.as_mut() {
-                if ui.button("Mirror sideways").clicked() {
+                if ui.button("Mirror sideways").help("Flip left to right.").clicked() {
                     f.flip_h();
                 }
-                if ui.button("Mirror up / down").clicked() {
+                if ui.button("Mirror up / down").help("Flip top to bottom.").clicked() {
                     f.flip_v();
                 }
                 if compact {
                     return;
                 }
-                if ui.button("Turn left").clicked() {
+                if ui.button("Turn left").help("Turn to the left.").clicked() {
                     f.rotate(-std::f32::consts::FRAC_PI_2);
                 }
-                if ui.button("Turn right").clicked() {
+                if ui.button("Turn right").help("Turn to the right.").clicked() {
                     f.rotate(std::f32::consts::FRAC_PI_2);
                 }
-                if ui.button("Reset").on_hover_text("Back to where it started").clicked() {
+                if ui.button("Reset").help("Back to where it started").clicked() {
                     let (x0, y0, x1, y1) = (f.x as f32, f.y as f32, (f.x + f.w as i32) as f32, (f.y + f.h as i32) as f32);
                     f.corners = [pos2(x0, y0), pos2(x1, y0), pos2(x1, y1), pos2(x0, y1)];
                 }
@@ -1070,40 +1071,40 @@ impl DrawState {
         let qm = self.quick_mask_idx().is_some();
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-            if !compact && ui.button("All").on_hover_text("Select everything (Ctrl+A)").clicked() {
+            if !compact && ui.button("All").help("Select everything (Ctrl+A)").clicked() {
                 self.select_all();
             }
-            if has && ui.button("Deselect").on_hover_text("Ctrl+D").clicked() {
+            if has && ui.button("Deselect").help("Ctrl+D").clicked() {
                 self.deselect();
             }
-            if (has || !compact) && ui.button("Invert").on_hover_text("Ctrl+Shift+I").clicked() {
+            if (has || !compact) && ui.button("Invert").help("Ctrl+Shift+I").clicked() {
                 self.invert_selection();
             }
             if has {
                 let px = self.tools.edit_px;
-                if ui.button("Grow").on_hover_text(format!("Bigger by {px:.0} px")).clicked() {
+                if ui.button("Grow").help(format!("Bigger by {px:.0} px")).clicked() {
                     self.grow_selection(px);
                 }
-                if ui.button("Shrink").on_hover_text(format!("Smaller by {px:.0} px")).clicked() {
+                if ui.button("Shrink").help(format!("Smaller by {px:.0} px")).clicked() {
                     self.grow_selection(-px);
                 }
-                if ui.button("Feather").on_hover_text(format!("Soft edge of {px:.0} px")).clicked() {
+                if ui.button("Feather").help(format!("Soft edge of {px:.0} px")).clicked() {
                     self.feather_selection(px);
                 }
             }
-            if ui.button("Fill").on_hover_text("Fill with the main color (Alt+Backspace)").clicked() {
+            if ui.button("Fill").help("Fill with the main color (Alt+Backspace)").clicked() {
                 self.fill_selected();
             }
-            if ui.button("Clear").on_hover_text("Erase what is selected (Delete)").clicked() {
+            if ui.button("Clear").help("Erase what is selected (Delete)").clicked() {
                 self.clear_selected();
             }
-            if ui.button("Transform").on_hover_text("Move, scale, turn, flip, distort (Ctrl+T)").clicked() {
+            if ui.button("Transform").help("Move, scale, turn, flip, distort (Ctrl+T)").clicked() {
                 self.start_transform();
             }
             let qm_label = if qm { "Quick mask off" } else { "Quick mask" };
             if ui
                 .add(egui::Button::new(qm_label).selected(qm))
-                .on_hover_text("Q: paint the selection with any brush (red = selected), Q again to finish")
+                .help("Q: paint the selection with any brush (red = selected), Q again to finish")
                 .clicked()
             {
                 self.toggle_quick_mask();
@@ -1147,7 +1148,7 @@ impl DrawState {
     pub(super) fn symmetry_button(&mut self, ui: &mut Ui) {
         let on = self.tools.sym.on();
         let tip = format!("Symmetry: {}", self.tools.sym.mode.label());
-        let r = icon_button(ui, Icon::Symmetry, on || self.tools.sym_open, 28.0, &tip);
+        let r = icon_button(ui, Icon::Symmetry, on || self.tools.sym_open, 28.0, &tip).help("Paint on both sides at once, mirrored.");
         if r.clicked() {
             self.tools.sym_open = !self.tools.sym_open;
         }
@@ -1172,7 +1173,7 @@ impl DrawState {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                     for (m, label, about) in SymMode::ALL {
-                        if widgets::chip(ui, label, s.mode == m).on_hover_text(about).clicked() {
+                        if widgets::chip(ui, label, s.mode == m).help(about).clicked() {
                             s.mode = m;
                         }
                     }
@@ -1192,7 +1193,7 @@ impl DrawState {
                         ui.add(egui::Slider::new(&mut s.angle, -180.0..=180.0).suffix("°").max_decimals(0));
                     });
                     ui.horizontal(|ui| {
-                        if ui.button("Center of the canvas").clicked() {
+                        if ui.button("Center of the canvas").help("Use the middle of the canvas as the center.").clicked() {
                             s.cx = (w / 2.0).round();
                             s.cy = (h / 2.0).round();
                             s.angle = 0.0;

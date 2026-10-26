@@ -3,6 +3,7 @@
 // background saving and loading, autosave recovery copies, the "save changes?" guard,
 // the New project dialog and the project manager.
 
+use crate::widgets::HelpExt;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
@@ -231,7 +232,7 @@ impl SeviathApp {
         }
     }
 
-    fn load_document(&mut self, doc: Document, path: Option<PathBuf>, name: String) {
+    pub(super) fn load_document(&mut self, doc: Document, path: Option<PathBuf>, name: String) {
         self.draw.replace_document(doc);
         self.history.clear();
         self.files.saved_generation = self.history.generation;
@@ -475,13 +476,13 @@ impl SeviathApp {
             ui.label(RichText::new(format!("You have unsaved changes {what}.")).color(TEXT_DIM));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button(RichText::new("Save").strong()).clicked() {
+                if ui.button(RichText::new("Save").strong()).help("Save it.").clicked() {
                     choice = 1;
                 }
-                if ui.button("Don't save").clicked() {
+                if ui.button("Don't save").help("Leave without saving: the changes are lost.").clicked() {
                     choice = 2;
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button("Cancel").help("Close this without doing anything.").clicked() {
                     choice = 3;
                 }
             });
@@ -661,7 +662,7 @@ impl SeviathApp {
                                 FontId::proportional(10.5),
                                 TEXT_DIM,
                             );
-                            let resp = resp.on_hover_text(path.display().to_string());
+                            let resp = resp.help(path.display().to_string());
                             if resp.double_clicked() || resp.clicked() {
                                 action = Some((0, path.clone()));
                             }
@@ -803,7 +804,7 @@ impl SeviathApp {
                 }
                 for r in recent {
                     let p = PathBuf::from(&r);
-                    if ui.button(stem(&p)).on_hover_text(&r).clicked() {
+                    if ui.button(stem(&p)).help(&r).clicked() {
                         ui.close();
                         self.request(Pending::Open(p));
                     }

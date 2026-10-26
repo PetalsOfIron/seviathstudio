@@ -103,6 +103,7 @@ pub const ACTIONS: &[ActionDef] = &[
     t("tab.4", "Go to the fourth tab", "Tabs", "Ctrl+4"),
     t("tab.5", "Go to the fifth tab", "Tabs", "Ctrl+5"),
     t("tab.6", "Go to the sixth tab", "Tabs", "Ctrl+6"),
+    t("tab.7", "Go to the seventh tab", "Tabs", "Ctrl+7"),
 ];
 
 pub fn def(id: &str) -> Option<&'static ActionDef> {

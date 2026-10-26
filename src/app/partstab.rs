@@ -2,6 +2,7 @@
 // The Parts tab: layers on the left, the picture in the middle with color codes, tags on the right.
 // "L" is the character's own left, which is on the right side of the picture.
 
+use crate::widgets::HelpExt;
 use std::collections::HashMap;
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, TextureHandle, TextureOptions, Ui, Vec2, pos2, vec2};
@@ -253,7 +254,7 @@ impl SeviathApp {
         // 0. the easy way
         section_title(ui, "Don't want to do it by hand?");
         ui.horizontal_wrapped(|ui| {
-            if ui.add(egui::Button::new(RichText::new("Tag everything for me").strong())).on_hover_text("Uses your name rules, then what the layer names say. You can undo it and change any tag.").clicked() {
+            if ui.add(egui::Button::new(RichText::new("Tag everything for me").strong())).help("Uses your name rules, then what the layer names say. You can undo it and change any tag.").clicked() {
                 let min = if self.parts.auto_guesses { 0.3 } else { 0.7 };
                 let found = parts::suggest_with(&self.draw.doc.layers, self.draw.doc.w, self.draw.doc.h, false, &self.parts.rules);
                 let take: Vec<Suggestion> = found.iter().filter(|s| s.confidence >= min).cloned().collect();
@@ -281,7 +282,7 @@ impl SeviathApp {
                 ("Tidy for rigging", false, "For a finished drawing with many layers for every part: tags every layer from its name and the folders around it. The order of your layers, the folders, the blend modes and the opacity are not changed. A layer that is clipped to another is tagged like its base and it stays clipped, as in the file. One step in the history."),
                 ("Also put each part together", true, "Tags the layers like Tidy for rigging, and then puts the layers of one part together into one layer, but only where no other part lies between them in the stack (so the picture does not change). A smaller model for a game. One step in the history."),
             ] {
-                if ui.add(egui::Button::new(if merge { RichText::new(label) } else { RichText::new(label).strong() })).on_hover_text(tip).clicked() {
+                if ui.add(egui::Button::new(if merge { RichText::new(label) } else { RichText::new(label).strong() })).help(tip).clicked() {
                     let rules = self.parts.rules.clone();
                     let mut report = None;
                     self.parts_edit(label, now, |d| report = Some(crate::prepare::tidy(d, &rules, merge)));
@@ -304,7 +305,7 @@ impl SeviathApp {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                 for p in Part::ALL.iter().filter(|p| p.group() == g) {
-                    if widgets::chip(ui, p.label(), current == Some(*p)).on_hover_text(if p.is_left() { "L is the character's left: the right side of the picture" } else { "" }).clicked() {
+                    if widgets::chip(ui, p.label(), current == Some(*p)).help(if p.is_left() { "L is the character's left: the right side of the picture" } else { "" }).clicked() {
                         *act_tag = Some(*p);
                     }
                 }
@@ -317,7 +318,7 @@ impl SeviathApp {
         // 2. suggestions
         section_title(ui, "Suggestions");
         ui.horizontal(|ui| {
-            if ui.button("Suggest tags").on_hover_text("From the layer names, their shape and where they are on the page").clicked() {
+            if ui.button("Suggest tags").help("From the layer names, their shape and where they are on the page").clicked() {
                 let again = self.parts.redo_tagged;
                 self.parts.suggestions = parts::suggest_with(&self.draw.doc.layers, self.draw.doc.w, self.draw.doc.h, again, &self.parts.rules);
                 self.parts.message = Some(if self.parts.suggestions.is_empty() { "Nothing to suggest.".into() } else { format!("{} suggestions.", self.parts.suggestions.len()) });
@@ -334,7 +335,7 @@ impl SeviathApp {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(if s.confidence >= 0.7 { "sure" } else { "maybe" }).size(11.0).color(if s.confidence >= 0.7 { VENOM } else { TEXT_DIM }));
                 let r = ui.label(format!("{name}: {}", s.part.label()));
-                r.on_hover_text(&s.reason);
+                r.help(&s.reason);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("No").clicked() {
                         dismiss = Some(i);
@@ -407,11 +408,11 @@ impl SeviathApp {
                 ui.label(RichText::new(if c.level == Level::Needs { "Must" } else { "Tip" }).size(11.0).color(if c.level == Level::Needs { Color32::from_rgb(235, 110, 90) } else { TEXT_DIM }));
                 ui.label(RichText::new(&c.text).size(12.5));
                 if let Some(id) = c.jump {
-                    if ui.small_button("Show").on_hover_text("Pick the layer here").clicked() {
+                    if ui.small_button("Show").help("Pick the layer here").clicked() {
                         *picked = Some((id, false, false));
                         self.parts.flash = Some(id);
                     }
-                    if ui.small_button("Draw tab").on_hover_text("Go to this layer in the Draw tab").clicked() {
+                    if ui.small_button("Draw tab").help("Go to this layer in the Draw tab").clicked() {
                         self.draw.focus_layer(id);
                         self.tab = Tab::Draw;
                     }
@@ -468,7 +469,7 @@ impl SeviathApp {
         section_title(ui, "Tag templates");
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.parts.tpl_name).hint_text("Template name").desired_width(140.0).char_limit(40));
-            if ui.button("Save").on_hover_text("Keeps the tags by layer name, to use on another project").clicked() {
+            if ui.button("Save").help("Keeps the tags by layer name, to use on another project").clicked() {
                 let t = parts::template_from(&self.parts.tpl_name, &self.draw.doc.layers);
                 self.parts.message = Some(match parts::save_template_in(&parts::templates_dir(), &t) {
                     Ok(()) => {
@@ -488,7 +489,7 @@ impl SeviathApp {
                     if ui.small_button("Delete").clicked() {
                         delete = Some(t.name.clone());
                     }
-                    if ui.small_button("Use").on_hover_text("Tags the layers that have the same names").clicked() {
+                    if ui.small_button("Use").help("Tags the layers that have the same names").clicked() {
                         apply = Some(t.clone());
                     }
                 });
@@ -506,7 +507,7 @@ impl SeviathApp {
 
         // 6. the improver
         section_title(ui, "Before rigging");
-        if ui.button("Pre-rig improver").on_hover_text("Finds stray pixels, tiny holes, nearly invisible pixels and light or dark edges. Nothing changes until you say so.").clicked() {
+        if ui.button("Pre-rig improver").help("Finds stray pixels, tiny holes, nearly invisible pixels and light or dark edges. Nothing changes until you say so.").clicked() {
             self.open_prerig();
         }
 

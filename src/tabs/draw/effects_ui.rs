@@ -2,6 +2,7 @@
 // The Effects part of the layer panel (shadow, glow, outline, overlays on a pixel layer) and the
 // settings of an adjustment layer. Everything here is non-destructive: see effects.rs.
 
+use crate::widgets::HelpExt;
 use eframe::egui::{self, Color32, RichText, Ui};
 
 use super::DrawState;
@@ -64,7 +65,7 @@ fn effect_controls(ui: &mut Ui, e: &mut FxKind) {
             slider(ui, "Width", width, 0.0..=effects::OUTLINE_WIDTH, " px");
             row(ui, "Where", |ui| {
                 for (p, name) in Place::ALL {
-                    if widgets::chip(ui, name, *place == p).clicked() {
+                    if widgets::chip(ui, name, *place == p).help("Pick where it goes.").clicked() {
                         *place = p;
                     }
                 }
@@ -145,7 +146,7 @@ impl DrawState {
         p.line_segment([c, at], egui::Stroke::new(1.5, GOLD.gamma_multiply(0.6)));
         p.circle_filled(at, 7.0, GOLD);
         p.circle_stroke(at, 7.0, egui::Stroke::new(1.5, Color32::BLACK.gamma_multiply(0.5)));
-        resp.on_hover_text("Drag the sun. The middle is straight above the drawing, the edge is low and from the side.");
+        resp.help("Drag the sun. The middle is straight above the drawing, the edge is low and from the side.");
     }
 
     /// Effects of the selected pixel layer, or the settings of the selected adjustment layer.
@@ -154,7 +155,7 @@ impl DrawState {
         if matches!(self.doc.layers[i].kind, LayerKind::Raster | LayerKind::Vector) && self.doc.layers[i].lightfx.is_none() {
             ui.add_space(4.0);
             let mut solid = self.doc.layers[i].solid;
-            if ui.checkbox(&mut solid, "Blocks light").on_hover_text("Casts shadows and stops the beams of shadow and ray layers").changed() {
+            if ui.checkbox(&mut solid, "Blocks light").help("Casts shadows and stops the beams of shadow and ray layers").changed() {
                 self.doc.layers[i].solid = solid;
                 self.doc.mark_all_dirty();
             }
@@ -170,7 +171,7 @@ impl DrawState {
                     ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
                     for fid in effects::ADJUSTMENTS {
                         let Some(d) = filters::find(fid) else { continue };
-                        if widgets::chip(ui, d.label, now.id == fid).on_hover_text(d.about).clicked() && now.id != fid {
+                        if widgets::chip(ui, d.label, now.id == fid).help(d.about).clicked() && now.id != fid {
                             now = Adjust::new(fid).unwrap_or_else(|| now.clone());
                         }
                     }
@@ -206,7 +207,7 @@ impl DrawState {
                     ui.vertical(|ui| {
                         color(ui, "Shadow", &mut l.shadow);
                         color(ui, "Highlight", &mut l.highlight);
-                        if ui.small_button("Reset").clicked() {
+                        if ui.small_button("Reset").help("Put the settings back to how they were.").clicked() {
                             l = Light::default();
                         }
                     });
@@ -230,7 +231,7 @@ impl DrawState {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     for k in [crate::lightfx::LightKind::Shadow, crate::lightfx::LightKind::Glow, crate::lightfx::LightKind::Rays] {
-                        if widgets::chip(ui, k.name(), f.kind == k).on_hover_text(k.about()).clicked() && f.kind != k {
+                        if widgets::chip(ui, k.name(), f.kind == k).help(k.about()).clicked() && f.kind != k {
                             f = crate::lightfx::LightFx { show_shape: f.show_shape, ..crate::lightfx::LightFx::new(k) };
                         }
                     }
@@ -247,7 +248,7 @@ impl DrawState {
                 match f.kind {
                     crate::lightfx::LightKind::Shadow => {
                         percent(ui, "Depth", &mut f.depth);
-                        ui.checkbox(&mut f.from_solid, "Cast from layers that block light");
+                        ui.checkbox(&mut f.from_solid, "Cast from layers that block light").help("Shadows come from layers that block light.");
                     }
                     crate::lightfx::LightKind::Rays => {
                         percent(ui, "Streaks", &mut f.beams);
@@ -256,7 +257,7 @@ impl DrawState {
                     }
                     crate::lightfx::LightKind::Glow => {}
                 }
-                ui.checkbox(&mut f.show_shape, "Show what I painted");
+                ui.checkbox(&mut f.show_shape, "Show what I painted").help("Show the paint you added by hand on the 3D character.");
                 ui.label(RichText::new("Paint the shape in any color. The light is your Light layer (or from the upper left). Mark layers that should stop light with Blocks light.").size(11.0).color(TEXT_DIM));
                 if f != before {
                     self.doc.layers[i].lightfx = Some(f.sanitized());
@@ -272,7 +273,7 @@ impl DrawState {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
                     for p in crate::material::presets() {
-                        if widgets::chip(ui, &p.name, m.name == p.name).clicked() {
+                        if widgets::chip(ui, &p.name, m.name == p.name).help("Use this preset.").clicked() {
                             m = p;
                         }
                     }
@@ -302,7 +303,7 @@ impl DrawState {
                 slider(ui, "Roundness", &mut m.round, 0.0..=crate::material::MAX_ROUND, " px (0 = auto)");
                 slider(ui, "Relief", &mut m.bump, 0.0..=crate::material::MAX_BUMP, "");
                 let mut use_base = m.base.is_some();
-                if ui.checkbox(&mut use_base, "Use a fixed color").on_hover_text("Off: the color you paint with is the base color").changed() {
+                if ui.checkbox(&mut use_base, "Use a fixed color").help("Off: the color you paint with is the base color").changed() {
                     m.base = use_base.then(|| m.base.unwrap_or([200, 200, 200]));
                 }
                 if let Some(b) = &mut m.base {
@@ -321,12 +322,12 @@ impl DrawState {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     for (name, v) in [("Near", 255u8), ("Middle", 128), ("Far", 0)] {
-                        if widgets::chip(ui, name, false).on_hover_text("Set the paint color to this depth").clicked() {
+                        if widgets::chip(ui, name, false).help("Set the paint color to this depth").clicked() {
                             self.primary = Color32::from_gray(v);
                         }
                     }
                 });
-                ui.checkbox(&mut self.doc.layers[i].depth, "This is a depth layer").on_hover_text("Off: it becomes a normal layer again");
+                ui.checkbox(&mut self.doc.layers[i].depth, "This is a depth layer").help("Off: it becomes a normal layer again");
                 ui.label(RichText::new("Hidden in the drawing unless it is selected. Add a Light layer above it to see the shading.").size(11.0).color(TEXT_DIM));
             }
             LayerKind::Raster | LayerKind::Vector => {
@@ -337,7 +338,7 @@ impl DrawState {
                     section_title(ui, "Effects");
                     ui.menu_button("Add effect", |ui| {
                         for p in Effect::presets() {
-                            if ui.button(p.name()).clicked() && fx.len() < effects::MAX_EFFECTS {
+                            if ui.button(p.name()).help("Add this effect to the layer.").clicked() && fx.len() < effects::MAX_EFFECTS {
                                 fx.push(p);
                                 ui.close();
                             }
@@ -353,11 +354,11 @@ impl DrawState {
                     egui::Frame::new().fill(CARD).corner_radius(6).inner_margin(6).show(ui, |ui| {
                         ui.horizontal(|ui| {
                             let name = e.name();
-                            ui.checkbox(&mut e.on, RichText::new(name).strong());
-                            if n > 0 && ui.small_button("Up").on_hover_text("Draw this effect earlier").clicked() {
+                            ui.checkbox(&mut e.on, RichText::new(name).strong()).help("Switch this on or off.");
+                            if n > 0 && ui.small_button("Up").help("Draw this effect earlier").clicked() {
                                 up = Some(n);
                             }
-                            if ui.small_button("Remove").clicked() {
+                            if ui.small_button("Remove").help("Take this out of the list.").clicked() {
                                 remove = Some(n);
                             }
                         });

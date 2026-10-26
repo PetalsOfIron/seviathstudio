@@ -2,6 +2,7 @@
 // The New project dialog (templates, print size and DPI, background, guides, rig-ready folders,
 // your own templates) and the Project info window (DPI, notes, tags, guides, autosave).
 
+use crate::widgets::HelpExt;
 use eframe::egui::{self, Align2, RichText, vec2};
 
 use super::SeviathApp;
@@ -47,7 +48,7 @@ fn dpi_row(ui: &mut egui::Ui, dpi: &mut u32) {
         ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
         ui.label("DPI");
         for d in DPI_CHOICES {
-            if widgets::chip(ui, &d.to_string(), *dpi == d).clicked() {
+            if widgets::chip(ui, &d.to_string(), *dpi == d).help("Set the sharpness of the page in dots per inch.").clicked() {
                 *dpi = d;
             }
         }
@@ -92,7 +93,7 @@ impl SeviathApp {
                 ui.horizontal(|ui| {
                     ui.label("Name");
                     ui.add(egui::TextEdit::singleline(&mut np.form.name).desired_width(280.0).char_limit(80));
-                    if ui.button(RichText::new("Create").strong()).clicked() {
+                    if ui.button(RichText::new("Create").strong()).help("Make it with these settings.").clicked() {
                         create = true;
                     }
                 });
@@ -104,7 +105,7 @@ impl SeviathApp {
                         for b in BUILTIN {
                             let on = f.w == b.w && f.h == b.h && f.dpi == b.dpi;
                             let tip = format!("{} × {} px · {} DPI · {}", b.w, b.h, b.dpi, real_size(b.w, b.h, b.dpi));
-                            if widgets::chip(ui, b.name, on).on_hover_text(tip).clicked() {
+                            if widgets::chip(ui, b.name, on).help(tip).clicked() {
                                 f.use_builtin(b);
                             }
                         }
@@ -114,16 +115,16 @@ impl SeviathApp {
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                             for t in &np.templates {
-                                let r = widgets::chip(ui, &t.name, false).on_hover_text("Click to use · right-click for more");
+                                let r = widgets::chip(ui, &t.name, false).help("Click to use · right-click for more");
                                 if r.clicked() {
                                     use_tpl = Some(t.clone());
                                 }
                                 r.context_menu(|ui| {
-                                    if ui.button("Export to a file…").clicked() {
+                                    if ui.button("Export to a file…").help("Save this as a file you can share.").clicked() {
                                         export_tpl = Some(t.clone());
                                         ui.close();
                                     }
-                                    if ui.button("Delete this template").clicked() {
+                                    if ui.button("Delete this template").help("Delete this template for good.").clicked() {
                                         delete_tpl = Some(t.name.clone());
                                         ui.close();
                                     }
@@ -138,7 +139,7 @@ impl SeviathApp {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         ui.label("Type sizes in");
                         for (u, label) in Unit::ALL {
-                            if widgets::chip(ui, label, f.unit == u).clicked() {
+                            if widgets::chip(ui, label, f.unit == u).help("Pick the unit.").clicked() {
                                 f.unit = u;
                             }
                         }
@@ -157,7 +158,7 @@ impl SeviathApp {
                         if b.changed() {
                             f.h = f.unit.to_px(vh, f.dpi).round().clamp(16.0, files::MAX_SIDE as f32) as u32;
                         }
-                        if ui.small_button("Swap").on_hover_text("Switch portrait and landscape").clicked() {
+                        if ui.small_button("Swap").help("Switch portrait and landscape").clicked() {
                             std::mem::swap(&mut f.w, &mut f.h);
                         }
                     });
@@ -172,7 +173,7 @@ impl SeviathApp {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                         for p in &colorprofiles::RGB_PROFILES {
-                            if widgets::chip(ui, p.name, f.rgb_profile == p.id).on_hover_text(p.about).clicked() {
+                            if widgets::chip(ui, p.name, f.rgb_profile == p.id).help(p.about).clicked() {
                                 f.rgb_profile = p.id.into();
                             }
                         }
@@ -186,13 +187,13 @@ impl SeviathApp {
                         let is_paper = matches!(f.bg, Background::Paper(_));
                         let is_clear = f.bg == Background::Transparent;
                         let is_grad = matches!(f.bg, Background::Gradient { .. });
-                        if widgets::chip(ui, "Paper", is_paper).clicked() && !is_paper {
+                        if widgets::chip(ui, "Paper", is_paper).help("Show the paper color of the page.").clicked() && !is_paper {
                             f.bg = Background::Paper([255, 255, 255]);
                         }
-                        if widgets::chip(ui, "Transparent", is_clear).clicked() {
+                        if widgets::chip(ui, "Transparent", is_clear).help("No background color.").clicked() {
                             f.bg = Background::Transparent;
                         }
-                        if widgets::chip(ui, "Gradient", is_grad).on_hover_text("A top-to-bottom two-color start on its own layer").clicked() && !is_grad {
+                        if widgets::chip(ui, "Gradient", is_grad).help("A top-to-bottom two-color start on its own layer").clicked() && !is_grad {
                             f.bg = Background::Gradient { top: [255, 255, 255], bottom: [170, 200, 235] };
                         }
                         match &mut f.bg {
@@ -211,13 +212,13 @@ impl SeviathApp {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                         for (p, label, about) in GuidePreset::ALL {
-                            if widgets::chip(ui, label, f.guides == p).on_hover_text(about).clicked() {
+                            if widgets::chip(ui, label, f.guides == p).help(about).clicked() {
                                 f.guides = p;
                             }
                         }
                     });
                     ui.checkbox(&mut f.rig_starter, "Rig-ready folders (hair, brows, eyes, nose and mouth, face, body)")
-                        .on_hover_text("Pre-made, color-labeled folders so every part of a character has its place from the first stroke");
+                        .help("Pre-made, color-labeled folders so every part of a character has its place from the first stroke");
                     ui.add_space(4.0);
 
                     section_title(ui, "Notes and tags");
@@ -231,10 +232,10 @@ impl SeviathApp {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut np.tpl_name).hint_text("Template name").desired_width(150.0).char_limit(40));
-                    if ui.add_enabled(!np.tpl_name.trim().is_empty(), egui::Button::new("Save as my template")).on_hover_text("Size, DPI, background, guides, folders and tags").clicked() {
+                    if ui.add_enabled(!np.tpl_name.trim().is_empty(), egui::Button::new("Save as my template")).help("Size, DPI, background, guides, folders and tags").clicked() {
                         save_tpl = true;
                     }
-                    if ui.button("Import…").on_hover_text("A template file someone shared").clicked() {
+                    if ui.button("Import…").help("A template file someone shared").clicked() {
                         import = true;
                     }
                 });
@@ -332,21 +333,21 @@ impl SeviathApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                     for p in &colorprofiles::RGB_PROFILES {
-                        if widgets::chip(ui, p.name, d.meta.rgb_profile == p.id).on_hover_text(p.about).clicked() {
+                        if widgets::chip(ui, p.name, d.meta.rgb_profile == p.id).help(p.about).clicked() {
                             d.meta.rgb_profile = p.id.into();
                         }
                     }
                 });
                 ui.label(RichText::new(colorprofiles::rgb_profile(&d.meta.rgb_profile).about).size(11.5).color(TEXT_DIM));
                 if d.meta.rgb_profile != "srgb" {
-                    ui.checkbox(&mut d.meta.export_bake, "Turn into plain sRGB when exporting").on_hover_text("For apps and websites that ignore profiles. Off: the profile travels inside the PNG / JPEG file.");
+                    ui.checkbox(&mut d.meta.export_bake, "Turn into plain sRGB when exporting").help("For apps and websites that ignore profiles. Off: the profile travels inside the PNG / JPEG file.");
                 }
                 ui.add_space(2.0);
                 ui.label(RichText::new("Print press (for the print proof in the eye menu)").size(12.0).color(TEXT_DIM));
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                     for p in &colorprofiles::PRESSES {
-                        if widgets::chip(ui, p.name, d.meta.cmyk_profile == p.id).on_hover_text(p.about).clicked() {
+                        if widgets::chip(ui, p.name, d.meta.cmyk_profile == p.id).help(p.about).clicked() {
                             d.meta.cmyk_profile = p.id.into();
                         }
                     }
@@ -354,7 +355,7 @@ impl SeviathApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                     for (i, id, label, about) in colorprofiles::Intent::ALL {
-                        if widgets::chip(ui, label, d.meta.intent == id).on_hover_text(about).clicked() {
+                        if widgets::chip(ui, label, d.meta.intent == id).help(about).clicked() {
                             d.meta.intent = id.into();
                             let _ = i;
                         }
@@ -375,22 +376,22 @@ impl SeviathApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                     for (p, label, about) in GuidePreset::ALL {
-                        if widgets::chip(ui, label, false).on_hover_text(about).clicked() {
+                        if widgets::chip(ui, label, false).help(about).clicked() {
                             d.meta.guides = p.build(w, h);
                         }
                     }
                 });
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    if widgets::chip(ui, "Vertical", d.guide_vertical).clicked() {
+                    if widgets::chip(ui, "Vertical", d.guide_vertical).help("Go up and down.").clicked() {
                         d.guide_vertical = true;
                     }
-                    if widgets::chip(ui, "Horizontal", !d.guide_vertical).clicked() {
+                    if widgets::chip(ui, "Horizontal", !d.guide_vertical).help("Go sideways.").clicked() {
                         d.guide_vertical = false;
                     }
                     let max = if d.guide_vertical { w } else { h } as f32;
                     ui.add(egui::DragValue::new(&mut d.guide_pos).range(0.0..=max).speed(5.0).suffix(" px").max_decimals(0));
-                    if ui.button("Add").clicked() && d.meta.guides.len() < 200 {
+                    if ui.button("Add").help("Add it to the list.").clicked() && d.meta.guides.len() < 200 {
                         d.meta.guides.push(Guide { vertical: d.guide_vertical, pos: d.guide_pos.round() });
                     }
                 });
@@ -402,7 +403,7 @@ impl SeviathApp {
                         ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                         for (i, g) in d.meta.guides.iter().enumerate() {
                             let label = format!("{} {:.0}", if g.vertical { "x" } else { "y" }, g.pos);
-                            if widgets::chip(ui, &label, false).on_hover_text("Click to remove").clicked() {
+                            if widgets::chip(ui, &label, false).help("Click to remove").clicked() {
                                 remove = Some(i);
                             }
                         }
@@ -410,7 +411,7 @@ impl SeviathApp {
                     if let Some(i) = remove {
                         d.meta.guides.remove(i);
                     }
-                    if ui.small_button("Remove all").clicked() {
+                    if ui.small_button("Remove all").help("Take everything out of the list.").clicked() {
                         d.meta.guides.clear();
                     }
                 }
@@ -418,7 +419,7 @@ impl SeviathApp {
                 ui.add_space(4.0);
 
                 section_title(ui, "Autosave for this project");
-                ui.checkbox(&mut d.own_autosave, "Use its own autosave settings instead of the global ones");
+                ui.checkbox(&mut d.own_autosave, "Use its own autosave settings instead of the global ones").help("This project saves by itself with its own rules.");
                 if d.own_autosave {
                     let mut minutes = d.meta.autosave_minutes.unwrap_or(global_minutes);
                     let mut copies = d.meta.recovery_copies.unwrap_or(global_copies);
@@ -438,10 +439,10 @@ impl SeviathApp {
                 }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button(RichText::new("Apply").strong()).clicked() {
+                    if ui.button(RichText::new("Apply").strong()).help("Use these settings now.").clicked() {
                         apply = true;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button("Cancel").help("Close this without doing anything.").clicked() {
                         cancel = true;
                     }
                 });

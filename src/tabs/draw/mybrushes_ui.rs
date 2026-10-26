@@ -3,6 +3,7 @@
 // credit and license, share it as a brush card or file, bring brushes in, remix, and make a stamp
 // brush from a picture or from what you have selected.
 
+use crate::widgets::HelpExt;
 use eframe::egui::{self, Color32, RichText, Ui, vec2};
 
 use super::DrawState;
@@ -222,23 +223,23 @@ impl DrawState {
             });
             ui.add(egui::TextEdit::multiline(&mut self.lib.meta.terms).hint_text("Terms of use (optional)").desired_rows(2).desired_width(f32::INFINITY).char_limit(1000));
             ui.horizontal_wrapped(|ui| {
-                if widgets::chip(ui, "Save to My brushes", false).on_hover_text("A new name makes a new brush, the same name replaces it").clicked() {
+                if widgets::chip(ui, "Save to My brushes", false).help("A new name makes a new brush, the same name replaces it").clicked() {
                     self.save_current_brush();
                 }
-                if is_mine && widgets::chip(ui, "Delete", false).on_hover_text("Remove this brush from My brushes").clicked() {
+                if is_mine && widgets::chip(ui, "Delete", false).help("Remove this brush from My brushes").clicked() {
                     let name = self.lib.mem[sl].name.clone();
                     userlib::delete_in(&userlib::dir(), &name);
                     self.reload_user_brushes();
                     self.lib.status = format!("Removed \"{name}\".");
                 }
-                if widgets::chip(ui, "Remix", false).on_hover_text("A close cousin of this brush: small changes to many settings").clicked() {
+                if widgets::chip(ui, "Remix", false).help("A close cousin of this brush: small changes to many settings").clicked() {
                     self.lib.roll_count = self.lib.roll_count.wrapping_add(1);
                     let seed = self.lib.roll_count.wrapping_mul(2_654_435_761).wrapping_add(self.lib.mem[sl].s.seed);
                     crate::brush::random::remix(&mut self.lib.mem[sl].s, seed, 0.25);
                 }
             });
             ui.horizontal_wrapped(|ui| {
-                if widgets::chip(ui, "Brush card…", false).on_hover_text("A picture of the brush with the brush inside it: share it anywhere").clicked() {
+                if widgets::chip(ui, "Brush card…", false).help("A picture of the brush with the brush inside it: share it anywhere").clicked() {
                     let b = self.current_user_brush();
                     if let Some(p) = rfd::FileDialog::new().set_title("Save a brush card").set_file_name(format!("{}.png", userlib::slug(&b.name))).add_filter("Brush card", &["png"]).save_file() {
                         self.lib.status = match userlib::card_png(&b, &card_picture(&b)).and_then(|bytes| std::fs::write(&p, bytes).map_err(|e| e.to_string())) {
@@ -247,7 +248,7 @@ impl DrawState {
                         };
                     }
                 }
-                if widgets::chip(ui, "Brush file…", false).on_hover_text("The brush as a small .seviathbrush file").clicked() {
+                if widgets::chip(ui, "Brush file…", false).help("The brush as a small .seviathbrush file").clicked() {
                     let b = self.current_user_brush();
                     if let Some(p) = rfd::FileDialog::new().set_title("Save a brush file").set_file_name(format!("{}.{}", userlib::slug(&b.name), userlib::EXT)).add_filter("SeviathStudio brush", &[userlib::EXT]).save_file() {
                         self.lib.status = match std::fs::write(&p, userlib::to_json(&[b])) {
@@ -256,7 +257,7 @@ impl DrawState {
                         };
                     }
                 }
-                if widgets::chip(ui, "For Photoshop (.abr)…", false).on_hover_text("A Photoshop brush file; Clip Studio Paint opens these too. Tip, size, spacing and pressure go across.").clicked() {
+                if widgets::chip(ui, "For Photoshop (.abr)…", false).help("A Photoshop brush file; Clip Studio Paint opens these too. Tip, size, spacing and pressure go across.").clicked() {
                     let b = self.current_user_brush();
                     if let Some(p) = rfd::FileDialog::new().set_title("Save a Photoshop brush").set_file_name(format!("{}.abr", userlib::slug(&b.name))).add_filter("Photoshop brushes", &["abr"]).save_file() {
                         self.lib.status = match std::fs::write(&p, crate::brush::formats::to_abr(&[b])) {
@@ -265,7 +266,7 @@ impl DrawState {
                         };
                     }
                 }
-                if widgets::chip(ui, "For Krita (.kpp)…", false).on_hover_text("A Krita brush preset with the tip inside").clicked() {
+                if widgets::chip(ui, "For Krita (.kpp)…", false).help("A Krita brush preset with the tip inside").clicked() {
                     let b = self.current_user_brush();
                     if let Some(p) = rfd::FileDialog::new().set_title("Save a Krita brush").set_file_name(format!("{}.kpp", userlib::slug(&b.name))).add_filter("Krita presets", &["kpp"]).save_file() {
                         self.lib.status = match crate::brush::formats::to_kpp(&b, &card_picture(&b)).and_then(|bytes| std::fs::write(&p, bytes).map_err(|e| e.to_string())) {
@@ -274,7 +275,7 @@ impl DrawState {
                         };
                     }
                 }
-                if widgets::chip(ui, "Tip picture…", false).on_hover_text("Just the tip as a PNG: black on white").clicked() {
+                if widgets::chip(ui, "Tip picture…", false).help("Just the tip as a PNG: black on white").clicked() {
                     let b = self.current_user_brush();
                     if let Some(p) = rfd::FileDialog::new().set_title("Save the tip as a picture").set_file_name(format!("{}-tip.png", userlib::slug(&b.name))).add_filter("PNG picture", &["png"]).save_file() {
                         self.lib.status = match std::fs::write(&p, crate::brush::formats::tip_png(&b.settings, 512)) {
@@ -283,17 +284,17 @@ impl DrawState {
                         };
                     }
                 }
-                if widgets::chip(ui, "Open brushes…", false).on_hover_text("Brush files, brush cards and pictures (a picture becomes a stamp brush)").clicked() {
+                if widgets::chip(ui, "Open brushes…", false).help("Brush files, brush cards and pictures (a picture becomes a stamp brush)").clicked() {
                     if let Some(paths) = rfd::FileDialog::new().set_title("Open brushes").add_filter("Brushes and pictures", &[userlib::EXT, "json", "png", "jpg", "jpeg", "webp", "bmp", "gif", "abr", "gbr", "gih", "kpp", "bundle"]).pick_files() {
                         self.import_brushes(&paths);
                     }
                 }
             });
             ui.horizontal_wrapped(|ui| {
-                if widgets::chip(ui, "Stamp from selection", false).on_hover_text("The painted pixels inside your selection become the brush's stamp").clicked() {
+                if widgets::chip(ui, "Stamp from selection", false).help("The painted pixels inside your selection become the brush's stamp").clicked() {
                     self.tip_from_selection();
                 }
-                if widgets::chip(ui, "Stamp from picture…", false).on_hover_text("A picture (dark or opaque parts paint) becomes the brush's stamp").clicked() {
+                if widgets::chip(ui, "Stamp from picture…", false).help("A picture (dark or opaque parts paint) becomes the brush's stamp").clicked() {
                     if let Some(p) = rfd::FileDialog::new().set_title("Picture for the stamp").add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "bmp", "gif"]).pick_file() {
                         self.tip_from_file(&p);
                     }
@@ -306,7 +307,7 @@ impl DrawState {
                 ui.add(egui::TextEdit::singleline(&mut self.lib.mat_name).hint_text("for the next material").desired_width(f32::INFINITY).char_limit(60));
             });
             ui.horizontal_wrapped(|ui| {
-                if widgets::chip(ui, "Texture from selection", false).on_hover_text("The painted pixels in your selection become a repeating texture for this brush (dark paints, light holds paint back)").clicked() {
+                if widgets::chip(ui, "Texture from selection", false).help("The painted pixels in your selection become a repeating texture for this brush (dark paints, light holds paint back)").clicked() {
                     self.texture_from_selection();
                 }
                 if widgets::chip(ui, "Texture from picture…", false).clicked() {
@@ -314,7 +315,7 @@ impl DrawState {
                         self.texture_from_file(&p);
                     }
                 }
-                ui.checkbox(&mut self.lib.seamless, "Make it seamless").on_hover_text("Blends the edges so the texture repeats without a visible seam");
+                ui.checkbox(&mut self.lib.seamless, "Make it seamless").help("Blends the edges so the texture repeats without a visible seam");
             });
             if self.lib.mem[sl].s.tip_image.is_some() && widgets::chip(ui, "Keep this stamp as a material", false).clicked() {
                 let name = if self.lib.mat_name.trim().is_empty() { format!("Stamp {}", self.lib.stamps.len() + 1) } else { self.lib.mat_name.trim().to_string() };

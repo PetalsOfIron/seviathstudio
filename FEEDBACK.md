@@ -36,3 +36,9 @@ fine: it is explained in the "Done" part below).
 - Not all parameters visible: the Parameters column (Rig, Physics, Animate) now has the folders of the Live2D list (Eyes open and close, Angles, Eyeballs, Brows, Mouth, Hair, Arms and legs) with every usual slider listed; the ones not made yet are grey with an Add button, and "Add all the standard sliders" makes them all (the automatic rig's own names, such as Eyes open, count as made). The joined sliders moved to the top of the column.
 
 - Typed slider values and more of the Live2D Physics window: every slider has a number box (type or drag); the Physics settings window has the chain drawn from the top, Increase output, Decrease output, Reset magnification, and the calculation rate (30 to 120 fps).
+
+- Generate tab: added (see ROADMAP). Style is picked from a list; outfit and body are written in the prompt; the pose is always the standard A-pose. Eyes are drawn again sharp and the feet have a margin. An example character is in Downloads\3d.
+- Small ! on controls with help: added (Settings, Interface to switch off).
+- Random brush: the Draw tab brush panel has Random brush (this section) and Random from any section.
+
+- Animations for game characters: the Generate tab has an Animations page (23 ready animations, a maker with mood, speed, strength and words). Only the game file (.glb) carries them, VRM files for VTubers do not. Example with all of them: Downloadsd\ExampleGirl_game_animated.glb.

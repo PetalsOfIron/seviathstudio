@@ -7,6 +7,7 @@ use eframe::egui::{
     Shape, Stroke, StrokeKind, Ui, Vec2, epaint::Vertex, pos2, vec2,
 };
 
+use crate::widgets::HelpExt;
 use super::{DrawState, SubTab, hex_of};
 use crate::theme::*;
 use crate::widgets;
@@ -77,7 +78,7 @@ impl DrawState {
         // ---- tools
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
-            if widgets::chip(ui, "+ Add", false).on_hover_text("Add pictures (or drop them onto the window)").clicked() {
+            if widgets::chip(ui, "+ Add", false).help("Add pictures (or drop them onto the window)").clicked() {
                 if let Some(paths) = rfd::FileDialog::new().set_title("Add reference pictures").add_filter("Pictures", PICTURES).pick_files() {
                     self.add_reference_paths(&paths);
                 }
@@ -87,32 +88,32 @@ impl DrawState {
                 let r = self.refs.current_mut().unwrap();
                 let (gray, flip) = (r.gray, r.flip);
                 let mut changed = false;
-                if widgets::chip(ui, "Gray", gray).on_hover_text("Look at the values only").clicked() {
+                if widgets::chip(ui, "Gray", gray).help("Look at the values only").clicked() {
                     r.gray = !gray;
                     changed = true;
                 }
-                if widgets::chip(ui, "Mirror", flip).clicked() {
+                if widgets::chip(ui, "Mirror", flip).help("Flip it to the other side.").clicked() {
                     r.flip = !flip;
                     changed = true;
                 }
-                if widgets::chip(ui, "Turn", false).on_hover_text("Turn a quarter clockwise").clicked() {
+                if widgets::chip(ui, "Turn", false).help("Turn a quarter clockwise").clicked() {
                     r.rot = (r.rot + 1) % 4;
                     changed = true;
                 }
-                if widgets::chip(ui, "Fit", false).clicked() {
+                if widgets::chip(ui, "Fit", false).help("Fit the whole picture in the window.").clicked() {
                     r.zoom = 1.0;
                     r.pan = Vec2::ZERO;
                     changed = true;
                 }
-                if widgets::chip(ui, "Grid", self.refs.grid).on_hover_text("Thirds grid for proportions").clicked() {
+                if widgets::chip(ui, "Grid", self.refs.grid).help("Thirds grid for proportions").clicked() {
                     self.refs.grid = !self.refs.grid;
                     changed = true;
                 }
-                if widgets::chip(ui, "On canvas", self.refs.overlay).on_hover_text("Show this picture see-through over your page").clicked() {
+                if widgets::chip(ui, "On canvas", self.refs.overlay).help("Show this picture see-through over your page").clicked() {
                     self.refs.overlay = !self.refs.overlay;
                     changed = true;
                 }
-                if widgets::chip(ui, "Palette", false).on_hover_text("Add the picture's main colors to your swatches").clicked() {
+                if widgets::chip(ui, "Palette", false).help("Add the picture's main colors to your swatches").clicked() {
                     let colors = self.refs.current().map(|r| r.palette(6)).unwrap_or_default();
                     let mut added = 0;
                     for c in colors {
@@ -126,13 +127,13 @@ impl DrawState {
                     }
                     self.notice = Some(if added > 0 { "Palette added to your swatches." } else { "Those colors are already in your swatches." });
                 }
-                if !big && widgets::chip(ui, "Bigger", false).on_hover_text("Make this view taller (or drag the bar under it)").clicked() {
+                if !big && widgets::chip(ui, "Bigger", false).help("Make this view taller (or drag the bar under it)").clicked() {
                     self.subview_h = [170.0, 320.0, 520.0, 760.0].into_iter().find(|s| *s > self.subview_h + 1.0).unwrap_or(170.0);
                 }
-                if !big && widgets::chip(ui, "Pop out", self.ref_popout).on_hover_text("Bigger reference window you can move anywhere").clicked() {
+                if !big && widgets::chip(ui, "Pop out", self.ref_popout).help("Bigger reference window you can move anywhere").clicked() {
                     self.ref_popout = !self.ref_popout;
                 }
-                if widgets::chip(ui, "Remove", false).on_hover_text("Remove this reference").clicked() {
+                if widgets::chip(ui, "Remove", false).help("Remove this reference").clicked() {
                     if let Some(id) = self.refs.current {
                         self.refs.remove(id);
                     }
@@ -228,7 +229,7 @@ impl DrawState {
         if resp.drag_stopped() {
             self.refs.save();
         }
-        resp.on_hover_text("Click: take the color · Drag: move · Wheel: zoom").on_hover_cursor(CursorIcon::Crosshair);
+        resp.help("Click: take the color · Drag: move · Wheel: zoom").on_hover_cursor(CursorIcon::Crosshair);
         if let Some(c) = pick {
             self.primary = c;
             self.hex = hex_of(c);
@@ -256,12 +257,12 @@ impl DrawState {
                             p.rect_stroke(cell, CornerRadius::same(5), Stroke::new(2.0, VENOM), StrokeKind::Inside);
                         }
                         let id = r.id;
-                        let resp = resp.on_hover_text(r.name.clone());
+                        let resp = resp.help(r.name.clone());
                         if resp.clicked() {
                             select = Some(id);
                         }
                         resp.context_menu(|ui| {
-                            if ui.button("Remove").clicked() {
+                            if ui.button("Remove").help("Take this out of the list.").clicked() {
                                 remove = Some(id);
                                 ui.close();
                             }

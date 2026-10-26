@@ -4,6 +4,7 @@
 // (the drawings of the frame, onion skin of the frames around it), plays it, and saves it like the rig animation. A character that is
 // both rigged and drawn frame by frame works as well: the rig (posed by the sliders and their tracks) is the base and the drawings are over it.
 
+use crate::widgets::HelpExt;
 use std::hash::{Hash, Hasher};
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
@@ -231,14 +232,14 @@ impl SeviathApp {
         egui::Area::new(egui::Id::new("cel_frame_bar")).anchor(egui::Align2::CENTER_TOP, vec2(0.0, 64.0)).order(egui::Order::Foreground).show(ctx, |ui| {
             egui::Frame::new().fill(PANEL.gamma_multiply(0.94)).corner_radius(8).inner_margin(egui::Margin::symmetric(8, 4)).stroke(Stroke::new(1.0, Color32::from_gray(60))).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button("Frame before").on_hover_text("Go to the frame before and pick its drawing").clicked() {
+                    if ui.button("Frame before").help("Go to the frame before and pick its drawing").clicked() {
                         go = Some((frame - 1).max(0));
                     }
                     ui.label(RichText::new(format!("Frame {} of {}", frame + 1, last + 1)).monospace().size(12.5));
-                    if ui.button("Frame after").on_hover_text("Go to the frame after and pick its drawing").clicked() {
+                    if ui.button("Frame after").help("Go to the frame after and pick its drawing").clicked() {
                         go = Some((frame + 1).min(last));
                     }
-                    ui.checkbox(&mut onion, "Onion skin");
+                    ui.checkbox(&mut onion, "Onion skin").help("Show the frames before and after faintly, to help you draw the next one.");
                 });
             });
         });
@@ -572,10 +573,10 @@ impl SeviathApp {
             ui.label(RichText::new("Draw every picture of the animation yourself. A cel track makes a folder of layers: each layer is one drawing, drawn in the Draw tab, and the track says which one shows at which frame.").size(11.5).color(TEXT_DIM));
         }
         ui.horizontal_wrapped(|ui| {
-            if ui.button("New cel track").on_hover_text("A folder with its first drawing").clicked() {
+            if ui.button("New cel track").help("A folder with its first drawing").clicked() {
                 self.cel_new_track();
             }
-            if ui.button("Pictures as drawings...").on_hover_text("The frames of a GIF, or pictures in the order of their names, one drawing each").clicked() {
+            if ui.button("Pictures as drawings...").help("The frames of a GIF, or pictures in the order of their names, one drawing each").clicked() {
                 self.cel_import_dialog();
             }
         });
@@ -587,8 +588,8 @@ impl SeviathApp {
             let mut muted = t.muted;
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut name).desired_width(120.0));
-                ui.checkbox(&mut muted, "Off").on_hover_text("The track leaves the layers alone");
-                if ui.small_button("Delete").on_hover_text("Takes the track away; the layers stay").clicked() {
+                ui.checkbox(&mut muted, "Off").help("The track leaves the layers alone");
+                if ui.small_button("Delete").help("Takes the track away; the layers stay").clicked() {
                     remove = Some(ti);
                 }
             });
@@ -601,16 +602,16 @@ impl SeviathApp {
             let shown = t.shown_at(frame).and_then(|c| t.number_of(c));
             ui.label(RichText::new(format!("At frame {frame}: {}", shown.map(|n| format!("drawing {n}")).unwrap_or_else(|| "blank".into()))).size(11.5).color(TEXT_DIM));
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Draw it").on_hover_text("Open the drawing that shows here in the Draw tab").clicked() {
+                if ui.button("Draw it").help("Open the drawing that shows here in the Draw tab").clicked() {
                     self.cel_draw_it(ti);
                 }
-                if ui.button("New drawing here").on_hover_text("A new blank layer, shown from the playhead on").clicked() {
+                if ui.button("New drawing here").help("A new blank layer, shown from the playhead on").clicked() {
                     self.cel_new_cel(ti);
                 }
-                if ui.button("Blank here").clicked() {
+                if ui.button("Blank here").help("Show nothing in this frame.").clicked() {
                     self.cel_set_here(ti, None);
                 }
-                if ui.button("Remove the change here").on_hover_text("Takes away the exposure that starts at the playhead").clicked() {
+                if ui.button("Remove the change here").help("Takes away the exposure that starts at the playhead").clicked() {
                     if let Some(tr) = self.anim_mut("Remove exposure").cel_tracks.get_mut(ti) {
                         tr.remove_exposure(frame);
                     }
@@ -621,20 +622,20 @@ impl SeviathApp {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Show drawing").size(12.0).color(TEXT_DIM));
                 for (i, c) in t.cels.iter().enumerate() {
-                    if widgets::chip(ui, &(i + 1).to_string(), t.shown_at(frame) == Some(*c)).on_hover_text("Shown from the playhead on").clicked() {
+                    if widgets::chip(ui, &(i + 1).to_string(), t.shown_at(frame) == Some(*c)).help("Shown from the playhead on").clicked() {
                         self.cel_set_here(ti, Some(*c));
                     }
                 }
             });
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Timing").size(12.0).color(TEXT_DIM));
-                if ui.small_button("Add a frame here").on_hover_text("Everything from the playhead on moves one frame later").clicked() {
+                if ui.small_button("Add a frame here").help("Everything from the playhead on moves one frame later").clicked() {
                     if let Some(tr) = self.anim_mut("Add a frame").cel_tracks.get_mut(ti) {
                         tr.shift(frame, 1);
                     }
                     self.rigs.anim.applied = None;
                 }
-                if ui.small_button("Take a frame away here").clicked() {
+                if ui.small_button("Take a frame away here").help("Remove one frame here, so the animation is shorter.").clicked() {
                     if let Some(tr) = self.anim_mut("Take a frame away").cel_tracks.get_mut(ti) {
                         tr.shift(frame, -1);
                     }
@@ -650,12 +651,12 @@ impl SeviathApp {
             ui.add_space(4.0);
             let mut o = a.onion;
             ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut o.on, "Onion skin").on_hover_text("The frames before (red) and after (green) show faintly while you scrub");
+                ui.checkbox(&mut o.on, "Onion skin").help("The frames before (red) and after (green) show faintly while you scrub");
                 ui.label(RichText::new("before").size(12.0).color(TEXT_DIM));
                 ui.add(egui::DragValue::new(&mut o.before).range(0..=6));
                 ui.label(RichText::new("after").size(12.0).color(TEXT_DIM));
                 ui.add(egui::DragValue::new(&mut o.after).range(0..=6));
-                ui.add(egui::Slider::new(&mut o.opacity, 0.05..=0.9).show_value(false)).on_hover_text("How strong");
+                ui.add(egui::Slider::new(&mut o.opacity, 0.05..=0.9).show_value(false)).help("How strong");
             });
             if o != a.onion {
                 self.anim_mut("Onion skin").onion = o;

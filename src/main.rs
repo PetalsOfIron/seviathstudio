@@ -5,6 +5,9 @@
 
 mod actions;
 mod ai;
+mod aigen;
+mod assetview;
+mod generate;
 mod aibridge;
 mod comfy;
 mod vcam;
@@ -46,6 +49,7 @@ mod light;
 mod lightfx;
 mod material;
 mod meta;
+mod motion;
 mod obs;
 mod oklab;
 mod outputs;
