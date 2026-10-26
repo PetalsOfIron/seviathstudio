@@ -123,7 +123,11 @@ impl Builder {
     /// Numbers of an animation (times as SCALAR, turns as VEC4): no buffer target; returns the accessor.
     pub fn animation_data(&mut self, data: &[f32], kind: &str) -> usize {
         let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
-        let per = if kind == "VEC4" { 4 } else { 1 };
+        let per = match kind {
+            "VEC4" => 4,
+            "VEC3" => 3,
+            _ => 1,
+        };
         let view = self.view(&bytes, None);
         let minmax = if per == 1 && !data.is_empty() { Some(([data.iter().cloned().fold(f32::MAX, f32::min), 0.0, 0.0], [data.iter().cloned().fold(f32::MIN, f32::max), 0.0, 0.0])) } else { None };
         let id = self.accessor(view, F32, data.len() / per, kind, None, false);

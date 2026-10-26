@@ -2,6 +2,7 @@
 // Brush panel: categories, search, brush cards with real previews (painted by the engine),
 // and every brush setting in folding sections. Brush, eraser and smudge each remember their own brush.
 
+use crate::widgets::HelpExt;
 use std::collections::HashMap;
 
 use eframe::egui::{
@@ -132,7 +133,7 @@ fn row(ui: &mut Ui, label: &str, tip: &str, add: impl FnOnce(&mut Ui) -> bool) -
         let (r, resp) = ui.allocate_exact_size(vec2(84.0, 18.0), Sense::hover());
         ui.painter().text(r.left_center(), Align2::LEFT_CENTER, label, FontId::proportional(12.0), TEXT_DIM);
         if !tip.is_empty() {
-            resp.on_hover_text(tip);
+            resp.help(tip);
         }
         add(ui)
     })
@@ -204,9 +205,20 @@ impl DrawState {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                     for (i, name) in CATEGORIES.iter().enumerate() {
-                        if widgets::chip(ui, name, self.lib.mem[sl].category == i).clicked() {
+                        if widgets::chip(ui, name, self.lib.mem[sl].category == i).help("Show only this category.").clicked() {
                             self.lib.mem[sl].category = i;
                         }
+                    }
+                });
+            }
+            if self.lib.query.trim().is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Random brush").help("A new brush made from a random brush of this section: the same kind, but different. Press again for another.").clicked() {
+                        let cat = Some(CATEGORIES[self.lib.mem[sl].category]);
+                        self.random_brush_from(sl, cat);
+                    }
+                    if ui.button("Random from any section").help("A new brush made from a random brush of any section.").clicked() {
+                        self.random_brush_from(sl, None);
                     }
                 });
             }
@@ -259,6 +271,22 @@ impl DrawState {
         });
     }
 
+    /// A new brush that is a cousin of a random brush of a section (or of any section): the settings are nudged, and it is picked.
+    fn random_brush_from(&mut self, sl: usize, category: Option<&str>) {
+        self.lib.roll_count = self.lib.roll_count.wrapping_add(1);
+        let seed = self.lib.roll_count.wrapping_mul(2_654_435_761).wrapping_add(17);
+        let pool: Vec<Preset> = self.lib.presets.iter().filter(|p| category.is_none_or(|c| p.category == c)).cloned().collect();
+        if pool.is_empty() {
+            return;
+        }
+        let base = &pool[(seed >> 7) as usize % pool.len()];
+        let mut s = base.s.clone();
+        crate::brush::random::remix(&mut s, seed, 0.45);
+        let size = if self.set.keep_size_on_switch { self.lib.mem[sl].s.size } else { s.size };
+        self.lib.mem[sl].s = BrushSettings { size, ..s };
+        self.lib.mem[sl].name = format!("Random {} {}", base.category, self.lib.roll_count);
+    }
+
     fn brush_settings(&mut self, ui: &mut Ui) {
         let sl = slot(self.tool);
         let ctx = ui.ctx().clone();
@@ -298,7 +326,7 @@ impl DrawState {
             ui.add_space(92.0);
             ui.spacing_mut().item_spacing.x = 3.0;
             for v in [2.0f32, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0] {
-                if widgets::chip(ui, &format!("{v}"), (s.size - v).abs() < 0.01).clicked() {
+                if widgets::chip(ui, &format!("{v}"), (s.size - v).abs() < 0.01).help("Pick this choice.").clicked() {
                     s.size = v;
                 }
             }
@@ -310,11 +338,11 @@ impl DrawState {
         pct(ui, "Stabilizer", &mut s.stabilize, "Smooths shaky lines: the brush follows the pen on a rope");
 
         section(ui, "Pen pressure", true, |ui| {
-            ui.checkbox(&mut s.size_pressure, "Pressure changes the size");
+            ui.checkbox(&mut s.size_pressure, "Pressure changes the size").help("A harder press makes the stroke bigger.");
             if s.size_pressure {
                 pct(ui, "Smallest", &mut s.min_size, "Size at the lightest pressure");
             }
-            ui.checkbox(&mut s.opacity_pressure, "Pressure changes the paint amount");
+            ui.checkbox(&mut s.opacity_pressure, "Pressure changes the paint amount").help("A harder press puts more paint.");
             ui.label(RichText::new("Uses Windows Ink. Mouse strokes count as full pressure.").size(11.0).color(TEXT_DIM));
         });
 
@@ -332,7 +360,7 @@ impl DrawState {
                 let mut changed = false;
                 egui::ComboBox::from_id_salt("tip").selected_text(s.tip.label()).show_ui(ui, |ui| {
                     for t in Tip::ALL {
-                        changed |= ui.selectable_value(&mut s.tip, t, t.label()).changed();
+                        changed |= ui.selectable_value(&mut s.tip, t, t.label()).help("Pick the shape of the brush tip.").changed();
                     }
                 });
                 changed
@@ -341,7 +369,7 @@ impl DrawState {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                     for b in ShapeBase::ALL {
-                        if widgets::chip(ui, b.label(), s.shape_base == b).clicked() {
+                        if widgets::chip(ui, b.label(), s.shape_base == b).help("Pick the base shape of the brush tip.").clicked() {
                             s.shape_base = b;
                         }
                     }
@@ -355,8 +383,8 @@ impl DrawState {
             }
             num(ui, "Roundness", &mut s.roundness, 0.05..=1.0, "1 = round, small = flat like a chisel or calligraphy nib");
             num(ui, "Angle", &mut s.angle, -180.0..=180.0, "Turns the tip");
-            ui.checkbox(&mut s.follow_direction, "Tip turns with the stroke");
-            ui.checkbox(&mut s.antialias, "Smooth edges (off = crisp pixels)");
+            ui.checkbox(&mut s.follow_direction, "Tip turns with the stroke").help("The brush tip turns to follow the direction of the stroke.");
+            ui.checkbox(&mut s.antialias, "Smooth edges (off = crisp pixels)").help("Soft edges. Off gives sharp pixels.");
         });
 
         section(ui, "Edges & wet look", false, |ui| {
@@ -364,7 +392,7 @@ impl DrawState {
                 let mut changed = false;
                 egui::ComboBox::from_id_salt("edge").selected_text(s.edge.label()).show_ui(ui, |ui| {
                     for e in Edge::ALL {
-                        changed |= ui.selectable_value(&mut s.edge, e, e.label()).on_hover_text(e.about()).changed();
+                        changed |= ui.selectable_value(&mut s.edge, e, e.label()).help(e.about()).changed();
                     }
                 });
                 changed
@@ -394,7 +422,7 @@ impl DrawState {
                 egui::ComboBox::from_id_salt("texkind").selected_text(s.tex_kind.label()).height(400.0).show_ui(ui, |ui| {
                     if s.tex_image.is_some() {
                         ui.label(RichText::new("Mine").size(11.0).color(GOLD));
-                        changed |= ui.selectable_value(&mut s.tex_kind, TexKind::Custom, TexKind::Custom.label()).changed();
+                        changed |= ui.selectable_value(&mut s.tex_kind, TexKind::Custom, TexKind::Custom.label()).help("Pick what the brush texture is made of.").changed();
                     }
                     let mut last = "";
                     for k in TexKind::ALL {
@@ -402,14 +430,14 @@ impl DrawState {
                             last = k.section();
                             ui.label(RichText::new(last).size(11.0).color(GOLD));
                         }
-                        changed |= ui.selectable_value(&mut s.tex_kind, k, k.label()).changed();
+                        changed |= ui.selectable_value(&mut s.tex_kind, k, k.label()).help("Pick what the brush texture is made of.").changed();
                     }
                 });
                 changed
             });
             num(ui, "Scale", &mut s.tex_scale, 0.25..=4.0, "Size of the texture");
             let mut keep = s.tex_color > 0.0;
-            if ui.checkbox(&mut keep, "Keep texture colors").on_hover_text("Paint with the texture's own colors instead of only your color").changed() {
+            if ui.checkbox(&mut keep, "Keep texture colors").help("Paint with the texture's own colors instead of only your color").changed() {
                 s.tex_color = if keep { 1.0 } else { 0.0 };
             }
             if keep {
@@ -445,16 +473,16 @@ impl DrawState {
                         ui.label(RichText::new(format!("Tip {}", i + 2)).strong());
                         egui::ComboBox::from_id_salt("subtip").selected_text(sub.tip.label()).show_ui(ui, |ui| {
                             for t in Tip::ALL {
-                                ui.selectable_value(&mut sub.tip, t, t.label());
+                                ui.selectable_value(&mut sub.tip, t, t.label()).help("Pick the shape of the tip.");
                             }
                         });
-                        if ui.small_button("Remove").clicked() {
+                        if ui.small_button("Remove").help("Take this out of the list.").clicked() {
                             remove = Some(i);
                         }
                     });
                     egui::ComboBox::from_id_salt("submode").selected_text(sub.mode.label()).show_ui(ui, |ui| {
                         for m in [SubMode::Mask, SubMode::Add, SubMode::Cut] {
-                            ui.selectable_value(&mut sub.mode, m, m.label());
+                            ui.selectable_value(&mut sub.mode, m, m.label()).help("Pick how it is mixed.");
                         }
                     });
                     num(ui, "Size", &mut sub.scale, 0.1..=2.0, "× main tip");
@@ -467,7 +495,7 @@ impl DrawState {
             if let Some(i) = remove {
                 s.extra_tips.remove(i);
             }
-            if s.extra_tips.len() < 2 && ui.button("+ Add a tip").clicked() {
+            if s.extra_tips.len() < 2 && ui.button("+ Add a tip").help("Add a new brush tip shape to this brush.").clicked() {
                 s.extra_tips.push(SubTip::default());
                 s.variants = s.variants.max(4);
             }
@@ -507,7 +535,7 @@ impl DrawState {
             pct(ui, "Dot patches", &mut s.dot_cluster, "Dots (freckles, blush) land in natural patches");
             pct(ui, "Keep texture", &mut s.keep_detail, "A blending brush changes the soft color and keeps the fine texture (pores)");
             pct(ui, "Skin glow", &mut s.sss, "Mid tones glow a little red, like light through skin");
-            ui.checkbox(&mut s.temp_blend, "Even out warm and cool").on_hover_text("A blending brush moves warm and cool patches together without flattening lights and darks");
+            ui.checkbox(&mut s.temp_blend, "Even out warm and cool").help("A blending brush moves warm and cool patches together without flattening lights and darks");
         });
 
         section(ui, "Width behavior", s.pinch > 0.0 || s.pressure_curve != 0.0, |ui| {
@@ -535,7 +563,7 @@ impl DrawState {
                 if matches!(s.transition, Transition::Length | Transition::Cycle) {
                     num(ui, "Over", &mut s.trans_len, 30.0..=3000.0, "Pixels of stroke for the whole change");
                 }
-                ui.checkbox(&mut s.trans_back, "Backwards").on_hover_text("Start with the second color");
+                ui.checkbox(&mut s.trans_back, "Backwards").help("Start with the second color");
             }
             num(ui, "Paint runs out", &mut s.drift, -1.0..=1.0, "The color changes as the brush runs dry: positive darkens and warms, negative lightens");
             if s.drift != 0.0 {
@@ -599,7 +627,7 @@ impl DrawState {
                 ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                 for (g, label, about) in crate::brush::random::Group::ALL {
                     let on = rolled.contains(&g);
-                    if widgets::chip(ui, label, on).on_hover_text(about).clicked() {
+                    if widgets::chip(ui, label, on).help(about).clicked() {
                         if on {
                             rolled.retain(|x| *x != g);
                         } else {
@@ -609,13 +637,13 @@ impl DrawState {
                 }
             });
             ui.horizontal(|ui| {
-                if ui.button("Roll the dice").on_hover_text("Randomizes the highlighted groups (never the size or opacity)").clicked() {
+                if ui.button("Roll the dice").help("Randomizes the highlighted groups (never the size or opacity)").clicked() {
                     roll = Some(rolled.clone());
                 }
-                if ui.small_button("All").clicked() {
+                if ui.small_button("All").help("Show everything.").clicked() {
                     *rolled = crate::brush::random::Group::ALL.iter().map(|g| g.0).collect();
                 }
-                if ui.small_button("None").clicked() {
+                if ui.small_button("None").help("Nothing.").clicked() {
                     rolled.clear();
                 }
             });
@@ -640,7 +668,7 @@ impl DrawState {
             } else if s.paint != Paint::Normal {
                 ui.label(RichText::new("Turn Mix up in Color mixing above to make the brush carry paint along.").size(11.0).color(TEXT_DIM));
             }
-            if widgets::chip(ui, "Mixing chart", false).on_hover_text("See how your swatches mix, as paint and as plain RGB").clicked() {
+            if widgets::chip(ui, "Mixing chart", false).help("See how your swatches mix, as paint and as plain RGB").clicked() {
                 open_chart = true;
             }
         });
@@ -651,7 +679,7 @@ impl DrawState {
         section(ui, "Pattern seed", false, |ui| {
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut s.seed).range(1..=99_999));
-                if ui.button("New pattern").on_hover_text("Changes the random pattern of edges and grain").clicked() {
+                if ui.button("New pattern").help("Changes the random pattern of edges and grain").clicked() {
                     s.seed = (s.seed * 7919 + 13) % 99_991 + 1;
                 }
             });
@@ -664,7 +692,7 @@ impl DrawState {
         }
         ui.add_space(6.0);
         if let Some(p) = preset {
-            if ui.button("Reset brush").on_hover_text("Back to the original settings (keeps your size)").clicked() {
+            if ui.button("Reset brush").help("Back to the original settings (keeps your size)").clicked() {
                 let size = self.lib.mem[sl].s.size;
                 self.lib.mem[sl].s = BrushSettings { size, ..p.s.clone() };
             }
@@ -699,7 +727,7 @@ fn brush_card(ui: &mut Ui, p: &Preset, tex: Option<egui::TextureId>, w: f32, sel
         FontId::proportional(11.5),
         if selected { VENOM } else { TEXT },
     );
-    resp.on_hover_text(p.about)
+    resp.help(p.about)
 }
 
 #[cfg(test)]

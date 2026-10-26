@@ -6,6 +6,7 @@ use eframe::egui::{
     RichText, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
 
+use crate::widgets::HelpExt;
 use super::{DrawState, checker};
 use crate::doc::{Blend, Drop, LayerId, LayerKind, TAG_COLORS};
 use crate::icons::{self, Icon};
@@ -92,7 +93,7 @@ impl DrawState {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let is_paper = self.doc.layers[self.active_idx()].kind == LayerKind::Paper;
-                if icon_button(ui, Icon::Trash, false, 26.0, "Delete layer (a folder goes with its contents)").clicked() {
+                if icon_button(ui, Icon::Trash, false, 26.0, "Delete layer (a folder goes with its contents)").help("Delete the layer. A folder goes with everything in it.").clicked() {
                     if self.is_multi() {
                         self.batch_delete();
                     } else if is_paper {
@@ -101,13 +102,13 @@ impl DrawState {
                         self.delete_layer(self.active);
                     }
                 }
-                if icon_button(ui, Icon::Folder, false, 26.0, "New folder").clicked() {
+                if icon_button(ui, Icon::Folder, false, 26.0, "New folder").help("Make a new folder.").clicked() {
                     self.add_layer(LayerKind::Group);
                 }
-                if icon_button(ui, Icon::Pen, false, 26.0, "New vector layer").clicked() {
+                if icon_button(ui, Icon::Pen, false, 26.0, "New vector layer").help("Add a new vector layer, for smooth lines you can change later.").clicked() {
                     self.add_layer(LayerKind::Vector);
                 }
-                if icon_button(ui, Icon::Plus, false, 26.0, "New layer (Ctrl+Shift+N)").clicked() {
+                if icon_button(ui, Icon::Plus, false, 26.0, "New layer (Ctrl+Shift+N)").help("Add a new empty layer (Ctrl+Shift+N).").clicked() {
                     self.add_layer(LayerKind::Raster);
                 }
             });
@@ -197,7 +198,7 @@ impl DrawState {
                     vec![c + vec2(-2.0, -4.0), c + vec2(3.0, 0.0), c + vec2(-2.0, 4.0)]
                 };
                 ui.painter().add(Shape::convex_polygon(tri, col, Stroke::NONE));
-                if aresp.on_hover_text("Open / close folder").clicked() {
+                if aresp.help("Open / close folder").clicked() {
                     self.doc.layers[i].expanded = !open;
                 }
             }
@@ -336,7 +337,7 @@ impl DrawState {
             let visible = self.doc.layers[i].visible;
             let ecol = if eresp.hovered() { VENOM } else if visible { TEXT } else { TEXT_DIM };
             icons::paint(ui.painter(), eye.shrink(4.0), if visible { Icon::Eye } else { Icon::EyeOff }, ecol);
-            if eresp.on_hover_text("Show / hide").clicked() {
+            if eresp.help("Show / hide").clicked() {
                 self.doc.layers[i].visible = !visible;
             } else if resp.double_clicked() && kind != LayerKind::Paper {
                 self.renaming = Some((id, self.doc.layers[i].name.clone()));
@@ -371,51 +372,51 @@ impl DrawState {
                     self.lui.multi.clear();
                 }
                 self.active = id;
-                if ui.button("New layer above").clicked() {
+                if ui.button("New layer above").help("Add a new layer above this one.").clicked() {
                     self.new_layer_beside(id, true, false);
                     ui.close();
                 }
                 if kind != LayerKind::Paper {
-                    if ui.button("New layer below").clicked() {
+                    if ui.button("New layer below").help("Add a new layer below this one.").clicked() {
                         self.new_layer_beside(id, false, false);
                         ui.close();
                     }
-                    if ui.button("New layer clipped to this").on_hover_text("A shading layer that only shows where this layer has paint").clicked() {
+                    if ui.button("New layer clipped to this").help("A shading layer that only shows where this layer has paint").clicked() {
                         self.new_layer_beside(id, true, true);
                         ui.close();
                     }
-                    if kind == LayerKind::Raster && ui.button("Select pixels of this layer").clicked() {
+                    if kind == LayerKind::Raster && ui.button("Select pixels of this layer").help("Select the painted pixels of this layer.").clicked() {
                         self.select_layer_pixels(id);
                         ui.close();
                     }
-                    if kind == LayerKind::Raster && ui.button("Trace to vector lines…").on_hover_text("Auto-trace: turn this drawing into editable lines and color shapes").clicked() {
+                    if kind == LayerKind::Raster && ui.button("Trace to vector lines…").help("Auto-trace: turn this drawing into editable lines and color shapes").clicked() {
                         self.open_trace(id);
                         ui.close();
                     }
                     let fav = self.doc.layers[i].fav;
-                    if ui.button(if fav { "Remove from favorites" } else { "Add to favorites" }).clicked() {
+                    if ui.button(if fav { "Remove from favorites" } else { "Add to favorites" }).help("Take this out of your favorites.").clicked() {
                         self.toggle_favorite(id);
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Rename").clicked() {
+                    if ui.button("Rename").help("Give it another name.").clicked() {
                         self.renaming = Some((id, self.doc.layers[i].name.clone()));
                         ui.close();
                     }
-                    if ui.button("Duplicate  (Ctrl+J)").clicked() {
+                    if ui.button("Duplicate  (Ctrl+J)").help("Make a copy of the layer (Ctrl+J).").clicked() {
                         self.duplicate_active();
                         ui.close();
                     }
-                    if ui.button("Merge down  (Ctrl+E)").clicked() {
+                    if ui.button("Merge down  (Ctrl+E)").help("Join this layer with the one below it (Ctrl+E).").clicked() {
                         self.merge_down_active();
                         ui.close();
                     }
-                    if ui.button("Into new folder  (Ctrl+G)").clicked() {
+                    if ui.button("Into new folder  (Ctrl+G)").help("Put the picked layers in a new folder (Ctrl+G).").clicked() {
                         self.group_active();
                         ui.close();
                     }
                     let clip_label = if self.doc.layers[i].clip { "Release clipping mask" } else { "Clip to layer below" };
-                    if ui.button(clip_label).clicked() {
+                    if ui.button(clip_label).help("Add this recorded clip to the animation as tracks.").clicked() {
                         self.toggle_clip_active();
                         ui.close();
                     }
@@ -438,7 +439,7 @@ impl DrawState {
                         if current == Some(t) {
                             ui.painter().circle_stroke(r.center(), 8.5, Stroke::new(1.5, TEXT));
                         }
-                        if cresp.on_hover_text(*name).clicked() {
+                        if cresp.help(*name).clicked() {
                             if let Some(k) = self.doc.index_of(id) {
                                 self.doc.layers[k].tag = t as u8;
                             }
@@ -448,7 +449,7 @@ impl DrawState {
                 });
                 if kind != LayerKind::Paper {
                     ui.separator();
-                    if ui.button(RichText::new("Delete").color(Color32::from_rgb(232, 110, 110))).clicked() {
+                    if ui.button(RichText::new("Delete").color(Color32::from_rgb(232, 110, 110))).help("Delete this. Undo brings it back.").clicked() {
                         self.delete_layer(id);
                         ui.close();
                     }
@@ -513,19 +514,19 @@ impl DrawState {
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-            if widgets::chip(ui, "Duplicate", false).on_hover_text("Copy this layer (Ctrl+J)").clicked() {
+            if widgets::chip(ui, "Duplicate", false).help("Copy this layer (Ctrl+J)").clicked() {
                 self.duplicate_active();
             }
-            if widgets::chip(ui, "Merge down", false).on_hover_text("Bake into the layer below (Ctrl+E)").clicked() {
+            if widgets::chip(ui, "Merge down", false).help("Bake into the layer below (Ctrl+E)").clicked() {
                 self.merge_down_active();
             }
-            if widgets::chip(ui, "Into folder", false).on_hover_text("Put this layer in a new folder (Ctrl+G)").clicked() {
+            if widgets::chip(ui, "Into folder", false).help("Put this layer in a new folder (Ctrl+G)").clicked() {
                 self.group_active();
             }
             ui.menu_button("Adjust", |ui| {
                 for fid in crate::effects::ADJUSTMENTS {
                     if let Some(d) = crate::filters::find(fid) {
-                        if ui.button(d.label).on_hover_text(d.about).clicked() {
+                        if ui.button(d.label).help(d.about).clicked() {
                             self.add_adjustment(fid);
                             ui.close();
                         }
@@ -533,29 +534,29 @@ impl DrawState {
                 }
             })
             .response
-            .on_hover_text("New adjustment layer: changes the colors of everything below it, and you can undo it any time");
-            if widgets::chip(ui, "Depth", false).on_hover_text("New depth layer: paint white where things are near and black where they are far").clicked() {
+            .help("New adjustment layer: changes the colors of everything below it, and you can undo it any time");
+            if widgets::chip(ui, "Depth", false).help("New depth layer: paint white where things are near and black where they are far").clicked() {
                 self.add_depth_layer();
             }
-            if widgets::chip(ui, "Material", false).on_hover_text("New material layer: paint a shape and it shines as metal, glass, velvet, neon or a gem").clicked() {
+            if widgets::chip(ui, "Material", false).help("New material layer: paint a shape and it shines as metal, glass, velvet, neon or a gem").clicked() {
                 self.add_material_layer();
             }
             ui.menu_button("Light FX", |ui| {
                 for k in [crate::lightfx::LightKind::Shadow, crate::lightfx::LightKind::Glow, crate::lightfx::LightKind::Rays] {
-                    if ui.button(k.name()).on_hover_text(k.about()).clicked() {
+                    if ui.button(k.name()).help(k.about()).clicked() {
                         self.add_light_effect(k);
                         ui.close();
                     }
                 }
             })
             .response
-            .on_hover_text("Shadow, glow or rays: paint a shape and the light works on it, live");
-            if widgets::chip(ui, "Light", false).on_hover_text("New light layer: shades the depth layers below it, and you can move the light any time").clicked() {
+            .help("Shadow, glow or rays: paint a shape and the light works on it, live");
+            if widgets::chip(ui, "Light", false).help("New light layer: shades the depth layers below it, and you can move the light any time").clicked() {
                 self.add_light_layer();
             }
             let clipped = self.doc.layers[self.active_idx()].clip;
             if widgets::chip(ui, "Clip", clipped)
-                .on_hover_text("Clipping mask: show only where the layer below has paint (Ctrl+Alt+G)")
+                .help("Clipping mask: show only where the layer below has paint (Ctrl+Alt+G)")
                 .clicked()
             {
                 self.toggle_clip_active();
@@ -584,10 +585,10 @@ impl DrawState {
                     .show_ui(ui, |ui| {
                         if layer.kind == LayerKind::Group {
                             ui.selectable_value(&mut layer.blend, Blend::PassThrough, Blend::PassThrough.name())
-                                .on_hover_text(Blend::PassThrough.about());
+                                .help(Blend::PassThrough.about());
                         }
                         for b in Blend::ALL {
-                            ui.selectable_value(&mut layer.blend, b, b.name()).on_hover_text(b.about());
+                            ui.selectable_value(&mut layer.blend, b, b.name()).help(b.about());
                         }
                     });
             });
@@ -596,9 +597,9 @@ impl DrawState {
         slider_row(ui, "Opacity", &mut layer.opacity, 0.0..=100.0, "%");
         ui.horizontal_wrapped(|ui| {
             if layer.kind == LayerKind::Raster {
-                ui.checkbox(&mut layer.lock_alpha, "Lock alpha").on_hover_text("Paint only where there is already paint");
+                ui.checkbox(&mut layer.lock_alpha, "Lock alpha").help("Paint only where there is already paint");
             }
-            ui.checkbox(&mut layer.locked, "Lock").on_hover_text("No painting or moving");
+            ui.checkbox(&mut layer.locked, "Lock").help("No painting or moving");
         });
         ui.label(RichText::new("Double-click a layer to rename. Drag to reorder or drop onto a folder.").color(TEXT_DIM).size(11.0));
         self.effects_section(ui);

@@ -49,6 +49,109 @@ pub fn write_vrma(fps: f32, turns: &[BoneTurns]) -> Vec<u8> {
     b.glb()
 }
 
+/// A bone that an animation turns: its name, its node in the file, and where the node is at rest (relative to its parent).
+pub struct Target {
+    pub bone: &'static str,
+    pub node: usize,
+    pub rest: [f32; 3],
+}
+
+/// Add one animation (a motion's frames at `fps`) to a file that has the nodes of `targets`. `flip` is for VRM 0.x, which faces the other way.
+pub fn add_animation(b: &mut Builder, name: &str, fps: f32, frames: &[crate::motion::Frame], targets: &[Target], flip: bool) {
+    if frames.is_empty() {
+        return;
+    }
+    let times: Vec<f32> = (0..frames.len()).map(|i| i as f32 / fps.max(1.0)).collect();
+    let mut samplers = Vec::new();
+    let mut channels = Vec::new();
+    for t in targets {
+        let moves = frames.iter().any(|f| f.get(t.bone) != [0.0; 3]);
+        if moves {
+            let mut prev: Option<[f32; 4]> = None;
+            let mut data: Vec<f32> = Vec::with_capacity(frames.len() * 4);
+            for f in frames {
+                let mut q = f.quat(t.bone);
+                if flip {
+                    q = [-q[0], q[1], -q[2], q[3]];
+                }
+                // the nearer of the two quaternions of the same turn, so the file does not spin the long way
+                if let Some(p) = prev {
+                    if p[0] * q[0] + p[1] * q[1] + p[2] * q[2] + p[3] * q[3] < 0.0 {
+                        q = [-q[0], -q[1], -q[2], -q[3]];
+                    }
+                }
+                prev = Some(q);
+                data.extend(q);
+            }
+            let input = b.animation_data(&times, "SCALAR");
+            let output = b.animation_data(&data, "VEC4");
+            samplers.push(json!({ "input": input, "output": output, "interpolation": "LINEAR" }));
+            channels.push(json!({ "sampler": samplers.len() - 1, "target": { "node": t.node, "path": "rotation" } }));
+        }
+        if t.bone == "hips" && frames.iter().any(|f| f.hips != [0.0; 3]) {
+            let data: Vec<f32> = frames
+                .iter()
+                .flat_map(|f| {
+                    let h = if flip { [-f.hips[0], f.hips[1], -f.hips[2]] } else { f.hips };
+                    [t.rest[0] + h[0], t.rest[1] + h[1], t.rest[2] + h[2]]
+                })
+                .collect();
+            let input = b.animation_data(&times, "SCALAR");
+            let output = b.animation_data(&data, "VEC3");
+            samplers.push(json!({ "input": input, "output": output, "interpolation": "LINEAR" }));
+            channels.push(json!({ "sampler": samplers.len() - 1, "target": { "node": t.node, "path": "translation" } }));
+        }
+    }
+    b.animations.push(json!({ "name": name, "samplers": samplers, "channels": channels }));
+}
+
+/// A .vrma file for one animation of the character: the skeleton in its T-pose (so a player knows the rest), and the turns of the bones.
+pub fn write_vrma_clip(model: &crate::vrm::model::Model3d, clip: &crate::motion::Clip, fps: f32) -> Vec<u8> {
+    let mut b = Builder::new("SeviathStudio");
+    // the humanoid bones that this model has, with the nearest one above each as its parent
+    let keep: Vec<usize> = (0..model.bones.len()).filter(|i| model.bones[*i].humanoid && crate::motion::BONES.contains(&model.bones[*i].name.as_str())).collect();
+    let node_of = |bone: usize| keep.iter().position(|k| *k == bone);
+    let parent_of = |bone: usize| -> Option<usize> {
+        let mut p = model.bones[bone].parent;
+        while let Some(i) = p {
+            if node_of(i).is_some() {
+                return Some(i);
+            }
+            p = model.bones[i].parent;
+        }
+        None
+    };
+    let mut targets = Vec::new();
+    let mut humanoid = serde_json::Map::new();
+    let mut roots = Vec::new();
+    for (n, &bi) in keep.iter().enumerate() {
+        let bone = &model.bones[bi];
+        let par = parent_of(bi);
+        let rest = match par {
+            Some(p) => [bone.pos[0] - model.bones[p].pos[0], bone.pos[1] - model.bones[p].pos[1], bone.pos[2] - model.bones[p].pos[2]],
+            None => bone.pos,
+        };
+        let children: Vec<usize> = keep.iter().enumerate().filter(|(_, c)| parent_of(**c) == Some(bi)).map(|(k, _)| k).collect();
+        let mut node = json!({ "name": bone.name, "translation": rest });
+        if !children.is_empty() {
+            node["children"] = json!(children);
+        }
+        b.nodes.push(node);
+        if par.is_none() {
+            roots.push(n);
+        }
+        humanoid.insert(bone.name.clone(), json!({ "node": n }));
+        if let Some(name) = crate::motion::BONES.iter().find(|x| **x == bone.name) {
+            targets.push(Target { bone: name, node: n, rest });
+        }
+    }
+    add_animation(&mut b, &clip.name, fps, &clip.frames(fps), &targets, false);
+    b.scenes.push(json!({ "nodes": roots }));
+    b.extensions_used.push("VRMC_vrm_animation".into());
+    b.extensions.insert("VRMC_vrm_animation".into(), json!({ "specVersion": "1.0", "humanoid": { "humanBones": humanoid } }));
+    b.glb()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

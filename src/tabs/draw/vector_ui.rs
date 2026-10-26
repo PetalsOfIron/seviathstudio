@@ -3,6 +3,7 @@
 // the eraser cuts them cleanly; Edit mode moves, adds and removes nodes, and the pressure graph
 // reshapes the width along a line. Hold the pen still at the end of a shape to straighten it.
 
+use crate::widgets::HelpExt;
 use std::collections::HashMap;
 
 use eframe::egui::{self, Color32, CornerRadius, Painter, Pos2, Rect, Response, RichText, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
@@ -468,7 +469,7 @@ impl DrawState {
                 ui.add_space(2.0);
                 let st = &mut self.vec.style;
                 slider_row(ui, "Size", &mut st.size, 0.5..=200.0, " px");
-                ui.checkbox(&mut st.size_pressure, "Pressure changes the width");
+                ui.checkbox(&mut st.size_pressure, "Pressure changes the width").help("A harder press makes the line wider.");
                 if st.size_pressure {
                     let mut m = st.min_size * 100.0;
                     if slider_row(ui, "Smallest", &mut m, 0.0..=100.0, "%").changed() {
@@ -488,7 +489,7 @@ impl DrawState {
                     self.vec.smooth = sm / 100.0;
                 }
                 hint(ui, "0 keeps your hand exactly. Higher gives smoother curves with fewer points.");
-                ui.checkbox(&mut self.vec.straighten, "Hold still to straighten").on_hover_text("Keep the pen still for a moment at the end of a circle, rectangle, triangle or line");
+                ui.checkbox(&mut self.vec.straighten, "Hold still to straighten").help("Keep the pen still for a moment at the end of a circle, rectangle, triangle or line");
             }
             VecMode::Edit => {
                 hint(ui, "Click a line to select it. Drag its nodes. Drag along the line to pull out a new node. Shift + drag moves the whole line. Delete removes the node or the line.");
@@ -503,7 +504,7 @@ impl DrawState {
         if li.is_none() && self.doc.layers[self.active_idx()].kind == LayerKind::Raster {
             section_title(ui, "Trace");
             hint(ui, "Turn a pixel drawing into editable lines and color shapes.");
-            if ui.button("Auto-trace this layer…").clicked() {
+            if ui.button("Auto-trace this layer…").help("Turn the pixels of this layer into smooth vector lines.").clicked() {
                 let id = self.active;
                 self.open_trace(id);
             }
@@ -546,22 +547,22 @@ impl DrawState {
             ns.style.opacity = o / 100.0;
         }
         widgets::segmented(ui, &mut ns.style.ends, &[(LineEnds::Round, "Round"), (LineEnds::Taper, "Pointed"), (LineEnds::Flat, "Flat")]);
-        ui.checkbox(&mut ns.style.size_pressure, "Pressure changes the width");
+        ui.checkbox(&mut ns.style.size_pressure, "Pressure changes the width").help("A harder press makes the line wider.");
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-            if ui.button("Smoother").clicked() {
+            if ui.button("Smoother").help("Make the line smoother.").clicked() {
                 ns = vector::smooth_stroke(&s, 0.4);
                 self.label_hint = Some("Smooth vector line".into());
             }
-            if ui.button("Fewer nodes").clicked() {
+            if ui.button("Fewer nodes").help("Take away points that are not needed. The line stays almost the same.").clicked() {
                 ns = vector::simplify_stroke(&s, 1.5);
                 self.label_hint = Some("Simplify vector line".into());
             }
-            if ui.button("More nodes").on_hover_text("A node every 6 pixels, to shape the pressure finely").clicked() {
+            if ui.button("More nodes").help("A node every 6 pixels, to shape the pressure finely").clicked() {
                 ns = vector::densify_stroke(&s, 6.0);
                 self.label_hint = Some("Add nodes".into());
             }
-            if ui.button(RichText::new("Delete line").color(Color32::from_rgb(232, 110, 110))).clicked() {
+            if ui.button(RichText::new("Delete line").color(Color32::from_rgb(232, 110, 110))).help("Delete this line.").clicked() {
                 self.vec_delete_whole(li, idx);
             }
         });

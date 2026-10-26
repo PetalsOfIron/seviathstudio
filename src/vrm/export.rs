@@ -43,6 +43,11 @@ pub fn export(model: &Model3d, fmt: Format) -> Result<Vec<u8>, String> {
 
 /// The same, with the SVRM description of the rig (sliders, expressions, clips) as one more extension of the file.
 pub fn export_with(model: &Model3d, fmt: Format, svrm: Option<&Value>) -> Result<Vec<u8>, String> {
+    export_full(model, fmt, svrm, &[], 30.0)
+}
+
+/// The same, with animations in the file (every clip as one animation of the bones; players and engines list them by name).
+pub fn export_full(model: &Model3d, fmt: Format, svrm: Option<&Value>, clips: &[crate::motion::Clip], fps: f32) -> Result<Vec<u8>, String> {
     if model.parts.is_empty() || model.bones.is_empty() {
         return Err("There is nothing to export: the character has no parts.".into());
     }
@@ -250,6 +255,21 @@ pub fn export_with(model: &Model3d, fmt: Format, svrm: Option<&Value>) -> Result
                     "colliderGroups": model.colliders.iter().map(|c| { let o = conv(fmt, c.offset); json!({ "node": bone_node(c.bone), "colliders": [{ "offset": { "x": o[0], "y": o[1], "z": o[2] }, "radius": c.radius }] }) }).collect::<Vec<_>>() },
                 "materialProperties": mat_props,
             }));
+        }
+    }
+    if !clips.is_empty() && fmt == Format::Glb {
+        let flip = fmt == Format::Vrm0;
+        let targets: Vec<super::vrma::Target> = crate::motion::BONES
+            .iter()
+            .filter_map(|name| {
+                let i = model.bone(name)?;
+                let world = conv(fmt, model.bones[i].pos);
+                let parent = model.bones[i].parent.map(|p| conv(fmt, model.bones[p].pos)).unwrap_or([0.0; 3]);
+                Some(super::vrma::Target { bone: name, node: bone_node(i), rest: [world[0] - parent[0], world[1] - parent[1], world[2] - parent[2]] })
+            })
+            .collect();
+        for c in clips {
+            super::vrma::add_animation(&mut b, &c.name, fps, &c.frames(fps), &targets, flip);
         }
     }
     if let Some(s) = svrm {

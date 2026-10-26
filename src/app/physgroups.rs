@@ -5,6 +5,7 @@
 // chain moves, from which weight, how much). Several groups move the same sliders freely. The numbers are the ones the Live2D physics of
 // `rig/paramphys.rs` uses, so what is made here swings as it would in a Live2D model (and files from Live2D open in the same window).
 
+use crate::widgets::HelpExt;
 use eframe::egui::{self, RichText, Ui, vec2};
 
 use super::SeviathApp;
@@ -98,14 +99,14 @@ impl SeviathApp {
             ui.label(RichText::new("Group").size(12.0).color(TEXT_DIM));
             egui::ComboBox::from_id_salt("phys_group").selected_text(pp.settings.get(sel).map(|s| s.name.clone()).unwrap_or_else(|| "none yet".into())).width(170.0).show_ui(ui, |ui| {
                 for (i, s) in pp.settings.iter().enumerate() {
-                    if ui.selectable_label(sel == i, &s.name).clicked() {
+                    if ui.selectable_label(sel == i, &s.name).help("Pick this one.").clicked() {
                         sel = i;
                     }
                 }
             });
             egui::ComboBox::from_id_salt("phys_group_add").selected_text("Add...").width(110.0).show_ui(ui, |ui| {
                 for (i, (name, _)) in PRESETS.iter().enumerate() {
-                    if ui.selectable_label(false, *name).clicked() {
+                    if ui.selectable_label(false, *name).help("Do this.").clicked() {
                         add_preset = Some(i);
                     }
                 }
@@ -147,7 +148,7 @@ impl SeviathApp {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                 for (t, label) in [(Tab::Inputs, "Input settings"), (Tab::Pendulum, "Pendulum settings"), (Tab::Outputs, "Output settings")] {
-                    if widgets::chip(ui, label, self.rigs.phys.groups.tab == t).clicked() {
+                    if widgets::chip(ui, label, self.rigs.phys.groups.tab == t).help("Pick which page of the physics window to see.").clicked() {
                         self.rigs.phys.groups.tab = t;
                     }
                 }
@@ -164,8 +165,8 @@ impl SeviathApp {
                             kind_pick(ui, ("pink", i), &mut inp.kind);
                             ui.label(RichText::new("effect").size(11.0).color(TEXT_DIM));
                             ui.add(egui::DragValue::new(&mut inp.weight).range(0.0..=100.0).speed(1.0).suffix("%"));
-                            ui.checkbox(&mut inp.reflect, "Reflect").on_hover_text("The other way round");
-                            if ui.small_button("Delete").clicked() {
+                            ui.checkbox(&mut inp.reflect, "Reflect").help("The other way round");
+                            if ui.small_button("Delete").help("Delete this. Undo brings it back.").clicked() {
                                 remove = Some(i);
                             }
                         });
@@ -173,7 +174,7 @@ impl SeviathApp {
                     if let Some(i) = remove {
                         g.inputs.remove(i);
                     }
-                    if ui.button("Add an input").clicked() {
+                    if ui.button("Add an input").help("Add a slider that moves this group (for example the head turn).").clicked() {
                         let first = params.first().map(|p| p.2.clone()).unwrap_or_default();
                         g.inputs.push(PhysInput { id: first, weight: 100.0, kind: Kind::X, reflect: false });
                         if let Some(p) = params.first() {
@@ -201,14 +202,14 @@ impl SeviathApp {
                             } else {
                                 ui.add(egui::DragValue::new(&mut v.radius).range(0.1..=50.0).speed(0.1).max_decimals(2));
                             }
-                            ui.add(egui::DragValue::new(&mut v.mobility).range(0.0..=1.0).speed(0.01).max_decimals(2)).on_hover_text("0 holds still, 1 swings freely");
-                            ui.add(egui::DragValue::new(&mut v.delay).range(0.0..=3.0).speed(0.01).max_decimals(2)).on_hover_text("Bigger follows faster");
-                            ui.add(egui::DragValue::new(&mut v.acceleration).range(0.0..=5.0).speed(0.01).max_decimals(2)).on_hover_text("How strongly it is pulled down");
+                            ui.add(egui::DragValue::new(&mut v.mobility).range(0.0..=1.0).speed(0.01).max_decimals(2)).help("0 holds still, 1 swings freely");
+                            ui.add(egui::DragValue::new(&mut v.delay).range(0.0..=3.0).speed(0.01).max_decimals(2)).help("Bigger follows faster");
+                            ui.add(egui::DragValue::new(&mut v.acceleration).range(0.0..=5.0).speed(0.01).max_decimals(2)).help("How strongly it is pulled down");
                             ui.horizontal(|ui| {
-                                if i > 0 && ui.small_button("Duplicate").clicked() {
+                                if i > 0 && ui.small_button("Duplicate").help("Make a copy of this.").clicked() {
                                     dup = Some(i);
                                 }
-                                if i > 1 && ui.small_button("Delete").clicked() {
+                                if i > 1 && ui.small_button("Delete").help("Delete this. Undo brings it back.").clicked() {
                                     remove = Some(i);
                                 }
                             });
@@ -225,7 +226,7 @@ impl SeviathApp {
                             o.vertex = o.vertex.min(g.vertices.len() - 1);
                         }
                     }
-                    if ui.button("Add a weight").clicked() {
+                    if ui.button("Add a weight").help("Add one more weight to the end of the chain.").clicked() {
                         let last = g.vertices.last().cloned().unwrap_or(PhysVertex { pos: [0.0, 0.0], mobility: 0.9, delay: 0.9, acceleration: 1.0, radius: 3.0 });
                         g.vertices.push(PhysVertex { radius: if last.radius > 0.0 { last.radius } else { 3.0 }, ..last });
                     }
@@ -263,9 +264,9 @@ impl SeviathApp {
                             ui.label(RichText::new("effect").size(11.0).color(TEXT_DIM));
                             ui.add(egui::DragValue::new(&mut o.weight).range(0.0..=100.0).speed(1.0).suffix("%"));
                             ui.label(RichText::new("scale").size(11.0).color(TEXT_DIM));
-                            ui.add(egui::DragValue::new(&mut o.scale).range(-500.0..=500.0).speed(0.5)).on_hover_text("How far the slider goes for a swing of this size");
-                            ui.checkbox(&mut o.reflect, "Reflect");
-                            if ui.small_button("Delete").clicked() {
+                            ui.add(egui::DragValue::new(&mut o.scale).range(-500.0..=500.0).speed(0.5)).help("How far the slider goes for a swing of this size");
+                            ui.checkbox(&mut o.reflect, "Reflect").help("The other way round.");
+                            if ui.small_button("Delete").help("Delete this. Undo brings it back.").clicked() {
                                 remove = Some(i);
                             }
                         });
@@ -274,23 +275,23 @@ impl SeviathApp {
                         g.outputs.remove(i);
                     }
                     ui.horizontal_wrapped(|ui| {
-                        if ui.button("Increase output").on_hover_text("Every output reaches 25 percent further").clicked() {
+                        if ui.button("Increase output").help("Every output reaches 25 percent further").clicked() {
                             for o in g.outputs.iter_mut() {
                                 o.scale = (o.scale * 1.25).clamp(-500.0, 500.0);
                             }
                         }
-                        if ui.button("Decrease output").clicked() {
+                        if ui.button("Decrease output").help("Every output reaches 25 percent less far.").clicked() {
                             for o in g.outputs.iter_mut() {
                                 o.scale = (o.scale / 1.25).clamp(-500.0, 500.0);
                             }
                         }
-                        if ui.button("Reset magnification").on_hover_text("Every output back to a scale of 10").clicked() {
+                        if ui.button("Reset magnification").help("Every output back to a scale of 10").clicked() {
                             for o in g.outputs.iter_mut() {
                                 o.scale = 10.0 * o.scale.signum();
                             }
                         }
                     });
-                    if ui.button("Add an output").clicked() {
+                    if ui.button("Add an output").help("Add a slider that this group moves.").clicked() {
                         let first = params.first().map(|p| p.2.clone()).unwrap_or_default();
                         g.outputs.push(PhysOutput { id: first, vertex: weights.saturating_sub(1).max(1), scale: 10.0, weight: 100.0, kind: Kind::Angle, reflect: false });
                         if let Some(p) = params.first() {
@@ -306,19 +307,19 @@ impl SeviathApp {
         // -- all groups together
         ui.separator();
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut pp.on, "Physics of the groups on");
+            ui.checkbox(&mut pp.on, "Physics of the groups on").help("Turn the hand made physics groups on or off.");
             egui::ComboBox::from_id_salt("phys_fps").selected_text(format!("{} fps", pp.fps.round())).width(80.0).show_ui(ui, |ui| {
                 for f in [30.0, 60.0, 90.0, 120.0] {
-                    ui.selectable_value(&mut pp.fps, f, format!("{f} fps"));
+                    ui.selectable_value(&mut pp.fps, f, format!("{f} fps")).help("Pick this one.");
                 }
             });
             ui.label(RichText::new("Strength").size(12.0).color(TEXT_DIM));
-            ui.add(egui::Slider::new(&mut pp.strength, 0.0..=2.0).show_value(false)).on_hover_text("1 is as set up");
+            ui.add(egui::Slider::new(&mut pp.strength, 0.0..=2.0).show_value(false)).help("1 is as set up");
             ui.label(RichText::new("Gravity").size(12.0).color(TEXT_DIM));
             ui.add(egui::DragValue::new(&mut pp.gravity[1]).range(-3.0..=3.0).speed(0.05).max_decimals(2));
             ui.label(RichText::new("Wind").size(12.0).color(TEXT_DIM));
             ui.add(egui::DragValue::new(&mut pp.wind[0]).range(-5.0..=5.0).speed(0.05).max_decimals(2));
-            if ui.small_button("Settle").on_hover_text("The chains hang still again").clicked() {
+            if ui.small_button("Settle").help("The chains hang still again").clicked() {
                 self.rigs.phys.param_state = Default::default();
             }
         });
@@ -384,7 +385,7 @@ fn slider_pick(ui: &mut Ui, id: (&str, usize), params: &[(Id, String, String)], 
     let current = params.iter().find(|p| !p.2.is_empty() && p.2 == *cid).map(|p| p.1.clone()).unwrap_or_else(|| if cid.is_empty() { "pick a slider".to_string() } else { format!("{cid} (not in this rig)") });
     egui::ComboBox::from_id_salt(id).selected_text(current).width(150.0).show_ui(ui, |ui| {
         for (pid, name, c) in params {
-            if ui.selectable_label(!c.is_empty() && c == cid, name).clicked() {
+            if ui.selectable_label(!c.is_empty() && c == cid, name).help("Use this picture model.").clicked() {
                 if c.is_empty() {
                     need.push(*pid);
                     // the id the slider is about to get, as `ensure_cid` makes it
@@ -404,9 +405,9 @@ fn kind_pick(ui: &mut Ui, id: (&str, usize), kind: &mut Kind) {
         Kind::Y => "Position Y",
         Kind::Angle => "Angle",
     }).width(90.0).show_ui(ui, |ui| {
-        ui.selectable_value(kind, Kind::X, "Position X");
-        ui.selectable_value(kind, Kind::Y, "Position Y");
-        ui.selectable_value(kind, Kind::Angle, "Angle");
+        ui.selectable_value(kind, Kind::X, "Position X").help("Where it is, across.");
+        ui.selectable_value(kind, Kind::Y, "Position Y").help("Where it is, up and down.");
+        ui.selectable_value(kind, Kind::Angle, "Angle").help("The turn of the weight is the slider value.");
     });
 }
 

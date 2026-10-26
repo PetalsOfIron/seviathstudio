@@ -8,6 +8,7 @@ use eframe::egui::{
     vec2,
 };
 
+use crate::widgets::HelpExt;
 use super::{DrawState, checker};
 use crate::blend::from_px;
 use crate::doc::Blend;
@@ -212,7 +213,7 @@ impl DrawState {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
             for (s, label, about) in GShape::ALL {
-                if widgets::chip(ui, label, self.grad.g.shape == s).on_hover_text(about).clicked() {
+                if widgets::chip(ui, label, self.grad.g.shape == s).help(about).clicked() {
                     self.grad.g.shape = s;
                 }
             }
@@ -220,7 +221,7 @@ impl DrawState {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
             for (r, label) in Repeat::ALL {
-                if widgets::chip(ui, label, self.grad.g.repeat == r).clicked() {
+                if widgets::chip(ui, label, self.grad.g.repeat == r).help("Pick what the gradient does after its end.").clicked() {
                     self.grad.g.repeat = r;
                 }
             }
@@ -252,13 +253,13 @@ impl DrawState {
                 self.grad.g.stops.remove(sel);
                 self.grad.sel_stop = sel.saturating_sub(1);
             }
-            if ui.add_enabled(n < 12, egui::Button::new("Add color")).on_hover_text("Or click on the bar").clicked() {
+            if ui.add_enabled(n < 12, egui::Button::new("Add color")).help("Or click on the bar").clicked() {
                 let t = self.grad.g.stops.get(sel).map(|s| (s.pos + 0.1).min(1.0)).unwrap_or(0.5);
                 let c = self.grad.g.color_at(t);
                 self.grad.g.stops.push(Stop { pos: t, color: [(c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8], alpha: c[3] });
                 self.grad.sel_stop = self.grad.g.stops.len() - 1;
             }
-            if ui.button("Reverse").clicked() {
+            if ui.button("Reverse").help("Turn the order round.").clicked() {
                 for s in &mut self.grad.g.stops {
                     s.pos = 1.0 - s.pos;
                 }
@@ -271,15 +272,15 @@ impl DrawState {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
             for (name, stops) in presets(pc, sc) {
-                if widgets::chip(ui, name, false).clicked() {
+                if widgets::chip(ui, name, false).help("Use this.").clicked() {
                     self.grad.g.stops = stops;
                     self.grad.sel_stop = 0;
                 }
             }
         });
         ui.add_space(4.0);
-        ui.checkbox(&mut self.grad.g.smooth, "Clean color blending").on_hover_text("Blends in OKLab, so the middle stays colorful instead of turning gray");
-        ui.checkbox(&mut self.grad.g.dither, "Smooth out banding").on_hover_text("A tiny noise so slow gradients show no visible steps");
+        ui.checkbox(&mut self.grad.g.smooth, "Clean color blending").help("Blends in OKLab, so the middle stays colorful instead of turning gray");
+        ui.checkbox(&mut self.grad.g.dither, "Smooth out banding").help("A tiny noise so slow gradients show no visible steps");
         ui.add_space(2.0);
         let mut op = self.grad.g.opacity * 100.0;
         if slider_row(ui, "Opacity", &mut op, 1.0..=100.0, "%").changed() {
@@ -289,7 +290,7 @@ impl DrawState {
             ui.label(RichText::new("Mix").color(TEXT_DIM).size(12.5));
             egui::ComboBox::from_id_salt("grad_blend").selected_text(self.grad.g.blend.name()).width(150.0).height(380.0).show_ui(ui, |ui| {
                 for b in Blend::ALL {
-                    ui.selectable_value(&mut self.grad.g.blend, b, b.name()).on_hover_text(b.about());
+                    ui.selectable_value(&mut self.grad.g.blend, b, b.name()).help(b.about());
                 }
             });
         });
@@ -298,13 +299,13 @@ impl DrawState {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let live = self.grad.edit.is_some();
-            if ui.add_enabled(live, egui::Button::new(RichText::new("Apply").strong())).on_hover_text("Enter").clicked() {
+            if ui.add_enabled(live, egui::Button::new(RichText::new("Apply").strong())).help("Enter").clicked() {
                 self.apply_gradient();
             }
-            if ui.add_enabled(live, egui::Button::new("Cancel")).on_hover_text("Esc").clicked() {
+            if ui.add_enabled(live, egui::Button::new("Cancel")).help("Esc").clicked() {
                 self.cancel_gradient();
             }
-            if ui.button("Gradient map").on_hover_text("Recolor this layer: dark parts get the first color, light parts the last").clicked() {
+            if ui.button("Gradient map").help("Recolor this layer: dark parts get the first color, light parts the last").clicked() {
                 self.gradient_map();
             }
         });
@@ -314,7 +315,7 @@ impl DrawState {
 
     /// The small group in the brush settings.
     pub(super) fn gradient_brush_section(grad: &mut GradState, ui: &mut Ui) {
-        ui.checkbox(&mut grad.brush_on, "Color the stroke with the gradient").on_hover_text("Uses the colors set in the Gradient tool");
+        ui.checkbox(&mut grad.brush_on, "Color the stroke with the gradient").help("Uses the colors set in the Gradient tool");
         if grad.brush_on {
             slider_row(ui, "One pass", &mut grad.brush_len, 50.0..=4000.0, " px");
             let sg = grad.g.clone();
@@ -391,7 +392,7 @@ fn stop_bar(ui: &mut Ui, g: &mut Gradient, sel: &mut usize) {
         let on = *sel == i;
         p.rect_filled(hr, CornerRadius::same(3), Color32::from_rgb(s.color[0], s.color[1], s.color[2]));
         p.rect_stroke(hr, CornerRadius::same(3), Stroke::new(if on { 2.0 } else { 1.0 }, if on { VENOM } else { TEXT_DIM }), StrokeKind::Inside);
-        r.on_hover_text("Drag to move · right-click to remove");
+        r.help("Drag to move · right-click to remove");
     }
     if let Some(i) = remove {
         g.stops.remove(i);

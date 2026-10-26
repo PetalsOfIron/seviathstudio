@@ -997,3 +997,104 @@ fn the_svrm_description_rides_along_in_every_format_and_is_read_back() {
         assert_eq!(validate(&export(&m, fmt).unwrap()).unwrap().svrm, None);
     }
 }
+
+/// The uncut figure as a character (for the motion tests).
+fn uncut_model() -> super::model::Model3d {
+    use super::model::build_any;
+    let img = crate::rig::uncut::tests::figure_image();
+    let mut d = uncut_doc(&img);
+    let ids: Vec<crate::doc::LayerId> = d.layers.iter().map(|l| l.id).collect();
+    let mut rig = Rig::default();
+    crate::rig::uncut::auto_rig(&mut rig, &d, &ids, 0.6).unwrap();
+    d.rig = std::sync::Arc::new(rig);
+    build_any(&d, &Options { name: "Motion".into(), author: "Me".into(), ..Default::default() }).unwrap()
+}
+
+/// Every ready motion at four moments, on a sheet: target/screens/motion_sheet.png
+#[test]
+fn motion_sheet() {
+    use crate::motion::{Clip, MOTIONS, Style};
+    let m = uncut_model();
+    let (cw, ch) = (150u32, 230u32);
+    let rows = MOTIONS.len() as u32;
+    let mut sheet = image::RgbaImage::from_pixel(cw * 5, ch * rows.div_ceil(2), image::Rgba([244, 242, 236, 255]));
+    for (i, info) in MOTIONS.iter().enumerate() {
+        let clip = Clip::new(info.motion, Style::default());
+        let d = clip.seconds();
+        let (col0, row) = (if i % 2 == 0 { 0 } else { 0 }, i as u32 / 2);
+        let _ = col0;
+        for k in 0..4u32 {
+            let t = d * (k as f32 + 0.5) / 4.0 * if clip.looping() { 1.0 } else { 1.0 };
+            let img = super::preview::render_motion(&m, 20.0, cw, ch, &clip.at(t), 1.5);
+            let x0 = (i as u32 % 2) * cw * 2 + k.min(1) * 0; // two motions per row, two moments each
+            let _ = x0;
+            let _ = img;
+        }
+        let _ = row;
+    }
+    // a simple layout: one motion per row of four moments, two columns of motions
+    let mut sheet2 = image::RgbaImage::from_pixel(cw * 8, ch * rows.div_ceil(2), image::Rgba([244, 242, 236, 255]));
+    for (i, info) in MOTIONS.iter().enumerate() {
+        let clip = Clip::new(info.motion, Style::default());
+        let d = clip.seconds();
+        for k in 0..4u32 {
+            let t = d * (k as f32 + 0.5) / 4.0;
+            let img = super::preview::render_motion(&m, 20.0, cw, ch, &clip.at(t), 1.5);
+            let (ox, oy) = ((i as u32 % 2) * cw * 4 + k * cw, (i as u32 / 2) * ch);
+            image::imageops::replace(&mut sheet2, &img, ox as i64, oy as i64);
+        }
+    }
+    let _ = &mut sheet;
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("screens");
+    std::fs::create_dir_all(&dir).unwrap();
+    sheet2.save(dir.join("motion_sheet.png")).unwrap();
+    std::fs::write(dir.join("motion_sheet.txt"), MOTIONS.iter().map(|i| i.name).collect::<Vec<_>>().chunks(2).map(|r| r.join(" | ")).collect::<Vec<_>>().join("\n")).unwrap();
+}
+
+#[test]
+fn only_the_game_glb_carries_animations_and_they_read_back() {
+    use super::export::{Format, export_full, validate};
+    use crate::motion::{Clip, Motion, Style};
+    let m = uncut_model();
+    let clips = vec![Clip::new(Motion::Walk, Style::default()), Clip::new(Motion::Wave, Style::default())];
+    let glb = export_full(&m, Format::Glb, None, &clips, 30.0).unwrap();
+    validate(&glb).unwrap();
+    let g = super::gltf::read_glb(&glb).unwrap();
+    let anims = g.json["animations"].as_array().expect("the game file has animations");
+    assert_eq!(anims.len(), 2);
+    assert_eq!(anims[0]["name"], "Walk");
+    let channels = anims[0]["channels"].as_array().unwrap();
+    assert!(channels.len() >= 8, "{} channels", channels.len());
+    assert!(channels.iter().any(|c| c["target"]["path"] == "translation"), "the hips move up and down in a walk");
+    // every accessor of an animation holds exactly as many numbers as it says (a loader refuses a file where it does not)
+    for an in anims {
+        for smp in an["samplers"].as_array().unwrap() {
+            for k in ["input", "output"] {
+                let acc = &g.json["accessors"][smp[k].as_u64().unwrap() as usize];
+                let per = match acc["type"].as_str().unwrap() { "SCALAR" => 1, "VEC3" => 3, "VEC4" => 4, t => panic!("{t}") };
+                let view = &g.json["bufferViews"][acc["bufferView"].as_u64().unwrap() as usize];
+                assert_eq!(acc["count"].as_u64().unwrap() as usize * per * 4, view["byteLength"].as_u64().unwrap() as usize, "{} {k}", an["name"]);
+            }
+            let (i, o) = (&g.json["accessors"][smp["input"].as_u64().unwrap() as usize], &g.json["accessors"][smp["output"].as_u64().unwrap() as usize]);
+            assert_eq!(i["count"], o["count"], "one value for every time");
+        }
+    }
+    // every channel points at a bone node of the skeleton
+    let nodes = g.json["nodes"].as_array().unwrap().len();
+    assert!(channels.iter().all(|c| (c["target"]["node"].as_u64().unwrap() as usize) < nodes));
+    // the VTuber files carry none
+    for fmt in [Format::Vrm1, Format::Vrm0] {
+        let v = export_full(&m, fmt, None, &clips, 30.0).unwrap();
+        assert!(super::gltf::read_glb(&v).unwrap().json.get("animations").is_none(), "{fmt:?} has no animations");
+    }
+}
+
+#[test]
+fn a_motion_frame_moves_the_picture_of_the_character() {
+    use crate::motion::{Motion, eval};
+    let m = uncut_model();
+    let rest = super::preview::render_motion(&m, 0.0, 120, 200, &eval(Motion::IdleBreathe, 0.0), 1.0);
+    let wave = super::preview::render_motion(&m, 0.0, 120, 200, &eval(Motion::Wave, 0.5), 1.0);
+    let diff = rest.pixels().zip(wave.pixels()).filter(|(a, b)| a != b).count();
+    assert!(diff > 300, "{diff} pixels differ between standing and waving");
+}

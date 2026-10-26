@@ -4,6 +4,7 @@
 // what it writes is read and checked by aibridge.rs before anything changes, and a brush or a palette is added to what is there,
 // never over a drawing.
 
+use crate::widgets::HelpExt;
 use std::sync::mpsc::{Receiver, channel};
 
 use eframe::egui::{self, Align2, Color32, RichText};
@@ -132,7 +133,7 @@ impl SeviathApp {
         if !using_own && !c.checkpoints.is_empty() {
             egui::ComboBox::from_id_salt("comfy_ckpt").selected_text(c.checkpoints.get(c.ckpt).cloned().unwrap_or_default()).width(300.0).show_ui(ui, |ui| {
                 for (i, n) in c.checkpoints.iter().enumerate() {
-                    ui.selectable_value(&mut c.ckpt, i, n);
+                    ui.selectable_value(&mut c.ckpt, i, n).help("Pick the picture model the AI uses.");
                 }
             });
         }
@@ -143,14 +144,14 @@ impl SeviathApp {
             ui.add(egui::DragValue::new(&mut c.height).range(256..=2048).speed(8.0).prefix("height "));
         });
         ui.horizontal(|ui| {
-            if ui.button("Use my own workflow…").on_hover_text("A workflow saved from ComfyUI with Save (API format). Put {{prompt}}, {{negative}}, {{seed}}, {{width}}, {{height}} and {{checkpoint}} where they belong.").clicked() {
+            if ui.button("Use my own workflow…").help("A workflow saved from ComfyUI with Save (API format). Put {{prompt}}, {{negative}}, {{seed}}, {{width}}, {{height}} and {{checkpoint}} where they belong.").clicked() {
                 if let Some(p) = rfd::FileDialog::new().add_filter("ComfyUI workflow", &["json"]).pick_file() {
                     c.workflow = Some(p);
                 }
             }
             if let Some(p) = &c.workflow {
                 ui.label(RichText::new(p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).size(11.5).color(TEXT_DIM));
-                if ui.small_button("Use the plain one").clicked() {
+                if ui.small_button("Use the plain one").help("Use the plain one without any change.").clicked() {
                     c.workflow = None;
                 }
             }
@@ -273,7 +274,7 @@ impl SeviathApp {
             for i in 0..n {
                 let active = self.settings.ai_active == i;
                 ui.horizontal(|ui| {
-                    if widgets::chip(ui, if active { "In use" } else { "Use" }, active).clicked() {
+                    if widgets::chip(ui, if active { "In use" } else { "Use" }, active).help("This one is on now.").clicked() {
                         self.settings.ai_active = i;
                     }
                 });
@@ -281,10 +282,10 @@ impl SeviathApp {
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut p.name).desired_width(120.0));
                     egui::ComboBox::from_id_salt(("ai_kind", i)).selected_text(match p.kind { Kind::Ollama => "Ollama", Kind::OpenAi => "OpenAI style" }).width(100.0).show_ui(ui, |ui| {
-                        ui.selectable_value(&mut p.kind, Kind::Ollama, "Ollama");
-                        ui.selectable_value(&mut p.kind, Kind::OpenAi, "OpenAI style");
+                        ui.selectable_value(&mut p.kind, Kind::Ollama, "Ollama").help("Use Ollama, an AI that runs on this computer.");
+                        ui.selectable_value(&mut p.kind, Kind::OpenAi, "OpenAI style").help("Use a service that speaks the OpenAI way (many programs do).");
                     });
-                    if ui.small_button("Remove").clicked() {
+                    if ui.small_button("Remove").help("Take this out of the list.").clicked() {
                         remove = Some(i);
                     }
                 });
@@ -305,13 +306,13 @@ impl SeviathApp {
                 self.settings.ai_active = self.settings.ai_active.min(self.settings.ai_providers.len().saturating_sub(1));
             }
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Add Ollama").clicked() {
+                if ui.button("Add Ollama").help("Add Ollama, an AI that runs on this computer, as a helper for the AI features.").clicked() {
                     self.settings.ai_providers.push(Provider::ollama());
                 }
-                if ui.button("Add Gemini").clicked() {
+                if ui.button("Add Gemini").help("Add the free Google Gemini service as a helper for the AI features. It needs your own free key.").clicked() {
                     self.settings.ai_providers.push(Provider::gemini());
                 }
-                if ui.button("Add another server").clicked() {
+                if ui.button("Add another server").help("Add one more AI server to the list.").clicked() {
                     self.settings.ai_providers.push(Provider::openai_compatible());
                 }
                 if ui.add_enabled(self.ai.job.is_none() && !self.settings.ai_providers.is_empty(), egui::Button::new("Test the one in use")).clicked() {

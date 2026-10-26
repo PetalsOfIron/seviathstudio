@@ -3,6 +3,7 @@
 // selecting many layers for batch edits, favorites, "oops" restore of a deleted layer,
 // and the floating quick bar (Ctrl+L).
 
+use crate::widgets::HelpExt;
 use std::collections::{HashMap, HashSet};
 
 use eframe::egui::{self, Color32, Id, Pos2, Response, RichText, Sense, Stroke, Ui, Vec2, vec2};
@@ -58,10 +59,10 @@ fn tri_chip(ui: &mut Ui, label: &str, state: Option<bool>) -> Response {
                     .corner_radius(11)
                     .min_size(vec2(0.0, 22.0)),
             );
-            r.on_hover_text("Must NOT be this. Click to switch this filter off.")
+            r.help("Must NOT be this. Click to switch this filter off.")
         }
-        Some(false) => widgets::chip(ui, label, true).on_hover_text("Must be this. Click again for NOT."),
-        None => widgets::chip(ui, label, false).on_hover_text("Click: only these. Click twice: NOT these."),
+        Some(false) => widgets::chip(ui, label, true).help("Must be this. Click again for NOT."),
+        None => widgets::chip(ui, label, false).help("Click: only these. Click twice: NOT these."),
     }
 }
 
@@ -289,7 +290,7 @@ impl DrawState {
                     }
                 }
                 let tip = if t == 0 { "Show all labels".to_owned() } else { format!("Show only {name} layers") };
-                if resp.on_hover_text(tip).clicked() {
+                if resp.help(tip).clicked() {
                     self.lui.filter.label = t as u8;
                 }
             }
@@ -298,7 +299,7 @@ impl DrawState {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
             let n = self.lui.filter.count();
             let label = if n > 0 { format!("Filters ({n})") } else { "Filters".to_owned() };
-            if widgets::chip(ui, &label, self.lui.filters_open).on_hover_text("Stack filters: type, state, blend mode…").clicked() {
+            if widgets::chip(ui, &label, self.lui.filters_open).help("Stack filters: type, state, blend mode…").clicked() {
                 self.lui.filters_open = !self.lui.filters_open;
             }
             let sort = self.lui.sort.0;
@@ -310,15 +311,15 @@ impl DrawState {
                 .width(150.0)
                 .show_ui(ui, |ui| {
                     for (s, label) in SortBy::ALL {
-                        ui.selectable_value(&mut self.lui.sort, SortBySafe(s), label);
+                        ui.selectable_value(&mut self.lui.sort, SortBySafe(s), label).help("Pick how the list is sorted.");
                     }
                 });
             if self.lui.filter.is_active() || sort != SortBy::Z {
-                if widgets::chip(ui, "Clear", false).on_hover_text("Show every layer again").clicked() {
+                if widgets::chip(ui, "Clear", false).help("Show every layer again").clicked() {
                     self.lui.filter.clear();
                     self.lui.sort = SortBySafe(SortBy::Z);
                 }
-                if widgets::chip(ui, "Select all shown", false).on_hover_text("Pick every shown layer for batch edits").clicked() {
+                if widgets::chip(ui, "Select all shown", false).help("Pick every shown layer for batch edits").clicked() {
                     let ids: HashSet<LayerId> = self
                         .layer_order()
                         .into_iter()
@@ -361,7 +362,7 @@ impl DrawState {
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("layer_blend_filter").selected_text("Add blend mode…").width(150.0).height(380.0).show_ui(ui, |ui| {
                 for b in Blend::ALL {
-                    if ui.selectable_label(false, b.name()).clicked() && self.lui.filter.chip_state(ChipKind::Blend(b)).is_none() {
+                    if ui.selectable_label(false, b.name()).help("Use this blend mode.").clicked() && self.lui.filter.chip_state(ChipKind::Blend(b)).is_none() {
                         self.lui.filter.cycle(ChipKind::Blend(b));
                     }
                 }
@@ -377,12 +378,12 @@ impl DrawState {
                 ui.label(RichText::new("None yet — set up a filter, name it, press Save.").size(11.5).color(TEXT_DIM));
             }
             for (i, p) in self.doc.filter_presets.iter().enumerate() {
-                let r = widgets::chip(ui, &p.name, p.filter == self.lui.filter).on_hover_text("Click to use · right-click to delete");
+                let r = widgets::chip(ui, &p.name, p.filter == self.lui.filter).help("Click to use · right-click to delete");
                 if r.clicked() {
                     apply = Some(i);
                 }
                 r.context_menu(|ui| {
-                    if ui.button("Delete this saved filter").clicked() {
+                    if ui.button("Delete this saved filter").help("Forget this saved filter.").clicked() {
                         remove = Some(i);
                         ui.close();
                     }
@@ -392,7 +393,7 @@ impl DrawState {
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.lui.preset_name).hint_text("Name, e.g. Skin tones").desired_width(130.0).char_limit(40));
             let ok = self.lui.filter.is_active() && !self.lui.preset_name.trim().is_empty();
-            if ui.add_enabled(ok, egui::Button::new("Save")).on_hover_text("Saved inside this project").clicked() {
+            if ui.add_enabled(ok, egui::Button::new("Save")).help("Saved inside this project").clicked() {
                 let name = self.lui.preset_name.trim().to_owned();
                 let preset = Preset { name: name.clone(), filter: self.lui.filter.clone() };
                 if let Some(i) = self.doc.filter_presets.iter().position(|p| p.name == name) {
@@ -426,7 +427,7 @@ impl DrawState {
             let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
             icons::paint(ui.painter(), r, Icon::Star, GOLD);
             for (id, name) in favs {
-                if widgets::chip(ui, &name, id == self.active).on_hover_text("Favorite layer").clicked() {
+                if widgets::chip(ui, &name, id == self.active).help("Favorite layer").clicked() {
                     self.active = id;
                     self.lui.multi.clear();
                 }
@@ -446,28 +447,28 @@ impl DrawState {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("{n} layers picked")).strong().color(VENOM));
-                if widgets::chip(ui, "Done", false).on_hover_text("Go back to one layer").clicked() {
+                if widgets::chip(ui, "Done", false).help("Go back to one layer").clicked() {
                     self.lui.multi.clear();
                 }
             });
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-                if widgets::chip(ui, "Show", false).clicked() {
+                if widgets::chip(ui, "Show", false).help("Show it.").clicked() {
                     self.batch("Show", |l| l.visible = true);
                 }
-                if widgets::chip(ui, "Hide", false).clicked() {
+                if widgets::chip(ui, "Hide", false).help("Hide it.").clicked() {
                     self.batch("Hide", |l| l.visible = false);
                 }
-                if widgets::chip(ui, "Lock", false).clicked() {
+                if widgets::chip(ui, "Lock", false).help("Lock it, so it cannot be changed by accident.").clicked() {
                     self.batch("Lock", |l| l.locked = true);
                 }
-                if widgets::chip(ui, "Unlock", false).clicked() {
+                if widgets::chip(ui, "Unlock", false).help("Unlock it, so it can be changed.").clicked() {
                     self.batch("Unlock", |l| l.locked = false);
                 }
-                if widgets::chip(ui, "Star", false).on_hover_text("Add all to favorites").clicked() {
+                if widgets::chip(ui, "Star", false).help("Add all to favorites").clicked() {
                     self.batch("Favorite", |l| l.fav = true);
                 }
-                if widgets::chip(ui, "Into folder", false).clicked() {
+                if widgets::chip(ui, "Into folder", false).help("Put the layer into the folder.").clicked() {
                     self.batch_into_folder();
                 }
             });
@@ -481,7 +482,7 @@ impl DrawState {
                     } else {
                         ui.painter().circle_filled(r.center(), 6.0, *c);
                     }
-                    if resp.on_hover_text(*name).clicked() {
+                    if resp.help(*name).clicked() {
                         self.batch("Color label", move |l| l.tag = t as u8);
                     }
                 }
@@ -494,7 +495,7 @@ impl DrawState {
                 ui.label(RichText::new("Blend").color(TEXT_DIM).size(12.5));
                 egui::ComboBox::from_id_salt("batch_blend").selected_text("Set for all…").width(150.0).height(380.0).show_ui(ui, |ui| {
                     for b in Blend::ALL {
-                        if ui.selectable_label(false, b.name()).clicked() {
+                        if ui.selectable_label(false, b.name()).help("Use this blend mode.").clicked() {
                             self.batch("Blend mode", move |l| {
                                 if l.kind != LayerKind::Group || b != Blend::Normal {
                                     l.blend = b;
@@ -503,7 +504,7 @@ impl DrawState {
                         }
                     }
                 });
-                if ui.button(RichText::new("Delete").color(Color32::from_rgb(232, 110, 110))).clicked() {
+                if ui.button(RichText::new("Delete").color(Color32::from_rgb(232, 110, 110))).help("Delete this. Undo brings it back.").clicked() {
                     self.batch_delete();
                 }
             });
@@ -531,15 +532,15 @@ impl DrawState {
                 section_title(ui, "Quick layers");
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-                    if widgets::chip(ui, "New layer", false).clicked() {
+                    if widgets::chip(ui, "New layer", false).help("Add a new empty layer.").clicked() {
                         self.add_layer(LayerKind::Raster);
                         close = true;
                     }
-                    if widgets::chip(ui, "New vector", false).clicked() {
+                    if widgets::chip(ui, "New vector", false).help("Add a new vector layer, for smooth lines you can change later.").clicked() {
                         self.add_layer(LayerKind::Vector);
                         close = true;
                     }
-                    if widgets::chip(ui, "New folder", false).clicked() {
+                    if widgets::chip(ui, "New folder", false).help("Make a new folder.").clicked() {
                         self.add_layer(LayerKind::Group);
                         close = true;
                     }
@@ -549,7 +550,7 @@ impl DrawState {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                         for (id, name) in &recent {
-                            if widgets::chip(ui, name, false).clicked() {
+                            if widgets::chip(ui, name, false).help("Use this.").clicked() {
                                 self.active = *id;
                                 close = true;
                             }
@@ -561,7 +562,7 @@ impl DrawState {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                         for (id, name) in &favs {
-                            if widgets::chip(ui, name, *id == self.active).clicked() {
+                            if widgets::chip(ui, name, *id == self.active).help("Pick this layer.").clicked() {
                                 self.active = *id;
                                 close = true;
                             }
@@ -570,7 +571,7 @@ impl DrawState {
                 }
                 if let Some(name) = oops {
                     ui.add_space(2.0);
-                    if ui.button(format!("Oops — put back \"{name}\"")).clicked() {
+                    if ui.button(format!("Oops — put back \"{name}\"")).help("Undo the delete and bring it back.").clicked() {
                         self.restore_deleted();
                         close = true;
                     }

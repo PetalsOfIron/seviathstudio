@@ -2,6 +2,7 @@
 // The Text tool: click the canvas to start a text layer, click a text to pick it up (drag to move it),
 // and shape it in the options: the words, the font, size, color, alignment, spacing, bend, turn.
 
+use crate::widgets::HelpExt;
 use std::sync::Arc;
 
 use eframe::egui::{self, Color32, Pos2, Response, RichText, Ui, vec2};
@@ -156,17 +157,17 @@ impl DrawState {
                 let q = self.text_ui.font_filter.to_lowercase();
                 for n in &fonts_list {
                     if n.to_lowercase().contains(&q) {
-                        ui.selectable_value(&mut t.font, n.clone(), n);
+                        ui.selectable_value(&mut t.font, n.clone(), n).help("Pick this font.");
                     }
                 }
                 ui.separator();
                 for (n, _) in fonts::system_fonts().iter().filter(|f| f.0.to_lowercase().contains(&q)).take(400) {
-                    ui.selectable_value(&mut t.font, n.clone(), n);
+                    ui.selectable_value(&mut t.font, n.clone(), n).help("Pick this font.");
                 }
             });
         });
         ui.horizontal(|ui| {
-            if widgets::chip(ui, "Add a font file…", false).on_hover_text("A .ttf or .otf file: it is kept inside this project").clicked() {
+            if widgets::chip(ui, "Add a font file…", false).help("A .ttf or .otf file: it is kept inside this project").clicked() {
                 if let Some(p) = rfd::FileDialog::new().set_title("Add a font").add_filter("Fonts", &["ttf", "otf"]).pick_file() {
                     match fonts::project_font_from_file(&p) {
                         Ok(f) if self.doc.meta.fonts.len() < fonts::MAX_PROJECT_FONTS => {
@@ -190,18 +191,18 @@ impl DrawState {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Color").size(12.0).color(TEXT_DIM));
             egui::color_picker::color_edit_button_srgb(ui, &mut t.color);
-            if ui.small_button("Use my color").clicked() {
+            if ui.small_button("Use my color").help("Use the color you picked.").clicked() {
                 t.color = [self.primary.r(), self.primary.g(), self.primary.b()];
             }
         });
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             for (a, name) in [(Align::Left, "Left"), (Align::Center, "Center"), (Align::Right, "Right")] {
-                if widgets::chip(ui, name, t.align == a).clicked() {
+                if widgets::chip(ui, name, t.align == a).help("Pick how the text lines up.").clicked() {
                     t.align = a;
                 }
             }
-            ui.checkbox(&mut t.vertical, "Up and down");
+            ui.checkbox(&mut t.vertical, "Up and down").help("Go up and down.");
         });
         slider(ui, "Letter gap", &mut t.letter_spacing, -20.0..=100.0, " px");
         slider(ui, "Line height", &mut t.line_height, 0.6..=3.0, "");
@@ -211,7 +212,7 @@ impl DrawState {
             ui.label(RichText::new("Place").size(12.0).color(TEXT_DIM));
             ui.add(egui::DragValue::new(&mut t.x).speed(1.0).suffix(" x"));
             ui.add(egui::DragValue::new(&mut t.y).speed(1.0).suffix(" y"));
-            if ui.small_button("Center").on_hover_text("Put the text in the middle of the page").clicked() {
+            if ui.small_button("Center").help("Put the text in the middle of the page").clicked() {
                 let (w, h) = text::measure(&t, &self.doc.meta.fonts);
                 t.x = (self.doc.w as f32 - w) / 2.0;
                 t.y = (self.doc.h as f32 - h) / 2.0;

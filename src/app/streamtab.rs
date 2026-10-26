@@ -4,6 +4,7 @@
 // itself when nothing tracks the face, and the model goes out to other programs: a window with a see-through background, and a
 // browser source for OBS.
 
+use crate::widgets::HelpExt;
 use eframe::egui::{self, Color32, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
 
 use super::SeviathApp;
@@ -411,12 +412,12 @@ impl SeviathApp {
                 (s.label, s.enabled, rate, s.error.clone(), s.protocol.is_none())
             };
             ui.horizontal(|ui| {
-                if widgets::chip(ui, label, enabled).clicked() {
+                if widgets::chip(ui, label, enabled).help("Switch this on or off.").clicked() {
                     change = Some((i, !enabled));
                 }
                 let (txt, col) = if !enabled { ("off", TEXT_DIM) } else if rate > 0.0 { ("receiving", VENOM) } else { ("waiting", GOLD) };
                 ui.label(RichText::new(if rate > 0.0 { format!("{txt} {rate:.0}/s") } else { txt.to_string() }).size(11.5).color(col));
-                if i > 0 && ui.small_button("Up").on_hover_text("Use it before the one above").clicked() {
+                if i > 0 && ui.small_button("Up").help("Use it before the one above").clicked() {
                     swap = Some((i, i - 1));
                 }
             });
@@ -492,7 +493,7 @@ impl SeviathApp {
             let on = self.rigs.stream.expr.is_on(&d.name);
             let level = self.rigs.stream.expr.level(&d.name);
             ui.horizontal(|ui| {
-                if widgets::chip(ui, &d.name, on).on_hover_text("Click to switch it on or off").clicked() {
+                if widgets::chip(ui, &d.name, on).help("Click to switch it on or off").clicked() {
                     self.rigs.stream.expr.toggle(&d.name);
                 }
                 let (r, _) = ui.allocate_exact_size(vec2(50.0, 6.0), Sense::hover());
@@ -500,10 +501,10 @@ impl SeviathApp {
                 ui.painter().rect_filled(Rect::from_min_size(r.min, vec2(r.width() * level, r.height())), 3.0, VENOM);
                 if d.own {
                     let mut fade = d.fade_in;
-                    if ui.add(egui::DragValue::new(&mut fade).range(0.0..=5.0).speed(0.02).suffix(" s")).on_hover_text("How long it takes to come and go").changed() {
+                    if ui.add(egui::DragValue::new(&mut fade).range(0.0..=5.0).speed(0.02).suffix(" s")).help("How long it takes to come and go").changed() {
                         fades.push((d.name.clone(), fade));
                     }
-                    if ui.small_button("Delete").clicked() {
+                    if ui.small_button("Delete").help("Delete this. Undo brings it back.").clicked() {
                         delete = Some(d.name.clone());
                     }
                 }
@@ -516,7 +517,7 @@ impl SeviathApp {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(name).size(11.5));
                                 for (m, label) in [(1u8, "Show"), (2, "Hide")] {
-                                    if widgets::chip(ui, label, mode == m).clicked() {
+                                    if widgets::chip(ui, label, mode == m).help("Pick how it works.").clicked() {
                                         layer_edit = Some((d.name.clone(), *id, if mode == m { 0 } else { m }));
                                     }
                                 }
@@ -556,7 +557,7 @@ impl SeviathApp {
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.rigs.stream.new_expr).hint_text("Name").desired_width(110.0));
             let name = self.rigs.stream.new_expr.trim().to_string();
-            if ui.add_enabled(!name.is_empty(), egui::Button::new("Save the sliders as an expression")).on_hover_text("Every slider that is not at its middle value now becomes part of the expression").clicked() {
+            if ui.add_enabled(!name.is_empty(), egui::Button::new("Save the sliders as an expression")).help("Every slider that is not at its middle value now becomes part of the expression").clicked() {
                 let base = self.rigs.stream.expr.without_effects(&self.rigs.values);
                 let values: Vec<(crate::rig::Id, f32)> = rig.params.iter().filter_map(|p| base.0.get(&p.id).filter(|v| (**v - p.default).abs() > 0.01).map(|v| (p.id, *v))).collect();
                 let n = values.len();
@@ -568,7 +569,7 @@ impl SeviathApp {
                 self.rigs.stream.new_expr.clear();
             }
         });
-        if ui.small_button("All expressions off").clicked() {
+        if ui.small_button("All expressions off").help("Switch every expression off, so the face is plain.").clicked() {
             self.rigs.stream.expr.clear();
         }
     }
@@ -578,7 +579,7 @@ impl SeviathApp {
         ui.label(RichText::new("Sends the face and the expressions to VRChat (OSC). An avatar with parameters named like the inputs (FaceAngleX, EyeOpenLeft, MouthOpen...) and Expr_<expression> follows them. In VRChat switch OSC on in the radial menu, Options, OSC.").size(11.5).color(TEXT_DIM));
         let on = self.rigs.stream.vrc.is_some();
         ui.horizontal_wrapped(|ui| {
-            if widgets::chip(ui, "Send to VRChat", on).clicked() {
+            if widgets::chip(ui, "Send to VRChat", on).help("Send the pose and the face to VRChat.").clicked() {
                 if on {
                     self.rigs.stream.vrc = None;
                 } else {
@@ -610,16 +611,16 @@ impl SeviathApp {
                 ui.label(RichText::new(format!("OBS Studio is installed: {}", p.display())).size(11.5).color(VENOM));
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(if running { "OBS is open now." } else { "OBS is not open." }).size(11.5).color(if running { VENOM } else { TEXT_DIM }));
-                    ui.checkbox(&mut self.rigs.stream.obs_auto, "Connect to it by itself").on_hover_text("When OBS is open, this program connects to it using the WebSocket settings OBS keeps itself");
+                    ui.checkbox(&mut self.rigs.stream.obs_auto, "Connect to it by itself").help("When OBS is open, this program connects to it using the WebSocket settings OBS keeps itself");
                 });
             }
             None => {
                 ui.label(RichText::new("OBS Studio is not installed (or not in the usual place).").size(11.5).color(GOLD));
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Get OBS Studio (free)").on_hover_text("Opens obsproject.com/download").clicked() {
+                    if ui.button("Get OBS Studio (free)").help("Opens obsproject.com/download").clicked() {
                         ui.ctx().open_url(egui::OpenUrl::new_tab("https://obsproject.com/download"));
                     }
-                    if ui.button("Install it with winget").on_hover_text("Opens a window that runs: winget install OBSProject.OBSStudio. Windows asks you to allow it.").clicked() {
+                    if ui.button("Install it with winget").help("Opens a window that runs: winget install OBSProject.OBSStudio. Windows asks you to allow it.").clicked() {
                         let mut cmd = std::process::Command::new("cmd");
                         cmd.args(["/C", "start", "", "cmd", "/K", "winget install --id OBSProject.OBSStudio -e --accept-package-agreements --accept-source-agreements"]);
                         self.rigs.stream.vcam_message = Some(match cmd.spawn() {
@@ -627,7 +628,7 @@ impl SeviathApp {
                             Err(e) => format!("Could not start winget ({e}). Use Get OBS Studio instead."),
                         });
                     }
-                    if ui.button("Look again").clicked() {
+                    if ui.button("Look again").help("Search again with the new settings.").clicked() {
                         self.rigs.stream.obs_exe = None;
                     }
                 });
@@ -636,7 +637,7 @@ impl SeviathApp {
         let connected = self.rigs.stream.obs.as_ref().map(|o| o.snapshot().status == crate::obs::Status::Connected).unwrap_or(false);
         if exe.is_some() && !connected {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Let this program control OBS").on_hover_text("Switches the WebSocket server of OBS on with a password made now (OBS must be closed; its old settings file is kept). The password is put in the OBS box above.").clicked() {
+                if ui.button("Let this program control OBS").help("Switches the WebSocket server of OBS on with a password made now (OBS must be closed; its old settings file is kept). The password is put in the OBS box above.").clicked() {
                     self.rigs.stream.vcam_message = Some(if crate::obs::is_running() {
                         "Close OBS first: it only reads this setting when it starts.".to_string()
                     } else {
@@ -653,7 +654,7 @@ impl SeviathApp {
                         }
                     });
                 }
-                if ui.button("Start OBS").clicked() {
+                if ui.button("Start OBS").help("Start the OBS program.").clicked() {
                     if let Some(p) = &exe {
                         self.rigs.stream.vcam_message = Some(match crate::obs::launch(p) {
                             Ok(()) => "OBS is starting. When its window is there, press Connect above.".to_string(),
@@ -666,7 +667,7 @@ impl SeviathApp {
         if connected {
             let on = self.rigs.stream.obs.as_ref().map(|o| o.snapshot().virtualcam).unwrap_or(false);
             ui.horizontal_wrapped(|ui| {
-                if !on && ui.button("Make the virtual camera").on_hover_text("Makes the scene in OBS with the model and the background colour, shows it and starts the camera").clicked() {
+                if !on && ui.button("Make the virtual camera").help("Makes the scene in OBS with the model and the background colour, shows it and starts the camera").clicked() {
                     // the model has to be served for OBS to show it
                     if self.rigs.stream.server.is_none() {
                         match BrowserSource::start(self.rigs.stream.server_port) {
@@ -686,7 +687,7 @@ impl SeviathApp {
                         }
                     }
                 }
-                if on && ui.button("Stop the virtual camera").clicked() {
+                if on && ui.button("Stop the virtual camera").help("Turn the virtual camera off.").clicked() {
                     if let Some(o) = &self.rigs.stream.obs {
                         o.send(crate::obs::Cmd::StopVirtualCam);
                     }
@@ -709,10 +710,10 @@ impl SeviathApp {
         if !registered {
             ui.label(RichText::new("It is not installed on this computer yet.").size(11.5).color(GOLD));
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Download it").on_hover_text("Opens File, Downloads: press Download next to Unity Capture").clicked() {
+                if ui.button("Download it").help("Opens File, Downloads: press Download next to Unity Capture").clicked() {
                     self.open_downloads();
                 }
-                if ui.button("Check again").on_hover_text("After running Install.bat in the Install folder").clicked() {
+                if ui.button("Check again").help("After running Install.bat in the Install folder").clicked() {
                     self.rigs.stream.ucap_registered = None;
                 }
             });
@@ -721,12 +722,12 @@ impl SeviathApp {
         }
         let on = self.rigs.stream.ucap.is_some();
         ui.horizontal_wrapped(|ui| {
-            if widgets::chip(ui, "Send the model to Unity Video Capture", on).clicked() {
+            if widgets::chip(ui, "Send the model to Unity Video Capture", on).help("Send the picture of the model to the Unity Video Capture camera, so other programs see it as a webcam.").clicked() {
                 self.rigs.stream.ucap = if on { None } else { Some(crate::vcam::Sender::new(0)) };
                 self.rigs.stream.ucap_status.clear();
             }
-            ui.checkbox(&mut self.rigs.stream.ucap_upside, "Upside down").on_hover_text("The camera wants the rows from the bottom. Turn this off if the picture comes out upside down in the other program");
-            ui.checkbox(&mut self.rigs.stream.ucap_alpha, "See-through").on_hover_text("For programs that take a see-through camera (OBS does). Others show black behind the model; leave it off and the colour chosen above is put behind it");
+            ui.checkbox(&mut self.rigs.stream.ucap_upside, "Upside down").help("The camera wants the rows from the bottom. Turn this off if the picture comes out upside down in the other program");
+            ui.checkbox(&mut self.rigs.stream.ucap_alpha, "See-through").help("For programs that take a see-through camera (OBS does). Others show black behind the model; leave it off and the colour chosen above is put behind it");
         });
         if on {
             let msg = if self.rigs.stream.ucap_status.is_empty() { "Waiting for a program to use the camera: pick Unity Video Capture in Discord, Zoom, a browser or OBS." } else { self.rigs.stream.ucap_status.as_str() };
@@ -739,7 +740,7 @@ impl SeviathApp {
         ui.label(RichText::new("Lets other programs on this computer press inputs here: a Stream Deck or Touch Portal button that opens a web address, a game that sends its state. Then bind them to expressions and OBS actions below (Learn an input, then call the address).").size(11.5).color(TEXT_DIM));
         let on = self.rigs.stream.link_on;
         ui.horizontal_wrapped(|ui| {
-            if widgets::chip(ui, "Link", on).clicked() {
+            if widgets::chip(ui, "Link", on).help("Join this to the other one, so they move together.").clicked() {
                 let port = self.rigs.stream.link_port;
                 let want = !on;
                 if let Some(h) = self.rigs.stream.hub.as_mut() {
@@ -765,7 +766,7 @@ impl SeviathApp {
                 ui.label(RichText::new("Save this as gamestate_integration_seviath.cfg in the cfg folder of the game (steamapps/common/Counter-Strike Global Offensive/game/csgo/cfg). Events: cs2.kill, cs2.death, cs2.round_live, cs2.round_freezetime, cs2.round_over, cs2.bomb_planted.").size(11.0).color(TEXT_DIM));
                 let cfg = crate::link::cs2_config(port);
                 ui.add(egui::TextEdit::multiline(&mut cfg.clone()).font(egui::TextStyle::Monospace).desired_rows(8).desired_width(f32::INFINITY));
-                if ui.small_button("Copy").clicked() {
+                if ui.small_button("Copy").help("Copy this to the clipboard.").clicked() {
                     ui.ctx().copy_text(cfg);
                 }
             });
@@ -781,10 +782,10 @@ impl SeviathApp {
             ui.add_enabled(snap.is_none(), egui::DragValue::new(&mut self.rigs.stream.obs_port).range(1..=65535));
             ui.add_enabled(snap.is_none(), egui::TextEdit::singleline(&mut self.rigs.stream.obs_password).password(true).hint_text("Password").desired_width(90.0));
             if snap.is_none() {
-                if ui.button("Connect").clicked() {
+                if ui.button("Connect").help("Connect to it.").clicked() {
                     self.rigs.stream.obs = Some(crate::obs::Obs::connect(&self.rigs.stream.obs_host, self.rigs.stream.obs_port, &self.rigs.stream.obs_password));
                 }
-            } else if ui.button("Disconnect").clicked() {
+            } else if ui.button("Disconnect").help("Disconnect.").clicked() {
                 self.rigs.stream.obs = None;
             }
         });
@@ -800,7 +801,7 @@ impl SeviathApp {
                 crate::obs::Status::Connected => {
                     ui.horizontal_wrapped(|ui| {
                         for name in &s.scenes {
-                            if widgets::chip(ui, name, s.current.as_deref() == Some(name.as_str())).clicked() {
+                            if widgets::chip(ui, name, s.current.as_deref() == Some(name.as_str())).help("Use this one.").clicked() {
                                 if let Some(o) = &self.rigs.stream.obs {
                                     o.send(crate::obs::Cmd::Scene(name.clone()));
                                 }
@@ -808,12 +809,12 @@ impl SeviathApp {
                         }
                     });
                     ui.horizontal_wrapped(|ui| {
-                        if widgets::chip(ui, if s.streaming { "Streaming: stop" } else { "Start streaming" }, s.streaming).clicked() {
+                        if widgets::chip(ui, if s.streaming { "Streaming: stop" } else { "Start streaming" }, s.streaming).help("Stop the stream.").clicked() {
                             if let Some(o) = &self.rigs.stream.obs {
                                 o.send(crate::obs::Cmd::ToggleStream);
                             }
                         }
-                        if widgets::chip(ui, if s.recording { "Recording: stop" } else { "Start recording" }, s.recording).clicked() {
+                        if widgets::chip(ui, if s.recording { "Recording: stop" } else { "Start recording" }, s.recording).help("Stop the recording.").clicked() {
                             if let Some(o) = &self.rigs.stream.obs {
                                 o.send(crate::obs::Cmd::ToggleRecord);
                             }
@@ -841,13 +842,13 @@ impl SeviathApp {
             ui.label(RichText::new("MIDI device").size(12.0).color(TEXT_DIM));
             let label = current.clone().unwrap_or_else(|| if ports.is_empty() { "none found".into() } else { "off".into() });
             egui::ComboBox::from_id_salt("midi_port").selected_text(label).width(160.0).show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_none(), "Off").clicked() {
+                if ui.selectable_label(current.is_none(), "Off").help("Switch it off.").clicked() {
                     if let Some(h) = self.rigs.stream.hub.as_mut() {
                         h.disconnect_midi();
                     }
                 }
                 for p in &ports {
-                    if ui.selectable_label(current.as_deref() == Some(p.as_str()), p).clicked() {
+                    if ui.selectable_label(current.as_deref() == Some(p.as_str()), p).help("Pick this one.").clicked() {
                         if let Some(h) = self.rigs.stream.hub.as_mut() {
                             if let Err(e) = h.connect_midi(p) {
                                 self.rigs.stream.message = Some(e);
@@ -856,7 +857,7 @@ impl SeviathApp {
                     }
                 }
             });
-            if ui.small_button("Look again").clicked() {
+            if ui.small_button("Look again").help("Search again with the new settings.").clicked() {
                 if let Some(h) = self.rigs.stream.hub.as_mut() {
                     h.refresh_midi_ports();
                 }
@@ -869,7 +870,7 @@ impl SeviathApp {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(b.input.label()).monospace().size(11.5).color(VENOM));
                 ui.label(RichText::new(b.action.label()).size(12.0));
-                if ui.small_button("Delete").clicked() {
+                if ui.small_button("Delete").help("Delete this. Undo brings it back.").clicked() {
                     remove = Some(i);
                 }
             });
@@ -894,7 +895,7 @@ impl SeviathApp {
                 (Some(i), _) => i.label(),
                 (None, _) => "Learn an input".to_string(),
             };
-            if widgets::chip(ui, &label, learning).on_hover_text("Click, then press what should switch the expression").clicked() {
+            if widgets::chip(ui, &label, learning).help("Click, then press what should switch the expression").clicked() {
                 if let Some(h) = self.rigs.stream.hub.as_mut() {
                     h.learn = !learning;
                 }
@@ -905,7 +906,7 @@ impl SeviathApp {
             const ACTIONS: [&str; 8] = ["Switch on or off", "Show only", "While held", "All off", "OBS scene", "OBS stream on or off", "OBS recording on or off", "OBS virtual camera on or off"];
             egui::ComboBox::from_id_salt("hk_action").selected_text(ACTIONS[self.rigs.stream.hk_action as usize % 8]).width(150.0).show_ui(ui, |ui| {
                 for (i, n) in ACTIONS.iter().enumerate() {
-                    if ui.selectable_label(self.rigs.stream.hk_action == i as u8, *n).clicked() {
+                    if ui.selectable_label(self.rigs.stream.hk_action == i as u8, *n).help("Pick what this hotkey does.").clicked() {
                         self.rigs.stream.hk_action = i as u8;
                     }
                 }
@@ -918,7 +919,7 @@ impl SeviathApp {
                     let sel = if scenes.contains(&self.rigs.stream.hk_scene) { self.rigs.stream.hk_scene.clone() } else { scenes[0].clone() };
                     egui::ComboBox::from_id_salt("hk_scene").selected_text(sel.clone()).width(120.0).show_ui(ui, |ui| {
                         for n in &scenes {
-                            if ui.selectable_label(&sel == n, n).clicked() {
+                            if ui.selectable_label(&sel == n, n).help("Pick this one.").clicked() {
                                 self.rigs.stream.hk_scene = n.clone();
                             }
                         }
@@ -930,7 +931,7 @@ impl SeviathApp {
                 let sel = if names.contains(&self.rigs.stream.hk_expr) { self.rigs.stream.hk_expr.clone() } else { names.first().cloned().unwrap_or_default() };
                 egui::ComboBox::from_id_salt("hk_expr").selected_text(sel.clone()).width(120.0).show_ui(ui, |ui| {
                     for n in &names {
-                        if ui.selectable_label(&sel == n, n).clicked() {
+                        if ui.selectable_label(&sel == n, n).help("Pick this one.").clicked() {
                             self.rigs.stream.hk_expr = n.clone();
                         }
                     }
@@ -980,11 +981,11 @@ impl SeviathApp {
         ui.horizontal(|ui| {
             let mut pick: Option<Option<usize>> = None;
             egui::ComboBox::from_id_salt("stream_tracker").selected_text(current.map(&name_of).unwrap_or_else(|| "nothing (it blinks by itself)".into())).width(240.0).show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_none(), "nothing (it blinks by itself)").clicked() {
+                if ui.selectable_label(current.is_none(), "nothing (it blinks by itself)").help("The eyes close only when it blinks by itself.").clicked() {
                     pick = Some(None);
                 }
                 for i in 0..self.rigs.stream.sources.len() {
-                    if ui.selectable_label(current == Some(i), name_of(i)).clicked() {
+                    if ui.selectable_label(current == Some(i), name_of(i)).help("Pick this one.").clicked() {
                         pick = Some(Some(i));
                     }
                 }
@@ -1013,19 +1014,19 @@ impl SeviathApp {
         section_title(ui, "Behaviour");
         let mut m = rig.tracking.clone();
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut m.auto_blink, "Blink by itself").on_hover_text("When the eyes are not tracked");
-            ui.checkbox(&mut m.breathing, "Breathe");
-            ui.checkbox(&mut m.look_at_mouse, "Look at the mouse").on_hover_text("When the face is not tracked, the eyes and the head follow the pointer");
+            ui.checkbox(&mut m.auto_blink, "Blink by itself").help("When the eyes are not tracked");
+            ui.checkbox(&mut m.breathing, "Breathe").help("Make the character breathe slowly.");
+            ui.checkbox(&mut m.look_at_mouse, "Look at the mouse").help("When the face is not tracked, the eyes and the head follow the pointer");
         });
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Calibrate").on_hover_text("Look straight at the camera, then press: how you look now becomes the middle").clicked() {
+            if ui.button("Calibrate").help("Look straight at the camera, then press: how you look now becomes the middle").clicked() {
                 let ch: std::collections::HashMap<&'static str, f32> = self.rigs.stream.inputs.iter().cloned().collect();
                 m.calibrate(&ch);
             }
-            if ui.button("Forget the calibration").clicked() {
+            if ui.button("Forget the calibration").help("Forget the neutral face, so the next one is set again.").clicked() {
                 m.neutral.clear();
             }
-            if ui.button("Make the mapping").on_hover_text("From the names of the sliders (or from the VTube Studio settings of a Live2D model)").clicked() {
+            if ui.button("Make the mapping").help("From the names of the sliders (or from the VTube Studio settings of a Live2D model)").clicked() {
                 let keep = (m.auto_blink, m.breathing, m.look_at_mouse, m.neutral.clone());
                 m = TrackMapping::auto(&rig);
                 (m.auto_blink, m.breathing, m.look_at_mouse, m.neutral) = keep;
@@ -1047,14 +1048,14 @@ impl SeviathApp {
                     ui.label(RichText::new("Input").size(11.5).color(TEXT_DIM));
                     egui::ComboBox::from_id_salt(("map_in", i)).selected_text(mp.input.clone()).width(150.0).show_ui(ui, |ui| {
                         for (name, _) in &device_inputs {
-                            if ui.selectable_label(mp.input == *name, format!("{name}  (device)")).clicked() {
+                            if ui.selectable_label(mp.input == *name, format!("{name}  (device)")).help("Pick this one.").clicked() {
                                 mp.input = name.clone();
                                 let sticky = name.starts_with("Pad ") && !name.contains("Trigger") && !name.contains("Z");
                                 (mp.in_lo, mp.in_hi) = if sticky { (-1.0, 1.0) } else { (0.0, 1.0) };
                             }
                         }
                         for c in CHANNELS {
-                            if ui.selectable_label(mp.input == c.0, format!("{}  ({})", c.0, c.1)).clicked() {
+                            if ui.selectable_label(mp.input == c.0, format!("{}  ({})", c.0, c.1)).help("Pick this one.").clicked() {
                                 mp.input = c.0.to_string();
                                 let (lo, hi) = (c.2, c.3);
                                 mp.in_lo = lo;
@@ -1077,11 +1078,11 @@ impl SeviathApp {
                 });
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Smoothing").size(11.5).color(TEXT_DIM));
-                    ui.add(egui::DragValue::new(&mut mp.smoothing).range(0.0..=60.0).speed(0.2)).on_hover_text("0 follows at once; bigger is calmer and slower");
-                    ui.checkbox(&mut mp.invert, "Turn it round");
-                    ui.checkbox(&mut mp.clamp, "Hold it inside");
+                    ui.add(egui::DragValue::new(&mut mp.smoothing).range(0.0..=60.0).speed(0.2)).help("0 follows at once; bigger is calmer and slower");
+                    ui.checkbox(&mut mp.invert, "Turn it round").help("Turn it the other way.");
+                    ui.checkbox(&mut mp.clamp, "Hold it inside").help("Keep it inside the outline.");
                 });
-                if ui.small_button("Remove").clicked() {
+                if ui.small_button("Remove").help("Take this out of the list.").clicked() {
                     remove = Some(i);
                 }
             });
@@ -1097,7 +1098,7 @@ impl SeviathApp {
             let label = sel.and_then(|id| names.iter().find(|n| n.0 == id)).map(|n| n.1.clone()).unwrap_or_else(|| "a slider".into());
             egui::ComboBox::from_id_salt("map_add_param").selected_text(label).width(120.0).show_ui(ui, |ui| {
                 for (id, n, _, _) in &names {
-                    if ui.selectable_label(sel == Some(*id), n).clicked() {
+                    if ui.selectable_label(sel == Some(*id), n).help("Pick this one.").clicked() {
                         self.rigs.stream.add_param = Some(*id);
                     }
                 }
@@ -1109,7 +1110,7 @@ impl SeviathApp {
             let label_of = |i: usize| -> String { if i < CHANNELS.len() { CHANNELS[i].0.to_string() } else { device_inputs[i - CHANNELS.len()].0.clone() } };
             egui::ComboBox::from_id_salt("map_add_input").selected_text(label_of(ci)).width(130.0).show_ui(ui, |ui| {
                 for i in 0..total {
-                    if ui.selectable_label(ci == i, label_of(i)).clicked() {
+                    if ui.selectable_label(ci == i, label_of(i)).help("Pick this one.").clicked() {
                         self.rigs.stream.add_input = i;
                     }
                 }
@@ -1198,17 +1199,17 @@ impl SeviathApp {
         ui.label(RichText::new("Shows the model smaller and squeezed, as it looks to viewers with a slow connection.").size(11.5).color(TEXT_DIM));
         ui.horizontal_wrapped(|ui| {
             for (side, name) in [(480u32, "480p"), (720, "720p"), (1080, "1080p")] {
-                if widgets::chip(ui, name, self.rigs.stream.test_side == side).clicked() {
+                if widgets::chip(ui, name, self.rigs.stream.test_side == side).help("Pick which side of the test picture.").clicked() {
                     self.rigs.stream.test_side = side;
                 }
             }
             for (i, name) in ["Squeezed hard", "Squeezed", "Good"].iter().enumerate() {
-                if widgets::chip(ui, name, self.rigs.stream.test_quality == i as u8).clicked() {
+                if widgets::chip(ui, name, self.rigs.stream.test_quality == i as u8).help("Pick how good the test picture is.").clicked() {
                     self.rigs.stream.test_quality = i as u8;
                 }
             }
         });
-        if ui.button("Make the test picture").clicked() {
+        if ui.button("Make the test picture").help("Make a picture to try the settings on.").clicked() {
             let ctx = ui.ctx().clone();
             if self.stream_test_picture(&ctx).is_none() {
                 self.rigs.stream.message = Some("There is nothing to draw: the rig has no meshes yet.".into());
@@ -1230,14 +1231,14 @@ impl SeviathApp {
             Some(n) => {
                 let secs = n as f32 / self.settings.stream_fps.clamp(5, 60) as f32;
                 ui.horizontal(|ui| {
-                    if ui.button("Stop and save").clicked() {
+                    if ui.button("Stop and save").help("Stop and keep what was recorded.").clicked() {
                         self.stream_stop_clip();
                     }
                     ui.label(RichText::new(format!("Recording {secs:.1} s")).size(12.0).color(Color32::from_rgb(255, 120, 100)));
                 });
             }
             None => {
-                if ui.button("Record a clip...").clicked() {
+                if ui.button("Record a clip...").help("Record a short clip of the screen.").clicked() {
                     if let Some(p) = rfd::FileDialog::new().set_title("Save the clip").set_directory(self.settings.projects_folder()).set_file_name("clip.mp4").add_filter("MP4 video", &["mp4"]).save_file() {
                         let (w, h) = (self.draw.doc.w, self.draw.doc.h);
                         let size = crate::recorder::video_size(w, h, self.rigs.stream.server_side.min(1080));
@@ -1266,9 +1267,9 @@ impl SeviathApp {
         section_title(ui, "Emotes");
         ui.label(RichText::new("A picture of the character for every expression (and the plain face), with a see-through background, at the sizes chat services ask for.").size(11.5).color(TEXT_DIM));
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut self.rigs.stream.emote_face, "Cut to the face");
+            ui.checkbox(&mut self.rigs.stream.emote_face, "Cut to the face").help("Cut the picture down to the face.");
             for (i, (name, _)) in crate::emotes::SIZES.iter().enumerate() {
-                ui.checkbox(&mut self.rigs.stream.emote_sizes[i], *name);
+                ui.checkbox(&mut self.rigs.stream.emote_sizes[i], *name).help("Make this emote size when saving.");
             }
         });
         if ui.add_enabled(self.rigs.stream.emote_sizes.iter().any(|s| *s), egui::Button::new("Save the emotes...")).clicked() {
@@ -1345,7 +1346,7 @@ impl SeviathApp {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Background here").size(12.0).color(TEXT_DIM));
             for (i, n) in ["Dark", "Green", "Light", "Black"].iter().enumerate() {
-                if widgets::chip(ui, n, self.rigs.stream.bg == i as u8).clicked() {
+                if widgets::chip(ui, n, self.rigs.stream.bg == i as u8).help("Pick the background of the stream picture.").clicked() {
                     self.rigs.stream.bg = i as u8;
                 }
             }
@@ -1358,16 +1359,16 @@ impl SeviathApp {
         });
         // the window with a see-through background
         ui.horizontal_wrapped(|ui| {
-            if widgets::chip(ui, "Model window", self.rigs.stream.window).on_hover_text("A window with only the model on a see-through background: capture it in OBS with Window Capture, or put it over the screen").clicked() {
+            if widgets::chip(ui, "Model window", self.rigs.stream.window).help("A window with only the model on a see-through background: capture it in OBS with Window Capture, or put it over the screen").clicked() {
                 self.rigs.stream.window = !self.rigs.stream.window;
             }
-            ui.checkbox(&mut self.rigs.stream.on_top, "On top");
-            ui.checkbox(&mut self.rigs.stream.click_through, "Mouse goes through");
+            ui.checkbox(&mut self.rigs.stream.on_top, "On top").help("Keep this window above the others.");
+            ui.checkbox(&mut self.rigs.stream.click_through, "Mouse goes through").help("The mouse clicks pass through this window.");
         });
         // the browser source
         let running = self.rigs.stream.server.is_some();
         ui.horizontal_wrapped(|ui| {
-            if widgets::chip(ui, "OBS browser source", running).on_hover_text("A page on this computer that shows the model with a see-through background. In OBS add a Browser source with the address below").clicked() {
+            if widgets::chip(ui, "OBS browser source", running).help("A page on this computer that shows the model with a see-through background. In OBS add a Browser source with the address below").clicked() {
                 if running {
                     self.rigs.stream.server = None;
                 } else {
@@ -1385,7 +1386,7 @@ impl SeviathApp {
         if let Some(s) = &self.rigs.stream.server {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(s.url()).monospace().size(12.0).color(VENOM));
-                if ui.small_button("Copy").clicked() {
+                if ui.small_button("Copy").help("Copy this to the clipboard.").clicked() {
                     ui.ctx().copy_text(s.url());
                 }
                 ui.label(RichText::new(format!("{} pictures sent", s.served())).size(11.0).color(TEXT_DIM));

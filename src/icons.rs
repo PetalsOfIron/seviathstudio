@@ -17,6 +17,7 @@ pub enum Icon {
     Physics,
     Animate,
     Stream,
+    Generate,
     // Draw tools
     Brush,
     Pencil,
@@ -205,6 +206,11 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Animate => {
             p.rect_stroke(Rect::from_min_max(at(1.5, 3.5), at(14.5, 12.5)), 2.0, st, eframe::egui::StrokeKind::Middle);
             p.add(Shape::convex_polygon(vec![at(6.5, 5.5), at(11.0, 8.0), at(6.5, 10.5)], color, Stroke::NONE));
+        }
+        Icon::Generate => {
+            line(&[(8.0, 1.5), (9.6, 6.4), (14.5, 8.0), (9.6, 9.6), (8.0, 14.5), (6.4, 9.6), (1.5, 8.0), (6.4, 6.4), (8.0, 1.5)], st);
+            dot(13.0, 3.0, 1.1);
+            dot(3.0, 13.0, 1.1);
         }
         Icon::Stream => {
             dot(8.0, 8.0, 1.8);

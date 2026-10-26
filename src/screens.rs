@@ -4403,3 +4403,142 @@ fn the_parameters_column_lists_every_standard_slider() {
     }
     save(&mut h, "rig_14_standard_after");
 }
+
+/// The Generate tab, both pages, with a made game asset in the viewer (the real lantern the AI helper made, when it is there).
+#[test]
+fn generate_tab_screens() {
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1500.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().test_run_action_now("tab.7");
+    h.run_steps(4);
+    {
+        let g = h.state_mut().test_gen();
+        g.asset.what = "an old iron lantern with a glowing glass".into();
+        g.asset.details = "rusty dark metal, warm orange glow".into();
+    }
+    h.run_steps(2);
+    save(&mut h, "generate_1_assets_empty");
+    let real = std::path::Path::new("target/gen/lantern.glb");
+    let glb = if real.exists() { std::fs::read(real).unwrap() } else { crate::assetview::tests_box_glb() };
+    let pic = image::open("target/gen/prop/gen_11.png").map(|i| i.to_rgba8()).unwrap_or_else(|_| image::RgbaImage::from_pixel(256, 256, image::Rgba([220, 200, 120, 255])));
+    h.state_mut().test_gen_set_pictures(vec![pic.clone(), pic]);
+    h.state_mut().test_gen_show_asset(glb);
+    h.run_steps(4);
+    save(&mut h, "generate_2_assets_made");
+    h.state_mut().test_gen().page = crate::app::generate_page_characters();
+    {
+        let g = h.state_mut().test_gen();
+        g.look.who = "a girl with long pink hair and green eyes".into();
+        g.look.outfit = "a green jacket, white skirt, boots".into();
+    }
+    let girl = image::open("target/gen/c2/gen_3.png").map(|i| i.to_rgba8()).unwrap_or_else(|_| image::RgbaImage::from_pixel(256, 384, image::Rgba([240, 240, 240, 255])));
+    h.state_mut().test_gen_set_pictures(vec![girl]);
+    h.run_steps(4);
+    save(&mut h, "generate_3_characters");
+}
+
+/// A generated picture of a standing character becomes a rigged 3D character (the flat card, which needs no AI), shown in the Generate tab.
+#[test]
+fn a_generated_picture_becomes_a_rigged_character_in_the_generate_tab() {
+    let _gpu = lock_gpu();
+    let Ok(girl) = image::open("target/gen/c2/gen_3.png").map(|i| i.to_rgba8()) else { return };
+    let mut h = Harness::builder().with_size([1500.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().test_run_action_now("tab.7");
+    h.state_mut().test_gen().page = crate::app::generate_page_characters();
+    h.state_mut().test_gen().flat_card = true;
+    h.state_mut().test_gen_set_pictures(vec![girl]);
+    h.state_mut().test_gen_make_character();
+    h.run_steps(6);
+    let msg = h.state_mut().test_gen().message.clone();
+    assert!(h.state_mut().test_game().model.is_some(), "a character was made: {msg:?}");
+    let bones = h.state_mut().test_game().model.as_ref().unwrap().bones.len();
+    assert!(bones >= 15, "the skeleton has {bones} bones");
+    save(&mut h, "generate_4_character_made");
+}
+
+/// Makes the example character with the real AI (the TripoSR shape) from the picture the Generate tab made, and saves it as VRM 1.0, VRM 0.x and
+/// GLB in Downloads/3d, to check in Blender. Run by hand: `cargo test --release make_the_example_character -- --ignored`.
+#[test]
+#[ignore]
+fn make_the_example_character() {
+    let _gpu = lock_gpu();
+    let girl = image::open("target/gen/c2/gen_3.png").expect("the generated picture").to_rgba8();
+    let mut h = Harness::builder().with_size([1500.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().test_run_action_now("tab.7");
+    h.state_mut().test_gen().page = crate::app::generate_page_characters();
+    h.state_mut().test_gen_set_pictures(vec![girl.clone()]);
+    h.state_mut().test_gen_make_character();
+    let start = std::time::Instant::now();
+    while h.state_mut().test_game().model.is_none() && start.elapsed().as_secs() < 900 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        h.run_steps(2);
+        if start.elapsed().as_secs() % 20 == 0 {
+            let (st, m) = { let g = h.state_mut().test_gen(); (g.stage, g.message.clone()) };
+            println!("{}s stage {:?} msg {:?}", start.elapsed().as_secs(), st, m);
+        }
+    }
+    let msg = h.state_mut().test_gen().message.clone();
+    assert!(h.state_mut().test_game().model.is_some(), "no character: {msg:?}");
+    h.state_mut().test_game().name = "ExampleGirl".into();
+    h.run_steps(3);
+    save(&mut h, "generate_5_example_character");
+    let dir = std::path::Path::new(r"C:\Users\SaphiresSilver\Downloads\3d");
+    std::fs::create_dir_all(dir).unwrap();
+    use crate::vrm::export::Format;
+    for (fmt, name) in [(Format::Vrm1, "ExampleGirl_vrm1.vrm"), (Format::Vrm0, "ExampleGirl_vrm0.vrm"), (Format::Glb, "ExampleGirl_game.glb")] {
+        let (bytes, summary) = h.state_mut().test_game_bytes(fmt).expect("the file");
+        std::fs::write(dir.join(name), &bytes).unwrap();
+        println!("{name}: {} bytes, {} parts, {} bones, {} expressions", bytes.len(), summary.parts, summary.bones, summary.expressions);
+    }
+    let all: Vec<crate::motion::Clip> = crate::motion::MOTIONS.iter().map(|i| crate::motion::Clip::new(i.motion, crate::motion::Style::default())).collect();
+    let (bytes, _) = h.state_mut().test_game_glb_with(&all, 30.0).expect("the animated file");
+    std::fs::write(dir.join("ExampleGirl_game_animated.glb"), &bytes).unwrap();
+    println!("ExampleGirl_game_animated.glb: {} bytes, {} animations", bytes.len(), all.len());
+    girl.save(dir.join("ExampleGirl_picture.png")).unwrap();
+}
+
+/// The Animations page: a character plays a ready animation, a described animation is found, and the game file carries all of them.
+#[test]
+fn the_animations_page_plays_and_saves_animations_for_the_game_file() {
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let Ok(girl) = image::open("target/gen/c2/gen_3.png").map(|i| i.to_rgba8()) else { return };
+    let mut h = Harness::builder().with_size([1500.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().test_run_action_now("tab.7");
+    h.state_mut().test_gen().flat_card = true;
+    h.state_mut().test_gen().page = crate::app::generate_page_characters();
+    h.state_mut().test_gen_set_pictures(vec![girl]);
+    h.state_mut().test_gen_make_character();
+    h.run_steps(4);
+    assert!(h.state_mut().test_game().model.is_some(), "a character");
+    assert_eq!(h.state_mut().test_tab_is_generate(), true, "making the character keeps the Generate tab");
+    h.state_mut().test_gen().page = crate::app::generate_page_animations();
+    h.run_steps(4);
+    h.get_by_label("Add all the ready animations").click();
+    h.run_steps(3);
+    assert!(h.state_mut().test_gen().anim.added.len() >= 20);
+    h.state_mut().test_gen().anim.motion = crate::motion::Motion::Wave;
+    h.state_mut().test_gen().anim.time = 1.2;
+    h.run_steps(4);
+    save(&mut h, "generate_6_animations");
+    // the words
+    h.state_mut().test_gen().anim.words = "an angry fast punch".into();
+    h.run_steps(2);
+    h.get_by_label("Make it from the words").scroll_to_me();
+    h.run_steps(2);
+    save(&mut h, "generate_7_words");
+    h.get_by_label("Make it from the words").click();
+    h.run_steps(3);
+    let a = &h.state_mut().test_gen().anim;
+    assert_eq!(a.motion, crate::motion::Motion::Punch);
+    assert_eq!(a.style.mood, crate::motion::Mood::Angry);
+    // the game file has them all
+    let clips = h.state_mut().test_gen().anim.added.clone();
+    let (bytes, _) = h.state_mut().test_game_glb_with(&clips, 30.0).unwrap();
+    let g = crate::vrm::gltf::read_glb(&bytes).unwrap();
+    assert_eq!(g.json["animations"].as_array().unwrap().len(), clips.len());
+}

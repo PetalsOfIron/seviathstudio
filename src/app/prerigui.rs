@@ -2,6 +2,7 @@
 // The pre-rig improver window: goes through the problems one at a time, zoomed in, with before and after.
 // Nothing changes until you press Fix, and every fix is an undo step.
 
+use crate::widgets::HelpExt;
 use std::collections::HashSet;
 
 use eframe::egui::{self, Align2, Color32, ColorImage, Rect, RichText, Stroke, TextureHandle, TextureOptions, vec2};
@@ -181,7 +182,7 @@ impl SeviathApp {
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("Sensitivity").size(12.0).color(TEXT_DIM));
-                    let r = ui.add(egui::Slider::new(&mut self.prerig.sens, 0.0..=1.0).show_value(false)).on_hover_text("Low: only the obvious. High: also small details like freckles");
+                    let r = ui.add(egui::Slider::new(&mut self.prerig.sens, 0.0..=1.0).show_value(false)).help("Low: only the obvious. High: also small details like freckles");
                     ui.label(RichText::new(if self.prerig.sens < 0.3 { "only the obvious" } else if self.prerig.sens < 0.7 { "normal" } else { "small details too" }).size(11.5).color(TEXT_DIM));
                     ui.checkbox(&mut self.prerig.only_tagged, "Only tagged layers");
                     if ui.button("Check the drawing").clicked() || r.drag_stopped() {
@@ -238,10 +239,10 @@ impl SeviathApp {
                     if ui.button(RichText::new("Fix").strong()).clicked() {
                         fix_one = true;
                     }
-                    if ui.button("Ignore").on_hover_text("Leave it as it is and don't mention it again").clicked() {
+                    if ui.button("Ignore").help("Leave it as it is and don't mention it again").clicked() {
                         ignore = true;
                     }
-                    if ui.button("Fix manually").on_hover_text("Go to this place in the Draw tab").clicked() {
+                    if ui.button("Fix manually").help("Go to this place in the Draw tab").clicked() {
                         manual = true;
                     }
                     ui.separator();

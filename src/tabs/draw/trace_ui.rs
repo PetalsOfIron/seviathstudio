@@ -2,6 +2,7 @@
 // Draw tab: the Auto-trace window. Pick a preset, adjust, see the result live on a small copy,
 // then trace the layer into a new vector layer (the original pixel layer is kept, hidden if you like).
 
+use crate::widgets::HelpExt;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::sync::Arc;
@@ -249,7 +250,7 @@ impl DrawState {
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                                 for (i, p) in PRESETS.iter().enumerate() {
-                                    if widgets::chip(ui, p.name, t.preset == i).on_hover_text(p.about).clicked() {
+                                    if widgets::chip(ui, p.name, t.preset == i).help(p.about).clicked() {
                                         t.preset = i;
                                         t.opts = (p.opts)(&t.opts);
                                     }
@@ -262,7 +263,7 @@ impl DrawState {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
                                 for (m, label) in [(TraceMode::Lines, "Lines"), (TraceMode::Colors, "Colors"), (TraceMode::Both, "Both"), (TraceMode::Silhouette, "Silhouette")] {
-                                    if widgets::chip(ui, label, o.mode == m).clicked() {
+                                    if widgets::chip(ui, label, o.mode == m).help("Pick how it works.").clicked() {
                                         o.mode = m;
                                     }
                                 }
@@ -271,7 +272,7 @@ impl DrawState {
                             let colors = matches!(o.mode, TraceMode::Colors | TraceMode::Both);
                             let pct = |ui: &mut egui::Ui, label: &str, tip: &str, v: &mut f32, lo: f32, hi: f32| {
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new(label).size(12.5).color(TEXT_DIM)).on_hover_text(tip);
+                                    ui.label(RichText::new(label).size(12.5).color(TEXT_DIM)).help(tip);
                                     let mut p = *v * 100.0;
                                     if ui.add(egui::Slider::new(&mut p, lo * 100.0..=hi * 100.0).suffix("%").max_decimals(0)).changed() {
                                         *v = p / 100.0;
@@ -285,27 +286,27 @@ impl DrawState {
                             if lines {
                                 pct(ui, "Smoothness", "0 follows every wobble, 100 gives smooth curves", &mut o.smooth, 0.0, 1.0);
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new("Ignore specks").size(12.5).color(TEXT_DIM)).on_hover_text("Dots and specks smaller than this are ignored");
+                                    ui.label(RichText::new("Ignore specks").size(12.5).color(TEXT_DIM)).help("Dots and specks smaller than this are ignored");
                                     ui.add(egui::Slider::new(&mut o.detail, 0..=300).suffix(" px"));
                                 });
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new("Close gaps").size(12.5).color(TEXT_DIM)).on_hover_text("Closes small gaps in the lines");
+                                    ui.label(RichText::new("Close gaps").size(12.5).color(TEXT_DIM)).help("Closes small gaps in the lines");
                                     ui.add(egui::Slider::new(&mut o.close_gaps, 0..=6).suffix(" px"));
                                 });
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new("Shortest line").size(12.5).color(TEXT_DIM)).on_hover_text("Shorter lines are left out");
+                                    ui.label(RichText::new("Shortest line").size(12.5).color(TEXT_DIM)).help("Shorter lines are left out");
                                     ui.add(egui::Slider::new(&mut o.min_length, 0.0..=100.0).suffix(" px").max_decimals(0));
                                 });
-                                ui.checkbox(&mut o.keep_width, "Keep thick and thin parts (as pen pressure)");
+                                ui.checkbox(&mut o.keep_width, "Keep thick and thin parts (as pen pressure)").help("The traced line is thick and thin as a pen stroke.");
                             }
                             if o.mode != TraceMode::Colors {
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new(if o.mode == TraceMode::Silhouette { "Color" } else { "Line color" }).size(12.5).color(TEXT_DIM));
                                     if o.mode != TraceMode::Silhouette {
-                                        if widgets::chip(ui, "As drawn", o.line_color == LineColor::Original).clicked() {
+                                        if widgets::chip(ui, "As drawn", o.line_color == LineColor::Original).help("Draw it as it is, without any change.").clicked() {
                                             o.line_color = LineColor::Original;
                                         }
-                                        if widgets::chip(ui, "One color", o.line_color == LineColor::Single).clicked() {
+                                        if widgets::chip(ui, "One color", o.line_color == LineColor::Single).help("Use one color for the whole thing.").clicked() {
                                             o.line_color = LineColor::Single;
                                         }
                                     }
@@ -316,15 +317,15 @@ impl DrawState {
                             }
                             if colors {
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new("Colors").size(12.5).color(TEXT_DIM)).on_hover_text("How many different colors the shapes use");
+                                    ui.label(RichText::new("Colors").size(12.5).color(TEXT_DIM)).help("How many different colors the shapes use");
                                     ui.add(egui::Slider::new(&mut o.colors, 2..=24));
                                 });
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new("Merge spots").size(12.5).color(TEXT_DIM)).on_hover_text("Color spots smaller than this join the color around them");
+                                    ui.label(RichText::new("Merge spots").size(12.5).color(TEXT_DIM)).help("Color spots smaller than this join the color around them");
                                     ui.add(egui::Slider::new(&mut o.min_area, 0..=500).suffix(" px"));
                                 });
                                 pct(ui, "Edge smooth", "0 = pixel-exact edges, 100 = round smooth edges", &mut o.color_smooth, 0.0, 1.0);
-                                ui.checkbox(&mut o.ignore_background, "Leave out white paper / background");
+                                ui.checkbox(&mut o.ignore_background, "Leave out white paper / background").help("The white paper does not count as drawing.");
                             }
                         });
                     });
@@ -333,7 +334,7 @@ impl DrawState {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
                             for (v, label) in [(View::Result, "Result"), (View::Both, "Over original"), (View::Original, "Original")] {
-                                if widgets::chip(ui, label, t.view == v).clicked() && t.view != v {
+                                if widgets::chip(ui, label, t.view == v).help("Pick how the preview looks.").clicked() && t.view != v {
                                     t.view = v;
                                     t.redraw = true;
                                 }
@@ -357,7 +358,7 @@ impl DrawState {
                 ui.horizontal(|ui| {
                     let t = &mut self.trace;
                     widgets::segmented(ui, &mut t.quality, &[(Quality::Full, "Full detail"), (Quality::Faster, "Faster")]);
-                    ui.checkbox(&mut t.hide_original, "Hide the original layer");
+                    ui.checkbox(&mut t.hide_original, "Hide the original layer").help("Hide the layer that this was made from.");
                     ui.add_space(8.0);
                     if let Some(f) = &t.fin {
                         ui.add(egui::ProgressBar::new(f32::from_bits(f.progress.load(Ordering::Relaxed))).desired_width(160.0).animate(true));

@@ -32,6 +32,8 @@ pub struct Settings {
     pub high_contrast: bool,
     pub reduced_motion: bool,
     pub show_tooltips: bool,
+    /// A small ! on every button, slider and switch that has a help text (hover it to read what it does).
+    pub help_marks: bool,
     pub left_handed: bool,
     /// How sharp the character is drawn in the Rig, Physics, Animate and Stream tabs: 0 Potato to 4 Max (see `preview_px`).
     pub rig_quality: u8,
@@ -103,6 +105,7 @@ impl Default for Settings {
             high_contrast: false,
             reduced_motion: false,
             show_tooltips: true,
+            help_marks: true,
             left_handed: false,
             rig_quality: 2,
             stream_fps: 30,

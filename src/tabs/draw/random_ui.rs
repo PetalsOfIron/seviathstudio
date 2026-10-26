@@ -2,6 +2,7 @@
 // Draw tab: the color randomizer window. Pick what you are coloring and a harmony, lock the
 // swatches you like, reroll the rest, then apply to the selection (or the whole layer).
 
+use crate::widgets::HelpExt;
 use eframe::egui::{self, Align2, Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind, vec2};
 
 use super::DrawState;
@@ -108,7 +109,7 @@ impl DrawState {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                     for (i, label, about) in Intent::ALL {
-                        if widgets::chip(ui, label, r.intent == i).on_hover_text(about).clicked() {
+                        if widgets::chip(ui, label, r.intent == i).help(about).clicked() {
                             r.intent = i;
                             changed = true;
                         }
@@ -119,7 +120,7 @@ impl DrawState {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                     for (h, label, about) in Harmony::ALL {
-                        if widgets::chip(ui, label, r.harmony == h).on_hover_text(about).clicked() {
+                        if widgets::chip(ui, label, r.harmony == h).help(about).clicked() {
                             r.harmony = h;
                             changed = true;
                         }
@@ -143,15 +144,15 @@ impl DrawState {
                         let lp = ui.painter();
                         lp.rect_filled(lock, CornerRadius::same(5), Color32::from_black_alpha(if r.locked[i] { 170 } else { 60 }));
                         icons::paint(lp, lock.shrink(3.0), Icon::Lock, if r.locked[i] { GOLD } else { Color32::from_white_alpha(150) });
-                        if lresp.on_hover_text("Keep this color when you reroll").clicked() {
+                        if lresp.help("Keep this color when you reroll").clicked() {
                             r.locked[i] = !r.locked[i];
                         }
-                        let resp = resp.on_hover_text(format!("#{:02X}{:02X}{:02X} · click to choose it for a flat fill · right-click: use as main color", c[0], c[1], c[2]));
+                        let resp = resp.help(format!("#{:02X}{:02X}{:02X} · click to choose it for a flat fill · right-click: use as main color", c[0], c[1], c[2]));
                         if resp.clicked() {
                             r.chosen = i;
                         }
                         resp.context_menu(|ui| {
-                            if ui.button("Use as main color").clicked() {
+                            if ui.button("Use as main color").help("Use this as the color you paint with.").clicked() {
                                 use_main = Some(i);
                                 ui.close();
                             }
@@ -159,11 +160,11 @@ impl DrawState {
                     }
                 });
                 ui.horizontal(|ui| {
-                    if ui.button(RichText::new("Reroll").strong()).on_hover_text("New colors for every swatch that is not locked").clicked() {
+                    if ui.button(RichText::new("Reroll").strong()).help("New colors for every swatch that is not locked").clicked() {
                         r.reroll();
                     }
                     ui.label(RichText::new("Seed").color(TEXT_DIM).size(12.0));
-                    if ui.add(egui::DragValue::new(&mut r.seed).range(0..=999_999)).on_hover_text("The same seed always gives the same colors").changed() {
+                    if ui.add(egui::DragValue::new(&mut r.seed).range(0..=999_999)).help("The same seed always gives the same colors").changed() {
                         changed = true;
                     }
                     ui.label(RichText::new("Swatches").color(TEXT_DIM).size(12.0));
@@ -179,7 +180,7 @@ impl DrawState {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                     for (m, label, about) in ApplyMode::ALL {
-                        if widgets::chip(ui, label, r.mode == m).on_hover_text(about).clicked() {
+                        if widgets::chip(ui, label, r.mode == m).help(about).clicked() {
                             r.mode = m;
                         }
                     }
@@ -207,10 +208,10 @@ impl DrawState {
                 let target = if self.doc.selection.is_some() { "the selection" } else { "the whole layer" };
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    if ui.button(RichText::new(format!("Apply to {target}")).strong()).clicked() {
+                    if ui.button(RichText::new(format!("Apply to {target}")).strong()).help("Use this on the picked layer or selection.").clicked() {
                         apply = true;
                     }
-                    if ui.button("Save as palette").on_hover_text("Add these colors to your swatches").clicked() {
+                    if ui.button("Save as palette").help("Add these colors to your swatches").clicked() {
                         save_palette = true;
                     }
                 });

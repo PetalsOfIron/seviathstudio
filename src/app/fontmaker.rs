@@ -3,6 +3,7 @@
 // you never have to pick keys: draw it, press Next. Any style works, because the app does not read the
 // letters, it keeps the shape you draw for the letter it asked for.
 
+use crate::widgets::HelpExt;
 use eframe::egui::{self, Align2, Color32, Event, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2, vec2};
 
 use super::SeviathApp;
@@ -185,7 +186,7 @@ impl SeviathApp {
                     if ui.button("Skip").clicked() {
                         m.step(1);
                     }
-                    if ui.button(RichText::new("Next letter").strong()).on_hover_text("Goes to the next letter you have not drawn yet").clicked() {
+                    if ui.button(RichText::new("Next letter").strong()).help("Goes to the next letter you have not drawn yet").clicked() {
                         m.next_empty();
                     }
                     ui.separator();
@@ -203,7 +204,7 @@ impl SeviathApp {
                             handfont::save_draft(&m.font);
                         }
                     }
-                    if ui.button("Take from the layer").on_hover_text("Draw the letter on the canvas, select that layer, and the app traces it into clean lines here").clicked() {
+                    if ui.button("Take from the layer").help("Draw the letter on the canvas, select that layer, and the app traces it into clean lines here").clicked() {
                         from_canvas = true;
                     }
                 });
@@ -232,17 +233,17 @@ impl SeviathApp {
                     ui.label(RichText::new("Line").size(12.0).color(TEXT_DIM));
                     ui.add(egui::Slider::new(&mut m.font.width, 3.0..=40.0).suffix(" px"));
                 });
-                ui.checkbox(&mut m.font.caps_for_small, "Use my capitals for small letters you did not draw").on_hover_text("For gothic and tattoo styles that only have one kind of letter");
+                ui.checkbox(&mut m.font.caps_for_small, "Use my capitals for small letters you did not draw").help("For gothic and tattoo styles that only have one kind of letter");
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Try").size(12.0).color(TEXT_DIM));
                     ui.add(egui::TextEdit::singleline(&mut m.preview).desired_width(300.0).char_limit(60));
                 });
                 preview(ui, &m.font, &m.preview);
                 ui.horizontal(|ui| {
-                    if ui.button(RichText::new("Use in this project").strong()).on_hover_text("The font shows up in the Text tool, and travels inside the project").clicked() {
+                    if ui.button(RichText::new("Use in this project").strong()).help("The font shows up in the Text tool, and travels inside the project").clicked() {
                         to_project = true;
                     }
-                    if ui.button("Save as a font file…").on_hover_text("A .ttf you can install and use in other programs").clicked() {
+                    if ui.button("Save as a font file…").help("A .ttf you can install and use in other programs").clicked() {
                         to_file = true;
                     }
                     if let Some(msg) = &m.message {

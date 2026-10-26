@@ -2,6 +2,7 @@
 // The panels of the Draw tab (brush, color, sub view, layers): docked on a side, floating over the canvas,
 // in their own window (for a second screen) or hidden. Layouts are kept as workspaces (see layout.rs).
 
+use crate::widgets::HelpExt;
 use eframe::egui::{self, Align, Layout as UiLayout, Margin, RichText, Ui, ViewportBuilder, ViewportClass, ViewportId};
 
 use super::{DrawState, Tool};
@@ -59,38 +60,38 @@ impl DrawState {
             let small = |s: &str| RichText::new(s).size(11.0).color(TEXT_DIM);
             ui.with_layout(UiLayout::right_to_left(Align::Center), |ui| {
                 ui.add_space(if docked { 8.0 } else { 0.0 });
-                if ui.add(egui::Button::new(small("Hide")).frame(false)).on_hover_text("Hide this panel (Layout menu or Ctrl+K brings it back)").clicked() {
+                if ui.add(egui::Button::new(small("Hide")).frame(false)).help("Hide this panel (Layout menu or Ctrl+K brings it back)").clicked() {
                     ask = Some(Ask::Hide);
                 }
-                if ui.add(egui::Button::new(small("Window")).frame(false)).on_hover_text("Its own window: drag it to another screen").clicked() {
+                if ui.add(egui::Button::new(small("Window")).frame(false)).help("Its own window: drag it to another screen").clicked() {
                     ask = Some(Ask::Window);
                 }
                 if docked {
-                    if ui.add(egui::Button::new(small("Float")).frame(false)).on_hover_text("A window over the canvas").clicked() {
+                    if ui.add(egui::Button::new(small("Float")).frame(false)).help("A window over the canvas").clicked() {
                         ask = Some(Ask::Float);
                     }
                     ui.menu_button(small("Move"), |ui| {
-                        if ui.button("Up").clicked() {
+                        if ui.button("Up").help("Move this up in the list.").clicked() {
                             ask = Some(Ask::Up);
                             ui.close();
                         }
-                        if ui.button("Down").clicked() {
+                        if ui.button("Down").help("Move this down in the list.").clicked() {
                             ask = Some(Ask::Down);
                             ui.close();
                         }
                         ui.separator();
-                        if ui.button("To the left side").clicked() {
+                        if ui.button("To the left side").help("Go to the left.").clicked() {
                             ask = Some(Ask::Dock(Side::Left));
                             ui.close();
                         }
-                        if ui.button("To the right side").clicked() {
+                        if ui.button("To the right side").help("Go to the right.").clicked() {
                             ask = Some(Ask::Dock(Side::Right));
                             ui.close();
                         }
                     });
                 } else {
                     let side = self.layouts.working.get(id).side;
-                    if ui.add(egui::Button::new(small("Dock")).frame(false)).on_hover_text("Back into the side column").clicked() {
+                    if ui.add(egui::Button::new(small("Dock")).frame(false)).help("Back into the side column").clicked() {
                         ask = Some(Ask::Dock(side));
                     }
                 }

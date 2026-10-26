@@ -6,6 +6,7 @@ use eframe::egui::{
     self, Color32, CornerRadius, CursorIcon, Mesh, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, ecolor::Hsva, pos2, vec2,
 };
 
+use crate::widgets::HelpExt;
 use crate::theme::*;
 
 /// Returns true when the color changed.
@@ -85,5 +86,5 @@ pub fn compare(ui: &mut Ui, old: Color32, new: Color32) -> egui::Response {
     p.rect_filled(a, CornerRadius { nw: 5, sw: 5, ne: 0, se: 0 }, old);
     p.rect_filled(b, CornerRadius { nw: 0, sw: 0, ne: 5, se: 5 }, new);
     p.rect_stroke(r, CornerRadius::same(5), Stroke::new(1.0, LINE), StrokeKind::Outside);
-    resp.on_hover_text("Left: color before · Right: now. Click to go back.")
+    resp.help("Left: color before · Right: now. Click to go back.")
 }

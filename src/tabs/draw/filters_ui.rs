@@ -2,6 +2,7 @@
 // Draw tab: the Filter window (blurs, stylize, color, line art, color adjustments) with a live
 // preview on a small copy, and the check-view button (black & white, inverted, color blindness).
 
+use crate::widgets::HelpExt;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
@@ -158,7 +159,7 @@ impl DrawState {
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                                 for (g, label) in Group::ALL {
-                                    if widgets::chip(ui, label, f.group == g).clicked() {
+                                    if widgets::chip(ui, label, f.group == g).help("Show only this group.").clicked() {
                                         f.group = g;
                                         if f.def.group != g {
                                             if let Some(d) = FILTERS.iter().find(|d| d.group == g) {
@@ -172,7 +173,7 @@ impl DrawState {
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                                 for d in FILTERS.iter().filter(|d| d.group == f.group) {
-                                    if widgets::chip(ui, d.label, f.def.id == d.id).on_hover_text(d.about).clicked() && f.def.id != d.id {
+                                    if widgets::chip(ui, d.label, f.def.id == d.id).help(d.about).clicked() && f.def.id != d.id {
                                         f.def = d;
                                         f.params = Params::defaults(d);
                                     }
@@ -188,7 +189,7 @@ impl DrawState {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
                             for (v, label) in [(View::Result, "Result"), (View::Original, "Original")] {
-                                if widgets::chip(ui, label, f.view == v).clicked() && f.view != v {
+                                if widgets::chip(ui, label, f.view == v).help("Pick how the preview looks.").clicked() && f.view != v {
                                     f.view = v;
                                     f.redraw = true;
                                 }
@@ -322,7 +323,7 @@ impl DrawState {
     pub(super) fn check_button(&mut self, ui: &mut Ui) {
         let on = self.check != CheckView::Normal || self.proof != Proof::Off || self.doc.meta.rgb_profile != "srgb";
         let tip = format!("Check view: {}", CheckView::ALL.iter().find(|c| c.0 == self.check).map(|c| c.1).unwrap_or(""));
-        let r = icon_button(ui, Icon::Eye, on || self.filter.check_open, 28.0, &tip);
+        let r = icon_button(ui, Icon::Eye, on || self.filter.check_open, 28.0, &tip).help("Show or hide this layer.");
         if r.clicked() {
             self.filter.check_open = !self.filter.check_open;
         }
@@ -342,7 +343,7 @@ impl DrawState {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                     for (c, label, about) in CheckView::ALL {
-                        if widgets::chip(ui, label, self.check == c).on_hover_text(about).clicked() {
+                        if widgets::chip(ui, label, self.check == c).help(about).clicked() {
                             self.check = c;
                         }
                     }
@@ -354,7 +355,7 @@ impl DrawState {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                     for (p, label, about) in Proof::ALL {
-                        if widgets::chip(ui, label, self.proof == p).on_hover_text(about).clicked() {
+                        if widgets::chip(ui, label, self.proof == p).help(about).clicked() {
                             self.proof = p;
                         }
                     }
@@ -364,7 +365,7 @@ impl DrawState {
                 let [cy, ma, ye, k] = pr.cmyk([c.r(), c.g(), c.b()]);
                 ui.label(RichText::new(format!("Your color prints as C {cy:.0}  M {ma:.0}  Y {ye:.0}  K {k:.0}  (ink {:.0}%)", cy + ma + ye + k)).size(11.5).color(TEXT_DIM));
                 ui.horizontal(|ui| {
-                    if widgets::chip(ui, "Count colors that can't print", false).on_hover_text("Looks at the whole drawing").clicked() {
+                    if widgets::chip(ui, "Count colors that can't print", false).help("Looks at the whole drawing").clicked() {
                         let img = crate::files::thumbnail(&self.doc, 512);
                         self.filter.share = Some(colorprofiles::unprintable_share(&img, &self.doc.meta.cmyk_profile, colorprofiles::Intent::from_id(&self.doc.meta.intent)));
                     }
@@ -399,7 +400,7 @@ pub(super) fn params_editor(ui: &mut Ui, def: &'static FilterDef, params: &mut P
                     ui.label(RichText::new(pd.label).size(12.5).color(TEXT_DIM));
                     let cur = params.f(pd.key) as usize;
                     for (i, o) in options.iter().enumerate() {
-                        if widgets::chip(ui, o, cur == i).clicked() {
+                        if widgets::chip(ui, o, cur == i).help("Pick this choice.").clicked() {
                             params.v.insert(pd.key, i as f32);
                         }
                     }
@@ -407,7 +408,7 @@ pub(super) fn params_editor(ui: &mut Ui, def: &'static FilterDef, params: &mut P
             }
             Kind::Check { .. } => {
                 let mut b = params.b(pd.key);
-                if ui.checkbox(&mut b, pd.label).changed() {
+                if ui.checkbox(&mut b, pd.label).help("Switch this on or off.").changed() {
                     params.v.insert(pd.key, b as u8 as f32);
                 }
             }
@@ -422,12 +423,12 @@ pub(super) fn params_editor(ui: &mut Ui, def: &'static FilterDef, params: &mut P
     }
     if def.curve {
         curve_editor(ui, &mut params.curve);
-        if ui.button("Straighten the curve").clicked() {
+        if ui.button("Straighten the curve").help("Make the curve straight again.").clicked() {
             params.curve = vec![[0.0, 0.0], [1.0, 1.0]];
         }
     }
     if def.group == Group::Adjust || !def.params.is_empty() {
-        if ui.small_button("Reset").clicked() {
+        if ui.small_button("Reset").help("Put the settings back to how they were.").clicked() {
             *params = Params::defaults(def);
         }
     }

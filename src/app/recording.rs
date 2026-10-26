@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // The Recorder window and the red "REC" light in the top bar. It films only the picture (see recorder.rs).
 
+use crate::widgets::HelpExt;
 use eframe::egui::{self, Align2, Color32, RichText, vec2};
 
 use super::SeviathApp;
@@ -68,7 +69,7 @@ impl SeviathApp {
     pub(super) fn rec_light(&mut self, ui: &mut egui::Ui) {
         let Some(s) = self.rec.session.as_ref() else { return };
         let (txt, col) = if s.paused { (format!("PAUSED {}", clock(s.elapsed)), TEXT_DIM) } else { (format!("REC {}", clock(s.elapsed)), Color32::from_rgb(235, 70, 70)) };
-        if ui.add(egui::Button::new(RichText::new(txt).color(col).strong()).corner_radius(14)).on_hover_text("The recorder (it films only the picture)").clicked() {
+        if ui.add(egui::Button::new(RichText::new(txt).color(col).strong()).corner_radius(14)).help("The recorder (it films only the picture)").clicked() {
             self.rec.open = true;
         }
     }
@@ -131,11 +132,11 @@ impl SeviathApp {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                         ui.label(RichText::new("Kind").size(12.0).color(TEXT_DIM));
-                        if widgets::chip(ui, "Timelapse", c.mode == RecMode::Timelapse).on_hover_text("One frame after every finished change: hours become a short clip").clicked() {
+                        if widgets::chip(ui, "Timelapse", c.mode == RecMode::Timelapse).help("One frame after every finished change: hours become a short clip").clicked() {
                             c.mode = RecMode::Timelapse;
                             c.fps = 12;
                         }
-                        if widgets::chip(ui, "Real time", c.mode == RecMode::RealTime).on_hover_text("Frames at a steady rate while you draw, strokes appear as you paint them").clicked() {
+                        if widgets::chip(ui, "Real time", c.mode == RecMode::RealTime).help("Frames at a steady rate while you draw, strokes appear as you paint them").clicked() {
                             c.mode = RecMode::RealTime;
                             c.fps = 15;
                         }

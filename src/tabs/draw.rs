@@ -8,6 +8,7 @@ use eframe::egui::{
     ecolor::Hsva, pos2, vec2,
 };
 
+use crate::widgets::HelpExt;
 use crate::canvas::{self as cv, CanvasRenderer};
 use crate::colorpick;
 use crate::history::{self, DocState};
@@ -568,7 +569,7 @@ impl DrawState {
             p.rect_stroke(back, CornerRadius::same(5), Stroke::new(1.5, LINE), StrokeKind::Outside);
             p.rect_filled(front, CornerRadius::same(5), self.primary);
             p.rect_stroke(front, CornerRadius::same(5), Stroke::new(1.5, GOLD), StrokeKind::Outside);
-            if resp.on_hover_text("Main and second color — click or press X to swap").clicked() {
+            if resp.help("Main and second color — click or press X to swap").clicked() {
                 std::mem::swap(&mut self.primary, &mut self.secondary);
                 self.hex = hex_of(self.primary);
             }
@@ -582,7 +583,7 @@ impl DrawState {
                 if widgets::chip(ui, if self.color_open { "Hide" } else { "Show" }, false).clicked() {
                     self.color_open = !self.color_open;
                 }
-                if widgets::chip(ui, "Randomize", self.rand.open).on_hover_text("Believable random colors for skin, foliage, sky and more").clicked() {
+                if widgets::chip(ui, "Randomize", self.rand.open).help("Believable random colors for skin, foliage, sky and more").clicked() {
                     self.rand.open = !self.rand.open;
                 }
                 let (r, _) = ui.allocate_exact_size(vec2(22.0, 16.0), Sense::hover());
@@ -610,7 +611,7 @@ impl DrawState {
                 // Color changed elsewhere (picker tool, swatch, swap): follow it.
                 self.hex = hex_of(self.primary);
             }
-            if ui.button("Save").on_hover_text("Add this color to the swatches").clicked() && !self.swatches.contains(&self.primary) {
+            if ui.button("Save").help("Add this color to the swatches").clicked() && !self.swatches.contains(&self.primary) {
                 if self.swatches.len() >= self.set.swatches_max {
                     self.swatches.remove(0);
                 }
@@ -625,7 +626,7 @@ impl DrawState {
                 ui.painter().rect_filled(r, CornerRadius::same(4), *c);
                 let edge = if *c == self.primary { VENOM } else { LINE };
                 ui.painter().rect_stroke(r, CornerRadius::same(4), Stroke::new(1.0, edge), StrokeKind::Inside);
-                let resp = resp.on_hover_text("Click: use · Right-click: remove");
+                let resp = resp.help("Click: use · Right-click: remove");
                 if resp.clicked() {
                     self.primary = *c;
                 }
@@ -692,7 +693,7 @@ impl DrawState {
                 if let Some(pt) = resp.interact_pointer_pos() {
                     self.view.center = ((pt - page.min) / z).to_pos2();
                 }
-                resp.on_hover_text("Whole drawing. Click or drag to move the view there.")
+                resp.help("Whole drawing. Click or drag to move the view there.")
                     .on_hover_cursor(CursorIcon::Grab);
             }
         }
@@ -1106,7 +1107,7 @@ impl DrawState {
                         let z = format!("{:.0}%", self.view.zoom * 100.0);
                         if ui
                             .add(egui::Button::new(RichText::new(z).size(12.5)).frame(false).min_size(vec2(50.0, 24.0)))
-                            .on_hover_text("Click: actual pixels, 100% (Ctrl+Alt+0)")
+                            .help("Click: actual pixels, 100% (Ctrl+Alt+0)")
                             .clicked()
                         {
                             self.view.set_zoom(1.0);
@@ -1126,7 +1127,7 @@ impl DrawState {
                         let a = format!("{:.0}°", self.view.angle_deg());
                         if ui
                             .add(egui::Button::new(RichText::new(a).size(12.5)).frame(false).min_size(vec2(42.0, 24.0)))
-                            .on_hover_text("Click: straighten (0°)")
+                            .help("Click: straighten (0°)")
                             .clicked()
                         {
                             self.straighten();

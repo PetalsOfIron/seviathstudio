@@ -3,6 +3,7 @@
 // OBS Studio), with what is already on this computer and a button for each that is not. One download at a time; what is being
 // done is shown, and what is done says where it is. See downloads.rs.
 
+use crate::widgets::HelpExt;
 use std::sync::mpsc::{Receiver, channel};
 
 use eframe::egui::{self, Align2, RichText};
@@ -68,7 +69,7 @@ impl SeviathApp {
                             if this {
                                 ui.label(RichText::new("Downloading...").color(GOLD));
                             } else if have {
-                                if ui.small_button("Show").clicked() {
+                                if ui.small_button("Show").help("Show it.").clicked() {
                                     show = downloads::place(it.kind);
                                 }
                                 ui.label(RichText::new("On this computer").size(11.5).color(TEXT_DIM));

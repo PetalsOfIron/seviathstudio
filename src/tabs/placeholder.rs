@@ -71,6 +71,7 @@ fn plan(tab: Tab) -> Plan {
             ],
         },
         Tab::Draw => unreachable!("Draw tab is implemented"),
+        Tab::Generate => unreachable!("Generate tab is implemented"),
     }
 }
 

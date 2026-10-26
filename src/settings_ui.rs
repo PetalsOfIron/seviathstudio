@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // The Settings window pages. Every setting here is saved and takes effect right away.
 
+use crate::widgets::HelpExt;
 use eframe::egui::{self, Align2, Color32, CornerRadius, Event, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
 
 use crate::settings::{CursorStyle, Settings, WheelAction};
@@ -80,7 +81,7 @@ fn row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
 
 fn reset_button(ui: &mut Ui) -> bool {
     ui.add_space(10.0);
-    ui.button("Reset this page").on_hover_text("Back to the default values for this page").clicked()
+    ui.button("Reset this page").help("Back to the default values for this page").clicked()
 }
 
 pub fn page(ui: &mut Ui, page: Page, s: &mut Settings, pen: &mut PenMonitor) {
@@ -92,15 +93,16 @@ pub fn page(ui: &mut Ui, page: Page, s: &mut Settings, pen: &mut PenMonitor) {
                 ui.add(egui::Slider::new(&mut s.ui_scale, 0.6..=2.5).step_by(0.05).max_decimals(2));
             });
             hint(ui, "Makes every panel and button bigger or smaller.");
-            ui.checkbox(&mut s.high_contrast, "High contrast (brighter text and outlines)");
-            ui.checkbox(&mut s.reduced_motion, "Reduce motion (no sliding or fading)");
-            ui.checkbox(&mut s.show_tooltips, "Show help when hovering buttons");
-            ui.checkbox(&mut s.left_handed, "Left-handed layout (tools on the right, layers on the left)");
+            ui.checkbox(&mut s.high_contrast, "High contrast (brighter text and outlines)").help("Brighter text and outlines, easier to read.");
+            ui.checkbox(&mut s.reduced_motion, "Reduce motion (no sliding or fading)").help("Panels appear at once, without moving.");
+            ui.checkbox(&mut s.show_tooltips, "Show help when hovering buttons").help("A small text appears when the mouse rests on a button.");
+            ui.add_enabled(s.show_tooltips, egui::Checkbox::new(&mut s.help_marks, "A small ! on every button that has a help text"));
+            ui.checkbox(&mut s.left_handed, "Left-handed layout (tools on the right, layers on the left)").help("Swap the sides of the panels.");
             ui.add_space(6.0);
             section_title(ui, "Drawing the character");
             row(ui, "Quality", |ui| {
                 for (i, (name, px)) in crate::settings::RIG_QUALITY.iter().enumerate() {
-                    if ui.selectable_label(s.rig_quality as usize == i, format!("{name} ({px:.0})")).clicked() {
+                    if ui.selectable_label(s.rig_quality as usize == i, format!("{name} ({px:.0})")).help("Pick this one.").clicked() {
                         s.rig_quality = i as u8;
                     }
                 }
@@ -117,6 +119,7 @@ pub fn page(ui: &mut Ui, page: Page, s: &mut Settings, pen: &mut PenMonitor) {
                 s.high_contrast = d.high_contrast;
                 s.reduced_motion = d.reduced_motion;
                 s.show_tooltips = d.show_tooltips;
+                s.help_marks = d.help_marks;
                 s.left_handed = d.left_handed;
             }
         }
@@ -130,26 +133,26 @@ pub fn page(ui: &mut Ui, page: Page, s: &mut Settings, pen: &mut PenMonitor) {
             row(ui, "Zoom speed", |ui| {
                 ui.add(egui::Slider::new(&mut s.zoom_speed, 0.2..=4.0).max_decimals(2));
             });
-            ui.checkbox(&mut s.invert_wheel, "Invert wheel zoom direction");
+            ui.checkbox(&mut s.invert_wheel, "Invert wheel zoom direction").help("Turns the mouse wheel zoom the other way round.");
             row(ui, "Rotation step", |ui| {
                 ui.add(egui::Slider::new(&mut s.rotate_snap, 1.0..=90.0).suffix("°").max_decimals(0));
             });
             hint(ui, "Used by the rotate buttons and by Shift while rotating with R + drag.");
             ui.add_space(6.0);
             section_title(ui, "Looks");
-            ui.checkbox(&mut s.show_guides, "Show the project's guide lines");
-            ui.checkbox(&mut s.pixel_grid, "Pixel grid when zoomed in far");
+            ui.checkbox(&mut s.show_guides, "Show the project's guide lines").help("Show the guide lines saved in this project.");
+            ui.checkbox(&mut s.pixel_grid, "Pixel grid when zoomed in far").help("Show lines between pixels when you zoom in a lot.");
             if s.pixel_grid {
                 row(ui, "Show grid from", |ui| {
                     ui.add(egui::Slider::new(&mut s.pixel_grid_from, 4.0..=64.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
                 });
             }
-            ui.checkbox(&mut s.smooth_zoomed_in, "Smooth pixels when zoomed in (off = crisp, see every pixel)");
-            ui.checkbox(&mut s.page_shadow, "Shadow under the page");
-            ui.checkbox(&mut s.show_scales, "Snake-scale pattern behind the page");
+            ui.checkbox(&mut s.smooth_zoomed_in, "Smooth pixels when zoomed in (off = crisp, see every pixel)").help("Blend pixels when you zoom in. Off shows every pixel sharp.");
+            ui.checkbox(&mut s.page_shadow, "Shadow under the page").help("A soft shadow under the page, so it looks like paper.");
+            ui.checkbox(&mut s.show_scales, "Snake-scale pattern behind the page").help("A scale pattern in the background.");
             row(ui, "Background", |ui| {
                 ui.color_edit_button_srgb(&mut s.canvas_bg);
-                if ui.small_button("Default").clicked() {
+                if ui.small_button("Default").help("Go back to the default.").clicked() {
                     s.canvas_bg = d.canvas_bg;
                 }
             });
@@ -175,7 +178,7 @@ pub fn page(ui: &mut Ui, page: Page, s: &mut Settings, pen: &mut PenMonitor) {
                 ui.add(egui::Slider::new(&mut s.cursor_min_size, 0.0..=30.0).suffix(" px"));
             });
             hint(ui, "Keeps tiny brushes visible when zoomed out.");
-            ui.checkbox(&mut s.hide_cursor_while_drawing, "Hide the cursor while drawing");
+            ui.checkbox(&mut s.hide_cursor_while_drawing, "Hide the cursor while drawing").help("The mouse arrow disappears while you paint.");
             if reset_button(ui) {
                 s.cursor = d.cursor;
                 s.cursor_min_size = d.cursor_min_size;
@@ -185,7 +188,7 @@ pub fn page(ui: &mut Ui, page: Page, s: &mut Settings, pen: &mut PenMonitor) {
         Page::Pen => pen_page(ui, s, pen, &d),
         Page::Brushes => {
             section_title(ui, "Brushes");
-            ui.checkbox(&mut s.keep_size_on_switch, "Keep my brush size when I pick another brush");
+            ui.checkbox(&mut s.keep_size_on_switch, "Keep my brush size when I pick another brush").help("A new brush keeps the size you had.");
             row(ui, "Biggest brush size", |ui| {
                 ui.add(egui::Slider::new(&mut s.brush_size_max, 50.0..=5000.0).logarithmic(true).suffix(" px"));
             });
@@ -222,7 +225,7 @@ pub fn page(ui: &mut Ui, page: Page, s: &mut Settings, pen: &mut PenMonitor) {
                 ui.add(egui::Slider::new(&mut s.undo_memory_mb, 64..=32768).logarithmic(true).suffix(" MB"));
             });
             hint(ui, "Steps only cost memory for the parts of the picture they changed. The oldest steps go first.");
-            ui.checkbox(&mut s.warn_other_tab_undo, "Ask before undoing a step that is older than changes in other tabs");
+            ui.checkbox(&mut s.warn_other_tab_undo, "Ask before undoing a step that is older than changes in other tabs").help("Ask first when undoing would also undo newer steps of other tabs.");
             hint(ui, "Off = Ctrl+Z quietly undoes only that step and keeps the other tabs' changes.");
             if reset_button(ui) {
                 s.undo_steps = d.undo_steps;
@@ -235,17 +238,17 @@ pub fn page(ui: &mut Ui, page: Page, s: &mut Settings, pen: &mut PenMonitor) {
             let folder = s.projects_folder();
             ui.label(RichText::new(folder.display().to_string()).color(TEXT).monospace());
             ui.horizontal(|ui| {
-                if ui.button("Change…").clicked() {
+                if ui.button("Change…").help("Pick something else.").clicked() {
                     let _ = std::fs::create_dir_all(&folder);
                     if let Some(p) = rfd::FileDialog::new().set_title("Projects folder").set_directory(&folder).pick_folder() {
                         s.projects_dir = p.display().to_string();
                     }
                 }
-                if ui.button("Open in Explorer").clicked() {
+                if ui.button("Open in Explorer").help("Show this folder in Windows Explorer.").clicked() {
                     let _ = std::fs::create_dir_all(&folder);
                     open_folder(&folder);
                 }
-                if !s.projects_dir.is_empty() && ui.button("Use the default").clicked() {
+                if !s.projects_dir.is_empty() && ui.button("Use the default").help("Go back to the default.").clicked() {
                     s.projects_dir.clear();
                 }
             });
@@ -259,9 +262,9 @@ pub fn page(ui: &mut Ui, page: Page, s: &mut Settings, pen: &mut PenMonitor) {
             row(ui, "Keep the newest", |ui| {
                 ui.add(egui::Slider::new(&mut s.recovery_copies, 1..=50).suffix(" copies"));
             });
-            ui.checkbox(&mut s.autosave_project_file, "Also save the project file itself on autosave");
+            ui.checkbox(&mut s.autosave_project_file, "Also save the project file itself on autosave").help("Autosave writes the project file too, not only a recovery copy.");
             hint(ui, "Off = your project file only changes when you press Save; the copies are kept separately.");
-            if ui.button("Open the recovery folder").clicked() {
+            if ui.button("Open the recovery folder").help("Show the folder where the program keeps recovery copies.").clicked() {
                 let f = Settings::recovery_folder();
                 let _ = std::fs::create_dir_all(&f);
                 open_folder(&f);
@@ -272,12 +275,12 @@ pub fn page(ui: &mut Ui, page: Page, s: &mut Settings, pen: &mut PenMonitor) {
                 ui.add(egui::Slider::new(&mut s.jpeg_quality, 40..=100));
             });
             hint(ui, "Higher = sharper and bigger files. PNG and WebP are saved without any loss.");
-            ui.checkbox(&mut s.export_credit, "Note \"made with SeviathStudio\" in exported PNG files");
+            ui.checkbox(&mut s.export_credit, "Note \"made with SeviathStudio\" in exported PNG files").help("Write a small note in exported PNG files saying which program made them.");
             hint(ui, "Written as the software used, never as the author — the art is yours.");
-            ui.checkbox(&mut s.start_with_projects, "Show the project manager when the app starts");
+            ui.checkbox(&mut s.start_with_projects, "Show the project manager when the app starts").help("Open the list of projects when the program starts.");
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("{} recent files remembered", s.recent.len())).color(TEXT_DIM));
-                if !s.recent.is_empty() && ui.small_button("Clear list").clicked() {
+                if !s.recent.is_empty() && ui.small_button("Clear list").help("Empty the list.").clicked() {
                     s.recent.clear();
                 }
             });
@@ -413,7 +416,7 @@ fn pen_page(ui: &mut Ui, s: &mut Settings, pen: &mut PenMonitor, d: &Settings) {
     if pen.scribble.is_empty() {
         p.text(area.center(), Align2::CENTER_CENTER, "Draw here, from light to heavy pressure", FontId::proportional(13.0), Color32::from_gray(140));
     }
-    if ui.small_button("Clear test area").clicked() {
+    if ui.small_button("Clear test area").help("Wipe the test area clean.").clicked() {
         pen.scribble.clear();
     }
 
@@ -422,7 +425,7 @@ fn pen_page(ui: &mut Ui, s: &mut Settings, pen: &mut PenMonitor, d: &Settings) {
     ui.horizontal(|ui| {
         ui.label("Feel:");
         for (name, g) in [("Very soft", 0.45), ("Soft", 0.7), ("Normal", 1.0), ("Firm", 1.5), ("Very firm", 2.2)] {
-            if ui.selectable_label((s.pressure_curve - g).abs() < 0.01, name).clicked() {
+            if ui.selectable_label((s.pressure_curve - g).abs() < 0.01, name).help("Pick how pressure turns into size or paint.").clicked() {
                 s.pressure_curve = g;
             }
         }
@@ -557,7 +560,7 @@ fn shortcuts(ui: &mut Ui, s: &mut Settings) {
                 if ui.add(egui::Button::new(RichText::new(label).monospace().color(if listening { Color32::from_rgb(235, 170, 80) } else { VENOM })).min_size(vec2(130.0, 20.0))).clicked() {
                     cap = if listening { None } else { Some((d.id.to_owned(), None)) };
                 }
-                if s.shortcuts.contains_key(d.id) && ui.small_button("Reset").clicked() {
+                if s.shortcuts.contains_key(d.id) && ui.small_button("Reset").help("Put the settings back to how they were.").clicked() {
                     s.shortcuts.remove(d.id);
                 }
             });
@@ -622,7 +625,7 @@ fn info(ui: &mut Ui) {
     section_title(ui, "Creator");
     ui.label(RichText::new("Created by Seviath").size(16.0).strong().color(VENOM));
     ui.horizontal(|ui| {
-        if ui.button("Seviath on X").on_hover_text("https://x.com/SnakeSeviath").clicked() {
+        if ui.button("Seviath on X").help("https://x.com/SnakeSeviath").clicked() {
             ui.ctx().open_url(egui::OpenUrl::new_tab("https://x.com/SnakeSeviath"));
         }
         ui.hyperlink_to("https://x.com/SnakeSeviath", "https://x.com/SnakeSeviath");
@@ -684,7 +687,7 @@ fn info(ui: &mut Ui) {
         std::env::consts::ARCH
     );
     ui.label(RichText::new(&report).monospace().size(12.0).color(TEXT_DIM));
-    if ui.button("Copy to clipboard").on_hover_text("Paste this when you report a problem").clicked() {
+    if ui.button("Copy to clipboard").help("Paste this when you report a problem").clicked() {
         ui.ctx().copy_text(report);
     }
 }
