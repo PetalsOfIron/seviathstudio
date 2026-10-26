@@ -2869,6 +2869,8 @@ fn rig_tab_joined_sliders_screens() {
     });
     h.run_steps(3);
     assert_eq!(h.state().draw_mut_ref().doc.rig.pads.len(), n + 1);
+    h.get_all_by_label("Split").last().unwrap().scroll_to_me();
+    h.run_steps(2);
     h.get_all_by_label("Split").last().unwrap().click();
     h.run_steps(3);
     assert_eq!(h.state().draw_mut_ref().doc.rig.pads.len(), n, "split brings the two sliders back");
@@ -4379,4 +4381,25 @@ fn the_zoom_key_zooms_one_click_and_gives_the_brush_back() {
     h.run_steps(3);
     assert!(h.state().draw_mut_ref().view.zoom > z0, "the click zoomed");
     assert_eq!(h.state().draw_mut_ref().tool, crate::tabs::draw::Tool::Brush, "the brush is back");
+}
+
+/// The Parameters column lists the usual Live2D sliders in their folders; one button makes them all.
+#[test]
+fn the_parameters_column_lists_every_standard_slider() {
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 1500.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    save(&mut h, "rig_14_standard_before");
+    h.get_by_label("Add all the standard sliders").click();
+    h.run_steps(4);
+    let names: Vec<String> = h.state().draw_mut_ref().doc.rig.params.iter().map(|p| p.name.clone()).collect();
+    for n in ["Angle X", "Angle Z", "Iris Size", "Brow R Form", "Cheek", "Hair Sway Y", "Body Z"] {
+        assert!(names.iter().any(|x| x == n), "{n} is made");
+    }
+    save(&mut h, "rig_14_standard_after");
 }
