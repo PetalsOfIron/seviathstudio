@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // The AI tools are not part of the app (they are large and have their own licences). They live in a folder of their own
 // (`SeviathAI` in the user's home folder, or where `SEVIATH_AI_ROOT` says): a private Python environment with the packages, and the
-// code of Hunyuan3D. When they are missing the app says so and offers a button that downloads them: it makes the environment, installs
-// the packages with pip, and fetches the Hunyuan3D code as a zip from GitHub. The models themselves (a few GB) are fetched from
+// code of TripoSR. When they are missing the app says so and offers a button that downloads them: it makes the environment, installs
+// the packages with pip, and fetches the TripoSR code as a zip from GitHub. The models themselves (a few GB) are fetched from
 // Hugging Face by the helpers the first time they run. Everything is done by programs the computer already has (Python, curl).
 
 use std::io::Read;
@@ -43,7 +43,8 @@ fn site_packages(root: &Path) -> PathBuf {
 pub struct Status {
     pub python_env: bool,
     pub packages: bool,
-    pub hunyuan: bool,
+    /// CharacterGen: its code, its models, its own Python environment with the graphics part (nvdiffrast) built.
+    pub charactergen: bool,
     /// The TripoSR code and its model (MIT licence, the shape model that may be used everywhere).
     pub triposr: bool,
 }
@@ -51,12 +52,15 @@ pub struct Status {
 impl Status {
     /// The Python environment, the packages and at least one shape model.
     pub fn ready(&self) -> bool {
-        self.python_env && self.packages && (self.hunyuan || self.triposr)
+        self.python_env && self.packages && self.triposr
     }
 
     /// Can this shape model be used now.
     pub fn shape_ready(&self, model: crate::ai::ShapeModel) -> bool {
-        self.python_env && self.packages && if model == crate::ai::ShapeModel::Hunyuan { self.hunyuan } else { self.triposr }
+        match model {
+            crate::ai::ShapeModel::CharacterGen => self.charactergen,
+            crate::ai::ShapeModel::TripoSr => self.python_env && self.packages && self.triposr,
+        }
     }
 
     /// What is missing, in words.
@@ -68,7 +72,7 @@ impl Status {
         if !self.packages {
             v.push("the AI packages (PyTorch, MediaPipe, Transformers...)");
         }
-        if !self.hunyuan && !self.triposr {
+        if !self.triposr {
             v.push("a 3D shape model (TripoSR)");
         }
         v
@@ -122,9 +126,10 @@ pub fn status() -> Status {
 pub fn status_in(root: &Path) -> Status {
     let python_env = venv_python(root).exists();
     let packages = python_env && (site_packages(root).join("torch").exists() || site_packages(root).join("python3.10").join("site-packages").join("torch").exists()) && root.join("venv").exists();
-    let hunyuan = root.join("Hunyuan3D-2").join("hy3dgen").exists();
+    let cg = root.join("CharacterGen-code");
+    let charactergen = cg.join("webui.py").exists() && cg.join("3D_Stage").join("models").exists() && cg.join("2D_Stage").join("models").exists() && root.join("CG-venv").join("Lib").join("site-packages").join("nvdiffrast").exists();
     let triposr = root.join("TripoSR").join("tsr").join("system.py").exists() && root.join("models").join("TripoSR").join("model.ckpt").exists();
-    Status { python_env, packages, hunyuan, triposr }
+    Status { python_env, packages, charactergen, triposr }
 }
 
 /// A Python of a version the AI packages exist for (3.10 to 3.12), found among the ones the computer has: the command to start it.
@@ -165,7 +170,6 @@ fn hide_window(cmd: &mut Command) {
 pub const PACKAGES: &[&str] = &["numpy<2", "pillow", "mediapipe==0.10.14", "transformers==4.51.3", "tokenizers==0.21.4", "trimesh", "pygltflib", "diffusers", "einops", "omegaconf", "tqdm", "accelerate", "pymeshlab", "xatlas", "safetensors", "scikit-image", "opencv-python<4.12"];
 pub const TORCH: &[&str] = &["torch==2.5.1", "torchvision==0.20.1"];
 pub const TORCH_INDEX: &str = "https://download.pytorch.org/whl/cu121";
-pub const HUNYUAN_ZIP: &str = "https://github.com/Tencent/Hunyuan3D-2/archive/refs/heads/main.zip";
 
 /// Unpack a zip into `dest`, dropping the first folder of every path (a GitHub archive has one folder with the name of the branch).
 pub fn unzip_stripped(bytes: &[u8], dest: &Path) -> Result<usize, String> {
@@ -239,22 +243,9 @@ pub fn fetch_triposr(step: &Sender<String>) -> Result<(), String> {
     Ok(())
 }
 
-/// The Hunyuan3D code (GitHub). Its models come from Hugging Face the first time it makes a shape.
-pub fn fetch_hunyuan_code(step: &Sender<String>) -> Result<(), String> {
-    let root = root();
-    let _ = step.send("Downloading the Hunyuan3D code".into());
-    let zip_path = root.join("hunyuan3d.zip");
-    crate::downloads::fetch_file(HUNYUAN_ZIP, &zip_path, "Hunyuan3D code", step)?;
-    let bytes = std::fs::read(&zip_path).map_err(|e| e.to_string())?;
-    unzip_stripped(&bytes, &root.join("Hunyuan3D-2"))?;
-    let _ = std::fs::remove_file(&zip_path);
-    Ok(())
-}
-
 /// Download and install everything that is missing. `step` tells what is being done now (for the window); the long output goes to
 /// `setup.log` in the folder of the tools. Takes a good while (several GB).
-/// With `with_hunyuan` also the Hunyuan3D code (its licence does not apply in the European Union, the United Kingdom and South Korea).
-pub fn install(step: &Sender<String>, with_hunyuan: bool) -> Result<(), String> {
+pub fn install(step: &Sender<String>) -> Result<(), String> {
     let root = root();
     std::fs::create_dir_all(&root).map_err(|e| format!("Could not make {}: {e}", root.display()))?;
     let log = log_path();
@@ -282,9 +273,6 @@ pub fn install(step: &Sender<String>, with_hunyuan: bool) -> Result<(), String> 
     }
     if !have.triposr {
         fetch_triposr(step)?;
-    }
-    if with_hunyuan && !have.hunyuan {
-        fetch_hunyuan_code(step)?;
     }
     if !tracker_model().exists() {
         let _ = step.send("Downloading the face model for the camera (4 MB)".into());
@@ -334,18 +322,25 @@ mod tests {
         std::fs::write(&py, b"").unwrap();
         std::fs::create_dir_all(site_packages(&d).join("torch")).unwrap();
         let s = status_in(&d);
-        assert!(s.python_env && s.packages && !s.hunyuan && !s.triposr);
+        assert!(s.python_env && s.packages && !s.charactergen && !s.triposr);
         assert_eq!(s.missing(), vec!["a 3D shape model (TripoSR)"]);
-        // TripoSR needs its code and its model; Hunyuan3D only its code
+        // TripoSR needs its code and its model
         std::fs::create_dir_all(d.join("TripoSR").join("tsr")).unwrap();
         std::fs::write(d.join("TripoSR").join("tsr").join("system.py"), b"").unwrap();
         assert!(!status_in(&d).ready(), "the model file is missing");
         std::fs::create_dir_all(d.join("models").join("TripoSR")).unwrap();
         std::fs::write(d.join("models").join("TripoSR").join("model.ckpt"), b"").unwrap();
         let s = status_in(&d);
-        assert!(s.ready() && s.shape_ready(crate::ai::ShapeModel::TripoSr) && !s.shape_ready(crate::ai::ShapeModel::Hunyuan));
-        std::fs::create_dir_all(d.join("Hunyuan3D-2").join("hy3dgen")).unwrap();
-        assert!(status_in(&d).shape_ready(crate::ai::ShapeModel::Hunyuan));
+        assert!(s.ready() && s.shape_ready(crate::ai::ShapeModel::TripoSr) && !s.shape_ready(crate::ai::ShapeModel::CharacterGen));
+        // CharacterGen needs its code, both sets of models, and its own environment with nvdiffrast
+        let cg = d.join("CharacterGen-code");
+        for sub in ["2D_Stage/models", "3D_Stage/models"] {
+            std::fs::create_dir_all(cg.join(sub)).unwrap();
+        }
+        std::fs::write(cg.join("webui.py"), b"").unwrap();
+        assert!(!status_in(&d).shape_ready(crate::ai::ShapeModel::CharacterGen), "its environment is missing");
+        std::fs::create_dir_all(d.join("CG-venv").join("Lib").join("site-packages").join("nvdiffrast")).unwrap();
+        assert!(status_in(&d).shape_ready(crate::ai::ShapeModel::CharacterGen));
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -366,18 +361,18 @@ mod tests {
         {
             let mut z = zip::ZipWriter::new(&mut buf);
             let o = zip::write::SimpleFileOptions::default();
-            z.add_directory("Hunyuan3D-2-main/", o).unwrap();
-            z.start_file("Hunyuan3D-2-main/hy3dgen/__init__.py", o).unwrap();
+            z.add_directory("Example-main/", o).unwrap();
+            z.start_file("Example-main/pkg/__init__.py", o).unwrap();
             z.write_all(b"x = 1\n").unwrap();
-            z.start_file("Hunyuan3D-2-main/README.md", o).unwrap();
+            z.start_file("Example-main/README.md", o).unwrap();
             z.write_all(b"hello").unwrap();
             z.finish().unwrap();
         }
         let d = temp("unzip");
-        let n = unzip_stripped(&buf.into_inner(), &d.join("Hunyuan3D-2")).unwrap();
+        let n = unzip_stripped(&buf.into_inner(), &d.join("Example")).unwrap();
         assert_eq!(n, 2);
-        assert!(d.join("Hunyuan3D-2").join("hy3dgen").join("__init__.py").exists());
-        assert!(d.join("Hunyuan3D-2").join("README.md").exists());
+        assert!(d.join("Example").join("pkg").join("__init__.py").exists());
+        assert!(d.join("Example").join("README.md").exists());
         assert!(unzip_stripped(b"not a zip", &d).is_err());
         let _ = std::fs::remove_dir_all(&d);
     }

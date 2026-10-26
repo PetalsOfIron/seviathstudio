@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Makes the shape of a 3D character from one picture with TripoSR (MIT licence, about 6 GB of video memory): the replacement for
-# Hunyuan3D where that one may not be used. The shape only: the colours come from the drawing itself, which SeviathStudio lays on the
+# Makes the shape of a 3D character from one picture with TripoSR (MIT licence, about 6 GB of video memory), usable everywhere. The shape only: the colours come from the drawing itself, which SeviathStudio lays on the
 # shape afterwards. Run by the app as a helper program; it prints one line of JSON: {"mesh": "<path>", "vertices": n, "faces": n} or
 # {"error": "..."}.
 #   python shape_triposr.py --image picture.png --out shape.glb --repo C:\path\to\TripoSR [--resolution 256]

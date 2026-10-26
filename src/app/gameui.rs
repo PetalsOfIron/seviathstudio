@@ -24,9 +24,8 @@ pub struct GameUi {
     /// The expression shown in the preview.
     pub expr: Option<String>,
     pub model: Option<Model3d>,
-    /// Which AI makes the 3D shape, and whether the setup also fetches Hunyuan3D (not licensed in the EU, the UK and South Korea).
+    /// Which AI makes the 3D shape.
     pub shape_model: crate::ai::ShapeModel,
-    pub setup_hunyuan: bool,
     pub message: Option<String>,
     /// What the SVRM check found in the last file that was made (things a game maker should know).
     pub svrm_notes: Vec<String>,
@@ -77,7 +76,7 @@ impl GameUi {
 
 impl Default for GameUi {
     fn default() -> Self {
-        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, follow: false, expr: None, model: None, shape_model: Default::default(), setup_hunyuan: false, message: None, svrm_notes: Vec::new(), template: None, ai_python: default_python(), guides: false, tex_dirty: false, paint_rev: 0, mesh_only: false, setup_job: None, setup_step: None, setup_text: String::new(), setup_agree: false, paint3d: false, brush: Default::default(), overlay: None, last_pt: None, paint_gen: 0, paint_undo: Vec::new(), paint_rebuild: false, ai_backend: 0, ai_job: None, shape: None, shape_job: None, tex: None, made: 0, ai_skin: None, skin_job: None, use_ai_skin: false }
+        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, follow: false, expr: None, model: None, shape_model: Default::default(), message: None, svrm_notes: Vec::new(), template: None, ai_python: default_python(), guides: false, tex_dirty: false, paint_rev: 0, mesh_only: false, setup_job: None, setup_step: None, setup_text: String::new(), setup_agree: false, paint3d: false, brush: Default::default(), overlay: None, last_pt: None, paint_gen: 0, paint_undo: Vec::new(), paint_rebuild: false, ai_backend: 0, ai_job: None, shape: None, shape_job: None, tex: None, made: 0, ai_skin: None, skin_job: None, use_ai_skin: false }
     }
 }
 
@@ -315,14 +314,12 @@ impl SeviathApp {
             }
             ui.label(RichText::new(format!("Missing: {}. They are not part of the app: they are large and have their own licences, so they are downloaded to {}.", status.missing().join(", "), crate::aisetup::root().display())).size(11.5).color(TEXT_DIM));
             ui.checkbox(&mut self.rigs.game.setup_agree, "I accept the licences: PyTorch (BSD), MediaPipe and Transformers (Apache 2.0), TripoSR (MIT).").help("Tick this to say you accept the licences of the AI files. The download needs it.");
-            ui.checkbox(&mut self.rigs.game.setup_hunyuan, "Also Hunyuan3D 2 (a finer shape, but its Tencent licence does not apply in the European Union, the United Kingdom and South Korea; accept it only where it is allowed)").help("Also download Hunyuan3D 2, which makes a finer 3D shape. Its licence does not apply in the EU, the UK and South Korea.");
             ui.label(RichText::new("About 3 GB now (Python packages and PyTorch with CUDA, so an NVIDIA graphics card is needed), and a few GB more the first time the AI models run. It needs Python 3.10, 3.11 or 3.12 and an internet connection.").size(11.0).color(TEXT_DIM));
             if ui.add_enabled(self.rigs.game.setup_agree, egui::Button::new(RichText::new("Download the AI files").strong())).clicked() {
                 let (tx, rx) = std::sync::mpsc::channel::<String>();
                 let (dtx, drx) = std::sync::mpsc::channel::<Result<(), String>>();
-                let with_hunyuan = self.rigs.game.setup_hunyuan;
                 std::thread::spawn(move || {
-                    let _ = dtx.send(crate::aisetup::install(&tx, with_hunyuan));
+                    let _ = dtx.send(crate::aisetup::install(&tx));
                 });
                 self.rigs.game.setup_job = Some(drx);
                 self.rigs.game.setup_step = Some(rx);
@@ -340,7 +337,7 @@ impl SeviathApp {
                 let python = self.rigs.game.ai_python.clone();
                 let (tx, rx) = std::sync::mpsc::channel();
                 std::thread::spawn(move || {
-                    let _ = tx.send(crate::ai::make_shape(&python, &page, model, true));
+                    let _ = tx.send(crate::ai::make_shape(&python, &page, model));
                 });
                 self.rigs.game.shape_job = Some(rx);
                 self.rigs.game.message = Some("The AI is making the 3D shape. The first run downloads the model; after that it takes a minute or two.".into());
@@ -349,7 +346,7 @@ impl SeviathApp {
         }
     }
 
-    /// Make the 3D shape of the character with an AI helper (Hunyuan3D 2 mini), in the background. The character is then built on
+    /// Make the 3D shape of the character with an AI helper (TripoSR or CharacterGen), in the background. The character is then built on
     /// that shape (the drawing is laid on it) instead of on a card.
     /// Take the answer of the shape job when it is there.
     pub(super) fn shape_poll(&mut self, ctx: &egui::Context) {
@@ -390,8 +387,8 @@ impl SeviathApp {
             if widgets::chip(ui, "TripoSR", self.rigs.game.shape_model == crate::ai::ShapeModel::TripoSr).help("MIT licence, usable everywhere, about 6 GB of video memory, about 20 seconds. A rougher shape.").clicked() {
                 self.rigs.game.shape_model = crate::ai::ShapeModel::TripoSr;
             }
-            if widgets::chip(ui, "Hunyuan3D", self.rigs.game.shape_model == crate::ai::ShapeModel::Hunyuan).help("A finer shape, but Tencent's licence does not apply in the European Union, the United Kingdom and South Korea.").clicked() {
-                self.rigs.game.shape_model = crate::ai::ShapeModel::Hunyuan;
+            if widgets::chip(ui, "CharacterGen", self.rigs.game.shape_model == crate::ai::ShapeModel::CharacterGen).help("Apache 2.0, made for anime characters: it draws the character from four sides in an A-pose and builds the shape from them, so arms, hair and clothes are kept apart better. A few minutes. It needs its own set-up (see CharacterGen in the Downloads window).").clicked() {
+                self.rigs.game.shape_model = crate::ai::ShapeModel::CharacterGen;
             }
         });
         ui.horizontal_wrapped(|ui| {
