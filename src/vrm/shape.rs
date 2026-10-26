@@ -502,6 +502,9 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
             chosen
         })
         .collect();
+    // Every point follows one limb only, so where an arm meets the body the skin would tear when the arm moves. The weights are smoothed
+    // along the surface: near a joint a point follows both bones a little, and far from it only its own.
+    let weights_of = smooth_weights(&tris, weights_of, 14);
     let (mut joints, mut weights) = (Vec::with_capacity(verts.len()), Vec::with_capacity(verts.len()));
     for (orig, _, _) in &made {
         let mut acc = weights_of[*orig as usize].clone();
@@ -519,9 +522,16 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
         joints.push(j);
         weights.push(o);
     }
-    let part = Part3d { name: "Body".to_string(), layer: sk.layers.first().copied().unwrap_or(0), verts, normals, uvs, tris: out_tris, joints, weights, image: atlas, morphs: Vec::new() };
+    let mut part = Part3d { name: "Body".to_string(), layer: sk.layers.first().copied().unwrap_or(0), verts, normals, uvs, tris: out_tris, joints, weights, image: atlas, morphs: Vec::new() };
+    // The AI joins what touches (a hand on a hip, two legs at the thigh, a sleeve on a skirt) into one surface. Pieces that move on their own
+    // cannot share triangles: a triangle between two different limbs would stretch into a long line when they move apart. The body can join a
+    // limb (that is a joint), a limb cannot join another limb.
+    let cut = split_fused_limbs(&mut part, &bones);
+    if std::env::var("SEVIATH_DEBUG_HAIR").is_ok() {
+        eprintln!("limbs: {cut} triangles between two different limbs were cut");
+    }
     let bones: Vec<Bone> = bones;
-    let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts: vec![part], bones, expressions: Vec::new(), springs: Vec::new(), colliders: Vec::new(), scale, landmarks: Vec::new(), hair_chains: Vec::new() };
+    let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts: vec![part], bones, expressions: Vec::new(), springs: Vec::new(), colliders: Vec::new(), scale, landmarks: Vec::new(), hair_chains: Vec::new(), t_pose: false };
     if let Some(m) = &marks {
         // The face is a part of its own, as on a VRoid model: only it carries the blend shapes, so the shapes do not have to
         // be written for every point of the body. Its triangles are the ones that face the front inside the face box.
@@ -580,8 +590,75 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
             }
         }
     }
-    normalize_to_t_pose(&mut model);
+    if opt.t_pose {
+        normalize_to_t_pose(&mut model);
+    }
     Some(model)
+}
+
+/// The weights of every point mixed with the weights of the points next to it along the triangles, again and again (each point keeps its four
+/// biggest shares). Points that belong to one bone entirely and are far from the others do not change.
+pub fn smooth_weights(tris: &[[u32; 3]], weights: Vec<Vec<(usize, f32)>>, rounds: usize) -> Vec<Vec<(usize, f32)>> {
+    let n = weights.len();
+    let mut next_to: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for t in tris {
+        for k in 0..3 {
+            let (a, b) = (t[k] as usize, t[(k + 1) % 3]);
+            if a < n && (b as usize) < n {
+                next_to[a].push(b);
+                next_to[b as usize].push(a as u32);
+            }
+        }
+    }
+    for list in &mut next_to {
+        list.sort_unstable();
+        list.dedup();
+    }
+    let mut w = weights;
+    for _ in 0..rounds {
+        let mut out: Vec<Vec<(usize, f32)>> = Vec::with_capacity(n);
+        for i in 0..n {
+            if next_to[i].is_empty() {
+                out.push(w[i].clone());
+                continue;
+            }
+            let mut acc: Vec<(usize, f32)> = Vec::with_capacity(8);
+            let (own, other) = (0.5f32, 0.5 / next_to[i].len() as f32);
+            for (b, x) in &w[i] {
+                acc.push((*b, x * own));
+            }
+            for &j in &next_to[i] {
+                for (b, x) in &w[j as usize] {
+                    match acc.iter_mut().find(|a| a.0 == *b) {
+                        Some(a) => a.1 += x * other,
+                        None => acc.push((*b, x * other)),
+                    }
+                }
+            }
+            acc.sort_by(|a, b| b.1.total_cmp(&a.1));
+            acc.truncate(4);
+            let sum: f32 = acc.iter().map(|a| a.1).sum::<f32>().max(1e-9);
+            acc.iter_mut().for_each(|a| a.1 /= sum);
+            out.push(acc);
+        }
+        w = out;
+    }
+    w
+}
+
+/// Separate the limbs that the AI joined (the left arm, the right arm, the left leg, the right leg) without a gap: returns how many triangles
+/// changed. The limb of a point is the one of the bone that moves it most.
+pub fn split_fused_limbs(part: &mut Part3d, bones: &[Bone]) -> usize {
+    let limb: Vec<usize> = (0..part.verts.len())
+        .map(|i| {
+            let best = (0..4).max_by(|a, b| part.weights[i][*a].total_cmp(&part.weights[i][*b])).unwrap_or(0);
+            if part.weights[i][best] <= 0.0 {
+                return 0;
+            }
+            bones.get(part.joints[i][best] as usize).map(|b| limb_group(&b.name)).unwrap_or(0)
+        })
+        .collect();
+    super::model::separate_groups(part, &limb)
 }
 
 /// Weights from how close a point is to each bone (the bones are the segments from their head to their tail): the near ones
@@ -826,4 +903,58 @@ fn draw_guides(img: &mut RgbaImage, origin: [f32; 2], m0: &super::face::FaceMark
         }
     }
     let _ = frame.0;
+}
+
+#[cfg(test)]
+mod smooth_tests {
+    use super::*;
+
+    #[test]
+    fn smoothing_blends_the_weights_at_a_seam_and_leaves_the_far_ends() {
+        // a strip of points in a row: the first half follows bone 0, the second half bone 1
+        let n = 40usize;
+        let tris: Vec<[u32; 3]> = (0..n as u32 - 2).map(|i| [i, i + 1, i + 2]).collect();
+        let w: Vec<Vec<(usize, f32)>> = (0..n).map(|i| vec![(if i < n / 2 { 0 } else { 1 }, 1.0)]).collect();
+        let s = smooth_weights(&tris, w, 6);
+        let share = |i: usize, b: usize| s[i].iter().find(|a| a.0 == b).map(|a| a.1).unwrap_or(0.0);
+        assert_eq!(share(0, 0), 1.0, "the far end is untouched");
+        assert_eq!(share(n - 1, 1), 1.0);
+        assert!(share(n / 2 - 1, 1) > 0.15 && share(n / 2, 0) > 0.15, "the seam is blended");
+        assert!(s.iter().all(|r| (r.iter().map(|a| a.1).sum::<f32>() - 1.0).abs() < 1e-4 && r.len() <= 4));
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+
+    #[test]
+    fn triangles_between_two_limbs_are_cut_but_a_limb_may_join_the_body() {
+        let bone = |name: &str| Bone { name: name.into(), humanoid: true, parent: None, pos: [0.0; 3], tip: [0.0; 3] };
+        let bones = vec![bone("hips"), bone("leftUpperLeg"), bone("rightUpperLeg"), bone("leftUpperArm")];
+        let mut part = Part3d {
+            name: "Body".into(),
+            layer: 0,
+            verts: vec![[0.0; 3]; 6],
+            normals: vec![[0.0, 0.0, 1.0]; 6],
+            uvs: vec![[0.0; 2]; 6],
+            // 0 body, 1 left leg, 2 right leg, 3 left arm, 4 body, 5 left leg
+            tris: vec![[0, 1, 4], [1, 2, 0], [1, 5, 4], [3, 1, 0], [1, 5, 1]],
+            joints: vec![[0, 0, 0, 0], [1, 0, 0, 0], [2, 0, 0, 0], [3, 0, 0, 0], [0, 0, 0, 0], [1, 0, 0, 0]],
+            weights: vec![[1.0, 0.0, 0.0, 0.0]; 6],
+            image: image::RgbaImage::new(2, 2),
+            morphs: Vec::new(),
+        };
+        let cut = split_fused_limbs(&mut part, &bones);
+        // [1,2,0] joins the legs and [3,1,0] joins an arm and a leg: both are separated; a body with a leg, and a leg with itself, stay
+        assert_eq!(cut, 2);
+        assert_eq!(part.tris[0], [0, 1, 4]);
+        assert_eq!(part.tris[2], [1, 5, 4]);
+        for t in [part.tris[1], part.tris[3]] {
+            let limbs: Vec<usize> = t.iter().map(|i| limb_group(&bones[part.joints[*i as usize][0] as usize].name)).filter(|g| *g != 0).collect();
+            assert!(limbs.windows(2).all(|w| w[0] == w[1]), "a triangle follows one limb only: {limbs:?}");
+        }
+        // nothing is lost: the copies are in the same places as the points they copy
+        assert_eq!(part.verts.len(), 6 + 2 * 1 + 0, "{}", part.verts.len());
+    }
 }

@@ -40,11 +40,13 @@ pub struct Options {
     pub mesh_only: bool,
     /// Skin weights an AI worked out for the points of the AI shape (see `aiskin.rs`); used instead of the weights painted on the drawing.
     pub ai_skin: Option<std::sync::Arc<super::aiskin::AiSkin>>,
+    /// Turn the arms out to the sides (a T-pose, which VRM wants); off for a game file, which keeps the pose the shape was made in.
+    pub t_pose: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { name: "Character".into(), author: "Unknown".into(), height_m: 1.6, puff: 1.0, layer_gap: 0.003, max_texture: 2048, fingers: true, face: true, template: None, shape: None, hair: true, mesh_only: false, ai_skin: None }
+        Self { name: "Character".into(), author: "Unknown".into(), height_m: 1.6, puff: 1.0, layer_gap: 0.003, max_texture: 2048, fingers: true, face: true, template: None, shape: None, hair: true, mesh_only: false, ai_skin: None, t_pose: true }
     }
 }
 
@@ -119,6 +121,9 @@ pub struct Model3d {
     pub landmarks: Vec<(String, [f32; 3])>,
     /// The strands of the hair as the app made them (page pixels), for the user to start from when editing the hair.
     pub hair_chains: Vec<super::hairedit::HairChain>,
+    /// The arms were turned out to the sides (a T-pose, as VRM wants). A model for a game stays as the AI made it (arms down), and the
+    /// animations are made relative to that.
+    pub t_pose: bool,
 }
 
 /// The VRM humanoid bones we make: (name, parent, the bone its piece runs to).
@@ -610,7 +615,7 @@ pub fn build(doc: &Document, opt: &Options) -> Option<Model3d> {
         }
     }
     // the swinging joints and balls are in the middle of the depth too
-    let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts, bones, expressions: Vec::new(), springs, colliders, scale, landmarks: Vec::new(), hair_chains: Vec::new() };
+    let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts, bones, expressions: Vec::new(), springs, colliders, scale, landmarks: Vec::new(), hair_chains: Vec::new(), t_pose: false };
     make_expressions(&mut model, rig, &index_of_mesh, scale);
     Some(model)
 }
@@ -872,11 +877,13 @@ pub fn build_uncut(doc: &Document, opt: &Options) -> Option<Model3d> {
         weights.push(o);
     }
     let part = Part3d { name: "Body".to_string(), layer: sk.layers.first().copied().unwrap_or(0), verts, normals, uvs, tris, joints, weights, image, morphs: Vec::new() };
-    let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts: vec![part], bones, expressions: Vec::new(), springs: Vec::new(), colliders: Vec::new(), scale, landmarks: Vec::new(), hair_chains: Vec::new() };
+    let mut model = Model3d { name: opt.name.clone(), author: opt.author.clone(), parts: vec![part], bones, expressions: Vec::new(), springs: Vec::new(), colliders: Vec::new(), scale, landmarks: Vec::new(), hair_chains: Vec::new(), t_pose: false };
     if let Some(m) = &marks {
         add_face(&mut model, m, xc, vb[3], opt.template.as_deref(), false, 0, &super::texedit::TexEdit::default());
     }
-    normalize_to_t_pose(&mut model);
+    if opt.t_pose {
+        normalize_to_t_pose(&mut model);
+    }
     Some(model)
 }
 
@@ -1047,6 +1054,51 @@ pub fn point_weights(rig: &Rig, sk: &crate::rig::skin::Skin, bones: &[Bone], slo
     acc
 }
 
+/// Pieces that are joined by triangles but must move on their own (the hair on a hand, a leg on the other leg) are separated without a gap:
+/// a point that a triangle shares with another piece gets a copy of its own, in the same place, that moves with the piece of the triangle.
+/// `group` is the piece of every point (0 joins everything: it is the body, which may touch any piece). Returns how many triangles changed.
+pub(super) fn separate_groups(part: &mut Part3d, group: &[usize]) -> usize {
+    let mut copies: std::collections::HashMap<(u32, usize), u32> = std::collections::HashMap::new();
+    let mut changed = 0;
+    for ti in 0..part.tris.len() {
+        let t = part.tris[ti];
+        let labels: Vec<usize> = t.iter().map(|i| group[*i as usize]).collect();
+        let mut named: Vec<usize> = labels.iter().copied().filter(|g| *g != 0).collect();
+        named.sort_unstable();
+        named.dedup();
+        if named.len() < 2 {
+            continue;
+        }
+        // the piece most of the triangle belongs to
+        let major = named.iter().copied().max_by_key(|g| labels.iter().filter(|l| *l == g).count()).unwrap_or(named[0]);
+        let Some(lead) = (0..3).find(|k| labels[*k] == major) else { continue };
+        let (lj, lw) = (part.joints[t[lead] as usize], part.weights[t[lead] as usize]);
+        let mut new_t = t;
+        for k in 0..3 {
+            if labels[k] != 0 && labels[k] != major {
+                let key = (t[k], major);
+                let id = *copies.entry(key).or_insert_with(|| {
+                    let i = t[k] as usize;
+                    part.verts.push(part.verts[i]);
+                    part.normals.push(part.normals[i]);
+                    part.uvs.push(part.uvs[i]);
+                    part.joints.push(lj);
+                    part.weights.push(lw);
+                    for m in &mut part.morphs {
+                        let d = m.deltas[i];
+                        m.deltas.push(d);
+                    }
+                    (part.verts.len() - 1) as u32
+                });
+                new_t[k] = id;
+            }
+        }
+        part.tris[ti] = new_t;
+        changed += 1;
+    }
+    changed
+}
+
 /// Which piece of the body a bone belongs to: 0 the body, 1 the left arm, 2 the right arm, 3 the left leg, 4 the right leg.
 pub(super) fn limb_group(name: &str) -> usize {
     let finger = ["Thumb", "Index", "Middle", "Ring", "Little"].iter().any(|f| name.contains(f));
@@ -1067,6 +1119,7 @@ pub(super) fn limb_group(name: &str) -> usize {
 /// parts that follow them (by their skin weights). A pose from tracking or an idle animation then starts from where the
 /// app thinks it does, so arms do not come out raised or folded.
 pub fn normalize_to_t_pose(m: &mut Model3d) {
+    m.t_pose = true;
     // (the bones turned, the joint they turn about, the joint that should end up in the target direction, the direction)
     let jobs: [(&[&str], &str, &str, [f32; 2]); 4] = [
         (&["leftUpperArm", "leftLowerArm", "leftHand", "@leftfingers"], "leftUpperArm", "leftHand", [1.0, 0.0]),

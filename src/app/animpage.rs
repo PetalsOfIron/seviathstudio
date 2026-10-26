@@ -227,8 +227,8 @@ impl SeviathApp {
         if self.rigs.game.model.is_none() {
             self.game_make();
         }
-        let m = self.rigs.game.model.as_ref().ok_or("There is no character to save.")?;
-        let bytes = crate::vrm::export::export_full(m, Format::Glb, None, clips, fps)?;
+        let m = self.game_model_for_games().ok_or("There is no character to save.")?;
+        let bytes = crate::vrm::export::export_full(&m, Format::Glb, None, clips, fps)?;
         let summary = crate::vrm::export::validate(&bytes)?;
         Ok((bytes, summary))
     }

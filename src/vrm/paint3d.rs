@@ -183,7 +183,7 @@ mod tests {
             image: RgbaImage::from_pixel(w, h, Rgba([200, 190, 180, 255])),
             morphs: Vec::new(),
         };
-        Model3d { name: "t".into(), author: "t".into(), parts: vec![part], bones: Vec::new(), expressions: Vec::new(), springs: Vec::new(), colliders: Vec::new(), scale: 1.0, landmarks: Vec::new(), hair_chains: Vec::new() }
+        Model3d { name: "t".into(), author: "t".into(), parts: vec![part], bones: Vec::new(), expressions: Vec::new(), springs: Vec::new(), colliders: Vec::new(), scale: 1.0, landmarks: Vec::new(), hair_chains: Vec::new(), t_pose: false }
     }
 
     #[test]

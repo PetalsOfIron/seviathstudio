@@ -970,8 +970,9 @@ fn hair_strands_and_the_hair_brush_edit_the_hair_of_the_midlander() {
     validate(&export(&edited, Format::Vrm1).unwrap()).unwrap();
     // the hair brush: take away hair over a patch on the top of the head, and the hair part has fewer triangles
     std::sync::Arc::make_mut(&mut d.rig).skin.as_mut().unwrap().hair.chains.clear();
-    let top = first.hair_chains.iter().flat_map(|c| c.joints.iter()).map(|j| j[1]).fold(f32::MAX, f32::min);
-    let mid = first.hair_chains.iter().flat_map(|c| c.joints.iter()).map(|j| j[0]).sum::<f32>() / first.hair_chains.iter().map(|c| c.joints.len()).sum::<usize>() as f32;
+    // the scalp: where the strands start
+    let top = first.hair_chains.iter().map(|c| c.joints[0][1]).fold(f32::MAX, f32::min);
+    let mid = first.hair_chains.iter().map(|c| c.joints[0][0]).sum::<f32>() / first.hair_chains.len() as f32;
     std::sync::Arc::make_mut(&mut d.rig).skin.as_mut().unwrap().hair.dabs.push(HairDab { at: [mid, top + 60.0], radius: 90.0, add: false });
     let trimmed = build_any(&d, &opt).unwrap();
     assert!(hair_tris(&trimmed) < hair_tris(&first), "{} {}", hair_tris(&trimmed), hair_tris(&first));

@@ -4499,29 +4499,75 @@ fn make_the_example_character() {
     let (bytes, _) = h.state_mut().test_game_glb_with(&all, 30.0).expect("the animated file");
     std::fs::write(dir.join("ExampleGirl_game_animated.glb"), &bytes).unwrap();
     println!("ExampleGirl_game_animated.glb: {} bytes, {} animations", bytes.len(), all.len());
-    // a few poses of the character, to look at how it bends
+    // the game file as it is saved (arms down, no T-pose), at rest and in a few moves: to look at how it bends
     {
-        let model = h.state_mut().test_game().model.take().unwrap();
+        let model = h.state_mut().test_game_model_for_games().expect("the game model");
         let (cw, ch) = (260u32, 400u32);
-        {
-            let mut rest_sheet = image::RgbaImage::new(cw * 4, ch);
-            let frames = [crate::motion::Frame::default(), crate::motion::Frame::rest(), crate::motion::eval(crate::motion::Motion::IdleBreathe, 0.25), crate::motion::eval(crate::motion::Motion::Wave, 0.5)];
-            for (k, f) in frames.iter().enumerate() {
-                let img = crate::vrm::preview::render_motion(&model, 0.0, cw, ch, f, 1.0);
-                image::imageops::replace(&mut rest_sheet, &img, (k as u32 * cw) as i64, 0);
-            }
-            rest_sheet.save(dir.join("ExampleGirl_rest.png")).unwrap();
+        let mut rest_sheet = image::RgbaImage::new(cw * 3, ch);
+        let rest_frames = [crate::motion::Frame::default(), crate::motion::eval(crate::motion::Motion::IdleBreathe, 0.25).minus_rest(), crate::motion::eval(crate::motion::Motion::Wave, 0.5).minus_rest()];
+        for (k, f) in rest_frames.iter().enumerate() {
+            let img = crate::vrm::preview::render_motion(&model, 0.0, cw, ch, f, 1.0);
+            image::imageops::replace(&mut rest_sheet, &img, (k as u32 * cw) as i64, 0);
         }
+        rest_sheet.save(dir.join("ExampleGirl_rest.png")).unwrap();
         let mut sheet = image::RgbaImage::new(cw * 6, ch * 2);
         for (row, m) in [crate::motion::Motion::Walk, crate::motion::Motion::Cheer].into_iter().enumerate() {
             let clip = crate::motion::Clip::new(m, crate::motion::Style::default());
             for k in 0..6u32 {
                 let t = clip.seconds() * k as f32 / 6.0 + 0.04;
-                let img = crate::vrm::preview::render_motion(&model, 20.0, cw, ch, &clip.at(t), 1.3);
+                let img = crate::vrm::preview::render_motion(&model, 20.0, cw, ch, &clip.at(t).minus_rest(), 1.3);
                 image::imageops::replace(&mut sheet, &img, (k * cw) as i64, (row as u32 * ch) as i64);
             }
         }
         sheet.save(dir.join(if painted_weights { "ExampleGirl_poses_painted_weights.png" } else { "ExampleGirl_poses.png" })).unwrap();
+    }
+    // which bone each point follows: a map of the points coloured by the part of the body that moves them most
+    {
+        let model = h.state_mut().test_game().model.take().unwrap();
+        let (w, hh) = (500u32, 760u32);
+        let mut img = image::RgbaImage::from_pixel(w * 2, hh, image::Rgba([250, 250, 250, 255]));
+        let top = model.parts.iter().flat_map(|p| p.verts.iter().map(|v| v[1])).fold(0.0f32, f32::max);
+        let k = hh as f32 * 0.9 / top;
+        for (pi, part) in model.parts.iter().enumerate() {
+            for (i, v) in part.verts.iter().enumerate() {
+                let best = (0..4).max_by(|a, b| part.weights[i][*a].total_cmp(&part.weights[i][*b])).unwrap();
+                let name = &model.bones[part.joints[i][best] as usize].name;
+                let col = match name.as_str() {
+                    n if n.starts_with("leftUpperArm") || n.starts_with("leftLowerArm") || n.starts_with("leftHand") || n.starts_with("left") && n.contains("Thumb") || n.starts_with("leftIndex") || n.starts_with("leftMiddle") || n.starts_with("leftRing") || n.starts_with("leftLittle") => [230, 40, 40],
+                    n if n.starts_with("rightUpperArm") || n.starts_with("rightLowerArm") || n.starts_with("rightHand") || n.starts_with("right") && (n.contains("Thumb") || n.contains("Index") || n.contains("Middle") || n.contains("Ring") || n.contains("Little")) => [40, 60, 230],
+                    n if n.starts_with("left") && (n.contains("Leg") || n.contains("Foot") || n.contains("Toes")) => [30, 170, 60],
+                    n if n.starts_with("right") && (n.contains("Leg") || n.contains("Foot") || n.contains("Toes")) => [220, 190, 20],
+                    "head" | "neck" => [160, 60, 200],
+                    "hips" | "spine" | "chest" | "upperChest" => [90, 90, 90],
+                    "leftShoulder" | "rightShoulder" => [250, 130, 30],
+                    _ => [0, 200, 200],
+                };
+                let _ = pi;
+                let (x, y) = ((w as f32 / 2.0 + v[0] * k) as i32, (hh as f32 * 0.95 - v[1] * k) as i32);
+                for (ox, oy) in [(0, 0), (1, 0), (0, 1)] {
+                    let (xx, yy) = (x + ox, y + oy);
+                    if xx >= 0 && yy >= 0 && (xx as u32) < w && (yy as u32) < hh {
+                        img.put_pixel(xx as u32, yy as u32, image::Rgba([col[0], col[1], col[2], 255]));
+                    }
+                }
+            }
+        }
+        // the skeleton on the right: the bones as lines
+        for b in &model.bones {
+            if !b.humanoid {
+                continue;
+            }
+            let (p, q) = (b.pos, b.tip);
+            let steps = 40;
+            for s in 0..=steps {
+                let f = s as f32 / steps as f32;
+                let (x, y) = ((w as f32 * 1.5 + (p[0] + (q[0] - p[0]) * f) * k) as i32, (hh as f32 * 0.95 - (p[1] + (q[1] - p[1]) * f) * k) as i32);
+                if x >= 0 && y >= 0 && (x as u32) < w * 2 && (y as u32) < hh {
+                    img.put_pixel(x as u32, y as u32, image::Rgba([0, 0, 0, 255]));
+                }
+            }
+        }
+        img.save(dir.join("ExampleGirl_weights_map.png")).unwrap();
         h.state_mut().test_game().model = Some(model);
     }
     girl.save(dir.join("ExampleGirl_picture.png")).unwrap();

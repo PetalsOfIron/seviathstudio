@@ -88,6 +88,16 @@ impl SeviathApp {
         Options { name, author: if g.author.trim().is_empty() { "Unknown".into() } else { g.author.clone() }, height_m: g.height_m, puff: g.puff, template: g.template.as_ref().map(|t| t.1.clone()), shape: g.shape.clone(), mesh_only: g.mesh_only, ai_skin: g.ai_skin.clone(), ..Default::default() }
     }
 
+    /// The character as a game file wants it: in the pose the shape was made in (arms down), not turned to a T-pose (that stretches what the AI
+    /// joined, like sleeves and hair). Made again from the project each time.
+    pub(super) fn game_model_for_games(&mut self) -> Option<Model3d> {
+        if self.rigs.game.model.is_none() {
+            self.game_make();
+        }
+        let opt = Options { t_pose: false, ..self.game_options() };
+        build_any(&self.draw.doc, &opt)
+    }
+
     /// Make the 3D character from the document and its rig.
     pub fn game_make(&mut self) {
         let opt = self.game_options();
@@ -121,7 +131,8 @@ impl SeviathApp {
         let layers: std::collections::HashMap<u64, String> = self.draw.doc.layers.iter().map(|l| (l.id, l.name.clone())).collect();
         let svrm = crate::vrm::svrm::describe(&rig, &|id| layers.get(&id).cloned());
         let notes = crate::vrm::svrm::report(&svrm);
-        let m = self.rigs.game.model.as_ref().ok_or("There is no character to save.")?;
+        let for_games = if fmt == Format::Glb { self.game_model_for_games() } else { None };
+        let m = for_games.as_ref().or(self.rigs.game.model.as_ref()).ok_or("There is no character to save.")?;
         let bytes = crate::vrm::export::export_with(m, fmt, Some(&svrm))?;
         let summary = validate(&bytes)?;
         self.rigs.game.svrm_notes = notes;
@@ -1044,6 +1055,11 @@ impl SeviathApp {
         if on {
             self.hair_adopt_auto();
         }
+    }
+
+    #[cfg(test)]
+    pub fn test_game_model_for_games(&mut self) -> Option<Model3d> {
+        self.game_model_for_games()
     }
 
     #[cfg(test)]

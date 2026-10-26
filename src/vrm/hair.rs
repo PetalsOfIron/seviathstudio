@@ -61,8 +61,9 @@ impl HairMask {
 pub fn hair_mask(page: &RgbaImage, head: [f32; 4]) -> Option<HairMask> {
     let hh = head[2] / 2.0;
     let (cx, top) = (head[0] + hh, head[1] + 0.1 * hh);
-    let (x0, y0) = (((cx - 1.9 * hh) as i32).max(0), ((top - 0.2 * hh) as i32).max(0));
-    let (x1, y1) = (((cx + 1.9 * hh) as i32).min(page.width() as i32), ((top + 6.0 * hh) as i32).min(page.height() as i32));
+    // the whole width of the picture: long hair spreads far beyond the head (and only what is joined to the scalp by the colour of the hair counts)
+    let (x0, y0) = (0, ((top - 0.2 * hh) as i32).max(0));
+    let (x1, y1) = (page.width() as i32, ((top + 9.0 * hh) as i32).min(page.height() as i32));
     let (w, h) = (x1 - x0, y1 - y0);
     if w < 8 || h < 8 {
         return None;
@@ -88,34 +89,105 @@ pub fn hair_mask(page: &RgbaImage, head: [f32; 4]) -> Option<HairMask> {
     let lum = 0.3 * mean[0] + 0.59 * mean[1] + 0.11 * mean[2];
     // dark hair has dark shadows and bright highlights; light hair is close to the colour of skin
     let tol = (90.0 - 0.25 * lum).clamp(45.0, 85.0);
-    let close = |p: [u8; 4]| {
+    // Coloured hair (pink, blue, red...) has light and dark strands of the same hue; grey, black and white hair is told by its colour distance.
+    let (mean_hue, mean_sat) = hue_sat(mean);
+    // Coloured hair (pink, blue, red...) has light and dark strands of the same hue; grey, black and white hair is told by its colour distance.
+    let (mean_hue, mean_sat) = hue_sat(mean);
+    let strict = |p: [u8; 4]| {
         p[3] >= 128 && {
             let d = [p[0] as f32 - mean[0], p[1] as f32 - mean[1], p[2] as f32 - mean[2]];
             (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() < tol
         }
     };
-    let mut bits = vec![false; (w * h) as usize];
-    let mut stack: Vec<(i32, i32)> = Vec::new();
-    for y in ((top - y0 as f32 + 0.1 * hh) as i32)..((top - y0 as f32 + 0.4 * hh) as i32) {
-        for x in ((cx - x0 as f32 - 0.4 * hh) as i32)..((cx - x0 as f32 + 0.4 * hh) as i32) {
-            if x >= 0 && y >= 0 && x < w && y < h && close(px(x, y)) && !bits[(y * w + x) as usize] {
-                bits[(y * w + x) as usize] = true;
-                stack.push((x, y));
+    let by_hue = |p: [u8; 4]| {
+        strict(p) || (p[3] >= 128 && {
+            let (h, sat) = hue_sat([p[0] as f32, p[1] as f32, p[2] as f32]);
+            let dh = (h - mean_hue).abs().min(360.0 - (h - mean_hue).abs());
+            dh < 24.0 && sat > 0.05 && sat > mean_sat * 0.3
+        })
+    };
+    // the pixels joined to the scalp that the rule takes
+    let grow = |close: &dyn Fn([u8; 4]) -> bool| -> Vec<bool> {
+        let mut bits = vec![false; (w * h) as usize];
+        let mut stack: Vec<(i32, i32)> = Vec::new();
+        for y in ((top - y0 as f32 + 0.1 * hh) as i32)..((top - y0 as f32 + 0.4 * hh) as i32) {
+            for x in ((cx - x0 as f32 - 0.4 * hh) as i32)..((cx - x0 as f32 + 0.4 * hh) as i32) {
+                if x >= 0 && y >= 0 && x < w && y < h && close(px(x, y)) && !bits[(y * w + x) as usize] {
+                    bits[(y * w + x) as usize] = true;
+                    stack.push((x, y));
+                }
             }
         }
-    }
-    while let Some((x, y)) = stack.pop() {
-        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-            let (nx, ny) = (x + dx, y + dy);
-            if nx >= 0 && ny >= 0 && nx < w && ny < h && !bits[(ny * w + nx) as usize] && close(px(nx, ny)) {
-                bits[(ny * w + nx) as usize] = true;
-                stack.push((nx, ny));
+        while let Some((x, y)) = stack.pop() {
+            // a thin dark outline between two strands is stepped over (two pixels at a time)
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1), (2, 0), (-2, 0), (0, 2), (0, -2)] {
+                let (nx, ny) = (x + dx, y + dy);
+                if nx >= 0 && ny >= 0 && nx < w && ny < h && !bits[(ny * w + nx) as usize] && close(px(nx, ny)) {
+                    bits[(ny * w + nx) as usize] = true;
+                    stack.push((nx, ny));
+                }
             }
+        }
+        bits
+    };
+    let mut bits = grow(&strict);
+    let mut coloured = false;
+    // The hue rule finds the long strands of coloured hair. It would take skin for hair when the hair is brown or reddish, so it is used only when
+    // the hue of the hair is far from the hue of the skin (taken from the jaw, under the mouth).
+    let skin_hue = {
+        let (mut sum, mut n) = ([0f32; 3], 0f32);
+        for y in ((top - y0 as f32 + 1.55 * hh) as i32)..((top - y0 as f32 + 1.8 * hh) as i32) {
+            for x in ((cx - x0 as f32 - 0.2 * hh) as i32)..((cx - x0 as f32 + 0.2 * hh) as i32) {
+                if x >= 0 && y >= 0 && x < w && y < h {
+                    let p = px(x, y);
+                    if p[3] >= 128 && 0.3 * p[0] as f32 + 0.59 * p[1] as f32 + 0.11 * p[2] as f32 > 90.0 {
+                        for c in 0..3 {
+                            sum[c] += p[c] as f32;
+                        }
+                        n += 1.0;
+                    }
+                }
+            }
+        }
+        (n >= 30.0).then(|| hue_sat([sum[0] / n, sum[1] / n, sum[2] / n]).0)
+    };
+    let far_from_skin = skin_hue.is_some_and(|sh| (mean_hue - sh).abs().min(360.0 - (mean_hue - sh).abs()) >= 20.0);
+    if mean_sat > 0.10 && far_from_skin {
+        let wide = grow(&by_hue);
+        let (n_wide, n_strict) = (wide.iter().filter(|b| **b).count(), bits.iter().filter(|b| **b).count());
+        if n_wide < n_strict * 12 {
+            bits = wide;
+            coloured = true;
         }
     }
     let mask = HairMask { x0, y0, w, h, bits };
+    if std::env::var("SEVIATH_DEBUG_HAIR").is_ok() {
+        let mut dbg = page.clone();
+        for y in 0..h {
+            for x in 0..w {
+                if mask.bits[(y * w + x) as usize] {
+                    let p = dbg.get_pixel_mut((x0 + x) as u32, (y0 + y) as u32);
+                    p.0 = [255, 0, 0, 255];
+                }
+            }
+        }
+        let _ = dbg.save(std::env::temp_dir().join("hair_mask.png"));
+        let _ = page.save(std::env::temp_dir().join("hair_page.png"));
+        eprintln!("hair colour {:?} tolerance {tol}, coloured {coloured}, hue {mean_hue}, sat {mean_sat}, skin hue {skin_hue:?}", mean);
+    }
     // a few pixels are not hair
     (mask.count() as f32 > 0.02 * (hh * hh)).then_some(mask)
+}
+
+/// Hue (degrees) and saturation (0 to 1) of a colour.
+fn hue_sat(c: [f32; 3]) -> (f32, f32) {
+    let (mx, mn) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
+    let d = mx - mn;
+    if mx <= 0.0 || d <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let h = if mx == c[0] { ((c[1] - c[2]) / d).rem_euclid(6.0) } else if mx == c[1] { (c[2] - c[0]) / d + 2.0 } else { (c[0] - c[1]) / d + 4.0 };
+    (h * 60.0, d / mx)
 }
 
 const COLUMNS: usize = 6;
@@ -192,6 +264,9 @@ pub fn add_hair(model: &mut Model3d, mask: &HairMask, page_of: impl Fn(&[f32; 3]
         b_tris.extend(p.tris.iter().map(|t| [t[0] + base, t[1] + base, t[2] + base]));
     }
     let is_hair: Vec<bool> = b_verts.iter().map(|v| { let p = page_of(v); mask.at(p[0], p[1]) }).collect();
+    if std::env::var("SEVIATH_DEBUG_HAIR").is_ok() {
+        eprintln!("hair: {} of {} points are hair (mask {} pixels in {} x {})", is_hair.iter().filter(|h| **h).count(), is_hair.len(), mask.count(), mask.w, mask.h);
+    }
     let tris: Vec<[u32; 3]> = b_tris.iter().copied().filter(|t| t.iter().all(|i| is_hair[*i as usize])).collect();
     if tris.len() < 50 {
         return false;
@@ -281,6 +356,34 @@ pub fn add_hair(model: &mut Model3d, mask: &HairMask, page_of: impl Fn(&[f32; 3]
         out_tris.push(o);
     }
     let part = Part3d { name: "Hair".to_string(), layer: b_layer, verts, normals, uvs, tris: out_tris, joints, weights, image: b_image, morphs: Vec::new() };
+    // The AI makes one surface of everything: where the hair touches a hand or a leg, the surface is joined there. Two pieces that move on their
+    // own cannot share triangles (they would stretch into long lines), so the points on the seam are copied: each piece gets its own, in the same
+    // place, and nothing shows at rest.
+    let mut at_cut = 0usize;
+    let mut cut = 0usize;
+    let mut orig_lens: Vec<usize> = Vec::new();
+    for p in model.parts.iter_mut().filter(|p| p.name == "Body" || p.name == "Face") {
+        orig_lens.push(p.verts.len());
+        // the hair is piece 1, everything else 0 (the body joins both); the seam between hair and not hair needs two pieces, so the rest is 2
+        let group: Vec<usize> = (0..p.verts.len()).map(|i| if is_hair[at_cut + i] { 1 } else { 2 }).collect();
+        cut += super::model::separate_groups(p, &group);
+        at_cut += group.len();
+    }
+    if std::env::var("SEVIATH_DEBUG_HAIR").is_ok() {
+        eprintln!("hair: {cut} triangles between the hair and the rest were separated");
+    }
+    // The hair is a part of its own now, but the body still has the points of the hair under it. Those must not follow an arm or a leg
+    // that the hair happens to hang beside (the strand would stretch into a sheet when the arm moves): they follow the head.
+    let mut at = 0usize;
+    for (p, n) in model.parts.iter_mut().filter(|p| p.name == "Body" || p.name == "Face").zip(orig_lens) {
+        for i in 0..n {
+            if is_hair[at + i] {
+                p.joints[i] = [head as u16, 0, 0, 0];
+                p.weights[i] = [1.0, 0.0, 0.0, 0.0];
+            }
+        }
+        at += n;
+    }
     model.parts.push(part);
     true
 }
