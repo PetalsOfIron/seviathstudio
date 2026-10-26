@@ -14,17 +14,18 @@ use crate::vrm::face::FaceMarks;
 
 const FACE_SCRIPT: &str = include_str!("../tools/ai/face_points.py");
 const TRACK_SCRIPT: &str = include_str!("../tools/ai/track.py");
-const SHAPE_SCRIPT: &str = include_str!("../tools/ai/shape3d.py");
 const TRIPOSR_SCRIPT: &str = include_str!("../tools/ai/shape_triposr.py");
+const CHARACTERGEN_SCRIPT: &str = include_str!("../tools/ai/shape_charactergen.py");
 
 /// The AI that makes the 3D shape from the picture.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ShapeModel {
-    /// TripoSR: MIT licence, about 6 GB of video memory, a rougher shape (usable everywhere).
+    /// TripoSR: MIT licence, about 6 GB of video memory, about 20 seconds (usable everywhere).
     #[default]
     TripoSr,
-    /// Hunyuan3D 2 mini: a finer shape, but its licence does not apply in the European Union, the United Kingdom and South Korea.
-    Hunyuan,
+    /// CharacterGen: Apache 2.0, made for anime characters: it draws the character from four sides in an A-pose and builds the shape from them, so
+    /// arms, hair and clothes are kept apart better. Slower (a few minutes) and needs its own set-up (see the Downloads window).
+    CharacterGen,
 }
 
 /// Only one helper at a time.
@@ -99,20 +100,38 @@ pub fn find_face(python: &str, page: &RgbaImage, crop: [f32; 4], backend: &str) 
     parse_face(&v)
 }
 
-/// Where the Hunyuan3D code is: next to the Python environment, in the SeviathAI folder.
-pub fn hunyuan_folder() -> PathBuf {
-    crate::aisetup::root().join("Hunyuan3D-2")
+/// Where the CharacterGen code is (next to the other AI files), and the Python of its own environment (it needs older packages than the others).
+pub fn charactergen_folder() -> PathBuf {
+    crate::aisetup::root().join("CharacterGen-code")
 }
 
-/// Make the shape of the character from the picture with Hunyuan3D 2 mini: the bytes of a GLB with the points and triangles.
-/// It takes a minute or two on the graphics card, and the first time it downloads the model.
-pub fn make_shape(python: &str, page: &RgbaImage, model: ShapeModel, turbo: bool) -> Result<Vec<u8>, String> {
+pub fn charactergen_python() -> PathBuf {
+    crate::aisetup::root().join("CG-venv").join("Scripts").join("python.exe")
+}
+
+/// The program that starts the CharacterGen helper: it makes the build tools of Visual Studio 2022 ready (the graphics part of CharacterGen is
+/// compiled for the graphics card the first time) and runs the Python of CharacterGen with what it is given.
+fn charactergen_launcher(dir: &Path) -> Result<PathBuf, String> {
+    let vcvars = [r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat", r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"];
+    let mut text = String::from("@echo off\r\n");
+    if let Some(v) = vcvars.iter().find(|v| Path::new(v).exists()) {
+        text.push_str(&format!("call \"{v}\" >nul\r\nset TORCH_CUDA_ARCH_LIST=8.6\r\nset DISTUTILS_USE_SDK=1\r\nset MSSdk=1\r\n"));
+    }
+    text.push_str(&format!("\"{}\" %*\r\n", charactergen_python().display()));
+    let path = dir.join("charactergen.cmd");
+    std::fs::write(&path, text).map_err(|e| format!("Could not write the helper: {e}"))?;
+    Ok(path)
+}
+
+/// Make the shape of the character from the picture: the bytes of a GLB with the points and triangles. TripoSR takes about twenty seconds,
+/// CharacterGen a few minutes; the first time they download their models.
+pub fn make_shape(python: &str, page: &RgbaImage, model: ShapeModel) -> Result<Vec<u8>, String> {
     let repo = match model {
-        ShapeModel::Hunyuan => hunyuan_folder(),
+        ShapeModel::CharacterGen => charactergen_folder(),
         ShapeModel::TripoSr => crate::aisetup::triposr_code(),
     };
     let (probe, hint) = match model {
-        ShapeModel::Hunyuan => (repo.join("hy3dgen"), "clone https://github.com/Tencent/Hunyuan3D-2 there"),
+        ShapeModel::CharacterGen => (repo.join("webui.py"), "see CharacterGen in the Downloads window"),
         ShapeModel::TripoSr => (repo.join("tsr"), "press Download the AI files"),
     };
     if !probe.exists() {
@@ -121,7 +140,7 @@ pub fn make_shape(python: &str, page: &RgbaImage, model: ShapeModel, turbo: bool
     let dir = helper_folder();
     std::fs::create_dir_all(&dir).map_err(|e| format!("Could not make the helper folder: {e}"))?;
     let (script_name, script_text) = match model {
-        ShapeModel::Hunyuan => ("shape3d.py", SHAPE_SCRIPT),
+        ShapeModel::CharacterGen => ("shape_charactergen.py", CHARACTERGEN_SCRIPT),
         ShapeModel::TripoSr => ("shape_triposr.py", TRIPOSR_SCRIPT),
     };
     let script = dir.join(script_name);
@@ -131,9 +150,6 @@ pub fn make_shape(python: &str, page: &RgbaImage, model: ShapeModel, turbo: bool
     let out = dir.join("shape.glb");
     let _ = std::fs::remove_file(&out);
     let mut args = vec!["--image".to_string(), png.to_string_lossy().to_string(), "--out".to_string(), out.to_string_lossy().to_string(), "--repo".to_string(), repo.to_string_lossy().to_string()];
-    if model == ShapeModel::Hunyuan && turbo {
-        args.push("--turbo".into());
-    }
     if model == ShapeModel::TripoSr {
         let dir = crate::aisetup::triposr_model_dir();
         if dir.join("model.ckpt").exists() {
@@ -141,7 +157,15 @@ pub fn make_shape(python: &str, page: &RgbaImage, model: ShapeModel, turbo: bool
             args.push(dir.to_string_lossy().to_string());
         }
     }
-    run_json(python, &script, &args)?;
+    match model {
+        ShapeModel::CharacterGen => {
+            let launcher = charactergen_launcher(&dir)?;
+            run_json(&launcher.to_string_lossy(), &script, &args)?;
+        }
+        ShapeModel::TripoSr => {
+            run_json(python, &script, &args)?;
+        }
+    }
     std::fs::read(&out).map_err(|e| format!("The shape file was not made: {e}"))
 }
 

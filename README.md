@@ -93,7 +93,6 @@ Performance check: `cargo test --release bench_full_redraw -- --ignored --nocapt
 
 ## Guides
 
-- `docs/TESTING.md`: what to try, tab by tab, and which parts need hardware.
 - `docs/virtual-camera.md`: show the model in Discord, Zoom or a browser through OBS Studio.
 
 ## Contributing
@@ -132,5 +131,5 @@ ogres, fairies) the finder placed the eyes and the mouth right on 22; the two it
 The AI tools are not shipped with the app (they are large and have their own licences). In the Rig tab, under *Rig for games*, a card
 says when they are missing and has a **Download the AI files** button (after you accept the licences). It makes a private Python
 environment in a folder called `SeviathAI` in your home folder, installs PyTorch (CUDA) and the other packages with pip, and downloads
-the Hunyuan3D code from GitHub; the models (a few GB more) are fetched the first time the shape or the face is made. It needs Python
+the TripoSR code from GitHub; the models (a few GB more) are fetched the first time the shape or the face is made. It needs Python
 3.10 to 3.12, an NVIDIA graphics card and an internet connection. Progress is written to `setup.log` in that folder.

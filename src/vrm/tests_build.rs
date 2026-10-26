@@ -731,7 +731,7 @@ fn a_character_is_built_on_an_ai_shape_with_texture_weights_and_face_shapes() {
     }
 }
 
-/// The real thing, when the AI files are on this computer: the Midlander drawing and the shape Hunyuan3D made of it.
+/// The real thing, when the AI files are on this computer: the Midlander drawing and the shape an AI made of it.
 #[test]
 fn the_ai_shape_of_the_midlander_becomes_a_textured_rigged_character() {
     use super::model::build_any;

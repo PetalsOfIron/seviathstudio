@@ -20,8 +20,6 @@ pub enum Kind {
     TripoSr,
     /// UniRig: the models that find a skeleton and skin weights (not used by the app yet).
     UniRig,
-    /// Hunyuan3D 2: the code (its models come the first time it runs).
-    Hunyuan,
     /// TRELLIS: a 3D shape with colours from a picture (MIT). Not connected to the app yet.
     Trellis,
     /// CharacterGen: a 3D anime character in an A pose from one picture (Apache 2.0). Not connected to the app yet.
@@ -50,14 +48,6 @@ pub fn items() -> Vec<Item> {
         Item { kind: Kind::TripoSr, name: "TripoSR (3D shape from a picture)", what: "Its code and its model. Needs the Python files of the AI helpers (File, Rig tab, Rig for games).", size: "1.7 GB", licence: "MIT", warning: None },
         Item { kind: Kind::UniRig, name: "UniRig models (skeleton and skin weights)", what: "Not used by the app yet. Needs about 16 GB of video memory to run comfortably.", size: "5.5 GB", licence: "MIT", warning: None },
         Item {
-            kind: Kind::Hunyuan,
-            name: "Hunyuan3D 2 (finer 3D shape)",
-            what: "Its code; the models (a few GB) come the first time it makes a shape.",
-            size: "30 MB + models",
-            licence: "Tencent Hunyuan Community Licence",
-            warning: Some("Its licence does not apply in the European Union, the United Kingdom and South Korea. Download it only where it is allowed."),
-        },
-        Item {
             kind: Kind::Trellis,
             name: "TRELLIS (3D shape and colours from a picture)",
             what: "The models of Microsoft's TRELLIS: a shape with its own colours, and it can run on 8 GB of video memory with a low-memory setting.",
@@ -71,7 +61,7 @@ pub fn items() -> Vec<Item> {
             what: "Makes views of an anime character in an A pose from one picture, and a 3D model from them: made for characters that are rigged afterwards.",
             size: "14 GB",
             licence: "Apache 2.0",
-            warning: Some("Not connected to the app yet: for trying by hand (it needs its own Python packages and nvdiffrast, which has to be built)."),
+            warning: Some("This downloads the models only. CharacterGen also needs its code (github.com/zjp-shadow/CharacterGen, in the AI folder as CharacterGen-code), its own Python environment (CG-venv with torch 2.1) and nvdiffrast built with the Visual Studio 2022 Build Tools. When all is there, it appears as a Shape AI in the Generate tab."),
         },
         Item { kind: Kind::Vrm4u, name: "VRM4U (VRM files in Unreal Engine)", what: "The plugin for your version of Unreal Engine, saved in Downloads. Copy its VRM4U folder into the Plugins folder of your project.", size: "70 MB", licence: "MIT", warning: None },
         Item {
@@ -135,7 +125,6 @@ pub fn installed(kind: Kind) -> bool {
         Kind::UniRig => unirig_files().iter().all(|p| p.exists()),
         Kind::Trellis => aisetup::root().join("models").join("TRELLIS-image-large").join("ckpts").join("slat_flow_img_dit_L_64l8p2_fp16.safetensors").exists(),
         Kind::CharacterGen => aisetup::root().join("models").join("CharacterGen").join("3D_Stage").join("models").join("lrm.ckpt").exists(),
-        Kind::Hunyuan => aisetup::status().hunyuan,
         Kind::Vrm4u => unreal_versions().last().is_some_and(|v| vrm4u_folder(*v).join("Plugins").join("VRM4U").join("VRM4U.uplugin").exists()),
         Kind::Obs => obs_installed() || obs_installer().is_some(),
         Kind::UnityCapture => crate::vcam::registered() || downloads_folder().join("UnityCapture").join("Install").join("UnityCaptureFilter64.dll").exists(),
@@ -150,7 +139,6 @@ pub fn place(kind: Kind) -> Option<PathBuf> {
         Kind::UniRig => Some(aisetup::root().join("models").join("UniRig")),
         Kind::Trellis => Some(aisetup::root().join("models").join("TRELLIS-image-large")),
         Kind::CharacterGen => Some(aisetup::root().join("models").join("CharacterGen")),
-        Kind::Hunyuan => Some(aisetup::root().join("Hunyuan3D-2")),
         Kind::Vrm4u => unreal_versions().last().map(|v| vrm4u_folder(*v)),
         Kind::Obs => obs_installer().or_else(|| Some(PathBuf::from("C:/Program Files/obs-studio"))),
         Kind::UnityCapture => Some(downloads_folder().join("UnityCapture").join("Install")),
@@ -290,10 +278,6 @@ pub fn download(kind: Kind, step: &Sender<String>) -> Result<String, String> {
             fetch_hf_repo("zjpshadow/CharacterGen", &["2D_Stage/", "3D_Stage/"], &dest, step)?;
             Ok(format!("The CharacterGen models are in {}. The code (github.com/zjp-shadow/CharacterGen) is not downloaded: it is for trying by hand.", dest.display()))
         }
-        Kind::Hunyuan => {
-            aisetup::fetch_hunyuan_code(step)?;
-            Ok(format!("The Hunyuan3D code is in {}.", root.join("Hunyuan3D-2").display()))
-        }
         Kind::Vrm4u => {
             let v = *unreal_versions().last().ok_or("Unreal Engine was not found in Program Files, Epic Games. Install it with the Epic Games Launcher first.")?;
             let _ = step.send("Asking GitHub for the newest VRM4U".into());
@@ -363,10 +347,10 @@ mod tests {
     #[test]
     fn every_download_has_a_name_a_size_and_a_licence_and_the_risky_one_says_so() {
         let list = items();
-        assert_eq!(list.len(), 9);
+        assert_eq!(list.len(), 8);
         assert!(list.iter().all(|i| !i.name.is_empty() && !i.size.is_empty() && !i.licence.is_empty()));
         let warned: Vec<Kind> = list.iter().filter(|i| i.warning.is_some()).map(|i| i.kind).collect();
-        assert_eq!(warned, vec![Kind::Hunyuan, Kind::Trellis, Kind::CharacterGen], "the licence problem and the two that are not connected say so");
+        assert_eq!(warned, vec![Kind::Trellis, Kind::CharacterGen], "the one that is not connected and the one that needs more set-up say so");
     }
 
     #[test]

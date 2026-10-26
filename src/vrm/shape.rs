@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// A 3D character from a shape that an AI made of the drawing (Hunyuan3D, `tools/ai/shape3d.py`): the shape is fitted onto the
+// A 3D character from a shape that an AI made of the drawing (TripoSR or CharacterGen, `tools/ai/shape_triposr.py`, `tools/ai/shape_charactergen.py`): the shape is fitted onto the
 // drawing so both have the same outline, the drawing is laid on it from the front (and, mirrored, from the back), the skin
 // weights are the ones painted on the picture for the skeleton of the auto-rig, and the face gets the same blend shapes as
 // the card made from the drawing. Wings, shards and tails that stay rigid simply follow the bone they hang on.
