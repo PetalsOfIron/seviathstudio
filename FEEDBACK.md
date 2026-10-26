@@ -34,3 +34,5 @@ fine: it is explained in the "Done" part below).
 - Saving the 3D bone animation: the Animate tab has "Save the 3D bones as a VRM animation (.vrma)" when bone sliders have keys.
 
 - Not all parameters visible: the Parameters column (Rig, Physics, Animate) now has the folders of the Live2D list (Eyes open and close, Angles, Eyeballs, Brows, Mouth, Hair, Arms and legs) with every usual slider listed; the ones not made yet are grey with an Add button, and "Add all the standard sliders" makes them all (the automatic rig's own names, such as Eyes open, count as made). The joined sliders moved to the top of the column.
+
+- Typed slider values and more of the Live2D Physics window: every slider has a number box (type or drag); the Physics settings window has the chain drawn from the top, Increase output, Decrease output, Reset magnification, and the calculation rate (30 to 120 fps).

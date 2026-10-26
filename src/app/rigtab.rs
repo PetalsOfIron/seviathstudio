@@ -1849,7 +1849,12 @@ impl SeviathApp {
                             self.rigs.values.set(*id, v);
                             self.rigs.sel_param = Some(*id);
                         }
-                        ui.label(RichText::new(format!("{v:.1}")).size(11.5).color(TEXT_DIM));
+                        let step = ((*hi - *lo) / 200.0).max(0.001);
+                        let decimals = if *hi - *lo <= 5.0 { 2 } else { 1 };
+                        if ui.add(egui::DragValue::new(&mut v).range(*lo..=*hi).speed(step).max_decimals(decimals).min_decimals(1)).on_hover_text("Type a number, or drag").changed() {
+                            self.rigs.values.set(*id, v);
+                            self.rigs.sel_param = Some(*id);
+                        }
                         if ui.small_button("Original").on_hover_text("Back to the original drawing (the filled mark)").clicked() {
                             self.rigs.values.set(*id, *def);
                         }

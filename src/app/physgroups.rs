@@ -230,6 +230,23 @@ impl SeviathApp {
                         g.vertices.push(PhysVertex { radius: if last.radius > 0.0 { last.radius } else { 3.0 }, ..last });
                     }
                     rehang(&mut g.vertices);
+                    // the chain, drawn from the top: how long each weight hangs
+                    let (r, _) = ui.allocate_exact_size(vec2(160.0, 170.0), egui::Sense::hover());
+                    let p = ui.painter_at(r);
+                    p.rect_filled(r, 4.0, egui::Color32::from_gray(26));
+                    let reach: f32 = g.vertices.iter().skip(1).map(|v| v.radius).sum::<f32>().max(1.0);
+                    let k = (r.height() - 24.0) / reach;
+                    let mut at = egui::pos2(r.center().x, r.top() + 10.0);
+                    let mut last = at;
+                    for (i, v) in g.vertices.iter().enumerate() {
+                        if i > 0 {
+                            at.y += v.radius * k;
+                            p.line_segment([last, at], egui::Stroke::new(1.5, egui::Color32::from_gray(150)));
+                        }
+                        p.circle_filled(at, if i == 0 { 4.0 } else { 3.5 }, if i == 0 { egui::Color32::WHITE } else { egui::Color32::from_rgb(70, 140, 240) });
+                        p.text(at + vec2(7.0, 0.0), egui::Align2::LEFT_CENTER, format!("{i}"), egui::FontId::proportional(10.0), TEXT_DIM);
+                        last = at;
+                    }
                 }
                 Tab::Outputs => {
                     let weights = g.vertices.len();
@@ -256,6 +273,23 @@ impl SeviathApp {
                     if let Some(i) = remove {
                         g.outputs.remove(i);
                     }
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Increase output").on_hover_text("Every output reaches 25 percent further").clicked() {
+                            for o in g.outputs.iter_mut() {
+                                o.scale = (o.scale * 1.25).clamp(-500.0, 500.0);
+                            }
+                        }
+                        if ui.button("Decrease output").clicked() {
+                            for o in g.outputs.iter_mut() {
+                                o.scale = (o.scale / 1.25).clamp(-500.0, 500.0);
+                            }
+                        }
+                        if ui.button("Reset magnification").on_hover_text("Every output back to a scale of 10").clicked() {
+                            for o in g.outputs.iter_mut() {
+                                o.scale = 10.0 * o.scale.signum();
+                            }
+                        }
+                    });
                     if ui.button("Add an output").clicked() {
                         let first = params.first().map(|p| p.2.clone()).unwrap_or_default();
                         g.outputs.push(PhysOutput { id: first, vertex: weights.saturating_sub(1).max(1), scale: 10.0, weight: 100.0, kind: Kind::Angle, reflect: false });
@@ -273,6 +307,11 @@ impl SeviathApp {
         ui.separator();
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut pp.on, "Physics of the groups on");
+            egui::ComboBox::from_id_salt("phys_fps").selected_text(format!("{} fps", pp.fps.round())).width(80.0).show_ui(ui, |ui| {
+                for f in [30.0, 60.0, 90.0, 120.0] {
+                    ui.selectable_value(&mut pp.fps, f, format!("{f} fps"));
+                }
+            });
             ui.label(RichText::new("Strength").size(12.0).color(TEXT_DIM));
             ui.add(egui::Slider::new(&mut pp.strength, 0.0..=2.0).show_value(false)).on_hover_text("1 is as set up");
             ui.label(RichText::new("Gravity").size(12.0).color(TEXT_DIM));
