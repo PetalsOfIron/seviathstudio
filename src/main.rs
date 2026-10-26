@@ -15,6 +15,7 @@ mod downloads;
 mod anim;
 mod audio;
 mod aisetup;
+mod setupall;
 mod app;
 mod blend;
 mod brush;

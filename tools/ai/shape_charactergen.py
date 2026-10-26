@@ -61,6 +61,7 @@ def main():
     ap.add_argument("--seed", type=int, default=2333)
     ap.add_argument("--steps", type=int, default=40)
     ap.add_argument("--smooth", type=int, default=3, help="how many times the surface is smoothed")
+    ap.add_argument("--sd21", default="sd2-community/stable-diffusion-2-1", help="where Stable Diffusion 2.1 is (the first-party repository was taken down; this mirror is the same model)")
     ap.add_argument("--views-out", default="", help="a folder to keep the four pictures it drew (for looking at)")
     args = ap.parse_args()
     if not os.path.isdir(os.path.join(args.repo, "2D_Stage", "models")) or not os.path.isdir(os.path.join(args.repo, "3D_Stage", "models")):
@@ -86,7 +87,9 @@ def main():
     try:
         image = Image.open(args.image).convert("RGBA")
         remover = W.rm_bg_api()
-        api2d = W.Inference2D_API(**OmegaConf.load("./2D_Stage/configs/infer.yaml"))
+        cfg2d = OmegaConf.load("./2D_Stage/configs/infer.yaml")
+        cfg2d.pretrained_model_path = args.sd21
+        api2d = W.Inference2D_API(**cfg2d)
         views = api2d.inference(image, 512, 768, crop=True, seed=args.seed, timestep=args.steps)
         views = remover.remove_background(imgs=views, alpha_min=0.2, alpha_max=0.9)
         # the order the pictures come in is right, back, left, front (as the web page of CharacterGen hands them on)

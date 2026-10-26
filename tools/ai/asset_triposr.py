@@ -7,6 +7,7 @@
 #   python asset_triposr.py --image picture.png --out asset.glb --repo C:\path\to\TripoSR --height 1.0 --faces 8000 --texture 1024
 import argparse
 import json
+import os
 import sys
 import types
 
@@ -97,8 +98,9 @@ def decimate(mesh, faces):
     return out
 
 
-def bake(mesh, size):
-    """Unwrap the mesh and paint the colours of its points into a texture of size x size."""
+def bake(mesh, size, fine=None):
+    """Unwrap the mesh and paint the colours of its points into a texture of size x size. With the fine mesh (before the number of triangles was
+    reduced) it also bakes a tangent space normal map, so the shape that the reduction took away is still seen in the light."""
     import cv2
     import numpy as np
     import trimesh
@@ -112,6 +114,8 @@ def bake(mesh, size):
     tex = np.zeros((size, size, 3), np.float32)
     got = np.zeros((size, size), np.uint8)
     px = uvs * (size - 1)
+    low_normals = np.asarray(mesh.vertex_normals, dtype=np.float32)[vmapping]
+    texels = []  # (rows, columns, place, normal, tangent, bitangent) for every triangle
     for tri in indices:
         p = px[tri]
         c = cols[tri]
@@ -133,6 +137,28 @@ def bake(mesh, size):
         col = a[..., None] * c[0] + b[..., None] * c[1] + g[..., None] * c[2]
         tex[ys[inside], xs[inside]] = col[inside]
         got[ys[inside], xs[inside]] = 255
+        if fine is not None:
+            v = verts[tri].astype(np.float64)
+            place = a[inside][:, None] * v[0] + b[inside][:, None] * v[1] + g[inside][:, None] * v[2]
+            n = a[inside][:, None] * low_normals[tri][0] + b[inside][:, None] * low_normals[tri][1] + g[inside][:, None] * low_normals[tri][2]
+            n = n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-9)
+            # the direction of u and of v along the surface (v of the atlas runs down the picture, the normal map wants it up)
+            e1, e2 = v[1] - v[0], v[2] - v[0]
+            du1, dv1 = uvs[tri][1] - uvs[tri][0]
+            du2, dv2 = uvs[tri][2] - uvs[tri][0]
+            det = du1 * dv2 - du2 * dv1
+            if abs(det) < 1e-12:
+                tangent, bitan = np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
+            else:
+                tangent = (e1 * dv2 - e2 * dv1) / det
+                bitan = -(e2 * du1 - e1 * du2) / det
+            tangent = tangent / max(np.linalg.norm(tangent), 1e-12)
+            bitan = bitan / max(np.linalg.norm(bitan), 1e-12)
+            t = tangent[None, :] - n * (n @ tangent)[:, None]
+            t = t / np.maximum(np.linalg.norm(t, axis=1, keepdims=True), 1e-9)
+            bb = np.cross(n, t)
+            sign = np.where((bb @ bitan) < 0, -1.0, 1.0)[:, None]
+            texels.append((ys[inside], xs[inside], place, n, t, bb * sign))
     # the edges of the pieces: the colour next to them, so the filtering of the engine does not show seams
     tex8 = np.clip(tex, 0, 255).astype(np.uint8)
     for _ in range(4):
@@ -140,11 +166,36 @@ def bake(mesh, size):
         tex8 = np.where(got[..., None] > 0, tex8, grown)
         got = cv2.dilate(got, np.ones((3, 3), np.uint8))
     img = Image.fromarray(tex8, "RGB")
+    normal_img = None
+    if fine is not None and texels:
+        from scipy.spatial import cKDTree
+
+        rows = np.concatenate([t[0] for t in texels])
+        cols_ = np.concatenate([t[1] for t in texels])
+        place = np.concatenate([t[2] for t in texels])
+        n_low = np.concatenate([t[3] for t in texels])
+        t_low = np.concatenate([t[4] for t in texels])
+        b_low = np.concatenate([t[5] for t in texels])
+        # the normal of the fine mesh at the nearest place of it (the nearest point, smooth normals)
+        nearest = cKDTree(np.asarray(fine.vertices)).query(place, k=1)[1]
+        n_fine = np.asarray(fine.vertex_normals)[nearest]
+        ts = np.stack([(n_fine * t_low).sum(1), (n_fine * b_low).sum(1), (n_fine * n_low).sum(1)], axis=1)
+        ts[:, 2] = np.maximum(ts[:, 2], 0.05)
+        ts = ts / np.maximum(np.linalg.norm(ts, axis=1, keepdims=True), 1e-9)
+        nm = np.full((size, size, 3), (128, 128, 255), np.uint8)
+        nm[rows, cols_] = np.clip((ts * 0.5 + 0.5) * 255.0, 0, 255).astype(np.uint8)
+        gotn = np.zeros((size, size), np.uint8)
+        gotn[rows, cols_] = 255
+        for _ in range(4):
+            grown = cv2.dilate(nm, np.ones((3, 3), np.uint8))
+            nm = np.where(gotn[..., None] > 0, nm, grown)
+            gotn = cv2.dilate(gotn, np.ones((3, 3), np.uint8))
+        normal_img = Image.fromarray(nm, "RGB")
     uv = uvs.copy()
     uv[:, 1] = 1.0 - uv[:, 1]
     out = trimesh.Trimesh(vertices=verts, faces=indices, process=False)
-    out.visual = trimesh.visual.TextureVisuals(uv=uv, image=img, material=trimesh.visual.material.PBRMaterial(baseColorTexture=img, metallicFactor=0.0, roughnessFactor=0.85))
-    return out
+    out.visual = trimesh.visual.TextureVisuals(uv=uv, image=img, material=trimesh.visual.material.PBRMaterial(baseColorTexture=img, normalTexture=normal_img, metallicFactor=0.0, roughnessFactor=0.85))
+    return out, normal_img
 
 
 def main():
@@ -157,6 +208,7 @@ def main():
     ap.add_argument("--height", type=float, default=1.0, help="how tall it is in metres (0 keeps the size of the model)")
     ap.add_argument("--faces", type=int, default=8000, help="the number of triangles the game can afford (0 keeps all)")
     ap.add_argument("--texture", type=int, default=1024, help="the size of the texture picture")
+    ap.add_argument("--normal-map", type=int, default=1, help="bake a normal map from the fine mesh (1) or not (0)")
     ap.add_argument("--pivot", default="bottom", choices=["bottom", "centre"], help="where the model is held")
     args = ap.parse_args()
     sys.path.insert(0, args.repo)
@@ -199,12 +251,7 @@ def main():
         mesh = drop_floaters(mesh)
     except Exception as e:  # keep everything when the pieces cannot be told apart
         sys.stderr.write("loose pieces kept: %s" % e)
-    try:
-        if args.faces and len(mesh.faces) > args.faces:
-            mesh = decimate(mesh, args.faces)
-    except Exception as e:  # keep the full mesh when the reduction is not possible
-        sys.stderr.write("reduction skipped: %s\n" % e)
-    # real size and the pivot
+    # real size and the pivot (on the fine mesh, so the fine mesh and the reduced one are in the same place)
     lo, hi = mesh.bounds
     size = hi - lo
     if args.height > 0 and size[1] > 0:
@@ -212,12 +259,20 @@ def main():
         lo, hi = mesh.bounds
     centre = [(lo[0] + hi[0]) / 2.0, lo[1] if args.pivot == "bottom" else (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0]
     mesh.apply_translation([-centre[0], -centre[1], -centre[2]])
+    fine = mesh.copy()
     try:
-        mesh = bake(mesh, args.texture)
+        if args.faces and len(mesh.faces) > args.faces:
+            mesh = decimate(mesh, args.faces)
+    except Exception as e:  # keep the full mesh when the reduction is not possible
+        sys.stderr.write("reduction skipped: %s\n" % e)
+    try:
+        mesh, normal_img = bake(mesh, args.texture, fine if args.normal_map else None)
     except Exception as e:
         fail("The texture could not be made: %s: %s" % (type(e).__name__, str(e)[:300]))
     mesh.export(args.out)
-    print(json.dumps({"mesh": args.out, "vertices": int(len(mesh.vertices)), "faces": int(len(mesh.faces)), "texture": args.texture}))
+    if normal_img is not None:
+        normal_img.save(os.path.splitext(args.out)[0] + "_normal.png")
+    print(json.dumps({"mesh": args.out, "vertices": int(len(mesh.vertices)), "faces": int(len(mesh.faces)), "texture": args.texture, "normal_map": normal_img is not None}))
 
 
 if __name__ == "__main__":

@@ -180,11 +180,13 @@ pub struct AssetLook {
     pub detail: u32,
     /// The model is held at the middle of its bottom (a prop on the floor) instead of its middle.
     pub pivot_bottom: bool,
+    /// A normal map is baked from the fine shape, so the shape that the reduction of the triangles takes away is still seen in the light.
+    pub normal_map: bool,
 }
 
 impl Default for AssetLook {
     fn default() -> Self {
-        AssetLook { kind: 0, style: 0, what: String::new(), details: String::new(), avoid: String::new(), count: 4, steps: 30, guidance: 7.0, seed: None, height_m: ASSET_KINDS[0].height_m, triangles: 8000, texture: 1024, detail: 256, pivot_bottom: true }
+        AssetLook { kind: 0, style: 0, what: String::new(), details: String::new(), avoid: String::new(), count: 4, steps: 30, guidance: 7.0, seed: None, height_m: ASSET_KINDS[0].height_m, triangles: 8000, texture: 1024, detail: 256, pivot_bottom: true, normal_map: true }
     }
 }
 
