@@ -11,6 +11,7 @@ use crate::ai::{helper_folder, run_json};
 
 const TEXT2IMAGE_SCRIPT: &str = include_str!("../tools/ai/text2image.py");
 const ASSET_SCRIPT: &str = include_str!("../tools/ai/asset_triposr.py");
+const RIG_MIA_SCRIPT: &str = include_str!("../tools/ai/rig_mia.py");
 
 /// What the picture AI is asked.
 #[derive(Clone, Debug)]
@@ -143,6 +144,36 @@ pub fn make_asset(python: &str, picture: &RgbaImage, r: &AssetRequest) -> Result
     let _ = std::fs::remove_file(&out);
     run_json(python, &script, &asset_args(r, &png, &out, &repo))?;
     std::fs::read(&out).map_err(|e| format!("The model file was not made: {e}"))
+}
+
+/// The folder of Make-It-Animatable (the AI that works out the skin weights), next to the other AI files.
+pub fn mia_folder() -> std::path::PathBuf {
+    crate::aisetup::root().join("MIA")
+}
+
+/// Is Make-It-Animatable installed with its own Python, its models and the bones file.
+pub fn mia_ready() -> bool {
+    let d = mia_folder();
+    d.join("venv").join("Scripts").join("python.exe").exists() && d.join("output").join("best").join("new").join("bw.pth").exists() && d.join("data").join("Mixamo").join("bones.fbx").exists()
+}
+
+/// The skin weights of a 3D shape (a .glb file that `make_shape` wrote) from Make-It-Animatable: about twenty seconds.
+pub fn mia_skin(shape_glb: &Path) -> Result<crate::vrm::aiskin::AiSkin, String> {
+    if !mia_ready() {
+        return Err("Make-It-Animatable is not installed in the AI folder.".into());
+    }
+    let mia = mia_folder();
+    let python = mia.join("venv").join("Scripts").join("python.exe");
+    let dir = helper_folder();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Could not make the helper folder: {e}"))?;
+    let script = dir.join("rig_mia.py");
+    std::fs::write(&script, RIG_MIA_SCRIPT).map_err(|e| format!("Could not write the helper: {e}"))?;
+    let out = dir.join("mia_weights.json");
+    let _ = std::fs::remove_file(&out);
+    let args = vec!["--mia".to_string(), mia.to_string_lossy().to_string(), "--mesh".into(), shape_glb.to_string_lossy().to_string(), "--out".into(), out.to_string_lossy().to_string()];
+    run_json(&python.to_string_lossy(), &script, &args)?;
+    let text = std::fs::read_to_string(&out).map_err(|e| format!("The weights were not written: {e}"))?;
+    crate::vrm::aiskin::AiSkin::from_json(&text)
 }
 
 #[cfg(test)]

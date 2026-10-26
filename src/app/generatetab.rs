@@ -37,6 +37,8 @@ pub enum Stage {
     #[default]
     Idle,
     Shape,
+    /// The AI works out the skin weights of the shape.
+    Skin,
 }
 
 /// Models and style files of your own (any picture model that is free to use for what you make).
@@ -145,6 +147,8 @@ impl SeviathApp {
             Some("Making pictures... the first time the AI models are downloaded (about 10 GB), after that it takes a minute or two.".into())
         } else if self.genr.asset_job.is_some() {
             Some("Making the 3D model... about a minute.".into())
+        } else if self.genr.stage == Stage::Skin {
+            Some("The AI is working out the skin weights... about twenty seconds.".into())
         } else if self.genr.stage == Stage::Shape || self.shape_busy() {
             Some("Making the 3D shape of the character... about a minute.".into())
         } else {
@@ -205,14 +209,54 @@ impl SeviathApp {
             Some(Err(TryRecvError::Disconnected)) => self.genr.asset_job = None,
             None => {}
         }
+        if self.genr.stage == Stage::Skin {
+            let r = self.rigs.game.skin_job.as_ref().map(|rx| rx.try_recv());
+            match r {
+                Some(Ok(res)) => {
+                    self.rigs.game.skin_job = None;
+                    self.genr.stage = Stage::Idle;
+                    let note = match res {
+                        Ok(s) => {
+                            self.rigs.game.ai_skin = Some(std::sync::Arc::new(s));
+                            "The skin weights come from the AI."
+                        }
+                        Err(e) => {
+                            self.rigs.game.ai_skin = None;
+                            self.genr.message = Some(format!("The AI skin weights failed ({e}); the weights of the drawing are used."));
+                            ""
+                        }
+                    };
+                    self.game_make();
+                    if !note.is_empty() {
+                        self.genr.message = self.rigs.game.message.clone().map(|m| format!("{m} {note}"));
+                    }
+                }
+                Some(Err(std::sync::mpsc::TryRecvError::Empty)) => ctx.request_repaint_after(std::time::Duration::from_millis(600)),
+                Some(Err(_)) | None => {
+                    self.rigs.game.skin_job = None;
+                    self.genr.stage = Stage::Idle;
+                }
+            }
+        }
         // the character: the shape comes from the AI, then the character is built on it
         if self.genr.stage == Stage::Shape {
             self.shape_poll(ctx);
             if !self.shape_busy() {
                 self.genr.stage = Stage::Idle;
                 if self.rigs.game.shape.is_some() {
-                    self.game_make();
-                    self.genr.message = self.rigs.game.message.clone();
+                    if self.rigs.game.use_ai_skin && crate::aigen::mia_ready() {
+                        let path = crate::ai::helper_folder().join("shape.glb");
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(crate::aigen::mia_skin(&path));
+                        });
+                        self.rigs.game.skin_job = Some(rx);
+                        self.genr.stage = Stage::Skin;
+                        self.genr.message = Some("The AI shape is made. The AI is working out the skin weights...".into());
+                    } else {
+                        self.game_make();
+                        self.genr.message = self.rigs.game.message.clone();
+                    }
                 } else {
                     self.genr.message = self.rigs.game.message.clone().or(Some("The AI shape was not made.".into()));
                 }
@@ -636,6 +680,9 @@ impl SeviathApp {
             ui.checkbox(&mut self.genr.replace_ok, "Replace the open project").help("The character is made in a new project: the open one has changes that are not saved.");
         }
         let ready = crate::aisetup::status().shape_ready(self.rigs.game.shape_model);
+        if crate::aigen::mia_ready() {
+            ui.checkbox(&mut self.rigs.game.use_ai_skin, "AI skin weights").help("Make-It-Animatable looks at the 3D shape and says how every bone moves every point: wings, skirts and hair bend better than with the weights painted on the picture. About twenty seconds more.");
+        }
         ui.checkbox(&mut self.genr.flat_card, "Flat card instead of an AI shape").help("No AI shape: the drawing is wrapped on a round card. Quick, but it has no depth.");
         if !ready && !self.genr.flat_card {
             ui.label(RichText::new("The AI shape files are missing (press Download the AI files at the top), or tick the flat card.").size(11.5).color(GOLD));
