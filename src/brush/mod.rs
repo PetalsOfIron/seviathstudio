@@ -815,7 +815,7 @@ pub fn presets() -> Vec<Preset> {
     let layer = MixRefer::Layer;
     vec![
         // ---- Pens
-        p("Pen", "Pens", "Ballpoint: even line with a light grain.", BrushSettings { size: 8.0, opacity: 0.95, flow: 0.9, hardness: 0.85, min_size: 0.65, opacity_pressure: true, texture: 0.18, stabilize: 0.3, ends: Taper, taper: 0.25, ..d() }),
+        p("Pen", "Pens", "Ballpoint: an even, solid line.", BrushSettings { size: 8.0, opacity: 1.0, flow: 1.0, hardness: 0.85, min_size: 0.65, opacity_pressure: true, texture: 0.0, stabilize: 0.3, ends: Taper, taper: 0.25, ..d() }),
         p("Ink", "Pens", "Sharp, clean lineart. Thin to thick with pen pressure.", BrushSettings { size: 4.0, hardness: 1.0, spacing: 0.04, min_size: 0.25, stabilize: 0.55, ends: Taper, taper: 0.5, ..d() }),
         p("G-pen", "Pens", "Manga G-pen: very thin to very thick, crisp ends.", BrushSettings { size: 10.0, hardness: 1.0, spacing: 0.03, min_size: 0.08, stabilize: 0.5, ends: Taper, taper: 0.6, ..d() }),
         p("Maru pen", "Pens", "Fine manga pen for small details and hair.", BrushSettings { size: 3.0, hardness: 1.0, spacing: 0.04, min_size: 0.3, stabilize: 0.45, ends: Taper, taper: 0.4, ..d() }),

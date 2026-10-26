@@ -2264,6 +2264,7 @@ fn rig_tab_more_changers_screens() {
     }
 
     // a second slider and a grid shape for the head
+    rig_tool(&mut h, "");
     h.state_mut().test_rig().new_param = ("Head up".into(), -30.0, 30.0);
     h.get_by_label("Add slider").click();
     h.run_steps(3);
@@ -4201,4 +4202,162 @@ fn the_bones_of_the_3d_character_get_sliders_that_pose_it() {
     h.state_mut().test_rig().bench.anim_3d = true;
     h.run_steps(4);
     save(&mut h, "bones_2_animate");
+}
+
+/// Black paint at full opacity on a Normal layer must be fully black where the brush went over.
+#[test]
+fn black_paint_at_full_opacity_is_fully_opaque() {
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().primary = Color32::BLACK;
+    h.state_mut().draw_mut().brush_mut().size = 60.0;
+    let (op, fl, hd) = { let b = h.state_mut().draw_mut().brush_mut(); (b.opacity, b.flow, b.hardness) };
+    eprintln!("brush: opacity {op} flow {fl} hardness {hd}");
+    for k in 0..3 {
+        stroke(&mut h, &wave(pos2(520.0, 300.0 + k as f32 * 10.0), pos2(900.0, 300.0 + k as f32 * 10.0), 20.0, 40));
+    }
+    h.run_steps(3);
+    // look at the pixels of the layer along the middle of the stroke
+    let d = h.state().draw_mut_ref();
+    let layer = d.doc.layers.iter().find(|l| l.kind == crate::doc::LayerKind::Raster).unwrap();
+    let (mut n, mut full, mut min_a) = (0usize, 0usize, 255u8);
+    for tile in layer.tiles.values() {
+        for c in tile.iter() {
+            if c.a() > 200 {
+                n += 1;
+                if c.a() == 255 {
+                    full += 1;
+                }
+                min_a = min_a.min(c.a());
+            }
+        }
+    }
+    eprintln!("pixels with alpha above 200: {n}, fully opaque: {full}, the lowest of them {min_a}");
+    assert!(n > 1000);
+    assert!(full as f32 / n as f32 > 0.97, "{full} of {n} are fully opaque");
+}
+
+/// The points of a changer are moved with the mouse as soon as a slider is picked, and the shape is saved when the pointer is let go.
+#[test]
+fn dragging_a_point_of_a_warp_changer_saves_the_shape() {
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    let first = h.state().draw_mut_ref().doc.layers.iter().find(|l| l.kind == crate::doc::LayerKind::Raster && !l.tiles.is_empty()).map(|l| l.id).unwrap();
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    h.state_mut().test_rig().selected = vec![first];
+    rig_tool(&mut h, "new:Warp");
+    h.get_by_label("Make the Warp changer").click();
+    h.run_steps(4);
+    h.state_mut().test_rig_edit(|r| {
+        r.add_param("Test", -30.0, 30.0, 0.0);
+    });
+    let pid = h.state().draw_mut_ref().doc.rig.params.iter().find(|p| p.name == "Test").map(|p| p.id).unwrap();
+    h.state_mut().test_rig().sel_param = Some(pid);
+    h.state_mut().test_rig().values.set(pid, 30.0);
+    h.state_mut().test_open_tool("");
+    h.run_steps(4);
+    let spots = h.state_mut().test_rig().test_spots();
+    assert!(spots.len() >= 4, "the grid of the warp has handles: {}", spots.len());
+    let before = h.state().draw_mut_ref().doc.rig.bindings.len();
+    // drag the first handle with the mouse
+    let from = spots[0];
+    h.hover_at(from);
+    h.step();
+    button(&mut h, from, true);
+    h.step();
+    for k in 1..=6 {
+        h.hover_at(from + vec2(6.0 * k as f32, 4.0 * k as f32));
+        h.step();
+    }
+    button(&mut h, from + vec2(36.0, 24.0), false);
+    h.run_steps(3);
+    let rig = h.state().draw_mut_ref().doc.rig.clone();
+    assert!(rig.bindings.len() > before, "a keyform was saved by the drag");
+    let b = rig.bindings.iter().find(|b| b.params == vec![pid]).expect("a binding on the slider");
+    assert!(b.keys[0].iter().any(|k| (k - 30.0).abs() < 1e-3), "saved at the value of the slider: {:?}", b.keys);
+    assert!(!h.state_mut().test_rig().test_editing(), "the edit is over");
+}
+
+/// A physics group made in the window: the head turning pushes a chain, and the chain moves a slider.
+#[test]
+fn a_physics_group_made_by_hand_moves_its_output_slider() {
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    h.state_mut().test_run_action_now("tab.4");
+    h.run_steps(5);
+    h.state_mut().test_add_physics_group(0);
+    rig_tool(&mut h, "groups");
+    h.get_by_label("Add an input");
+    h.get_by_label("Physics of the groups on");
+    save(&mut h, "physics_1_groups");
+    let rig = h.state().draw_mut_ref().doc.rig.clone();
+    assert_eq!(rig.param_physics.settings.len(), 1);
+    let g = &rig.param_physics.settings[0];
+    assert!(!g.inputs.is_empty(), "the head sliders push it");
+    assert_eq!(g.outputs.len(), 1);
+    // turn the head, let it swing: the output slider moves
+    let ax = rig.params.iter().find(|p| p.name == "Angle X").map(|p| p.id).unwrap();
+    h.state_mut().test_rig().values.set(ax, 25.0);
+    for _ in 0..40 {
+        h.state_mut().phys_advance(1.0 / 60.0);
+    }
+    let out = h.state().test_physics_out();
+    assert!(out.iter().any(|(n, v)| n == "Hair sway" && v.abs() > 0.01), "the hair sway slider is moved by the swing: {out:?}");
+    // a second group works together with the first
+    h.state_mut().test_add_physics_group(1);
+    assert_eq!(h.state().draw_mut_ref().doc.rig.param_physics.settings.len(), 2);
+}
+
+/// The push brush moves the points of a warp under it and saves the shape at the slider value.
+#[test]
+fn the_push_brush_moves_the_points_under_it_and_saves_the_shape() {
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    let first = h.state().draw_mut_ref().doc.layers.iter().find(|l| l.kind == crate::doc::LayerKind::Raster && !l.tiles.is_empty()).map(|l| l.id).unwrap();
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    h.state_mut().test_rig().selected = vec![first];
+    rig_tool(&mut h, "new:Warp");
+    h.get_by_label("Make the Warp changer").click();
+    h.run_steps(4);
+    h.state_mut().test_rig_edit(|r| {
+        r.add_param("Push", -30.0, 30.0, 0.0);
+    });
+    let pid = h.state().draw_mut_ref().doc.rig.params.iter().find(|p| p.name == "Push").map(|p| p.id).unwrap();
+    h.state_mut().test_rig().sel_param = Some(pid);
+    h.state_mut().test_rig().values.set(pid, 30.0);
+    rig_tool(&mut h, "brush");
+    let spots = h.state_mut().test_rig().test_spots();
+    assert!(spots.len() >= 4);
+    let from = spots[spots.len() / 2];
+    h.hover_at(from);
+    h.step();
+    button(&mut h, from, true);
+    h.step();
+    for k in 1..=8 {
+        h.hover_at(from + vec2(5.0 * k as f32, 0.0));
+        h.step();
+    }
+    button(&mut h, from + vec2(40.0, 0.0), false);
+    h.run_steps(3);
+    let rig = h.state().draw_mut_ref().doc.rig.clone();
+    let b = rig.bindings.iter().find(|b| b.params == vec![pid]).expect("the brush saved a shape at the slider value");
+    let crate::rig::Form::Warp { offsets } = b.forms.last().unwrap() else { panic!("a warp shape") };
+    let moved = offsets.iter().filter(|o| o[0].abs() > 0.5).count();
+    assert!(moved >= 1, "points under the brush followed it ({moved})");
+    assert!(moved < offsets.len(), "points far from the brush did not move");
 }

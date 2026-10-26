@@ -28,13 +28,15 @@ pub struct PhysUi {
     pub motion: Option<(usize, f32)>,
     pub message: Option<String>,
     /// The swinging of a Live2D model (parameter physics): where its chains are, and the slider values it gives now.
+    /// The physics settings window (groups, inputs, pendulum, outputs).
+    pub groups: super::physgroups::GroupsUi,
     pub param_state: crate::rig::paramphys::PhysState,
     pub param_out: HashMap<Id, f32>,
 }
 
 impl Default for PhysUi {
     fn default() -> Self {
-        Self { on: true, sim: PhysSim::default(), offs: HashMap::new(), sel: None, kind: PKind::Hair, material: Material::Normal, motion: None, message: None, param_state: Default::default(), param_out: HashMap::new() }
+        Self { groups: Default::default(), on: true, sim: PhysSim::default(), offs: HashMap::new(), sel: None, kind: PKind::Hair, material: Material::Normal, motion: None, message: None, param_state: Default::default(), param_out: HashMap::new() }
     }
 }
 
@@ -163,6 +165,9 @@ impl SeviathApp {
         egui::Panel::top("phys_toolbar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.rig_toolbar(ui, false, true, false));
         egui::Panel::left("phys_layers").default_size(270.0).size_range(210.0..=440.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             picked = self.rig_left_panel(ui, &ctx, now, "phys", true, true);
+        });
+        egui::Panel::left("phys_params").default_size(250.0).size_range(190.0..=420.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
+            self.rig_params_column(ui, now, "phys");
         });
         egui::Panel::right("phys_tools").default_size(330.0).size_range(280.0..=500.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("phys_right").show(ui, |ui| self.physics_side(ui, now));

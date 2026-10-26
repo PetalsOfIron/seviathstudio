@@ -503,6 +503,43 @@ impl Rig {
         v
     }
 
+    /// Give a Warp changer a finer (or coarser) grid: every shape saved for it is taken over, the new points on the old surface. False when the
+    /// changer is not a Warp or the size is not allowed.
+    pub fn resize_warp(&mut self, cid: Id, cols: u32, rows: u32) -> bool {
+        if !(1..=MAX_WARP).contains(&cols) || !(1..=MAX_WARP).contains(&rows) {
+            return false;
+        }
+        let Some(c) = self.changers.iter_mut().find(|c| c.id == cid) else { return false };
+        let Kind::Warp { cols: oc, rows: or, .. } = &mut c.kind else { return false };
+        let (old_c, old_r) = (*oc, *or);
+        *oc = cols;
+        *or = rows;
+        for b in self.bindings.iter_mut().filter(|b| b.changer == cid) {
+            for f in b.forms.iter_mut() {
+                if let Form::Warp { offsets } = f {
+                    if offsets.len() != ((old_c + 1) * (old_r + 1)) as usize {
+                        continue;
+                    }
+                    let at = |c: u32, r: u32| offsets[(r * (old_c + 1) + c) as usize];
+                    let mut out = Vec::with_capacity(((cols + 1) * (rows + 1)) as usize);
+                    for r in 0..=rows {
+                        for cc in 0..=cols {
+                            // where the new point is on the old grid
+                            let (x, y) = (cc as f32 / cols as f32 * old_c as f32, r as f32 / rows as f32 * old_r as f32);
+                            let (x0, y0) = ((x.floor() as u32).min(old_c), (y.floor() as u32).min(old_r));
+                            let (x1, y1) = ((x0 + 1).min(old_c), (y0 + 1).min(old_r));
+                            let (tx, ty) = (x - x0 as f32, y - y0 as f32);
+                            let (a, b, c2, d) = (at(x0, y0), at(x1, y0), at(x0, y1), at(x1, y1));
+                            out.push([0, 1].map(|k| (a[k] * (1.0 - tx) + b[k] * tx) * (1.0 - ty) + (c2[k] * (1.0 - tx) + d[k] * tx) * ty));
+                        }
+                    }
+                    *offsets = out;
+                }
+            }
+        }
+        true
+    }
+
     /// The shape a changer has when nothing is moved.
     pub fn rest_form(&self, changer: Id) -> Option<Form> {
         Some(match &self.changer(changer)?.kind {
@@ -1567,5 +1604,24 @@ mod tests {
         }
         // nothing to copy: None
         assert!(r.mirror_changer(9999, 500.0, "x").is_none());
+    }
+
+    #[test]
+    fn a_warp_gets_a_finer_grid_and_keeps_its_shapes() {
+        let mut r = Rig::default();
+        let p = r.add_param("x", -1.0, 1.0, 0.0);
+        let c = r.add_changer("W", Kind::Warp { rect: [0.0, 0.0, 100.0, 100.0], cols: 1, rows: 1 }, None);
+        // the right edge goes down by 10 at the end of the slider
+        r.set_keyform(c, p, 1.0, Form::Warp { offsets: vec![[0.0, 0.0], [0.0, 10.0], [0.0, 0.0], [0.0, 10.0]] });
+        assert!(r.resize_warp(c, 4, 2));
+        let b = r.bindings.iter().find(|b| b.changer == c).unwrap();
+        let Form::Warp { offsets } = b.forms.last().unwrap() else { panic!() };
+        assert_eq!(offsets.len(), 15);
+        // along the top row: 0, 2.5, 5, 7.5, 10
+        let top: Vec<f32> = offsets[..5].iter().map(|o| o[1]).collect();
+        for (got, want) in top.iter().zip([0.0, 2.5, 5.0, 7.5, 10.0]) {
+            assert!((got - want).abs() < 1e-4, "{top:?}");
+        }
+        assert!(!r.resize_warp(c, 0, 2) && !r.resize_warp(c, 4, MAX_WARP + 1));
     }
 }

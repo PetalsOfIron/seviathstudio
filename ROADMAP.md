@@ -205,3 +205,7 @@ How every part of the project plan (`SeviathStudio_Project_Plan_EN.md`, Parts A�
 - **Your own AI** (Ollama/ComfyUI installed, or a free Gemini key) for the AI features — everything else works without it.
 - **Platform accounts** (Twitch, OBS on your PC, PayPal for sellers) when their connectors are built.
 - **Unity / Godot / Unreal** installed when the game runtimes (46) are built — they live in their own repos.
+
+### Feedback round: rig editing
+- Done: drag points directly (auto-saved), push brush, warp grid columns/rows, sharp zoom, Path/Soft/Pins fixes, physics groups window, parameters column, solid Pen. 592 tests.
+- Not done: brush-size zoom-on-click bug (only a notice), TripoSR stretched wings/skirts, VRMA export of bone sliders, Unity Capture with the real driver.

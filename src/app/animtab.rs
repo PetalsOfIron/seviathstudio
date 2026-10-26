@@ -264,6 +264,9 @@ impl SeviathApp {
         egui::Panel::left("anim_parts").default_size(270.0).size_range(210.0..=440.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             picked = self.rig_left_panel(ui, &ctx, now, "anim", true, false);
         });
+        egui::Panel::left("anim_params").default_size(250.0).size_range(190.0..=420.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
+            self.rig_params_column(ui, now, "anim");
+        });
         egui::Panel::bottom("anim_timeline").default_size(300.0).size_range(190.0..=760.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.anim_timeline_ui(ui));
         egui::Panel::right("anim_side").default_size(320.0).size_range(260.0..=480.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("anim_right").show(ui, |ui| self.anim_side_ui(ui, now));

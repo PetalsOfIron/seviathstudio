@@ -14,6 +14,7 @@ use crate::theme::{self, *};
 use crate::widgets::{self, icon_button, segmented, tab_button};
 
 mod aihelper;
+mod physgroups;
 mod rigbench;
 mod downloadsui;
 mod animtab;

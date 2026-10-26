@@ -34,6 +34,8 @@ pub(super) enum Mode {
     AddPin,
     /// Drag on the picture to draw a path on the picked Path changer (or on a new one).
     DrawPath,
+    /// A brush that pushes the points of the picked changer (warp, line, pins, paths, soft) at the slider value.
+    Brush,
 }
 
 /// What dragging does in weight mode.
@@ -102,6 +104,17 @@ impl RigState {
     #[cfg(test)]
     pub fn test_warp_edit(&mut self) -> Option<&mut Vec<[f32; 2]>> {
         self.warp_edit.as_mut().map(|w| &mut w.1)
+    }
+
+    /// Where the handles of the picked changer are on the screen, and whether a shape is being edited.
+    #[cfg(test)]
+    pub fn test_spots(&self) -> Vec<Pos2> {
+        self.spots.clone()
+    }
+
+    #[cfg(test)]
+    pub fn test_editing(&self) -> bool {
+        self.warp_edit.is_some()
     }
 }
 
@@ -197,6 +210,15 @@ pub struct RigState {
     pub issues: Vec<rig::check::Issue>,
     pub(super) checked: bool,
     pub pro: bool,
+    /// The shape being edited began with a drag on a point (it is saved when the pointer is let go).
+    pub(super) auto_edit: bool,
+    /// How long the page shows on the screen in real pixels (the picture of the rig is made as fine as that, up to a limit).
+    pub(super) view_px: f32,
+    /// Where the handles of the picked changer are on the screen.
+    pub(super) spots: Vec<Pos2>,
+    /// The brush that pushes the points of the picked changer: its size (page pixels) and strength.
+    pub(super) brush_r: f32,
+    pub(super) brush_s: f32,
     /// The workbench: the tool windows and what the top bar remembers (see rigbench.rs).
     pub bench: super::rigbench::Bench,
     pub(super) play: bool,
@@ -515,6 +537,19 @@ impl SeviathApp {
         Some(img)
     }
 
+    /// How many pixels long the picture of the rig is made: the quality of the settings, and finer (up to three times, and 4096) when the
+    /// page is zoomed in so that it shows bigger than that on the screen.
+    fn rig_sharp_px(&self) -> f32 {
+        let base = self.settings.preview_px();
+        // while a shape is being dragged the picture is made again every frame: keep it quick
+        if self.rigs.warp_edit.is_some() {
+            return base;
+        }
+        let want = self.rigs.view_px.clamp(base, (base * 3.0).min(4096.0).max(base));
+        // in steps of 256, so a little zoom does not make the picture again
+        ((want / 256.0).ceil() * 256.0).clamp(base, (base * 3.0).min(4096.0).max(base))
+    }
+
     pub(super) fn rig_render(&mut self, ctx: &egui::Context) {
         let d = &self.draw.doc;
         let mut key: Vec<u64> = vec![d.w as u64, d.h as u64, Arc::as_ptr(&d.rig) as usize as u64];
@@ -525,6 +560,8 @@ impl SeviathApp {
         key.push((self.rigs.mode == Mode::Weight) as u64);
         key.push(self.rigs.hq as u64);
         key.push(self.settings.rig_quality as u64);
+        // zoomed in, the picture is made finer (in steps), so it stays sharp
+        key.push(self.rig_sharp_px().to_bits() as u64);
         let mut el: Vec<(u64, bool, u32)> = self.rigs.expr_layers.iter().map(|(k, (s, l))| (*k, *s, l.to_bits())).collect();
         el.sort();
         for (k, s, l) in el {
@@ -561,7 +598,7 @@ impl SeviathApp {
             return;
         }
         let (w, h) = (d.w as f32, d.h as f32);
-        let scale = (self.settings.preview_px() / w.max(h)).min(1.0);
+        let scale = (self.rig_sharp_px() / w.max(h)).min(1.0);
         let (pw, ph) = (((w * scale) as usize).max(8), ((h * scale) as usize).max(8));
         let items = self.rig_items();
         let paper = Color32::from_rgb(244, 242, 236);
@@ -697,6 +734,15 @@ impl SeviathApp {
             }
             None => {
                 let sel = self.rigs.selected.clone();
+                if sel.is_empty() {
+                    self.rigs.message = Some("Pick the parts first (on the left, or click them on the picture): the path moves them.".into());
+                    return;
+                }
+                // a part without a mesh gets one
+                let lacking: Vec<LayerId> = sel.iter().copied().filter(|id| self.draw.doc.rig.mesh_of(*id).is_none()).collect();
+                if !lacking.is_empty() {
+                    self.make_meshes(lacking, now);
+                }
                 let n = self.draw.doc.rig.changers.len() + 1;
                 let mut new_id = 0;
                 self.rig_edit("New Path changer", now, |r| {
@@ -754,6 +800,8 @@ impl SeviathApp {
     pub(super) fn rig_init(&mut self) {
         if !self.rigs.inited {
             self.rigs.density = 0.5;
+            self.rigs.brush_r = 160.0;
+            self.rigs.brush_s = 0.7;
             self.rigs.wire = true;
             self.rigs.turn_deg = 30.0;
             self.rigs.cols_rows = (3, 3);
@@ -838,6 +886,9 @@ impl SeviathApp {
         egui::Panel::top("rig_toolbar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.rig_toolbar(ui, true, false, false));
         egui::Panel::left("rig_layers").default_size(270.0).size_range(210.0..=440.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             picked = self.rig_left_panel(ui, &ctx, now, "rig", true, false);
+        });
+        egui::Panel::left("rig_params").default_size(250.0).size_range(190.0..=420.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
+            self.rig_params_column(ui, now, "rig");
         });
         egui::Panel::right("rig_tools").default_size(330.0).size_range(280.0..=500.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("rig_right").show(ui, |ui| self.rig_side(ui, now));
@@ -1591,6 +1642,7 @@ impl SeviathApp {
         }
         // move parts into the selected changer
         if let Some(cid) = self.rigs.sel_changer {
+            self.rig_warp_grid_ui(ui, now, cid);
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Copy to the other side, line at x").size(12.0).color(TEXT_DIM));
                 ui.add(egui::DragValue::new(&mut self.rigs.mirror_axis).speed(2.0));
@@ -1671,11 +1723,15 @@ impl SeviathApp {
         }
     }
 
-    /// All the sliders (parameters) of the rig: always on the left of the Rig, Physics and Animate tabs.
+    /// All the sliders (parameters) of the rig, then the joined squares: always on the left of the Rig, Physics and Animate tabs.
     pub(super) fn rig_params_body(&mut self, ui: &mut Ui, now: f64) {
+        self.rig_sliders_list(ui, now);
+        egui::CollapsingHeader::new(RichText::new("Joined sliders").size(13.0).strong()).id_salt("params_pads").default_open(true).show(ui, |ui| self.rig_pads_body(ui, now));
+    }
+
+    fn rig_pads_body(&mut self, ui: &mut Ui, now: f64) {
         let rig = self.draw.doc.rig.clone();
         // ---- pads: two sliders joined into one square ----
-        section_title(ui, "Joined sliders");
         ui.label(RichText::new("Drag inside a square to move two sliders at once.").size(11.5).color(TEXT_DIM)).on_hover_text("Orange line: the first slider. Blue line: the second. The dots are where the two lines cross (green: the original drawing, yellow: a saved shape, grey: nothing saved yet, red: where you are).");
         let mut split: Option<usize> = None;
         self.rigs.pad_areas.clear();
@@ -1748,10 +1804,25 @@ impl SeviathApp {
                 }
             });
         }
+    }
 
+    fn rig_sliders_list(&mut self, ui: &mut Ui, now: f64) {
+        let rig = self.draw.doc.rig.clone();
         // ---- sliders ----
         section_title(ui, "Sliders");
         ui.label(RichText::new("The circles are key points.").size(11.5).color(TEXT_DIM)).on_hover_text("Green: the original drawing. Yellow: a shape is saved there. Grey: nothing saved yet. The red dot is where the slider is.");
+        ui.horizontal_wrapped(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.rigs.new_param.0).desired_width(110.0).char_limit(40));
+            ui.add(egui::DragValue::new(&mut self.rigs.new_param.1).speed(0.5).prefix("from "));
+            ui.add(egui::DragValue::new(&mut self.rigs.new_param.2).speed(0.5).prefix("to "));
+            if ui.button("Add slider").clicked() && self.rigs.new_param.1 < self.rigs.new_param.2 {
+                let (name, lo, hi) = self.rigs.new_param.clone();
+                let mid = if lo < 0.0 && hi > 0.0 { 0.0 } else { lo };
+                let mut new_id = 0;
+                self.rig_edit("New slider", now, |r| new_id = r.add_param(&name, lo, hi, mid));
+                self.rigs.sel_param = Some(new_id);
+            }
+        });
         let params: Vec<(Id, String, f32, f32, f32)> = rig.params.iter().map(|p| (p.id, p.name.clone(), p.min, p.max, p.default)).collect();
         let mut del_param: Option<Id> = None;
         let mut last_group = "";
@@ -1792,22 +1863,13 @@ impl SeviathApp {
             self.rigs.values.0.remove(&id);
             self.rigs.sel_param = None;
         }
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.rigs.new_param.0).desired_width(110.0).char_limit(40));
-            ui.add(egui::DragValue::new(&mut self.rigs.new_param.1).speed(0.5).prefix("from "));
-            ui.add(egui::DragValue::new(&mut self.rigs.new_param.2).speed(0.5).prefix("to "));
-            if ui.button("Add slider").clicked() && self.rigs.new_param.1 < self.rigs.new_param.2 {
-                let (name, lo, hi) = self.rigs.new_param.clone();
-                let mid = if lo < 0.0 && hi > 0.0 { 0.0 } else { lo };
-                let mut new_id = 0;
-                self.rig_edit("New slider", now, |r| new_id = r.add_param(&name, lo, hi, mid));
-                self.rigs.sel_param = Some(new_id);
-            }
-        });
     }
 
     /// How the picked slider moves the picked changer: key points and shapes (the Shapes tool).
     pub(super) fn rig_keyforms_body(&mut self, ui: &mut Ui, now: f64) {
+        if let Some(cid) = self.rigs.sel_changer {
+            self.rig_warp_grid_ui(ui, now, cid);
+        }
         if let Some(pid) = self.rigs.sel_param {
             self.rig_key_points(ui, now, pid);
             if let Some(cid) = self.rigs.sel_changer {
@@ -1852,6 +1914,36 @@ impl SeviathApp {
                     self.rig_edit("Remove a key point", now, |r| r.remove_key(pid, k));
                 }
             });
+        }
+    }
+
+    /// The grid of the picked Warp changer: more or fewer points across and down (the shapes saved for it are taken over).
+    pub(super) fn rig_warp_grid_ui(&mut self, ui: &mut Ui, now: f64, cid: Id) {
+        let Some(Kind::Warp { cols, rows, .. }) = self.draw.doc.rig.changer(cid).map(|c| c.kind.clone()) else { return };
+        let (mut nc, mut nr) = (cols, rows);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            ui.label(RichText::new("Grid").size(12.0).color(TEXT_DIM));
+            for (label, v) in [("across", &mut nc), ("down", &mut nr)] {
+                if ui.small_button("-").clicked() {
+                    *v = v.saturating_sub(1).max(1);
+                }
+                ui.add(egui::DragValue::new(v).range(1..=rig::MAX_WARP).suffix(format!(" {label}")));
+                if ui.small_button("+").clicked() {
+                    *v = (*v + 1).min(rig::MAX_WARP);
+                }
+            }
+            if ui.small_button("Twice as fine").on_hover_text("Doubles the points both ways").clicked() {
+                nc = (nc * 2).min(rig::MAX_WARP);
+                nr = (nr * 2).min(rig::MAX_WARP);
+            }
+        });
+        if (nc, nr) != (cols, rows) {
+            self.rig_edit("Warp grid", now, |r| {
+                r.resize_warp(cid, nc, nr);
+            });
+            self.rigs.warp_edit = None;
+            self.rigs.auto_edit = false;
         }
     }
 
@@ -2263,30 +2355,7 @@ impl SeviathApp {
                 ui.horizontal(|ui| {
                     if !editing {
                         if ui.button("Edit the shape").clicked() {
-                            // show only this slider (and the one it is joined with), so the saved shape is just its own
-                            let mut only = Values::default();
-                            for id in std::iter::once(pid).chain(pid2) {
-                                only.set(id, rig.value(&self.rigs.values, id));
-                            }
-                            self.rigs.values = only;
-                            let pose = rig.pose(&self.rigs.values);
-                            let off: Vec<[f32; 2]> = match &c.kind {
-                                Kind::Warp { cols, rows, .. } => pose.warp.get(&cid).cloned().unwrap_or_else(|| vec![[0.0, 0.0]; ((cols + 1) * (rows + 1)) as usize]),
-                                Kind::Line { pts, .. } => pose.line.get(&cid).cloned().unwrap_or_else(|| vec![[0.0, 0.0]; pts.len()]),
-                                Kind::Pins { pts } => pose.pins.get(&cid).cloned().unwrap_or_else(|| vec![[0.0, 0.0]; pts.len()]),
-                                Kind::Paths { paths } => rig::changers::flatten(&paths, pose.paths.get(&cid)),
-                                _ => {
-                                    let (o, g) = pose.soft.get(&cid).copied().unwrap_or(([0.0, 0.0], 0.0));
-                                    self.rigs.soft_grow = g;
-                                    vec![o]
-                                }
-                            };
-                            self.rigs.turn_edit = match &c.kind {
-                                Kind::Line { pts, .. } => Some(pose.line_turns.get(&cid).cloned().unwrap_or_else(|| vec![0.0; pts.len()])),
-                                Kind::Paths { paths } => Some(rig::changers::flatten_turns(paths, pose.path_turns.get(&cid))),
-                                _ => None,
-                            };
-                            self.rigs.warp_edit = Some((cid, off));
+                            self.begin_shape_edit(cid, false);
                         }
                     } else {
                         if ui.button(RichText::new("Save the shape at this value").strong()).clicked() {
@@ -2342,12 +2411,100 @@ impl SeviathApp {
         }
     }
 
+    /// Start editing the shape of a changer at the slider value(s) now: only the picked slider (and the one it is joined with) is on, so the
+    /// shape that is saved is just its own. `auto`: it began with a drag on a point, and is saved when the pointer is let go.
+    pub(super) fn begin_shape_edit(&mut self, cid: Id, auto: bool) {
+        let rig = self.draw.doc.rig.clone();
+        let Some(c) = rig.changer(cid).cloned() else { return };
+        let Some(pid) = self.rigs.sel_param else { return };
+        let pid2 = self.rigs.sel_param2.filter(|q| *q != pid && rig.param(*q).is_some());
+                // show only this slider (and the one it is joined with), so the saved shape is just its own
+                let mut only = Values::default();
+                for id in std::iter::once(pid).chain(pid2) {
+                    only.set(id, rig.value(&self.rigs.values, id));
+                }
+                self.rigs.values = only;
+                let pose = rig.pose(&self.rigs.values);
+                let off: Vec<[f32; 2]> = match &c.kind {
+                    Kind::Warp { cols, rows, .. } => pose.warp.get(&cid).cloned().unwrap_or_else(|| vec![[0.0, 0.0]; ((cols + 1) * (rows + 1)) as usize]),
+                    Kind::Line { pts, .. } => pose.line.get(&cid).cloned().unwrap_or_else(|| vec![[0.0, 0.0]; pts.len()]),
+                    Kind::Pins { pts } => pose.pins.get(&cid).cloned().unwrap_or_else(|| vec![[0.0, 0.0]; pts.len()]),
+                    Kind::Paths { paths } => rig::changers::flatten(&paths, pose.paths.get(&cid)),
+                    _ => {
+                        let (o, g) = pose.soft.get(&cid).copied().unwrap_or(([0.0, 0.0], 0.0));
+                        self.rigs.soft_grow = g;
+                        vec![o]
+                    }
+                };
+                self.rigs.turn_edit = match &c.kind {
+                    Kind::Line { pts, .. } => Some(pose.line_turns.get(&cid).cloned().unwrap_or_else(|| vec![0.0; pts.len()])),
+                    Kind::Paths { paths } => Some(rig::changers::flatten_turns(paths, pose.path_turns.get(&cid))),
+                    _ => None,
+                };
+                self.rigs.warp_edit = Some((cid, off));
+        self.rigs.auto_edit = auto;
+    }
+
+    /// Save the shape that is being edited at the slider value(s) now (the same as the button Save the shape at this value).
+    pub(super) fn commit_shape_edit(&mut self, now: f64) {
+        let rig = self.draw.doc.rig.clone();
+        let Some((cid, off)) = self.rigs.warp_edit.take() else { return };
+        let Some(c) = rig.changer(cid).cloned() else { return };
+        let Some(pid) = self.rigs.sel_param else { return };
+        let pid2 = self.rigs.sel_param2.filter(|q| *q != pid && rig.param(*q).is_some());
+        let value = rig.value(&self.rigs.values, pid);
+        let value2 = pid2.map(|q| rig.value(&self.rigs.values, q));
+        let form = match &c.kind {
+            Kind::Warp { .. } => Form::Warp { offsets: off },
+            Kind::Line { .. } => Form::Line { offsets: off, turns: self.rigs.turn_edit.clone().filter(|t| t.iter().any(|x| *x != 0.0)).unwrap_or_default() },
+            Kind::Pins { .. } => Form::Pins { offsets: off },
+            Kind::Paths { paths } => {
+                let t = self.rigs.turn_edit.clone().filter(|t| t.iter().any(|x| *x != 0.0));
+                Form::Paths { offsets: rig::changers::unflatten(paths, &off), turns: t.map(|t| rig::changers::unflatten_turns(paths, &t)).unwrap_or_default() }
+            }
+            _ => Form::Soft { offset: off.first().copied().unwrap_or([0.0, 0.0]), grow: self.rigs.soft_grow },
+        };
+        self.rig_edit("Keyform", now, |r| match (pid2, value2) {
+            (Some(q), Some(v2)) => r.set_keyform2(cid, pid, q, value, v2, form),
+            _ => r.set_keyform(cid, pid, value, form),
+        });
+        self.rigs.turn_edit = None;
+        self.rigs.auto_edit = false;
+    }
+
+    /// The brush pushes the points of a changer that are under it (page pixels): the nearer the middle of the brush, the more they follow.
+    fn brush_push(&mut self, rig: &Rig, cid: Id, at: [f32; 2], delta: [f32; 2]) {
+        let (r, strength) = (self.rigs.brush_r.max(1.0), self.rigs.brush_s.clamp(0.0, 1.0));
+        let Some(c) = rig.changer(cid) else { return };
+        let rest: Vec<[f32; 2]> = match &c.kind {
+            Kind::Warp { rect, cols, rows } => Rig::warp_rest(*rect, *cols, *rows),
+            Kind::Line { pts, .. } => pts.clone(),
+            Kind::Pins { pts } => pts.clone(),
+            Kind::Paths { paths } => paths.iter().flat_map(|sp| sp.pts.iter().copied()).collect(),
+            Kind::Soft { center, .. } => vec![*center],
+            _ => return,
+        };
+        let Some((_, off)) = self.rigs.warp_edit.as_mut() else { return };
+        for (i, o) in off.iter_mut().enumerate() {
+            let Some(base) = rest.get(i) else { continue };
+            let d = (base[0] + o[0] - at[0]).hypot(base[1] + o[1] - at[1]);
+            if d < r {
+                let t = 1.0 - (d / r) * (d / r);
+                let w = t * t * strength;
+                o[0] += delta[0] * w;
+                o[1] += delta[1] * w;
+            }
+        }
+    }
+
     pub(super) fn rig_view(&mut self, ui: &mut Ui, now: f64, picked: &mut Option<(LayerId, bool, bool)>) {
         let rect = ui.available_rect_before_wrap();
         let resp = ui.allocate_rect(rect, Sense::click_and_drag());
         let (dw, dh) = (self.draw.doc.w as f32, self.draw.doc.h as f32);
         let fit = ((rect.width() - 24.0) / dw).min((rect.height() - 24.0) / dh).max(0.01);
         let sc = fit * self.rigs.zoom.max(0.1);
+        // how long the page shows on the screen, in real pixels: the picture is made as fine as that (see rig_sharp_px)
+        self.rigs.view_px = dw.max(dh) * sc * ui.ctx().pixels_per_point();
         let page = Rect::from_center_size(rect.center() + self.rigs.pan, vec2(dw * sc, dh * sc));
         if resp.hovered() {
             let (scroll, pos) = ui.input(|i| (i.smooth_scroll_delta.y, i.pointer.hover_pos()));
@@ -2394,7 +2551,8 @@ impl SeviathApp {
             }
         }
         // the picked changer: a pivot or a grid with handles
-        let mut drag_handle: Option<(usize, Vec2)> = None;
+        let mut grab = Grab::default();
+        let can_pick_shape = self.rigs.sel_param.is_some();
         let mut set_turn: Option<(usize, f32)> = None;
         if let Some(c) = self.rigs.sel_changer.and_then(|id| rig.changer(id)) {
             match &c.kind {
@@ -2424,12 +2582,7 @@ impl SeviathApp {
                         let a = pos_of(i);
                         let hr = Rect::from_center_size(a, vec2(12.0, 12.0));
                         p.rect_filled(hr, 3.0, if editing { Color32::from_rgb(255, 200, 60) } else { Color32::from_rgb(120, 110, 60) });
-                        if editing {
-                            let r = ui.interact(hr, egui::Id::new(("warp_handle", c.id, i)), Sense::drag());
-                            if r.dragged() {
-                                drag_handle = Some((i, r.drag_delta() / sc));
-                            }
-                        }
+                        grab_handle(ui, hr, egui::Id::new(("warp_handle", c.id, i)), i, sc, editing || can_pick_shape, &mut grab);
                     }
                 }
                 Kind::Line { pts, width } => {
@@ -2460,12 +2613,7 @@ impl SeviathApp {
                         let a = to_screen(rig.deform_point(&pose, c.parent, *v));
                         let hr = Rect::from_center_size(a, vec2(12.0, 12.0));
                         p.rect_filled(hr, 6.0, if editing { Color32::from_rgb(255, 200, 60) } else { Color32::from_rgb(120, 110, 60) });
-                        if editing {
-                            let r = ui.interact(hr, egui::Id::new(("line_handle", c.id, i)), Sense::drag());
-                            if r.dragged() {
-                                drag_handle = Some((i, r.drag_delta() / sc));
-                            }
-                        }
+                        grab_handle(ui, hr, egui::Id::new(("line_handle", c.id, i)), i, sc, editing || can_pick_shape, &mut grab);
                     }
                 }
                 Kind::Pins { pts } => {
@@ -2478,12 +2626,7 @@ impl SeviathApp {
                         let moved = o[0].abs() > 0.5 || o[1].abs() > 0.5;
                         p.circle_filled(at, 7.0, if editing { Color32::from_rgb(255, 200, 60) } else { Color32::from_rgb(120, 110, 60) });
                         p.circle_stroke(at, 7.0, Stroke::new(if moved { 2.5 } else { 1.0 }, Color32::WHITE));
-                        if editing {
-                            let r = ui.interact(hr, egui::Id::new(("pin_handle", c.id, i)), Sense::drag());
-                            if r.dragged() {
-                                drag_handle = Some((i, r.drag_delta() / sc));
-                            }
-                        }
+                        grab_handle(ui, hr, egui::Id::new(("pin_handle", c.id, i)), i, sc, editing || can_pick_shape, &mut grab);
                     }
                 }
                 Kind::Paths { paths } => {
@@ -2518,12 +2661,7 @@ impl SeviathApp {
                             let at = to_screen(rig.deform_point(&pose, c.parent, *v));
                             let hr = Rect::from_center_size(at, vec2(12.0, 12.0));
                             p.rect_filled(hr, 6.0, if editing { Color32::from_rgb(255, 200, 60) } else { Color32::from_rgb(120, 110, 60) });
-                            if editing {
-                                let r = ui.interact(hr, egui::Id::new(("path_handle", c.id, flat + i)), Sense::drag());
-                                if r.dragged() {
-                                    drag_handle = Some((flat + i, r.drag_delta() / sc));
-                                }
-                            }
+                            grab_handle(ui, hr, egui::Id::new(("path_handle", c.id, flat + i)), flat + i, sc, editing || can_pick_shape, &mut grab);
                         }
                         flat += sp.pts.len();
                     }
@@ -2542,12 +2680,7 @@ impl SeviathApp {
                     p.circle_stroke(to_screen(rig.deform_point(&pose, c.parent, *center)), radius * sc, Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 200, 60, 120)));
                     let hr = Rect::from_center_size(at, vec2(14.0, 14.0));
                     p.circle_filled(at, 7.0, if editing { Color32::from_rgb(255, 200, 60) } else { Color32::from_rgb(120, 110, 60) });
-                    if editing {
-                        let r = ui.interact(hr, egui::Id::new(("soft_handle", c.id)), Sense::drag());
-                        if r.dragged() {
-                            drag_handle = Some((0, r.drag_delta() / sc));
-                        }
-                    }
+                    grab_handle(ui, hr, egui::Id::new(("soft_handle", c.id)), 0, sc, editing || can_pick_shape, &mut grab);
                 }
             }
         }
@@ -2671,13 +2804,32 @@ impl SeviathApp {
                 *x = t;
             }
         }
-        if let (Some((i, d)), Some((_, off))) = (drag_handle, self.rigs.warp_edit.as_mut()) {
+        if grab.blocked {
+            self.rigs.message = Some("Pick a slider on the left first: the shape is saved at the value of the slider.".into());
+        }
+        if grab.start && self.rigs.warp_edit.is_none() {
+            if let Some(cid) = self.rigs.sel_changer {
+                self.begin_shape_edit(cid, true);
+            }
+        }
+        if let (Some((i, d)), Some((_, off))) = (grab.drag, self.rigs.warp_edit.as_mut()) {
             if let Some(o) = off.get_mut(i) {
                 o[0] += d.x;
                 o[1] += d.y;
             }
         }
-        // drag the picture itself while a warp shape is being edited
+        if grab.stop && self.rigs.auto_edit {
+            self.commit_shape_edit(now);
+        }
+        self.rigs.spots = std::mem::take(&mut grab.spots);
+        let drag_handle = grab.drag;
+        // drag the picture itself: a warp shape begins to be edited by the drag when a slider is picked
+        if self.rigs.warp_edit.is_none() && drag_handle.is_none() && !grab.start && can_pick_shape && self.rigs.mode == Mode::Look && self.rigs.gdrag.is_none() && resp.drag_started_by(egui::PointerButton::Primary) {
+            let on_page = ui.input(|i| i.pointer.press_origin()).is_some_and(|q| page.contains(q));
+            if let (true, Some(cid)) = (on_page, self.rigs.sel_changer.filter(|c| matches!(rig.changer(*c).map(|c| &c.kind), Some(Kind::Warp { .. })))) {
+                self.begin_shape_edit(cid, true);
+            }
+        }
         if drag_handle.is_none() && self.rigs.mode == Mode::Look && self.rigs.gdrag.is_none() {
             let warp = self.rigs.warp_edit.as_ref().and_then(|w| match rig.changer(w.0).map(|c| &c.kind) {
                 Some(Kind::Warp { rect, cols, rows }) => Some((*rect, *cols, *rows)),
@@ -2696,6 +2848,9 @@ impl SeviathApp {
                 }
                 if resp.drag_stopped() {
                     self.rigs.pull = None;
+                    if self.rigs.auto_edit {
+                        self.commit_shape_edit(now);
+                    }
                 }
             }
         }
@@ -2719,6 +2874,37 @@ impl SeviathApp {
                 let stroke = std::mem::take(&mut self.rigs.stroke);
                 self.rigs.mode = Mode::Look;
                 self.add_path_from_stroke(stroke, now);
+            }
+        }
+        // the push brush: drag over the picture and the points of the picked changer under the brush follow
+        if self.rigs.mode == Mode::Brush {
+            let cid = self.rigs.sel_changer.filter(|c| matches!(rig.changer(*c).map(|c| &c.kind), Some(Kind::Warp { .. } | Kind::Line { .. } | Kind::Pins { .. } | Kind::Paths { .. } | Kind::Soft { .. })));
+            if let (Some(hp), true) = (resp.hover_pos().or_else(|| resp.interact_pointer_pos()), resp.hovered() || resp.dragged()) {
+                let col = if cid.is_some() && can_pick_shape { Color32::from_rgb(255, 200, 60) } else { Color32::from_gray(150) };
+                p.circle_stroke(hp, self.rigs.brush_r * sc, Stroke::new(1.5, col));
+                p.circle_stroke(hp, self.rigs.brush_r * sc * 0.5, Stroke::new(1.0, Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 90)));
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            }
+            match (cid, can_pick_shape) {
+                (Some(cid), true) => {
+                    if resp.drag_started_by(egui::PointerButton::Primary) && self.rigs.warp_edit.is_none() {
+                        self.begin_shape_edit(cid, true);
+                    }
+                    if resp.dragged_by(egui::PointerButton::Primary) {
+                        if let Some(pos) = resp.interact_pointer_pos() {
+                            let d = resp.drag_delta() / sc;
+                            self.brush_push(&rig, cid, to_page(pos), [d.x, d.y]);
+                        }
+                    }
+                    if resp.drag_stopped() && self.rigs.auto_edit {
+                        self.commit_shape_edit(now);
+                    }
+                }
+                _ => {
+                    if resp.drag_started_by(egui::PointerButton::Primary) {
+                        self.rigs.message = Some(if cid.is_none() { "Pick a changer with points first (a warp, a line, pins, paths or a soft one).".into() } else { "Pick a slider on the left first: the shape is saved at the value of the slider.".into() });
+                    }
+                }
             }
         }
         // add a pin
@@ -3061,6 +3247,43 @@ impl SeviathApp {
 }
 
 /// "rotation", "warp", "line" or "soft".
+/// What the handles of the picked changer did this frame.
+#[derive(Default)]
+struct Grab {
+    /// A drag began on a handle.
+    start: bool,
+    /// A drag began, but no slider is picked (the shape is saved at a slider value).
+    blocked: bool,
+    /// The handle moved: which and by how much (page pixels).
+    drag: Option<(usize, Vec2)>,
+    /// The pointer was let go.
+    stop: bool,
+    /// Where the handles are on the screen (for the tests).
+    spots: Vec<Pos2>,
+}
+
+/// One handle on the picture: it follows the pointer when it is dragged, and says so in `grab`.
+fn grab_handle(ui: &Ui, hr: Rect, id: egui::Id, idx: usize, sc: f32, can_edit: bool, grab: &mut Grab) {
+    let r = ui.interact(hr, id, Sense::drag());
+    grab.spots.push(hr.center());
+    if r.hovered() || r.dragged() {
+        ui.ctx().set_cursor_icon(if r.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+    }
+    if r.drag_started() {
+        if can_edit {
+            grab.start = true;
+        } else {
+            grab.blocked = true;
+        }
+    }
+    if r.dragged() && can_edit {
+        grab.drag = Some((idx, r.drag_delta() / sc));
+    }
+    if r.drag_stopped() && can_edit {
+        grab.stop = true;
+    }
+}
+
 fn kind_word(rig: &Rig, id: Id, is_rot: bool) -> &'static str {
     if is_rot {
         return "rotation";

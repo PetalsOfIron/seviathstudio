@@ -77,8 +77,12 @@ pub enum Tool {
     Changers,
     Glue,
     Shapes,
+    /// The brush that pushes the points of the picked changer.
+    Brush,
     /// The Physics tab: a window to look at the physics on its own.
     PhysicsCheck,
+    /// The Physics tab: the groups of physics (inputs, pendulum, outputs).
+    PhysicsGroups,
 }
 
 impl Tool {
@@ -90,7 +94,9 @@ impl Tool {
             Tool::Changers => "Changers".into(),
             Tool::Glue => "Glue".into(),
             Tool::Shapes => "Shapes of a slider".into(),
+            Tool::Brush => "Push brush".into(),
             Tool::PhysicsCheck => "Check the physics".into(),
+            Tool::PhysicsGroups => "Physics settings".into(),
         }
     }
 }
@@ -125,6 +131,16 @@ impl Default for Bench {
 impl SeviathApp {
     /// The row of tools along the top. `with_view_switch`: the Rig tab also has the switch between the 2D rig and the 3D character.
     pub(super) fn rig_toolbar(&mut self, ui: &mut Ui, with_view_switch: bool, with_physics: bool, with_edit_here: bool) {
+        let before = self.rigs.bench.open;
+        self.rig_toolbar_row(ui, with_view_switch, with_physics, with_edit_here);
+        // another tool: what the last one was waiting for on the picture (a path, a pin, a pivot) is over
+        if self.rigs.bench.open != before {
+            self.rigs.mode = if self.rigs.bench.open == Some(Tool::Brush) { super::rigtab::Mode::Brush } else { super::rigtab::Mode::Look };
+            self.rigs.stroke.clear();
+        }
+    }
+
+    fn rig_toolbar_row(&mut self, ui: &mut Ui, with_view_switch: bool, with_physics: bool, with_edit_here: bool) {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
             if with_view_switch {
@@ -157,10 +173,12 @@ impl SeviathApp {
             }
             ui.separator();
             set(ui, bench, Tool::Changers, "Changers", "Every changer there is: pick one, put it inside another, delete it, copy it to the other side");
+            set(ui, bench, Tool::Brush, "Brush", "Push the points of the picked changer with a brush (warp, line, pins, paths, soft): pick the changer and a slider, then drag over the picture");
             set(ui, bench, Tool::Shapes, "Shapes", "Say how the picked slider moves the picked changer: save the shape at each key point");
             set(ui, bench, Tool::Glue, "Glue", "Keeps the seam of two parts closed when they move differently");
             if with_physics {
                 ui.separator();
+                set(ui, bench, Tool::PhysicsGroups, "Physics settings", "Groups of swinging chains like Live2D: which sliders push a chain, how it swings, which sliders it moves. Make as many as you like");
                 set(ui, bench, Tool::PhysicsCheck, "Check the physics", "A window with the picture and the physics running, to look at them on their own");
             }
             if with_edit_here {
@@ -199,7 +217,9 @@ impl SeviathApp {
                     Tool::Changers => self.rig_changers_body(ui, now),
                     Tool::Glue => self.rig_glue_body(ui, now),
                     Tool::Shapes => self.rig_keyforms_body(ui, now),
+                    Tool::Brush => self.rig_brush_body(ui),
                     Tool::PhysicsCheck => self.physics_check_body(ui),
+                    Tool::PhysicsGroups => self.physics_groups_body(ui, now),
                 });
             });
         if !open {
@@ -226,6 +246,22 @@ impl SeviathApp {
         } else {
             self.game_preview_ui(ui);
         }
+    }
+
+    /// The push brush: how big and how strong.
+    fn rig_brush_body(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new("Pick a changer with points (warp, line, pins, paths or soft) and a slider on the left, then drag over the picture: the points under the brush follow, the nearer the middle the more. The shape is saved at the value of the slider when you let go.").size(11.5).color(TEXT_DIM));
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Size").size(12.0).color(TEXT_DIM));
+            ui.add(egui::Slider::new(&mut self.rigs.brush_r, 10.0..=800.0).logarithmic(true).suffix(" px"));
+        });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Strength").size(12.0).color(TEXT_DIM));
+            ui.add(egui::Slider::new(&mut self.rigs.brush_s, 0.05..=1.0));
+        });
+        let ok_changer = self.rigs.sel_changer.is_some();
+        let ok_slider = self.rigs.sel_param.is_some();
+        ui.label(RichText::new(format!("Changer: {}.  Slider: {}.", if ok_changer { "picked" } else { "none yet" }, if ok_slider { "picked" } else { "none yet" })).size(11.5).color(if ok_changer && ok_slider { TEXT_DIM } else { GOLD }));
     }
 
     /// The picked parts, in words (a new changer takes them).
@@ -311,7 +347,7 @@ impl SeviathApp {
         }
         ui.add_space(4.0);
         let label = if kind == NewKind::Path { "Draw paths on the picture".to_string() } else { format!("Make the {} changer", kind.word()) };
-        if ui.add_enabled(have || kind == NewKind::Path, egui::Button::new(RichText::new(label).strong())).clicked() {
+        if ui.add_enabled(have, egui::Button::new(RichText::new(label).strong())).clicked() {
             self.make_new_changer(kind, now);
         }
     }
@@ -421,15 +457,15 @@ impl SeviathApp {
         }
     }
 
-    /// The left side of the Rig, Physics and Animate tabs: the parts (above) and the parameters, the sliders (below). Returns the part that was clicked.
-    pub(super) fn rig_left_panel(&mut self, ui: &mut Ui, ctx: &egui::Context, now: f64, id: &str, show_params: bool, physics_labels: bool) -> Option<(LayerId, bool, bool)> {
+    /// The parts, in a column of their own (the parameters are the column next to it). Returns the part that was clicked.
+    pub(super) fn rig_left_panel(&mut self, ui: &mut Ui, ctx: &egui::Context, _now: f64, id: &str, show_params: bool, physics_labels: bool) -> Option<(LayerId, bool, bool)> {
         let mut picked: Option<(LayerId, bool, bool)> = None;
         let mut toggle: Option<LayerId> = None;
         section_title(ui, "Parts");
         ui.label(RichText::new("Pick the parts to rig or move. The eye hides a layer. No tags are needed.").size(11.5).color(TEXT_DIM));
         self.rig_visibility_buttons(ui);
         let full = ui.available_height();
-        let parts_h = if show_params { (full * 0.38).clamp(110.0, 420.0) } else { full };
+        let parts_h = full;
         egui::ScrollArea::vertical().id_salt((id, "parts")).max_height(parts_h).show(ui, |ui| {
             for l in self.draw.doc.layers.iter().filter(|l| parts::is_part_layer(l)) {
                 let on = self.rigs.selected.contains(&l.id);
@@ -459,13 +495,14 @@ impl SeviathApp {
         if let Some(id) = toggle {
             self.toggle_layer_visible(id);
         }
-        if show_params {
-            ui.add_space(4.0);
-            ui.separator();
-            section_title(ui, "Parameters");
-            egui::ScrollArea::vertical().id_salt((id, "params")).show(ui, |ui| self.rig_params_body(ui, now));
-        }
+        let _ = show_params;
         picked
+    }
+
+    /// The parameters (all the sliders), in a column of their own next to the parts.
+    pub(super) fn rig_params_column(&mut self, ui: &mut Ui, now: f64, id: &str) {
+        section_title(ui, "Parameters");
+        egui::ScrollArea::vertical().id_salt((id, "params")).show(ui, |ui| self.rig_params_body(ui, now));
     }
 }
 
@@ -473,6 +510,7 @@ impl SeviathApp {
 impl SeviathApp {
     /// Open a tool of the top bar by name: meshes, skin, changers, glue, shapes, check, new:<Kind>, or 3d (the 3D page).
     pub fn test_open_tool(&mut self, which: &str) {
+        self.rigs.mode = if which == "brush" { super::rigtab::Mode::Brush } else { super::rigtab::Mode::Look };
         let b = &mut self.rigs.bench;
         b.view3d = which == "3d";
         b.open = match which {
@@ -482,6 +520,8 @@ impl SeviathApp {
             "glue" => Some(Tool::Glue),
             "shapes" => Some(Tool::Shapes),
             "check" => Some(Tool::PhysicsCheck),
+            "groups" => Some(Tool::PhysicsGroups),
+            "brush" => Some(Tool::Brush),
             w if w.starts_with("new:") => NewKind::ALL.iter().copied().find(|k| k.word() == &w[4..]).map(Tool::New),
             _ => None,
         };
