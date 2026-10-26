@@ -523,6 +523,16 @@ impl SeviathApp {
                 ui.ctx().open_url(egui::OpenUrl::new_tab("https://github.com/ruyo/VRM4U"));
             }
         });
+        // the bones as sliders: to pose the 3D character by hand, and to key the poses in the Animate tab
+        ui.horizontal_wrapped(|ui| {
+            let has = self.rigs.game.model.is_some();
+            if ui.add_enabled(has, egui::Button::new("Sliders for the bones")).on_hover_text("One slider for each main bone (arms, legs, spine, head): move them to pose the 3D character, and key them in the Animate tab (its 3D view button shows the pose)").clicked() {
+                self.make_bone_sliders(_now);
+            }
+            if let Some(n) = self.bone_slider_count().filter(|n| *n > 0) {
+                ui.label(RichText::new(format!("{n} bone sliders (3D bones, on the left)")).size(11.0).color(TEXT_DIM));
+            }
+        });
         if let Some(m) = &self.rigs.game.message {
             ui.label(RichText::new(m).size(11.5).color(TEXT_DIM));
         }
@@ -551,6 +561,47 @@ impl SeviathApp {
         self.paint3d_controls(ui);
     }
 
+    /// The bones that get a slider.
+    const SLIDER_BONES: [&'static str; 12] = ["spine", "chest", "neck", "head", "leftUpperArm", "leftLowerArm", "rightUpperArm", "rightLowerArm", "leftUpperLeg", "leftLowerLeg", "rightUpperLeg", "rightLowerLeg"];
+
+    /// How many of the bone sliders (3D bones) the rig has.
+    pub(super) fn bone_slider_count(&self) -> Option<usize> {
+        Some(self.draw.doc.rig.params.iter().filter(|p| p.name.starts_with("3D ")).count())
+    }
+
+    /// A slider for each main bone of the 3D character (turn in degrees, in the picture plane), made once.
+    pub(super) fn make_bone_sliders(&mut self, now: f64) {
+        let Some(model) = &self.rigs.game.model else { return };
+        let have: Vec<String> = self.draw.doc.rig.params.iter().map(|p| p.name.clone()).collect();
+        let wanted: Vec<&str> = Self::SLIDER_BONES.iter().copied().filter(|b| model.bone(b).is_some() && !have.contains(&format!("3D {b}"))).collect();
+        if wanted.is_empty() {
+            self.rigs.game.message = Some("The bone sliders are there already (3D bones, on the left).".into());
+            return;
+        }
+        let n = wanted.len();
+        self.rig_edit("Sliders for the bones", now, |r| {
+            for b in &wanted {
+                r.add_param(&format!("3D {b}"), -90.0, 90.0, 0.0);
+            }
+        });
+        self.rigs.game.message = Some(format!("{n} bone sliders are made: 3D bones, on the left. Move them to pose the 3D character, and key them in the Animate tab."));
+    }
+
+    /// The turn of every bone that has a slider, from the sliders as they are now.
+    pub(super) fn bone_pose_from_sliders(&self) -> Vec<(String, f32)> {
+        let rig = &self.draw.doc.rig;
+        rig.params
+            .iter()
+            .filter_map(|p| p.name.strip_prefix("3D ").map(|b| (b.to_owned(), rig.value(&self.rigs.values, p.id))))
+            .filter(|(_, v)| v.abs() > 0.01)
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub fn bone_pose_for_test(&self) -> Vec<(String, f32)> {
+        self.bone_pose_from_sliders()
+    }
+
     /// The 3D character as a picture in the middle of the Rig tab (3D page): turn it with the slider on the right, drag on it to paint when painting is on.
     pub(super) fn game_preview_ui(&mut self, ui: &mut Ui) {
         if self.rigs.game.model.is_none() {
@@ -571,12 +622,15 @@ impl SeviathApp {
         if tracked.is_some() {
             ui.ctx().request_repaint();
         }
+        // the poses of the bone sliders (3D bones): hand posing, and the keys of the Animate tab
+        let slider_pose: Vec<(String, f32)> = self.bone_pose_from_sliders();
+        let slider_digest = format!("{:?}", slider_pose.iter().map(|(n, v)| (n.as_str(), (v / 2.0).round() as i32)).collect::<Vec<_>>());
         let (yaw_now, expr_key) = match &tracked {
             Some((yaw, list, pose)) => (
                 (*yaw / 2.0).round() as i32 * 2,
-                Some(format!("{:?}{:?}", list.iter().map(|(n, v)| (*n, (v * 10.0).round() as i32)).collect::<Vec<_>>(), pose.iter().map(|(n, v)| (*n, (v / 3.0).round() as i32)).collect::<Vec<_>>())),
+                Some(format!("{:?}{:?}{slider_digest}", list.iter().map(|(n, v)| (*n, (v * 10.0).round() as i32)).collect::<Vec<_>>(), pose.iter().map(|(n, v)| (*n, (v / 3.0).round() as i32)).collect::<Vec<_>>())),
             ),
-            None => (self.rigs.game.yaw.round() as i32, self.rigs.game.expr.clone()),
+            None => (self.rigs.game.yaw.round() as i32, Some(format!("{:?}{slider_digest}", self.rigs.game.expr))),
         };
         let key = (yaw_now, expr_key, self.rigs.game.made, self.rigs.game.guides, self.rigs.game.paint_gen, paint);
         if self.rigs.game.tex.as_ref().map(|t| &t.0) != Some(&key) {
@@ -585,13 +639,18 @@ impl SeviathApp {
                     Some((_, list, _)) => list.iter().map(|(n, v)| (*n, (v * 10.0).round() / 10.0)).collect(),
                     None => self.rigs.game.expr.as_deref().map(|e| vec![(e, 1.0)]).unwrap_or_default(),
                 };
-                let img = match &tracked {
-                    Some((_, _, pose)) if !pose.is_empty() => {
-                        let pose: Vec<(&str, f32)> = pose.iter().map(|(n, v)| (*n, (v / 3.0).round() * 3.0)).collect();
-                        preview::render_posed(m, key.0 as f32, pw, ph, &active, &pose)
+                // the bones the sliders turn, and over them the arms of the tracked body
+                let mut pose: Vec<(&str, f32)> = slider_pose.iter().map(|(n, v)| (n.as_str(), (v / 2.0).round() * 2.0)).collect();
+                if let Some((_, _, tp)) = &tracked {
+                    for (n, v) in tp {
+                        let v = (v / 3.0).round() * 3.0;
+                        match pose.iter_mut().find(|p| p.0 == *n) {
+                            Some(p) => p.1 = v,
+                            None => pose.push((*n, v)),
+                        }
                     }
-                    _ => preview::render_guides(m, key.0 as f32, pw, ph, &active, key.3),
-                };
+                }
+                let img = if pose.is_empty() { preview::render_guides(m, key.0 as f32, pw, ph, &active, key.3) } else { preview::render_posed(m, key.0 as f32, pw, ph, &active, &pose) };
                 let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
                 let tex = ui.ctx().load_texture("game_preview", color, TextureOptions::LINEAR);
                 self.rigs.game.tex = Some((key, tex));

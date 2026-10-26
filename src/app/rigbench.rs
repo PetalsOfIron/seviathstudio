@@ -110,13 +110,15 @@ pub struct Bench {
     pub smooth: bool,
     pub flip_vertical: bool,
     pub pivot: Option<[f32; 2]>,
+    /// The Animate tab shows the 3D character (posed by the bone sliders) instead of the 2D picture.
+    pub anim_3d: bool,
     /// The 3D page shows the drawing (to drag the face marks and the hair) instead of the 3D character.
     pub picture: bool,
 }
 
 impl Default for Bench {
     fn default() -> Self {
-        Self { open: None, view3d: false, edit_here: false, name: String::new(), parent: None, line_points: 5, smooth: true, flip_vertical: false, pivot: None, picture: false }
+        Self { open: None, view3d: false, edit_here: false, name: String::new(), parent: None, line_points: 5, smooth: true, flip_vertical: false, pivot: None, anim_3d: false, picture: false }
     }
 }
 
@@ -166,6 +168,12 @@ impl SeviathApp {
                 let on = self.rigs.bench.edit_here;
                 if widgets::chip(ui, if on { "Editing the rig on the picture" } else { "Edit the rig on the picture" }, on).on_hover_text("Shows the rig editor in the middle (drag the points of a changer, pick parts by clicking them) instead of the finished picture").clicked() {
                     self.rigs.bench.edit_here = !on;
+                    self.rigs.bench.anim_3d = false;
+                }
+                let on3 = self.rigs.bench.anim_3d;
+                if widgets::chip(ui, "3D view", on3).on_hover_text("Shows the 3D character, posed by the 3D bones sliders on the left (make them on the Rig tab, 3D character page): key them like any slider").clicked() {
+                    self.rigs.bench.anim_3d = !on3;
+                    self.rigs.bench.edit_here = false;
                 }
             }
         });
@@ -383,6 +391,22 @@ impl SeviathApp {
                 self.rigs.phys.offs.clear();
             }
         });
+        // the wind, to see how things swing in it
+        let rig = self.draw.doc.rig.clone();
+        let mut world = rig.world.clone();
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            ui.label(RichText::new("Wind").size(12.0).color(TEXT_DIM));
+            for k in crate::rig::physics::Wind::ALL {
+                if widgets::chip(ui, k.label(), world.wind == k).clicked() {
+                    world.wind = k;
+                }
+            }
+        });
+        if world != rig.world {
+            let now = ui.ctx().input(|i| i.time);
+            self.rig_edit("Wind", now, |r| r.world = world);
+        }
         ui.label(RichText::new("The sliders on the left move the character here, and the things you made swing as they would in the end.").size(11.5).color(TEXT_DIM));
         match &self.rigs.image {
             Some(t) => {
