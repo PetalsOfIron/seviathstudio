@@ -145,7 +145,7 @@ pub struct DrawState {
     pub proof: crate::colorprofiles::Proof,
     color_open: bool,
     layer_rows: Vec<(LayerId, Rect)>, // where each layer row was drawn last frame
-    view: View,
+    pub(crate) view: View,
     view_ready: bool,
     renderer: CanvasRenderer,
     stroke: Option<BrushStroke>,
@@ -153,6 +153,8 @@ pub struct DrawState {
     /// What the last finished stroke changed (for undo).
     pub last_stroke: Option<StrokeResult>,
     rotate_raw: f32,
+    /// The Zoom tool was chosen with its key: after one zoom click the tool that was on comes back.
+    pub(crate) zoom_return: Option<Tool>,
     canvas_rect: Rect,
     cursor_doc: Option<Pos2>,
     notice: Option<&'static str>,
@@ -236,6 +238,7 @@ impl Default for DrawState {
             pen_stroke: false,
             last_stroke: None,
             rotate_raw: 0.0,
+            zoom_return: None,
             canvas_rect: Rect::NOTHING,
             cursor_doc: None,
             notice: None,
@@ -549,6 +552,7 @@ impl DrawState {
                     let key = crate::actions::effective_text(&self.set.shortcuts, tool.action_id());
                     let tip = if key.is_empty() { tool.name().to_owned() } else { format!("{} ({})", tool.name(), key) };
                     if icon_button(ui, tool.icon(), self.tool == tool, 36.0, &tip).clicked() {
+                        self.zoom_return = None;
                         self.tool = tool;
                     }
                 }
@@ -820,7 +824,11 @@ impl DrawState {
         }
         if zoom_clicked {
             // a click that zooms is easy to take for a broken brush: say which tool is on and how to get the brush back
-            self.tools.notice = Some("The Zoom tool is on, so a click zooms in. Press B (or pick the brush on the left) to paint again.".into());
+            if let Some(back) = self.zoom_return.take() {
+                self.tool = back;
+            } else {
+                self.tools.notice = Some("The Zoom tool is on, so a click zooms in. Press B (or pick the brush on the left) to paint again.".into());
+            }
         }
         let tool_used = !nav_key && self.tool_input(&resp, &ctx);
 

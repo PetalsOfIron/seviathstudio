@@ -53,6 +53,7 @@ impl DrawState {
             return true;
         }
         if let Some(t) = TOOL_GROUPS.iter().flat_map(|g| g.iter().copied()).find(|t| t.action_id() == id) {
+            self.zoom_return = if t == Tool::Zoom && !matches!(self.tool, Tool::Zoom) { Some(self.tool) } else { None };
             self.tool = t;
             return true;
         }
