@@ -4361,3 +4361,22 @@ fn the_push_brush_moves_the_points_under_it_and_saves_the_shape() {
     assert!(moved >= 1, "points under the brush followed it ({moved})");
     assert!(moved < offsets.len(), "points far from the brush did not move");
 }
+
+/// A stray Z key turns the Zoom tool on, but only for one click: the brush comes back after it.
+#[test]
+fn the_zoom_key_zooms_one_click_and_gives_the_brush_back() {
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.key_press(Key::Z);
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().tool, crate::tabs::draw::Tool::Zoom);
+    let z0 = h.state().draw_mut_ref().view.zoom;
+    let at = pos2(700.0, 450.0);
+    button(&h, at, true);
+    h.step();
+    button(&h, at, false);
+    h.run_steps(3);
+    assert!(h.state().draw_mut_ref().view.zoom > z0, "the click zoomed");
+    assert_eq!(h.state().draw_mut_ref().tool, crate::tabs::draw::Tool::Brush, "the brush is back");
+}

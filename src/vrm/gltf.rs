@@ -28,6 +28,7 @@ pub struct Builder {
     pub meshes: Vec<Value>,
     pub nodes: Vec<Value>,
     pub skins: Vec<Value>,
+    pub animations: Vec<Value>,
     pub scenes: Vec<Value>,
     pub extensions_used: Vec<String>,
     pub extensions: serde_json::Map<String, Value>,
@@ -119,6 +120,20 @@ impl Builder {
         self.accessor(view, F32, data.len(), "MAT4", None, false)
     }
 
+    /// Numbers of an animation (times as SCALAR, turns as VEC4): no buffer target; returns the accessor.
+    pub fn animation_data(&mut self, data: &[f32], kind: &str) -> usize {
+        let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let per = if kind == "VEC4" { 4 } else { 1 };
+        let view = self.view(&bytes, None);
+        let minmax = if per == 1 && !data.is_empty() { Some(([data.iter().cloned().fold(f32::MAX, f32::min), 0.0, 0.0], [data.iter().cloned().fold(f32::MIN, f32::max), 0.0, 0.0])) } else { None };
+        let id = self.accessor(view, F32, data.len() / per, kind, None, false);
+        if let Some((lo, hi)) = minmax {
+            self.accessors[id]["min"] = json!([lo[0]]);
+            self.accessors[id]["max"] = json!([hi[0]]);
+        }
+        id
+    }
+
     /// A PNG picture; returns the texture index.
     pub fn png_texture(&mut self, png: &[u8], name: &str) -> usize {
         let view = self.view(png, None);
@@ -140,7 +155,7 @@ impl Builder {
             "scene": 0,
         });
         let map = root.as_object_mut().unwrap();
-        for (k, v) in [("images", self.images), ("textures", self.textures), ("materials", self.materials), ("meshes", self.meshes), ("skins", self.skins)] {
+        for (k, v) in [("images", self.images), ("textures", self.textures), ("materials", self.materials), ("meshes", self.meshes), ("skins", self.skins), ("animations", self.animations)] {
             if !v.is_empty() {
                 map.insert(k.into(), Value::Array(v));
             }

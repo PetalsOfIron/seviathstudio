@@ -1199,6 +1199,37 @@ impl SeviathApp {
         } else if ui.button("Save...").on_hover_text("Plays the animation frame by frame, with the physics, and writes it").clicked() {
             self.anim_export_start();
         }
+        let have_bones = self.draw.doc.rig.anim.tracks.iter().any(|t| matches!(t.target, crate::anim::Target::Param(id) if self.draw.doc.rig.param(id).is_some_and(|p| p.name.starts_with("3D "))));
+        if have_bones && !busy && ui.button("Save the 3D bones as a VRM animation (.vrma)").on_hover_text("The keys of the 3D bones sliders as a VRM animation file that VRM apps and game engines play on any VRM model").clicked() {
+            self.save_vrma();
+        }
+    }
+
+    /// The keys of the 3D bone sliders as a .vrma file.
+    fn save_vrma(&mut self) {
+        let rig = &self.draw.doc.rig;
+        let a = &rig.anim;
+        let (first, last) = if self.rigs.anim.export_work_area { a.play_range() } else { (0, a.length.saturating_sub(1)) };
+        let turns: Vec<crate::vrm::vrma::BoneTurns> = a
+            .tracks
+            .iter()
+            .filter(|t| !t.muted)
+            .filter_map(|t| {
+                let crate::anim::Target::Param(id) = t.target else { return None };
+                let bone = rig.param(id)?.name.strip_prefix("3D ")?.to_owned();
+                Some(crate::vrm::vrma::BoneTurns { bone, degrees: (first..=last).map(|f| t.value_at(f as f32).unwrap_or(0.0)).collect() })
+            })
+            .collect();
+        if turns.is_empty() {
+            return;
+        }
+        let bytes = crate::vrm::vrma::write_vrma(a.fps, &turns);
+        let name = self.files.name.clone();
+        let Some(p) = rfd::FileDialog::new().set_title("Save the VRM animation").set_directory(self.settings.projects_folder()).set_file_name(format!("{name}.vrma")).add_filter("VRM animation", &["vrma"]).save_file() else { return };
+        self.rigs.anim.message = Some(match std::fs::write(&p, bytes) {
+            Ok(()) => format!("Saved {} ({} bones, {} frames).", p.display(), turns.len(), last + 1 - first),
+            Err(e) => format!("Could not save the file: {e}"),
+        });
     }
 
     fn anim_export_start(&mut self) {

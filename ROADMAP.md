@@ -208,4 +208,5 @@ How every part of the project plan (`SeviathStudio_Project_Plan_EN.md`, Parts Aâ
 
 ### Feedback round: rig editing
 - Done: drag points directly (auto-saved), push brush, warp grid columns/rows, sharp zoom, Path/Soft/Pins fixes, physics groups window, parameters column, solid Pen. 592 tests.
-- Not done: brush-size zoom-on-click bug (only a notice), TripoSR stretched wings/skirts, VRMA export of bone sliders, Unity Capture with the real driver.
+- Done after: the Z key now zooms for one click and the previous tool comes back (the click-zoom bug); keys of the 3D bone sliders save as a VRM animation (.vrma, Animate tab, Save the animation). 594 tests.
+- Not done: Make-It-Animatable install (blocked by the permission check, needs the user to allow it), TripoSR stretched wings/skirts, Unity Capture with the real driver, playing a .vrma back in a real VRM app (only read back by our own reader).

@@ -14,6 +14,7 @@ pub mod shape;
 pub mod svrm;
 pub mod template;
 pub mod texedit;
+pub mod vrma;
 
 #[cfg(test)]
 mod tests {
