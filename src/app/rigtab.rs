@@ -21,7 +21,7 @@ use crate::widgets::{self, section_title};
 const RECORD_FPS: f32 = 30.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-enum Mode {
+pub(super) enum Mode {
     #[default]
     Look,
     /// The next click on the picture is the pivot of the selected Rotation changer.
@@ -111,12 +111,12 @@ pub struct RigState {
     pub uncut_hints: rig::uncut::Hints,
     pub game: super::gameui::GameUi,
     /// The turn at every point of the curve(s) being edited (curves after curve), next to `warp_edit`.
-    turn_edit: Option<Vec<f32>>,
+    pub(super) turn_edit: Option<Vec<f32>>,
     /// The eyes and the mouth of an uncut figure are shown on the picture to be dragged.
     pub(super) face_edit: bool,
     /// The joints of the skeleton are shown on the picture to be dragged, and the picture of the doc from before a drag.
     pub(super) joint_edit: bool,
-    joint_before: Option<crate::history::DocState>,
+    pub(super) joint_before: Option<crate::history::DocState>,
     /// Clicking the face points one after the other: 0 off, 1 first eye, 2 second eye, 3 mouth (with the first eye kept here).
     pub(super) face_click: u8,
     /// The Animate tab: playhead, timeline view and the saving job.
@@ -142,84 +142,86 @@ pub struct RigState {
     pub(super) pick_from: Option<[f32; 2]>,
     pub(super) face_first: [f32; 2],
     /// How many degrees the next *Turn* button turns by.
-    turn_by: f32,
+    pub(super) turn_by: f32,
     /// The numbers of a numeric changer being set, and whether they are shown on the picture now.
-    vals_edit: Option<(Id, Vec<f32>)>,
-    vals_live: bool,
+    pub(super) vals_edit: Option<(Id, Vec<f32>)>,
+    pub(super) vals_live: bool,
     /// The path being drawn on the picture.
-    stroke: Vec<[f32; 2]>,
-    path_width: f32,
-    path_points: usize,
+    pub(super) stroke: Vec<[f32; 2]>,
+    pub(super) path_width: f32,
+    pub(super) path_points: usize,
     /// Add triangles where a mesh bends, so the picture stays sharp.
     pub hq: bool,
     /// Where the picture is being pulled (page position of the grab).
-    pull: Option<[f32; 2]>,
+    pub(super) pull: Option<[f32; 2]>,
     pub phys: super::physicsui::PhysUi,
     pub selected: Vec<LayerId>,
-    anchor: Option<LayerId>,
-    density: f32,
-    wire: bool,
+    pub(super) anchor: Option<LayerId>,
+    pub(super) density: f32,
+    pub(super) wire: bool,
     pub sel_changer: Option<Id>,
     pub sel_param: Option<Id>,
     pub values: Values,
-    mode: Mode,
+    pub(super) mode: Mode,
     /// A Warp being edited: the changer and its control point shifts as they are on screen now.
-    warp_edit: Option<(Id, Vec<[f32; 2]>)>,
+    pub(super) warp_edit: Option<(Id, Vec<[f32; 2]>)>,
     /// How much a Soft changer being edited grows.
     pub soft_grow: f32,
     /// A second slider: the shape is then saved for the two sliders together (a grid).
     pub sel_param2: Option<Id>,
-    skin_detail: f32,
+    pub(super) skin_detail: f32,
     pub heat: bool,
-    skin_tex: Option<(u64, Option<Arc<LayerTex>>)>,
+    pub(super) skin_tex: Option<(u64, Option<Arc<LayerTex>>)>,
     /// The inside of the outline of the face, for cutting teeth and patches live to the face (made again when the outline layer changes).
-    clip_mask: Option<(u64, Option<Arc<LayerTex>>)>,
-    heat_tex: Option<((usize, u64), TextureHandle)>,
-    bone_from: Option<[f32; 2]>,
-    bone_chain: bool,
+    pub(super) clip_mask: Option<(u64, Option<Arc<LayerTex>>)>,
+    pub(super) heat_tex: Option<((usize, u64), TextureHandle)>,
+    pub(super) bone_from: Option<[f32; 2]>,
+    pub(super) bone_chain: bool,
     pub wtool: WTool,
     pub face_opts: rig::autorig::FaceOptions,
     pub body_opts: rig::autorig::BodyOptions,
     pub gizmo: bool,
     pub gtarget: usize,
     pub snap: f32,
-    join: (Option<Id>, Option<Id>),
+    pub(super) join: (Option<Id>, Option<Id>),
     /// Where each joined square is on the screen (for the tests).
     pub pad_areas: Vec<(String, Rect)>,
-    gdrag: Option<(rig::gizmo::Axis, Pos2, f32)>,
+    pub(super) gdrag: Option<(rig::gizmo::Axis, Pos2, f32)>,
     pub warnings: Vec<String>,
     /// Where the rings were drawn last: centre and radius on the screen (for the tests).
     pub gizmo_geom: Option<(Pos2, f32)>,
     /// Recording the sliders: when it started, the time of the last frame, and the frames so far.
-    recording: Option<(f64, f64, Vec<Vec<(Id, f32)>>)>,
+    pub(super) recording: Option<(f64, f64, Vec<Vec<(Id, f32)>>)>,
     /// Playing a clip: which one and when it started.
-    playing: Option<(usize, f64)>,
+    pub(super) playing: Option<(usize, f64)>,
     pub issues: Vec<rig::check::Issue>,
-    checked: bool,
+    pub(super) checked: bool,
     pub pro: bool,
-    play: bool,
-    wopts: rig::skin::BrushOpts,
-    feather: f32,
-    lasso_pts: Vec<[f32; 2]>,
-    last_dab: Option<[f32; 2]>,
-    weight_before: Option<crate::history::DocState>,
-    weight_gen: u64,
+    /// The workbench: the tool windows and what the top bar remembers (see rigbench.rs).
+    pub bench: super::rigbench::Bench,
+    pub(super) play: bool,
+    pub(super) wopts: rig::skin::BrushOpts,
+    pub(super) feather: f32,
+    pub(super) lasso_pts: Vec<[f32; 2]>,
+    pub(super) last_dab: Option<[f32; 2]>,
+    pub(super) weight_before: Option<crate::history::DocState>,
+    pub(super) weight_gen: u64,
     pub mirror_axis: f32,
     pub mirror_to: Option<Id>,
-    tag_pick: Option<parts::Part>,
-    glue_reach: f32,
+    pub(super) tag_pick: Option<parts::Part>,
+    pub(super) glue_reach: f32,
     pub new_param: (String, f32, f32),
-    turn_deg: f32,
-    cols_rows: (u32, u32),
-    tex: HashMap<LayerId, (u64, Option<Arc<LayerTex>>)>,
+    pub(super) turn_deg: f32,
+    pub(super) cols_rows: (u32, u32),
+    pub(super) tex: HashMap<LayerId, (u64, Option<Arc<LayerTex>>)>,
     pub(super) image: Option<TextureHandle>,
-    rendered: Option<u64>,
+    pub(super) rendered: Option<u64>,
     /// pixels of the picture per page pixel
-    scale: f32,
-    zoom: f32,
-    pan: Vec2,
-    message: Option<String>,
-    inited: bool,
+    pub(super) scale: f32,
+    pub(super) zoom: f32,
+    pub(super) pan: Vec2,
+    pub(super) message: Option<String>,
+    pub(super) inited: bool,
 }
 
 /// A small circle beside a curve point: drag it round to turn the picture at that point. Gives the new turn (degrees)
@@ -593,7 +595,7 @@ impl SeviathApp {
     }
 
     /// The bounds of the selected layers' paint: (x0, y0, x1, y1).
-    fn selection_box(&self) -> Option<[f32; 4]> {
+    pub(super) fn selection_box(&self) -> Option<[f32; 4]> {
         let d = &self.draw.doc;
         let mut b: Option<[f32; 4]> = None;
         for l in d.layers.iter().filter(|l| self.rigs.selected.contains(&l.id)) {
@@ -830,43 +832,25 @@ impl SeviathApp {
         }
         self.rig_render(&ctx);
         let mut picked: Option<(LayerId, bool, bool)> = None;
+        let view3d = self.rigs.bench.view3d;
 
-        egui::Panel::left("rig_layers").default_size(230.0).size_range(190.0..=380.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
-            section_title(ui, "Parts");
-            ui.label(RichText::new("Pick the parts to mesh or move. The eye hides a layer.").size(11.5).color(TEXT_DIM));
-            self.rig_visibility_buttons(ui);
-            let mut toggle: Option<LayerId> = None;
-            egui::ScrollArea::vertical().id_salt("rig_parts").show(ui, |ui| {
-                for l in self.draw.doc.layers.iter().filter(|l| parts::is_part_layer(l)) {
-                    let on = self.rigs.selected.contains(&l.id);
-                    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
-                    if on {
-                        ui.painter().rect_filled(rect, 4.0, HOVER);
-                    }
-                    let dot = l.part.map(|p| p.color()).unwrap_or(Color32::from_gray(70));
-                    ui.painter().circle_filled(rect.left_center() + vec2(34.0, 0.0), 5.0, dot);
-                    ui.painter().text(rect.left_center() + vec2(46.0, 0.0), egui::Align2::LEFT_CENTER, &l.name, egui::FontId::proportional(13.0), if l.visible { TEXT } else { TEXT_DIM });
-                    if self.draw.doc.rig.mesh_of(l.id).is_some() {
-                        ui.painter().text(rect.right_center() - vec2(6.0, 0.0), egui::Align2::RIGHT_CENTER, "mesh", egui::FontId::proportional(11.0), VENOM);
-                    }
-                    if super::rigtab::eye_toggle(ui, rect, l.id, l.visible) {
-                        toggle = Some(l.id);
-                    } else if resp.clicked() {
-                        let m = ctx.input(|i| i.modifiers);
-                        picked = Some((l.id, m.command || m.ctrl, m.shift));
-                    }
-                }
-            });
-            if let Some(id) = toggle {
-                self.toggle_layer_visible(id);
-            }
+        // the tools of rigging by hand along the top, the parts and the parameters on the left, the automatic rig on the right
+        egui::Panel::top("rig_toolbar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.rig_toolbar(ui, true, false, false));
+        egui::Panel::left("rig_layers").default_size(270.0).size_range(210.0..=440.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
+            picked = self.rig_left_panel(ui, &ctx, now, "rig", !view3d, false);
         });
-
         egui::Panel::right("rig_tools").default_size(330.0).size_range(280.0..=500.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("rig_right").show(ui, |ui| self.rig_side(ui, now));
         });
 
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(14, 20, 18))).show(ui, |ui| self.rig_view(ui, now, &mut picked));
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(14, 20, 18))).show(ui, |ui| {
+            if view3d {
+                self.rig_3d_center(ui, now, &mut picked);
+            } else {
+                self.rig_view(ui, now, &mut picked);
+            }
+        });
+        self.rig_tool_window(&ctx, now);
 
         if let Some((id, c, s)) = picked.filter(|p| p.0 != u64::MAX) {
             self.rig_select(id, c, s);
@@ -905,26 +889,20 @@ impl SeviathApp {
         });
     }
 
+    /// The right side: the automatic rig (2D page), or the 3D character (3D page).
     fn rig_side(&mut self, ui: &mut Ui, now: f64) {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Mode").size(12.0).color(TEXT_DIM));
-            if widgets::chip(ui, "Beginner", !self.rigs.pro).on_hover_text("Just the automatic rig and the sliders").clicked() {
-                self.rigs.pro = false;
-            }
-            if widgets::chip(ui, "Pro", self.rigs.pro).on_hover_text("Meshes, changers, glue, the uncut skin and keyforms").clicked() {
-                self.rigs.pro = true;
-            }
-        });
+        if self.rigs.bench.view3d {
+            section_title(ui, "3D character");
+            self.rig_game_section(ui, now);
+            return;
+        }
+        section_title(ui, "Automatic rig");
+        ui.label(RichText::new("Tags tell the automatic rig what each part is (Parts tab). Rigging by hand needs no tags: use the tools along the top.").size(11.5).color(TEXT_DIM));
         ui.checkbox(&mut self.rigs.hq, "Sharp curves").on_hover_text("Adds triangles where a part bends, so the picture stays sharp. Turn it off if the picture is slow to move.");
         self.rig_auto_section(ui, now);
         self.rig_quality_section(ui, now);
         self.rig_pose_section(ui, now);
-        self.rig_game_section(ui, now);
-        if self.rigs.pro {
-            self.rig_pro_sections(ui, now);
-        }
         self.rig_views_section(ui, now);
-        self.rig_sliders_section(ui, now);
     }
 
     /// Views: front, three quarters, side, back. Layers are put in views and one slider shows one at a time.
@@ -1424,9 +1402,9 @@ impl SeviathApp {
         self.rig_the_face(0.0);
     }
 
-    fn rig_pro_sections(&mut self, ui: &mut Ui, now: f64) {
-        // ---- meshes ----
-        section_title(ui, "Meshes");
+    /// Meshes: a layer cut into triangles, so it can bend (the Meshes tool of the top bar).
+    pub(super) fn rig_mesh_body(&mut self, ui: &mut Ui, now: f64) {
+        let sel = self.rigs.selected.clone();
         ui.label(RichText::new("A mesh cuts a layer into triangles, so it can bend.").size(11.5).color(TEXT_DIM));
         ui.horizontal(|ui| {
             ui.label(RichText::new("Detail").size(12.0).color(TEXT_DIM));
@@ -1436,6 +1414,10 @@ impl SeviathApp {
         ui.horizontal_wrapped(|ui| {
             if ui.add_enabled(!sel.is_empty(), egui::Button::new("Make mesh for the picked parts")).clicked() {
                 self.make_meshes(sel.clone(), now);
+            }
+            if ui.button("Mesh all parts").on_hover_text("Every layer that has paint").clicked() {
+                let ids: Vec<LayerId> = self.draw.doc.layers.iter().filter(|l| parts::is_part_layer(l) && !l.tiles.is_empty()).map(|l| l.id).collect();
+                self.make_meshes(ids, now);
             }
             if ui.button("Mesh all tagged parts").clicked() {
                 let ids: Vec<LayerId> = self.draw.doc.layers.iter().filter(|l| parts::is_part_layer(l) && l.part.is_some()).map(|l| l.id).collect();
@@ -1453,9 +1435,11 @@ impl SeviathApp {
         }
         let (nm, nt) = (self.draw.doc.rig.meshes.len(), self.draw.doc.rig.meshes.iter().map(|m| m.tris.len()).sum::<usize>());
         ui.label(RichText::new(format!("{nm} meshes, {nt} triangles. Parts without a mesh stay where they are.")).size(11.5).color(TEXT_DIM));
+    }
 
-        // ---- uncut skin ----
-        section_title(ui, "Uncut skin: the whole drawing in one piece");
+    /// The uncut skin, its bones and weights (the Skin and bones tool).
+    pub(super) fn rig_skin_body(&mut self, ui: &mut Ui, now: f64) {
+        let sel = self.rigs.selected.clone();
         ui.label(RichText::new("No cutting: one mesh over the drawing, bones on top, and weights say how much each part follows each bone.").size(11.5).color(TEXT_DIM));
         ui.horizontal(|ui| {
             ui.label(RichText::new("Detail").size(12.0).color(TEXT_DIM));
@@ -1535,121 +1519,11 @@ impl SeviathApp {
             ui.checkbox(&mut self.rigs.heat, "Show the picked bone's weights (blue little, red a lot)");
             self.rig_weight_tools(ui, now, picked_bone, &bones);
         }
+    }
 
-        // ---- changers ----
-        section_title(ui, "Changers");
-        ui.horizontal_wrapped(|ui| {
-            if ui.add_enabled(!sel.is_empty(), egui::Button::new("New Rotation changer")).on_hover_text("Turns the picked parts around a point (the middle of them to start with)").clicked() {
-                if let Some(b) = self.selection_box() {
-                    let pivot = [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0];
-                    let n = self.draw.doc.rig.changers.len() + 1;
-                    let mut new_id = 0;
-                    let selc = sel.clone();
-                    self.rig_edit("New Rotation changer", now, |r| {
-                        let id = r.add_changer(&format!("Rotation {n}"), Kind::Rotation { pivot }, None);
-                        for m in r.meshes.iter_mut().filter(|m| selc.contains(&m.layer)) {
-                            m.parent = Some(id);
-                        }
-                        new_id = id;
-                    });
-                    self.rigs.sel_changer = Some(new_id);
-                }
-            }
-            if ui.add_enabled(!sel.is_empty(), egui::Button::new("New Warp changer")).on_hover_text("A grid over the picked parts: move its points to bend them").clicked() {
-                if let Some(b) = self.selection_box() {
-                    let (cols, rows) = self.rigs.cols_rows;
-                    let n = self.draw.doc.rig.changers.len() + 1;
-                    let mut new_id = 0;
-                    let selc = sel.clone();
-                    self.rig_edit("New Warp changer", now, |r| {
-                        let id = r.add_changer(&format!("Warp {n}"), Kind::Warp { rect: b, cols, rows }, None);
-                        r.smooth.push(id);
-                        for m in r.meshes.iter_mut().filter(|m| selc.contains(&m.layer)) {
-                            m.parent = Some(id);
-                        }
-                        new_id = id;
-                    });
-                    self.rigs.sel_changer = Some(new_id);
-                }
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            if ui.add_enabled(!sel.is_empty(), egui::Button::new("New Line changer")).on_hover_text("A curve along the picked parts: they bend along it (hair strands, tails, ribbons)").clicked() {
-                if let Some(b) = self.selection_box() {
-                    let x = (b[0] + b[2]) / 2.0;
-                    let pts: Vec<[f32; 2]> = (0..5).map(|i| [x, b[1] + (b[3] - b[1]) * i as f32 / 4.0]).collect();
-                    let width = ((b[2] - b[0]) / 2.0).max(20.0);
-                    let n = self.draw.doc.rig.changers.len() + 1;
-                    let mut new_id = 0;
-                    let selc = sel.clone();
-                    self.rig_edit("New Line changer", now, |r| {
-                        let id = r.add_changer(&format!("Line {n}"), Kind::Line { pts, width }, None);
-                        for m in r.meshes.iter_mut().filter(|m| selc.contains(&m.layer)) {
-                            m.parent = Some(id);
-                        }
-                        new_id = id;
-                    });
-                    self.rigs.sel_changer = Some(new_id);
-                }
-            }
-            if ui.add_enabled(!sel.is_empty(), egui::Button::new("New Soft changer")).on_hover_text("A soft push around a point (cheeks, eyes, belly)").clicked() {
-                if let Some(b) = self.selection_box() {
-                    let center = [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0];
-                    let radius = ((b[2] - b[0]).max(b[3] - b[1]) / 2.0).max(20.0);
-                    let n = self.draw.doc.rig.changers.len() + 1;
-                    let mut new_id = 0;
-                    let selc = sel.clone();
-                    self.rig_edit("New Soft changer", now, |r| {
-                        let id = r.add_changer(&format!("Soft {n}"), Kind::Soft { center, radius }, None);
-                        for m in r.meshes.iter_mut().filter(|m| selc.contains(&m.layer)) {
-                            m.parent = Some(id);
-                        }
-                        new_id = id;
-                    });
-                    self.rigs.sel_changer = Some(new_id);
-                }
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-            let has = !sel.is_empty();
-            let b = self.selection_box();
-            let (center, left_mid) = b.map(|b| ([(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0], [b[0], (b[1] + b[3]) / 2.0])).unwrap_or(([0.0; 2], [0.0; 2]));
-            if ui.button("New Path changer").on_hover_text("Draw paths on the picture: drag a spot of a path and the picture bends like a line. Put several on one part. Works for cloth and for things that are not physics, like closing an eye.").clicked() {
-                self.rigs.mode = Mode::DrawPath;
-                self.rigs.stroke.clear();
-            }
-            if ui.add_enabled(has, egui::Button::new("New Pin changer")).on_hover_text("Pins on the picture: drag a pin and the picture follows smoothly without breaking. Pins you do not move hold it still.").clicked() {
-                if let Some(b) = b {
-                    let pts = vec![[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]];
-                    self.new_changer_kind("Pins", Kind::Pins { pts }, now);
-                    self.rigs.mode = Mode::AddPin;
-                }
-            }
-            if ui.add_enabled(has, egui::Button::new("New Move changer")).on_hover_text("Shifts the picked parts (Inochi translate)").clicked() {
-                self.new_changer_kind("Move", Kind::Move, now);
-            }
-            if ui.add_enabled(has, egui::Button::new("New Scale changer")).on_hover_text("Makes the picked parts wider or taller about their middle").clicked() {
-                self.new_changer_kind("Scale", Kind::Scale { center }, now);
-            }
-            if ui.add_enabled(has, egui::Button::new("New Flip changer")).on_hover_text("Turns the picked parts over, through flat (Live2D reflect)").clicked() {
-                self.new_changer_kind("Flip", Kind::Flip { center, vertical: false }, now);
-            }
-            if ui.add_enabled(has, egui::Button::new("New Fade changer")).on_hover_text("Makes the picked parts see-through: show or hide a part with a slider").clicked() {
-                self.new_changer_kind("Fade", Kind::Fade, now);
-            }
-            if ui.add_enabled(has, egui::Button::new("New Order changer")).on_hover_text("Moves the picked parts forward or back in the stack (draw order)").clicked() {
-                self.new_changer_kind("Order", Kind::Order, now);
-            }
-            if ui.add_enabled(has, egui::Button::new("New Wave changer")).on_hover_text("A wave runs through the picked parts: flags, seaweed, hair ends").clicked() {
-                self.new_changer_kind("Wave", Kind::Wave { center: left_mid }, now);
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Warp grid").size(12.0).color(TEXT_DIM));
-            ui.add(egui::DragValue::new(&mut self.rigs.cols_rows.0).range(1..=rig::MAX_WARP).suffix(" across"));
-            ui.add(egui::DragValue::new(&mut self.rigs.cols_rows.1).range(1..=rig::MAX_WARP).suffix(" down"));
-        });
+    /// The changers there are: pick one, put it inside another, delete it, copy it to the other side (the Changers tool).
+    pub(super) fn rig_changers_body(&mut self, ui: &mut Ui, now: f64) {
+        let sel = self.rigs.selected.clone();
         let changers: Vec<(Id, String, bool, Option<Id>)> = self.draw.doc.rig.changers.iter().map(|c| (c.id, c.name.clone(), matches!(c.kind, Kind::Rotation { .. }), c.parent)).collect();
         let mut delete: Option<Id> = None;
         let mut set_parent: Option<(Id, Option<Id>)> = None;
@@ -1745,9 +1619,11 @@ impl SeviathApp {
                 }
             }
         }
+    }
 
-        // ---- glue ----
-        section_title(ui, "Glue");
+    /// Glue between two parts (the Glue tool).
+    pub(super) fn rig_glue_body(&mut self, ui: &mut Ui, now: f64) {
+        let sel = self.rigs.selected.clone();
         ui.label(RichText::new("Keeps the seam of two parts closed when they move differently.").size(11.5).color(TEXT_DIM));
         ui.horizontal(|ui| {
             ui.label(RichText::new("Reach").size(12.0).color(TEXT_DIM));
@@ -1793,14 +1669,14 @@ impl SeviathApp {
                 }
             });
         }
-
     }
 
-    fn rig_sliders_section(&mut self, ui: &mut Ui, now: f64) {
+    /// All the sliders (parameters) of the rig: always on the left of the Rig, Physics and Animate tabs.
+    pub(super) fn rig_params_body(&mut self, ui: &mut Ui, now: f64) {
         let rig = self.draw.doc.rig.clone();
         // ---- pads: two sliders joined into one square ----
         section_title(ui, "Joined sliders");
-        ui.label(RichText::new("Two sliders joined into one square: drag inside it to move both. Orange line: the first slider. Blue line: the second. The dots are where the two lines cross (green: the original drawing, yellow: a saved shape, grey: nothing saved yet, red: where you are).").size(11.5).color(TEXT_DIM));
+        ui.label(RichText::new("Drag inside a square to move two sliders at once.").size(11.5).color(TEXT_DIM)).on_hover_text("Orange line: the first slider. Blue line: the second. The dots are where the two lines cross (green: the original drawing, yellow: a saved shape, grey: nothing saved yet, red: where you are).");
         let mut split: Option<usize> = None;
         self.rigs.pad_areas.clear();
         for (pi, pad) in rig.pads.iter().enumerate() {
@@ -1829,7 +1705,7 @@ impl SeviathApp {
             }
         }
         if rig.pads.is_empty() {
-            ui.label(RichText::new("None yet. The auto-rig makes them for the head, the eyeballs and the mouth.").size(11.5).color(TEXT_DIM));
+            ui.label(RichText::new("None yet.").size(11.5).color(TEXT_DIM));
         }
         if let Some(i) = split {
             self.rig_edit("Split a pad", now, |r| {
@@ -1875,17 +1751,11 @@ impl SeviathApp {
 
         // ---- sliders ----
         section_title(ui, "Sliders");
-        ui.label(RichText::new("The circles on a slider are its key points. Green: the original drawing. Yellow: a shape is saved there. Grey: nothing saved yet. The red dot is where the slider is.").size(11.5).color(TEXT_DIM));
-        let in_pad = |id: Id| rig.pads.iter().any(|p| p.x == id || p.y == id);
+        ui.label(RichText::new("The circles are key points.").size(11.5).color(TEXT_DIM)).on_hover_text("Green: the original drawing. Yellow: a shape is saved there. Grey: nothing saved yet. The red dot is where the slider is.");
         let params: Vec<(Id, String, f32, f32, f32)> = rig.params.iter().map(|p| (p.id, p.name.clone(), p.min, p.max, p.default)).collect();
         let mut del_param: Option<Id> = None;
-        let mut hidden = 0;
         let mut last_group = "";
         for (id, name, lo, hi, def) in &params {
-            if in_pad(*id) && !self.rigs.pro {
-                hidden += 1;
-                continue;
-            }
             let g = slider_group(name);
             if g != last_group {
                 last_group = g;
@@ -1913,9 +1783,6 @@ impl SeviathApp {
                 }
             });
         }
-        if hidden > 0 {
-            ui.label(RichText::new(format!("{hidden} sliders are inside the joined squares above. Pro mode shows them here too.")).size(11.5).color(TEXT_DIM));
-        }
         if let Some(id) = del_param {
             self.rig_edit("Delete slider", now, |r| {
                 r.params.retain(|p| p.id != id);
@@ -1937,11 +1804,11 @@ impl SeviathApp {
                 self.rigs.sel_param = Some(new_id);
             }
         });
+    }
 
-        // ---- keyforms of the picked changer and slider ----
-        if !self.rigs.pro {
-            ui.label(RichText::new("Pro mode shows the meshes, changers and keyforms behind these sliders.").size(11.5).color(TEXT_DIM));
-        } else if let Some(pid) = self.rigs.sel_param {
+    /// How the picked slider moves the picked changer: key points and shapes (the Shapes tool).
+    pub(super) fn rig_keyforms_body(&mut self, ui: &mut Ui, now: f64) {
+        if let Some(pid) = self.rigs.sel_param {
             self.rig_key_points(ui, now, pid);
             if let Some(cid) = self.rigs.sel_changer {
                 self.rig_keyforms(ui, now, cid, pid);

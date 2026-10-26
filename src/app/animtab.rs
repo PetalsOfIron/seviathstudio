@@ -259,11 +259,26 @@ impl SeviathApp {
         self.anim_export_step(&ctx);
         self.rig_render(&ctx);
 
+        let mut picked: Option<(crate::doc::LayerId, bool, bool)> = None;
+        egui::Panel::top("anim_toolbar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.rig_toolbar(ui, false, false, true));
+        egui::Panel::left("anim_parts").default_size(270.0).size_range(210.0..=440.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
+            picked = self.rig_left_panel(ui, &ctx, now, "anim", true, false);
+        });
         egui::Panel::bottom("anim_timeline").default_size(300.0).size_range(190.0..=760.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.anim_timeline_ui(ui));
         egui::Panel::right("anim_side").default_size(320.0).size_range(260.0..=480.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("anim_right").show(ui, |ui| self.anim_side_ui(ui, now));
         });
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(14, 20, 18))).show(ui, |ui| self.anim_preview(ui));
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(14, 20, 18))).show(ui, |ui| {
+            if self.rigs.bench.edit_here {
+                self.rig_view(ui, now, &mut picked);
+            } else {
+                self.anim_preview(ui);
+            }
+        });
+        self.rig_tool_window(&ctx, now);
+        if let Some((id, c, s)) = picked.filter(|p| p.0 != u64::MAX) {
+            self.rig_select(id, c, s);
+        }
         self.anim_flush(&ctx);
     }
 

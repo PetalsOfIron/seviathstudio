@@ -30,6 +30,8 @@ pub enum Kind {
     Vrm4u,
     /// OBS Studio: the installer (it brings the virtual camera).
     Obs,
+    /// Unity Capture: a second virtual camera, "Unity Video Capture" (no OBS needed).
+    UnityCapture,
 }
 
 pub struct Item {
@@ -72,6 +74,14 @@ pub fn items() -> Vec<Item> {
             warning: Some("Not connected to the app yet: for trying by hand (it needs its own Python packages and nvdiffrast, which has to be built)."),
         },
         Item { kind: Kind::Vrm4u, name: "VRM4U (VRM files in Unreal Engine)", what: "The plugin for your version of Unreal Engine, saved in Downloads. Copy its VRM4U folder into the Plugins folder of your project.", size: "70 MB", licence: "MIT", warning: None },
+        Item {
+            kind: Kind::UnityCapture,
+            name: "Unity Capture (another virtual camera)",
+            what: "A free virtual camera called Unity Video Capture that needs no OBS. It is saved in Downloads\\UnityCapture: run Install.bat inside the Install folder once (it asks to allow changes), then use Stream, Virtual camera.",
+            size: "1 MB",
+            licence: "MIT",
+            warning: None,
+        },
         Item { kind: Kind::Obs, name: "OBS Studio (virtual camera)", what: "The installer, saved in Downloads. You start it yourself; the virtual camera comes with OBS.", size: "130 MB", licence: "GPL 2", warning: None },
     ]
 }
@@ -128,6 +138,7 @@ pub fn installed(kind: Kind) -> bool {
         Kind::Hunyuan => aisetup::status().hunyuan,
         Kind::Vrm4u => unreal_versions().last().is_some_and(|v| vrm4u_folder(*v).join("Plugins").join("VRM4U").join("VRM4U.uplugin").exists()),
         Kind::Obs => obs_installed() || obs_installer().is_some(),
+        Kind::UnityCapture => crate::vcam::registered() || downloads_folder().join("UnityCapture").join("Install").join("UnityCaptureFilter64.dll").exists(),
     }
 }
 
@@ -142,6 +153,7 @@ pub fn place(kind: Kind) -> Option<PathBuf> {
         Kind::Hunyuan => Some(aisetup::root().join("Hunyuan3D-2")),
         Kind::Vrm4u => unreal_versions().last().map(|v| vrm4u_folder(*v)),
         Kind::Obs => obs_installer().or_else(|| Some(PathBuf::from("C:/Program Files/obs-studio"))),
+        Kind::UnityCapture => Some(downloads_folder().join("UnityCapture").join("Install")),
     }
 }
 
@@ -305,6 +317,30 @@ pub fn download(kind: Kind, step: &Sender<String>) -> Result<String, String> {
             let _ = std::fs::remove_dir_all(folder.join("unpacked"));
             Ok(format!("VRM4U for Unreal Engine {}.{} is in {}. Copy the VRM4U folder from its Plugins folder into the Plugins folder of your project.", v.0, v.1, folder.display()))
         }
+        Kind::UnityCapture => {
+            let folder = downloads_folder().join("UnityCapture");
+            let zip_path = folder.join("UnityCapture.zip");
+            fetch_file("https://github.com/schellingb/UnityCapture/archive/refs/heads/master.zip", &zip_path, "Unity Capture", step)?;
+            let bytes = std::fs::read(&zip_path).map_err(|e| e.to_string())?;
+            let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("The Unity Capture file is damaged: {e}"))?;
+            // only the Install folder (the filters and the scripts that register them) is wanted
+            for i in 0..zip.len() {
+                let mut f = zip.by_index(i).map_err(|e| e.to_string())?;
+                let name = f.name().map(|n| n.to_string()).unwrap_or_default();
+                let Some(rel) = name.split_once("/Install/").map(|x| x.1.to_owned()) else { continue };
+                if rel.is_empty() || f.is_dir() || rel.contains("..") {
+                    continue;
+                }
+                let to = folder.join("Install").join(&rel);
+                if let Some(d) = to.parent() {
+                    std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+                }
+                let mut out = std::fs::File::create(&to).map_err(|e| e.to_string())?;
+                std::io::copy(&mut f, &mut out).map_err(|e| e.to_string())?;
+            }
+            let _ = std::fs::remove_file(&zip_path);
+            Ok(format!("Unity Capture is in {}. Run Install.bat in the Install folder (it asks to allow changes), then use Stream, Virtual camera, Unity Capture.", folder.display()))
+        }
         Kind::Obs => {
             if let Some(p) = obs_installer() {
                 return Ok(format!("The OBS installer is already in {}. Start it yourself.", p.display()));
@@ -327,7 +363,7 @@ mod tests {
     #[test]
     fn every_download_has_a_name_a_size_and_a_licence_and_the_risky_one_says_so() {
         let list = items();
-        assert_eq!(list.len(), 8);
+        assert_eq!(list.len(), 9);
         assert!(list.iter().all(|i| !i.name.is_empty() && !i.size.is_empty() && !i.licence.is_empty()));
         let warned: Vec<Kind> = list.iter().filter(|i| i.warning.is_some()).map(|i| i.kind).collect();
         assert_eq!(warned, vec![Kind::Hunyuan, Kind::Trellis, Kind::CharacterGen], "the licence problem and the two that are not connected say so");

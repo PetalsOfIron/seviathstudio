@@ -21,7 +21,6 @@ pub const CHANNELS: &[(&str, &str, f32, f32)] = &[
     ("FacePositionX", "Head left and right (cm)", -10.0, 10.0),
     ("FacePositionY", "Head up and down (cm)", -10.0, 10.0),
     ("FacePositionZ", "Head near and far (cm)", -10.0, 10.0),
-    ("EyeOpen", "Both eyes open", 0.0, 1.0),
     ("EyeOpenLeft", "Left eye open", 0.0, 1.0),
     ("EyeOpenRight", "Right eye open", 0.0, 1.0),
     ("EyeX", "Eyes look left and right", -1.0, 1.0),

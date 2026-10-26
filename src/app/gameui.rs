@@ -549,8 +549,22 @@ impl SeviathApp {
             }
         });
         self.paint3d_controls(ui);
+    }
+
+    /// The 3D character as a picture in the middle of the Rig tab (3D page): turn it with the slider on the right, drag on it to paint when painting is on.
+    pub(super) fn game_preview_ui(&mut self, ui: &mut Ui) {
+        if self.rigs.game.model.is_none() {
+            ui.add_space(30.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("No 3D character yet").size(16.0).strong());
+                ui.label(RichText::new("Press Make the 3D character on the right.").size(12.0).color(TEXT_DIM));
+            });
+            return;
+        }
         let paint = self.rigs.game.paint3d;
-        let (pw, ph) = if paint { (420u32, 672u32) } else { (300, 480) };
+        let avail = ui.available_size();
+        let ph = ((avail.y - 12.0).clamp(480.0, 1100.0) / 8.0) as u32 * 8;
+        let pw = (ph as f32 * 0.625) as u32 / 8 * 8;
         // following the face: the head turn and the expressions come from the tracking (steps of a tenth, so the picture is not made again for
         // a change nobody can see)
         let tracked = if self.rigs.game.follow { Some(tracked_look(&self.rigs.stream.inputs)) } else { None };
