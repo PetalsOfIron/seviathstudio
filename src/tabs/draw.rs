@@ -523,6 +523,11 @@ impl DrawState {
         self.color_open = open;
     }
 
+    #[cfg(test)]
+    pub fn view_zoom_for_test(&self) -> f32 {
+        self.view.zoom
+    }
+
     /// Rotation back to 0°.
     pub fn straighten(&mut self) {
         self.view.set_angle(0.0);
@@ -795,8 +800,10 @@ impl DrawState {
         }
 
         // ---- Zoom tool: click to zoom in (Alt: out), drag sideways to scrub.
+        let mut zoom_clicked = false;
         if self.tool == Tool::Zoom && !nav_key {
             if resp.clicked() {
+                zoom_clicked = true;
                 if let Some(p) = resp.interact_pointer_pos() {
                     self.view.zoom_at(p, if alt { 1.0 / 1.5 } else { 1.5 });
                 }
@@ -810,6 +817,10 @@ impl DrawState {
         // ---- Selections, fill, move & transform, symmetry center.
         if ctx.input(|i| i.pointer.primary_pressed()) && resp.hovered() {
             self.tools.notice = None;
+        }
+        if zoom_clicked {
+            // a click that zooms is easy to take for a broken brush: say which tool is on and how to get the brush back
+            self.tools.notice = Some("The Zoom tool is on, so a click zooms in. Press B (or pick the brush on the left) to paint again.".into());
         }
         let tool_used = !nav_key && self.tool_input(&resp, &ctx);
 

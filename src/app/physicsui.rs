@@ -160,40 +160,15 @@ impl SeviathApp {
         self.phys_tick(&ctx);
         self.rig_render(&ctx);
         let mut picked: Option<(LayerId, bool, bool)> = None;
-        egui::Panel::left("phys_layers").default_size(230.0).size_range(190.0..=380.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
-            section_title(ui, "Parts");
-            ui.label(RichText::new("Pick the parts that should move. The eye hides a layer.").size(11.5).color(TEXT_DIM));
-            self.rig_visibility_buttons(ui);
-            let mut toggle: Option<LayerId> = None;
-            egui::ScrollArea::vertical().id_salt("phys_parts").show(ui, |ui| {
-                for l in self.draw.doc.layers.iter().filter(|l| parts::is_part_layer(l)) {
-                    let on = self.rigs.selected.contains(&l.id);
-                    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
-                    if on {
-                        ui.painter().rect_filled(rect, 4.0, HOVER);
-                    }
-                    let dot = l.part.map(|p| p.color()).unwrap_or(Color32::from_gray(70));
-                    ui.painter().circle_filled(rect.left_center() + vec2(34.0, 0.0), 5.0, dot);
-                    ui.painter().text(rect.left_center() + vec2(46.0, 0.0), egui::Align2::LEFT_CENTER, &l.name, egui::FontId::proportional(13.0), if l.visible { TEXT } else { TEXT_DIM });
-                    if let Some(c) = self.draw.doc.rig.physics.iter().find(|c| self.draw.doc.rig.mesh_of(l.id).and_then(|m| m.parent) == Some(c.changer)) {
-                        ui.painter().text(rect.right_center() - vec2(6.0, 0.0), egui::Align2::RIGHT_CENTER, c.kind.label(), egui::FontId::proportional(11.0), VENOM);
-                    }
-                    if super::rigtab::eye_toggle(ui, rect, l.id, l.visible) {
-                        toggle = Some(l.id);
-                    } else if resp.clicked() {
-                        let m = ctx.input(|i| i.modifiers);
-                        picked = Some((l.id, m.command || m.ctrl, m.shift));
-                    }
-                }
-            });
-            if let Some(id) = toggle {
-                self.toggle_layer_visible(id);
-            }
+        egui::Panel::top("phys_toolbar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.rig_toolbar(ui, false, true, false));
+        egui::Panel::left("phys_layers").default_size(270.0).size_range(210.0..=440.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
+            picked = self.rig_left_panel(ui, &ctx, now, "phys", true, true);
         });
         egui::Panel::right("phys_tools").default_size(330.0).size_range(280.0..=500.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("phys_right").show(ui, |ui| self.physics_side(ui, now));
         });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(14, 20, 18))).show(ui, |ui| self.rig_view(ui, now, &mut picked));
+        self.rig_tool_window(&ctx, now);
         if let Some((id, c, s)) = picked.filter(|p| p.0 != u64::MAX) {
             self.rig_select(id, c, s);
             // picking a part that has physics shows its numbers

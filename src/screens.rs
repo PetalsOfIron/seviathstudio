@@ -63,6 +63,12 @@ fn wave(from: Pos2, to: Pos2, amp: f32, n: usize) -> Vec<Pos2> {
         .collect()
 }
 
+/// Open a tool of the top bar of the Rig tab (meshes, skin, new:Warp, changers, glue, shapes) or the 3D page (3d).
+fn rig_tool(h: &mut Harness<'_, SeviathApp>, which: &str) {
+    h.state_mut().test_open_tool(which);
+    h.run_steps(3);
+}
+
 fn wheel(h: &Harness<'_, SeviathApp>, at: Pos2, lines: f32, modifiers: Modifiers) {
     h.hover_at(at);
     h.event(Event::MouseWheel { unit: MouseWheelUnit::Line, delta: Vec2::new(0.0, lines), phase: TouchPhase::Move, modifiers });
@@ -2027,9 +2033,9 @@ fn rig_tab_screens() {
         (ida, idb)
     };
     h.state_mut().test_run_action_now("tab.3");
-    h.state_mut().test_rig().pro = true;
     h.run_steps(5);
     // meshes for everything that is tagged
+    rig_tool(&mut h, "meshes");
     h.get_by_label("Mesh all tagged parts").click();
     h.run_steps(4);
     {
@@ -2040,10 +2046,12 @@ fn rig_tab_screens() {
     // a Rotation changer for the head, a slider, and the binding
     h.state_mut().test_rig().selected = vec![head];
     h.run_steps(2);
-    h.get_by_label("New Rotation changer").click();
+    rig_tool(&mut h, "new:Rotation");
+    h.get_by_label("Make the Rotation changer").click();
     h.run_steps(3);
     h.get_by_label("Add slider").click();
     h.run_steps(3);
+    rig_tool(&mut h, "shapes");
     h.get_by_label("Bind: turn with the slider").click();
     h.run_steps(3);
     let (pid, cid) = {
@@ -2071,10 +2079,12 @@ fn rig_tab_screens() {
     // a Warp changer for the arm with a keyform made from a dragged shape
     h.state_mut().test_rig().selected = vec![arm];
     h.run_steps(2);
-    h.get_by_label("New Warp changer").click();
+    rig_tool(&mut h, "new:Warp");
+    h.get_by_label("Make the Warp changer").click();
     h.run_steps(3);
     let warp = h.state_mut().test_rig().sel_changer.unwrap();
     h.state_mut().test_rig().values.set(pid, 30.0);
+    rig_tool(&mut h, "shapes");
     h.get_by_label("Edit the shape").click();
     h.run_steps(3);
     {
@@ -2082,6 +2092,7 @@ fn rig_tab_screens() {
         let n = w.len();
         w[n - 1] = [0.0, 150.0]; // the last corner goes down
     }
+    rig_tool(&mut h, "shapes");
     h.get_by_label("Save the shape at this value").click();
     h.run_steps(3);
     assert!(h.state().draw_mut_ref().doc.rig.bindings.iter().any(|b| b.changer == warp));
@@ -2184,10 +2195,10 @@ fn rig_tab_more_changers_screens() {
         (hair, cheek, left, right, head)
     };
     h.state_mut().test_run_action_now("tab.3");
-    h.state_mut().test_rig().pro = true;
     h.run_steps(4);
     h.state_mut().test_rig().selected = vec![hair, cheek, left, right, head];
     h.run_steps(2);
+    rig_tool(&mut h, "meshes");
     h.get_by_label("Make mesh for the picked parts").click();
     h.run_steps(4);
     assert_eq!(h.state().draw_mut_ref().doc.rig.meshes.len(), 5);
@@ -2200,8 +2211,10 @@ fn rig_tab_more_changers_screens() {
     // Line changer on the hair: the tip swings
     h.state_mut().test_rig().selected = vec![hair];
     h.run_steps(2);
-    h.get_by_label("New Line changer").click();
+    rig_tool(&mut h, "new:Line");
+    h.get_by_label("Make the Line changer").click();
     h.run_steps(3);
+    rig_tool(&mut h, "shapes");
     h.get_by_label("Edit the shape").click();
     h.run_steps(3);
     {
@@ -2210,6 +2223,7 @@ fn rig_tab_more_changers_screens() {
         w[4] = [200.0, 0.0];
         w[3] = [80.0, 0.0];
     }
+    rig_tool(&mut h, "shapes");
     h.get_by_label("Save the shape at this value").click();
     h.run_steps(3);
     assert!(h.state_mut().test_moved(hair) > 100.0, "the strand bends at the end of the slider");
@@ -2221,8 +2235,10 @@ fn rig_tab_more_changers_screens() {
     // Soft changer on the cheek: pushed and grown
     h.state_mut().test_rig().selected = vec![cheek];
     h.run_steps(2);
-    h.get_by_label("New Soft changer").click();
+    rig_tool(&mut h, "new:Soft");
+    h.get_by_label("Make the Soft changer").click();
     h.run_steps(3);
+    rig_tool(&mut h, "shapes");
     h.get_by_label("Edit the shape").click();
     h.run_steps(3);
     {
@@ -2230,6 +2246,7 @@ fn rig_tab_more_changers_screens() {
         w[0] = [60.0, 0.0];
     }
     h.state_mut().test_rig().soft_grow = 0.3;
+    rig_tool(&mut h, "shapes");
     h.get_by_label("Save the shape at this value").click();
     h.run_steps(3);
     assert!(h.state_mut().test_moved(cheek) > 20.0, "the cheek is pushed");
@@ -2237,6 +2254,7 @@ fn rig_tab_more_changers_screens() {
     // glue the two touching parts
     h.state_mut().test_rig().selected = vec![left, right];
     h.run_steps(2);
+    rig_tool(&mut h, "glue");
     h.get_by_label("Glue the two picked parts").click();
     h.run_steps(3);
     {
@@ -2253,13 +2271,15 @@ fn rig_tab_more_changers_screens() {
     assert_ne!(pid, pid2);
     h.state_mut().test_rig().selected = vec![head];
     h.run_steps(2);
-    h.get_by_label("New Rotation changer").click();
+    rig_tool(&mut h, "new:Rotation");
+    h.get_by_label("Make the Rotation changer").click();
     h.run_steps(3);
     h.state_mut().test_rig().sel_param = Some(pid);
     h.state_mut().test_rig().sel_param2 = Some(pid2);
     h.state_mut().test_rig().values.set(pid, 30.0);
     h.state_mut().test_rig().values.set(pid2, 30.0);
     h.run_steps(3);
+    rig_tool(&mut h, "shapes");
     h.get_by_label("Set the turn at these two values").click();
     h.run_steps(3);
     {
@@ -2313,8 +2333,8 @@ fn rig_tab_uncut_skin_screens() {
         d.doc.mark_all_dirty();
     }
     h.state_mut().test_run_action_now("tab.3");
-    h.state_mut().test_rig().pro = true;
     h.run_steps(4);
+    rig_tool(&mut h, "skin");
     h.get_by_label("Make one mesh of the drawing").click();
     h.run_steps(5);
     {
@@ -2335,6 +2355,7 @@ fn rig_tab_uncut_skin_screens() {
         assert_eq!(rig.skin.as_ref().unwrap().bones.len(), 2);
         assert_eq!(rig.changer(arm).unwrap().parent, Some(spine), "the arm bone sits inside the spine bone");
     }
+    rig_tool(&mut h, "skin");
     h.get_by_label("Weights from the bones").click();
     h.run_steps(4);
     {
@@ -2345,11 +2366,13 @@ fn rig_tab_uncut_skin_screens() {
         assert!(w[0] > 0.9, "the body follows the spine: {w:?}");
     }
     // a slider for each bone
+    rig_tool(&mut h, "skin");
     h.get_by_label("Slider for this bone").click();
     h.run_steps(3);
     let arm_slider = h.state_mut().test_rig().sel_param.unwrap();
     h.state_mut().test_rig().sel_changer = Some(spine);
     h.run_steps(2);
+    rig_tool(&mut h, "skin");
     h.get_by_label("Slider for this bone").click();
     h.run_steps(3);
     let spine_slider = h.state_mut().test_rig().sel_param.unwrap();
@@ -2404,8 +2427,8 @@ fn rig_tab_manual_weights_screens() {
         d.doc.mark_all_dirty();
     }
     h.state_mut().test_run_action_now("tab.3");
-    h.state_mut().test_rig().pro = true;
     h.run_steps(4);
+    rig_tool(&mut h, "skin");
     h.get_by_label("Make one mesh of the drawing").click();
     h.run_steps(4);
     h.state_mut().test_add_bone([1500.0, 2600.0], [1500.0, 1500.0]);
@@ -2428,16 +2451,20 @@ fn rig_tab_manual_weights_screens() {
     h.state_mut().test_rig().sel_changer = Some(arm_bone);
     h.state_mut().test_rig().sel_changer = Some(spine);
     h.run_steps(2);
+    rig_tool(&mut h, "skin");
     h.get_by_label("Flood the whole bone").click();
     h.run_steps(3);
     assert!(weight(&h, 0, 1000.0, 3500.0) > 0.4, "flooded everywhere (to the strength)");
+    rig_tool(&mut h, "skin");
     h.get_by_label("Clear this bone").click();
     h.run_steps(3);
     assert_eq!(weight(&h, 0, 1000.0, 3500.0), 0.0);
     h.state_mut().test_rig().sel_changer = Some(arm_bone);
     h.run_steps(2);
+    rig_tool(&mut h, "skin");
     h.get_by_label("Clear this bone").click();
     h.run_steps(3);
+    rig_tool(&mut h, "skin");
     h.get_by_label("Give the bone the parts with this tag").click();
     h.run_steps(3);
     assert!(weight(&h, 1, 2100.0, 1625.0) > 0.95, "the arm layer's paint is the arm bone's weight");
@@ -2446,10 +2473,12 @@ fn rig_tab_manual_weights_screens() {
     h.state_mut().test_rig().mirror_to = Some(spine);
     h.state_mut().test_rig().mirror_axis = 1500.0;
     h.run_steps(2);
+    rig_tool(&mut h, "skin");
     h.get_by_label("Mirror").click();
     h.run_steps(3);
     assert!(weight(&h, 0, 900.0, 1625.0) > 0.9, "the arm's weights are on the other side now: {}", weight(&h, 0, 900.0, 1625.0));
     // painting shows the picture at rest, even with a slider moved
+    rig_tool(&mut h, "skin");
     h.get_by_label("Slider for this bone").click();
     h.run_steps(3);
     let slider = h.state_mut().test_rig().sel_param.unwrap();
@@ -2509,7 +2538,6 @@ fn rig_tab_auto_face_screens() {
     h.state_mut().test_run_action_now("tab.3");
     h.run_steps(5);
     // beginner mode: only the automatic rig and the sliders are shown
-    assert!(h.query_by_label("Mesh all tagged parts").is_none(), "pro things are hidden in beginner mode");
     h.get_by_label("This is a face").click();
     h.run_steps(5);
     {
@@ -3061,7 +3089,6 @@ fn new_changers_screens() {
     }
     h.state_mut().test_run_action_now("tab.3");
     h.run_steps(5);
-    h.state_mut().test_rig().pro = true;
     h.state_mut().test_rig().selected = vec![a, b];
     h.run_steps(2);
     {
@@ -3076,8 +3103,9 @@ fn new_changers_screens() {
     // the buttons make the changers
     h.state_mut().test_rig().selected = vec![a];
     h.run_steps(2);
-    for label in ["New Pin changer", "New Move changer", "New Scale changer", "New Flip changer", "New Fade changer", "New Order changer", "New Wave changer"] {
-        h.get_by_label(label).click();
+    for kind in ["Pins", "Move", "Scale", "Flip", "Fade", "Order", "Wave"] {
+        rig_tool(&mut h, &format!("new:{kind}"));
+        h.get_by_label(&format!("Make the {kind} changer")).click();
         h.run_steps(3);
     }
     {
@@ -3162,7 +3190,6 @@ fn path_turns_and_turn_the_whole_shape_screens() {
     }
     h.state_mut().test_run_action_now("tab.3");
     h.run_steps(5);
-    h.state_mut().test_rig().pro = true;
     h.state_mut().test_rig_edit(|r| {
         let id = r.fresh_id();
         r.meshes.push(crate::rig::ArtMesh { id, layer, verts: vec![[900.0, 800.0], [1300.0, 800.0], [1300.0, 1300.0], [900.0, 1300.0]], tris: vec![[0, 1, 2], [0, 2, 3]], parent: None });
@@ -3179,17 +3206,20 @@ fn path_turns_and_turn_the_whole_shape_screens() {
     h.state_mut().test_rig().sel_param = Some(curl);
     h.state_mut().test_rig().values.set(curl, 1.0);
     h.run_steps(3);
+    rig_tool(&mut h, "shapes");
     h.get_by_label("Edit the shape").click();
     h.run_steps(3);
     assert!(h.state_mut().test_rig().test_warp_edit().is_some());
     // turn the whole shape: the points go round
     let before = h.state_mut().test_rig().test_warp_edit().unwrap().clone();
+    rig_tool(&mut h, "shapes");
     h.get_by_label("the whole shape").click();
     h.run_steps(3);
     let after = h.state_mut().test_rig().test_warp_edit().unwrap().clone();
     assert_ne!(before, after, "the points moved round");
     save(&mut h, "path_turn_1_edit");
     // saved: the shape has turns, and the picture shows them
+    rig_tool(&mut h, "shapes");
     h.get_by_label("Save the shape at this value").click();
     h.run_steps(3);
     let rig = h.state().draw_mut_ref().doc.rig.clone();
@@ -3209,6 +3239,7 @@ fn rig_for_games_screens() {
     h.state_mut().test_run_action_now("tab.3");
     h.run_steps(5);
     h.state_mut().test_game().author = "Me".into();
+    rig_tool(&mut h, "3d");
     h.get_by_label("Make the 3D character").click();
     h.run_steps(4);
     assert!(h.state_mut().test_game().model.is_some());
@@ -3226,6 +3257,7 @@ fn rig_for_games_screens() {
     // with no meshes there is nothing to build
     h.state_mut().test_game().model = None;
     h.state_mut().test_rig_edit(|r| r.meshes.clear());
+    rig_tool(&mut h, "3d");
     h.get_by_label("Make the 3D character").click();
     h.run_steps(3);
     assert!(h.state_mut().test_game().model.is_none());
@@ -3247,6 +3279,7 @@ fn uncut_face_points_screens() {
     h.state_mut().draw_mut().replace_document(doc);
     h.state_mut().test_run_action_now("tab.3");
     h.run_steps(5);
+    rig_tool(&mut h, "3d");
     h.get_by_label("Make the 3D character").click();
     h.run_steps(4);
     assert!(h.state_mut().test_game().model.is_some());
@@ -3259,6 +3292,7 @@ fn uncut_face_points_screens() {
     save(&mut h, "game_3_click_the_face");
     // the AI finder is there, and without Python packages it says so plainly instead of failing
     h.state_mut().test_game().ai_python = "definitely-not-python-xyz".into();
+    rig_tool(&mut h, "3d");
     h.get_by_label("Find the face with AI").click();
     h.run_steps(30);
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -3335,7 +3369,8 @@ fn missing_ai_files_show_the_download_button_screens() {
     h.state_mut().draw_mut().replace_document(doc);
     h.state_mut().test_run_action_now("tab.3");
     h.run_steps(5);
-    // the card is there and the download button waits for the licences
+    // the card is on the 3D page; the download button waits for the licences
+    rig_tool(&mut h, "3d");
     h.get_by_label("The AI files are missing");
     h.get_by_label("Download the AI files");
     assert!(!h.state_mut().test_game().setup_agree);
@@ -4063,4 +4098,77 @@ fn small_window_screens_of_the_new_tabs() {
         h.run_steps(5);
         save(&mut h, name);
     }
+}
+
+/// Changing the brush size with its slider must leave the Brush tool on: a click or a stroke on the page paints.
+#[test]
+fn after_the_size_slider_is_used_the_brush_still_paints_and_does_not_zoom() {
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    let before = h.state().draw_mut_ref().view_zoom_for_test();
+    // the size slider of the brush panel: click it, then use its keys
+    let sliders: Vec<_> = h.get_all_by_role(eframe::egui::accesskit::Role::Slider).collect();
+    eprintln!("sliders in the Draw tab: {}", sliders.len());
+    let size_slider = sliders.into_iter().next();
+    if let Some(s) = size_slider {
+        s.click();
+        h.run_steps(2);
+    }
+    h.key_press(Key::ArrowRight);
+    h.key_press(Key::ArrowRight);
+    h.run_steps(2);
+    eprintln!("tool after the slider: {:?}", h.state().draw_mut_ref().tool);
+    stroke(&mut h, &wave(pos2(520.0, 300.0), pos2(900.0, 300.0), 30.0, 30));
+    h.run_steps(2);
+    assert_eq!(format!("{:?}", h.state().draw_mut_ref().tool), "Brush");
+    assert_eq!(h.state().draw_mut_ref().view_zoom_for_test(), before, "the page did not zoom");
+    assert!(h.state().history().entries.iter().any(|e| e.label.starts_with("Brush") || e.label.starts_with("Stroke") || e.label.starts_with("Draw")), "a stroke was made: {:?}", h.state().history().entries.iter().map(|e| e.label.clone()).collect::<Vec<_>>());
+}
+
+/// The workbench: the tools along the top, the parts and the parameters on the left, the automatic rig on the right, in the Rig, Physics and
+/// Animate tabs, and the 3D character on a page of its own.
+#[test]
+fn the_rig_workbench_is_the_same_in_the_rig_physics_and_animate_tabs() {
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    let first = h.state().draw_mut_ref().doc.layers.iter().find(|l| l.kind == crate::doc::LayerKind::Raster && !l.tiles.is_empty()).map(|l| l.id).unwrap();
+    // the Rig tab: the tools on top, a tool window open, no tags needed
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    h.state_mut().test_rig().selected = vec![first];
+    rig_tool(&mut h, "new:Warp");
+    h.get_by_label("Make the Warp changer");
+    h.get_by_label("Parameters");
+    h.get_by_label("Automatic rig");
+    save(&mut h, "workbench_1_rig");
+    h.get_by_label("Make the Warp changer").click();
+    h.run_steps(4);
+    assert!(h.state().draw_mut_ref().doc.rig.changers.iter().any(|c| matches!(c.kind, crate::rig::Kind::Warp { .. })), "the warp changer is made by the window");
+    // the Physics tab has the same tools and the physics window
+    h.state_mut().test_run_action_now("tab.4");
+    h.run_steps(5);
+    rig_tool(&mut h, "check");
+    h.get_by_label("Check the physics");
+    h.get_by_label("Parameters");
+    save(&mut h, "workbench_2_physics");
+    // the Animate tab too, and the rig can be edited on the picture there
+    h.state_mut().test_run_action_now("tab.5");
+    h.run_steps(5);
+    h.state_mut().test_open_tool("changers");
+    h.state_mut().test_rig().bench.edit_here = true;
+    h.run_steps(4);
+    h.get_by_label("Parameters");
+    save(&mut h, "workbench_3_animate");
+    // the 3D character is its own page
+    h.state_mut().test_run_action_now("tab.3");
+    rig_tool(&mut h, "3d");
+    h.get_by_label("Make the 3D character");
+    assert!(h.query_by_label("Automatic rig").is_none(), "the automatic rig is not on the 3D page");
+    save(&mut h, "workbench_4_3d");
 }

@@ -45,6 +45,15 @@ pub struct StreamUi {
     pub add_param: Option<Id>,
     pub add_input: usize,
     pub bg: u8,
+    /// The second virtual camera (Unity Capture): the sender while it is on, and how it is set.
+    pub ucap: Option<crate::vcam::Sender>,
+    pub ucap_upside: bool,
+    pub ucap_alpha: bool,
+    pub ucap_last: f64,
+    pub ucap_status: String,
+    pub ucap_registered: Option<bool>,
+    /// The background of the Stream tab when it is a colour of your own (bg 4).
+    pub bg_color: Color32,
     /// Where keys, pad buttons and MIDI notes come from, and which expressions are on.
     pub hub: Option<crate::hotkeys::Hub>,
     pub expr: crate::expressions::ExprState,
@@ -109,6 +118,13 @@ impl Default for StreamUi {
             add_param: None,
             add_input: 0,
             bg: 0,
+            ucap: None,
+            ucap_upside: true,
+            ucap_alpha: false,
+            ucap_last: 0.0,
+            ucap_status: String::new(),
+            ucap_registered: None,
+            bg_color: Color32::from_rgb(40, 60, 90),
             hub: None,
             expr: Default::default(),
             new_expr: String::new(),
@@ -176,6 +192,7 @@ impl SeviathApp {
 
     fn stream_bg(&self) -> Color32 {
         match self.rigs.stream.bg {
+            4 => self.rigs.stream.bg_color,
             1 => Color32::from_rgb(0, 177, 64),
             2 => Color32::from_rgb(240, 240, 240),
             3 => Color32::from_rgb(20, 20, 24),
@@ -680,6 +697,41 @@ impl SeviathApp {
         if let Some(m) = &self.rigs.stream.vcam_message {
             ui.label(RichText::new(m).size(11.5).color(TEXT_DIM));
         }
+        self.stream_unity_capture_ui(ui);
+    }
+
+    /// The second virtual camera: Unity Capture (no OBS needed).
+    fn stream_unity_capture_ui(&mut self, ui: &mut Ui) {
+        ui.add_space(6.0);
+        ui.label(RichText::new("Another virtual camera: Unity Capture").strong());
+        ui.label(RichText::new("A free camera called Unity Video Capture (MIT licence) that works without OBS. It is installed once, then this program sends the model to it.").size(11.5).color(TEXT_DIM));
+        let registered = *self.rigs.stream.ucap_registered.get_or_insert_with(crate::vcam::registered);
+        if !registered {
+            ui.label(RichText::new("It is not installed on this computer yet.").size(11.5).color(GOLD));
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Download it").on_hover_text("Opens File, Downloads: press Download next to Unity Capture").clicked() {
+                    self.open_downloads();
+                }
+                if ui.button("Check again").on_hover_text("After running Install.bat in the Install folder").clicked() {
+                    self.rigs.stream.ucap_registered = None;
+                }
+            });
+            ui.label(RichText::new("After the download: open Downloads, UnityCapture, Install and run Install.bat (it asks to allow changes), then press Check again.").size(11.0).color(TEXT_DIM));
+            return;
+        }
+        let on = self.rigs.stream.ucap.is_some();
+        ui.horizontal_wrapped(|ui| {
+            if widgets::chip(ui, "Send the model to Unity Video Capture", on).clicked() {
+                self.rigs.stream.ucap = if on { None } else { Some(crate::vcam::Sender::new(0)) };
+                self.rigs.stream.ucap_status.clear();
+            }
+            ui.checkbox(&mut self.rigs.stream.ucap_upside, "Upside down").on_hover_text("The camera wants the rows from the bottom. Turn this off if the picture comes out upside down in the other program");
+            ui.checkbox(&mut self.rigs.stream.ucap_alpha, "See-through").on_hover_text("For programs that take a see-through camera (OBS does). Others show black behind the model; leave it off and the colour chosen above is put behind it");
+        });
+        if on {
+            let msg = if self.rigs.stream.ucap_status.is_empty() { "Waiting for a program to use the camera: pick Unity Video Capture in Discord, Zoom, a browser or OBS." } else { self.rigs.stream.ucap_status.as_str() };
+            ui.label(RichText::new(msg).size(11.5).color(TEXT_DIM));
+        }
     }
 
     fn stream_link_ui(&mut self, ui: &mut Ui) {
@@ -910,6 +962,52 @@ impl SeviathApp {
         });
     }
 
+    /// What follows your face, chosen in one place under Calibrate: the camera of this computer (MediaPipe), or an app that sends it.
+    fn stream_tracker_picker(&mut self, ui: &mut Ui) {
+        let current = self.rigs.stream.sources.iter().position(|s| s.enabled);
+        let names: Vec<String> = self
+            .rigs
+            .stream
+            .sources
+            .iter()
+            .map(|s| match s.protocol {
+                None => "Camera of this computer (MediaPipe)".to_string(),
+                Some(_) => s.label.to_string(),
+            })
+            .collect();
+        let name_of = |i: usize| -> String { names[i].clone() };
+        ui.label(RichText::new("Follow the face with").size(12.0).color(TEXT_DIM));
+        ui.horizontal(|ui| {
+            let mut pick: Option<Option<usize>> = None;
+            egui::ComboBox::from_id_salt("stream_tracker").selected_text(current.map(&name_of).unwrap_or_else(|| "nothing (it blinks by itself)".into())).width(240.0).show_ui(ui, |ui| {
+                if ui.selectable_label(current.is_none(), "nothing (it blinks by itself)").clicked() {
+                    pick = Some(None);
+                }
+                for i in 0..self.rigs.stream.sources.len() {
+                    if ui.selectable_label(current == Some(i), name_of(i)).clicked() {
+                        pick = Some(Some(i));
+                    }
+                }
+            });
+            if let Some(p) = pick {
+                // one tracker at a time here; the list on the left can still mix several
+                for i in 0..self.rigs.stream.sources.len() {
+                    if Some(i) != p && self.rigs.stream.sources[i].enabled {
+                        self.stream_set_source(i, false);
+                    }
+                }
+                if let Some(i) = p {
+                    if self.rigs.stream.sources[i].protocol.is_none() && !crate::aisetup::tracker_ready() {
+                        self.rigs.stream.sources[i].error = Some("The camera tracking files are missing: File, Downloads, Tracking models and the AI files card in the Rig tab.".into());
+                    } else {
+                        self.stream_set_source(i, true);
+                    }
+                }
+            }
+        });
+        ui.label(RichText::new("Every tracker gives the same numbers (the turn of the head, the eyes, the mouth, the brows), so they all move 2D and 3D characters alike.").size(11.0).color(TEXT_DIM));
+    }
+
     fn stream_mapping_ui(&mut self, ui: &mut Ui) {
         let rig = self.draw.doc.rig.clone();
         section_title(ui, "Behaviour");
@@ -934,7 +1032,9 @@ impl SeviathApp {
                 self.rigs.stream.message = Some(format!("{} sliders are moved by the face now.", m.maps.len()));
             }
         });
-        section_title(ui, "Sliders moved by the face");
+        self.stream_tracker_picker(ui);
+        egui::CollapsingHeader::new(RichText::new("Advanced: which slider follows what").size(13.0).strong()).id_salt("stream_mapping_adv").default_open(false).show(ui, |ui| {
+        ui.label(RichText::new("Make the mapping does this for you. Here you can change it: every line says which slider moves with which part of your face.").size(11.5).color(TEXT_DIM));
         if m.maps.is_empty() {
             ui.label(RichText::new("None yet. Press Make the mapping, or add one below.").size(11.5).color(TEXT_DIM));
         }
@@ -1026,6 +1126,7 @@ impl SeviathApp {
                     m.maps.push(Map { param: id, input, in_lo, in_hi, out_lo: lo, out_hi: hi, clamp: true, smoothing: 8.0, invert: false });
                 }
             }
+        });
         });
         if m != rig.tracking {
             let now = ui.ctx().input(|i| i.time);
@@ -1248,6 +1349,12 @@ impl SeviathApp {
                     self.rigs.stream.bg = i as u8;
                 }
             }
+            ui.label(RichText::new("or any colour").size(11.5).color(TEXT_DIM));
+            let mut c = self.rigs.stream.bg_color;
+            if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
+                self.rigs.stream.bg_color = c;
+                self.rigs.stream.bg = 4;
+            }
         });
         // the window with a see-through background
         ui.horizontal_wrapped(|ui| {
@@ -1330,6 +1437,25 @@ impl SeviathApp {
                         self.rigs.stream.message = Some(format!("The clip stopped: {e}"));
                     }
                 }
+            }
+            ctx.request_repaint();
+        }
+        // the second virtual camera
+        if self.rigs.stream.ucap.is_some() && now - self.rigs.stream.ucap_last >= 1.0 / self.settings.stream_fps.clamp(5, 60) as f64 {
+            self.rigs.stream.ucap_last = now;
+            let (w, h) = (self.draw.doc.w, self.draw.doc.h);
+            let k = (self.rigs.stream.server_side.clamp(256, 1080) as f32 / w.max(h) as f32).min(1.0);
+            // an even size, as cameras like it
+            let size = (((w as f32 * k) as u32 / 2 * 2).max(8), ((h as f32 * k) as u32 / 2 * 2).max(8));
+            let paper = if self.rigs.stream.ucap_alpha { None } else { Some(self.stream_bg()) };
+            if let Some(img) = self.rig_still(size, paper) {
+                let upside = self.rigs.stream.ucap_upside;
+                let sent = self.rigs.stream.ucap.as_mut().map(|s| s.send(&img, upside));
+                self.rigs.stream.ucap_status = match sent {
+                    Some(crate::vcam::Sent::Delivered) | Some(crate::vcam::Sent::Skipped) => "Sending the model: a program is using the camera.".into(),
+                    Some(crate::vcam::Sent::TooBig) => "The picture is too big for the camera (more than 4K).".into(),
+                    _ => String::new(),
+                };
             }
             ctx.request_repaint();
         }
