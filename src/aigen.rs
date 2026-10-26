@@ -99,6 +99,7 @@ pub struct AssetRequest {
     pub texture: u32,
     pub detail: u32,
     pub pivot_bottom: bool,
+    pub normal_map: bool,
 }
 
 pub fn asset_args(r: &AssetRequest, png: &Path, out: &Path, repo: &Path) -> Vec<String> {
@@ -119,6 +120,8 @@ pub fn asset_args(r: &AssetRequest, png: &Path, out: &Path, repo: &Path) -> Vec<
         r.detail.clamp(128, 384).to_string(),
         "--pivot".into(),
         if r.pivot_bottom { "bottom" } else { "centre" }.into(),
+        "--normal-map".into(),
+        if r.normal_map { "1" } else { "0" }.into(),
     ];
     let model = crate::aisetup::triposr_model_dir();
     if model.join("model.ckpt").exists() {
@@ -196,7 +199,7 @@ mod tests {
 
     #[test]
     fn the_asset_request_becomes_helper_arguments_inside_safe_limits() {
-        let r = AssetRequest { height_m: 0.0, triangles: 5, texture: 100_000, detail: 9999, pivot_bottom: false };
+        let r = AssetRequest { height_m: 0.0, triangles: 5, texture: 100_000, detail: 9999, pivot_bottom: false, normal_map: true };
         let a = asset_args(&r, Path::new("in.png"), Path::new("out.glb"), Path::new("repo"));
         let at = |k: &str| a.iter().position(|x| x == k).map(|i| a[i + 1].clone());
         assert_eq!(at("--faces").as_deref(), Some("200"));
@@ -204,5 +207,6 @@ mod tests {
         assert_eq!(at("--resolution").as_deref(), Some("384"));
         assert_eq!(at("--pivot").as_deref(), Some("centre"));
         assert_eq!(at("--height").as_deref(), Some("0.010"));
+        assert_eq!(at("--normal-map").as_deref(), Some("1"));
     }
 }

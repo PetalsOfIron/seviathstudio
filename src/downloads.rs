@@ -16,13 +16,17 @@ use crate::aisetup;
 pub enum Kind {
     /// The face, body and hand models of the camera tracking (MediaPipe).
     TrackerModels,
+    /// Everything the Generate tab needs, with one button.
+    Everything,
     /// TripoSR: the code and the model that make a 3D shape from a picture.
     TripoSr,
+    /// The picture AI: Stable Diffusion XL and its pose model.
+    PictureAi,
     /// UniRig: the models that find a skeleton and skin weights (not used by the app yet).
     UniRig,
     /// TRELLIS: a 3D shape with colours from a picture (MIT). Not connected to the app yet.
     Trellis,
-    /// CharacterGen: a 3D anime character in an A pose from one picture (Apache 2.0). Not connected to the app yet.
+    /// CharacterGen: a 3D anime character in an A pose from one picture (Apache 2.0): the code, the models, its own Python and the graphics part.
     CharacterGen,
     /// VRM4U: the plugin that opens a VRM file in Unreal Engine.
     Vrm4u,
@@ -44,8 +48,17 @@ pub struct Item {
 
 pub fn items() -> Vec<Item> {
     vec![
+        Item {
+            kind: Kind::Everything,
+            name: "Everything for the Generate tab (one button)",
+            what: "The base AI files, TripoSR, the picture AI and CharacterGen, one after the other, and what is there already is kept. It needs Python 3.10 to 3.12, an NVIDIA graphics card and about 45 GB of free space, and it takes a long while. The Visual Studio 2022 Build Tools are installed too if they are missing (Windows asks to allow it). Everything is free.",
+            size: "about 45 GB",
+            licence: "see each item below",
+            warning: None,
+        },
         Item { kind: Kind::TrackerModels, name: "Tracking models (MediaPipe)", what: "The face, body and hand models for the camera tracking.", size: "20 MB", licence: "Apache 2.0", warning: None },
         Item { kind: Kind::TripoSr, name: "TripoSR (3D shape from a picture)", what: "Its code and its model. Needs the Python files of the AI helpers (File, Rig tab, Rig for games).", size: "1.7 GB", licence: "MIT", warning: None },
+        Item { kind: Kind::PictureAi, name: "Picture AI (Stable Diffusion XL and the pose model)", what: "Makes the pictures of the Generate tab from a text. Needs the AI files (the first card of the Rig tab) to be installed first.", size: "9.5 GB", licence: "CreativeML Open RAIL++-M, Apache 2.0", warning: None },
         Item { kind: Kind::UniRig, name: "UniRig models (skeleton and skin weights)", what: "Not used by the app yet. Needs about 16 GB of video memory to run comfortably.", size: "5.5 GB", licence: "MIT", warning: None },
         Item {
             kind: Kind::Trellis,
@@ -58,10 +71,10 @@ pub fn items() -> Vec<Item> {
         Item {
             kind: Kind::CharacterGen,
             name: "CharacterGen (anime character in an A pose)",
-            what: "Makes views of an anime character in an A pose from one picture, and a 3D model from them: made for characters that are rigged afterwards.",
-            size: "14 GB",
+            what: "Makes views of an anime character in an A pose from one picture, and a 3D model from them: made for characters that are rigged afterwards. This installs all of it: its code, its models, its own Python environment, nvdiffrast, and Stable Diffusion 2.1 for it.",
+            size: "about 25 GB",
             licence: "Apache 2.0",
-            warning: Some("This downloads the models only. CharacterGen also needs its code (github.com/zjp-shadow/CharacterGen, in the AI folder as CharacterGen-code), its own Python environment (CG-venv with torch 2.1) and nvdiffrast built with the Visual Studio 2022 Build Tools. When all is there, it appears as a Shape AI in the Generate tab."),
+            warning: Some("Takes a long while and installs the Visual Studio 2022 Build Tools if they are missing (Windows asks to allow it): nvdiffrast, the graphics part, is built with them. When it is done, CharacterGen is a Shape AI in the Generate tab."),
         },
         Item { kind: Kind::Vrm4u, name: "VRM4U (VRM files in Unreal Engine)", what: "The plugin for your version of Unreal Engine, saved in Downloads. Copy its VRM4U folder into the Plugins folder of your project.", size: "70 MB", licence: "MIT", warning: None },
         Item {
@@ -121,10 +134,12 @@ fn unirig_files() -> [PathBuf; 2] {
 pub fn installed(kind: Kind) -> bool {
     match kind {
         Kind::TrackerModels => aisetup::tracker_model().exists() && aisetup::pose_model().exists() && aisetup::hand_model().exists(),
+        Kind::Everything => installed(Kind::TrackerModels) && installed(Kind::TripoSr) && installed(Kind::PictureAi) && installed(Kind::CharacterGen),
         Kind::TripoSr => aisetup::status().triposr,
+        Kind::PictureAi => crate::setupall::picture_ready(),
         Kind::UniRig => unirig_files().iter().all(|p| p.exists()),
         Kind::Trellis => aisetup::root().join("models").join("TRELLIS-image-large").join("ckpts").join("slat_flow_img_dit_L_64l8p2_fp16.safetensors").exists(),
-        Kind::CharacterGen => aisetup::root().join("models").join("CharacterGen").join("3D_Stage").join("models").join("lrm.ckpt").exists(),
+        Kind::CharacterGen => aisetup::status().charactergen,
         Kind::Vrm4u => unreal_versions().last().is_some_and(|v| vrm4u_folder(*v).join("Plugins").join("VRM4U").join("VRM4U.uplugin").exists()),
         Kind::Obs => obs_installed() || obs_installer().is_some(),
         Kind::UnityCapture => crate::vcam::registered() || downloads_folder().join("UnityCapture").join("Install").join("UnityCaptureFilter64.dll").exists(),
@@ -135,10 +150,12 @@ pub fn installed(kind: Kind) -> bool {
 pub fn place(kind: Kind) -> Option<PathBuf> {
     match kind {
         Kind::TrackerModels => Some(aisetup::root().join("models")),
+        Kind::Everything => Some(aisetup::root()),
         Kind::TripoSr => Some(aisetup::triposr_model_dir()),
+        Kind::PictureAi => Some(aisetup::root()),
         Kind::UniRig => Some(aisetup::root().join("models").join("UniRig")),
         Kind::Trellis => Some(aisetup::root().join("models").join("TRELLIS-image-large")),
-        Kind::CharacterGen => Some(aisetup::root().join("models").join("CharacterGen")),
+        Kind::CharacterGen => Some(crate::setupall::charactergen_folder()),
         Kind::Vrm4u => unreal_versions().last().map(|v| vrm4u_folder(*v)),
         Kind::Obs => obs_installer().or_else(|| Some(PathBuf::from("C:/Program Files/obs-studio"))),
         Kind::UnityCapture => Some(downloads_folder().join("UnityCapture").join("Install")),
@@ -254,6 +271,11 @@ pub fn download(kind: Kind, step: &Sender<String>) -> Result<String, String> {
             }
             Ok(format!("The tracking models are in {}.", root.join("models").display()))
         }
+        Kind::Everything => crate::setupall::install_everything(step),
+        Kind::PictureAi => {
+            crate::setupall::fetch_picture_models(step)?;
+            Ok("The picture AI is in the cache of Hugging Face on this computer.".into())
+        }
         Kind::TripoSr => {
             aisetup::fetch_triposr(step)?;
             Ok(format!("TripoSR is in {}. It also needs the Python files of the AI helpers (the card in the Rig tab).", root.display()))
@@ -274,9 +296,8 @@ pub fn download(kind: Kind, step: &Sender<String>) -> Result<String, String> {
             Ok(format!("The TRELLIS models are in {}. The code (github.com/microsoft/TRELLIS) is not downloaded: it is for trying by hand.", dest.display()))
         }
         Kind::CharacterGen => {
-            let dest = root.join("models").join("CharacterGen");
-            fetch_hf_repo("zjpshadow/CharacterGen", &["2D_Stage/", "3D_Stage/"], &dest, step)?;
-            Ok(format!("The CharacterGen models are in {}. The code (github.com/zjp-shadow/CharacterGen) is not downloaded: it is for trying by hand.", dest.display()))
+            crate::setupall::setup_charactergen(step)?;
+            Ok(format!("CharacterGen is in {}. It is a Shape AI in the Generate tab now.", crate::setupall::charactergen_folder().display()))
         }
         Kind::Vrm4u => {
             let v = *unreal_versions().last().ok_or("Unreal Engine was not found in Program Files, Epic Games. Install it with the Epic Games Launcher first.")?;
@@ -347,7 +368,7 @@ mod tests {
     #[test]
     fn every_download_has_a_name_a_size_and_a_licence_and_the_risky_one_says_so() {
         let list = items();
-        assert_eq!(list.len(), 8);
+        assert_eq!(list.len(), 10);
         assert!(list.iter().all(|i| !i.name.is_empty() && !i.size.is_empty() && !i.licence.is_empty()));
         let warned: Vec<Kind> = list.iter().filter(|i| i.warning.is_some()).map(|i| i.kind).collect();
         assert_eq!(warned, vec![Kind::Trellis, Kind::CharacterGen], "the one that is not connected and the one that needs more set-up say so");

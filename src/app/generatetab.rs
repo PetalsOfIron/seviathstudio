@@ -12,7 +12,7 @@ use image::RgbaImage;
 
 use super::SeviathApp;
 use crate::aigen::{AssetRequest, PictureRequest, generate_pictures, make_asset};
-use crate::assetview::AssetMesh;
+use crate::assetview::{AssetMesh, View};
 use crate::generate::*;
 use crate::theme::*;
 use crate::vrm::export::Format;
@@ -74,7 +74,9 @@ pub struct GenerateUi {
     /// How the model is turned (yaw, pitch) and whether the triangles show.
     pub view: (f32, f32),
     pub wire: bool,
-    view_tex: Option<((i32, i32, bool, u64), TextureHandle)>,
+    /// Colours, the directions of the surface, or depth.
+    pub view_mode: View,
+    view_tex: Option<((i32, i32, bool, u64, View), TextureHandle)>,
     made: u64,
     pub message: Option<String>,
     /// Pictures, then the 3D model, one after the other without a click in between.
@@ -300,7 +302,7 @@ impl SeviathApp {
             return;
         }
         let a = &self.genr.asset;
-        let req = AssetRequest { height_m: a.height_m, triangles: a.triangles, texture: a.texture, detail: a.detail, pivot_bottom: a.pivot_bottom };
+        let req = AssetRequest { height_m: a.height_m, triangles: a.triangles, texture: a.texture, detail: a.detail, pivot_bottom: a.pivot_bottom, normal_map: a.normal_map };
         let python = self.rigs.game.ai_python.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -409,10 +411,10 @@ impl SeviathApp {
         };
         let side = ui.available_width().clamp(320.0, 560.0).min(560.0);
         let (yaw, pitch) = self.genr.view;
-        let key = (yaw.round() as i32, pitch.round() as i32, self.genr.wire, self.genr.made);
+        let key = (yaw.round() as i32, pitch.round() as i32, self.genr.wire, self.genr.made, self.genr.view_mode);
         if self.genr.view_tex.as_ref().map(|t| t.0) != Some(key) {
             let n = side as u32 / 4 * 4;
-            let img = mesh.render(yaw, pitch, n, n, self.genr.wire);
+            let img = mesh.render_view(yaw, pitch, n, n, self.genr.wire, self.genr.view_mode);
             let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
             self.genr.view_tex = Some((key, ui.ctx().load_texture("gen_asset_view", color, TextureOptions::LINEAR)));
         }
@@ -426,6 +428,13 @@ impl SeviathApp {
             }
             resp.help("Drag to turn it");
         }
+        ui.horizontal_wrapped(|ui| {
+            for (v, label, tip) in [(View::Textured, "Colours", "The model with its texture."), (View::Normals, "Normals", "The direction of the surface in colours: red to the right, green up, blue to the viewer."), (View::Depth, "Depth", "How far every point is: white is near, black is far.")] {
+                if widgets::chip(ui, label, self.genr.view_mode == v).help(tip).clicked() {
+                    self.genr.view_mode = v;
+                }
+            }
+        });
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut self.genr.wire, "Show the triangles").help("Draw the triangle edges of the model over it.");
             if ui.small_button("Front").help("Look at it from the front.").clicked() {
@@ -535,6 +544,7 @@ impl SeviathApp {
                 }
             }
         });
+        ui.checkbox(&mut a.normal_map, "Bake a normal map").help("Makes a normal map from the fine shape before the triangles are reduced, so the shape (dents, folds, carving) is still seen in the light with few triangles. Game engines use it with the colour texture.");
         ui.checkbox(&mut a.pivot_bottom, "Hold it at the middle of its bottom").help("The model's zero point is where it touches the ground, so it stands on the floor in the game. Off: its middle.");
         ui.add_space(6.0);
         let (p, n) = self.genr.asset.prompt();
@@ -637,6 +647,29 @@ impl SeviathApp {
             if let Some(tex) = self.genr.mesh.as_ref().and_then(|m| m.texture.as_ref()) {
                 if let Some(p) = rfd::FileDialog::new().set_title("Save the texture").set_file_name(format!("{}_color.png", asset_file_name(&self.genr.asset))).add_filter("PNG picture", &["png"]).save_file() {
                     let _ = tex.save(&p);
+                }
+            }
+        }
+        if ui.add_enabled(have && self.genr.mesh.as_ref().is_some_and(|m| m.normal.is_some()), egui::Button::new("Save the normal map (.png)")).help("The normal map that was baked from the fine shape. Use it with the colour texture in a game engine or in Blender.").clicked() {
+            if let Some(n) = self.genr.mesh.as_ref().and_then(|m| m.normal.as_ref()) {
+                if let Some(p) = rfd::FileDialog::new().set_title("Save the normal map").set_file_name(format!("{}_normal.png", asset_file_name(&self.genr.asset))).add_filter("PNG picture", &["png"]).save_file() {
+                    let _ = n.save(&p);
+                }
+            }
+        }
+        if ui.add_enabled(have, egui::Button::new("Save the depth map of this view (.png)")).help("A grey picture of how far every point is from this side (white is near). Useful to steer a picture AI that follows depth, or to check the shape.").clicked() {
+            if let Some(mesh) = &self.genr.mesh {
+                if let Some(p) = rfd::FileDialog::new().set_title("Save the depth map").set_file_name(format!("{}_depth.png", asset_file_name(&self.genr.asset))).add_filter("PNG picture", &["png"]).save_file() {
+                    let (yaw, pitch) = self.genr.view;
+                    let _ = mesh.render_view(yaw, pitch, 1024, 1024, false, View::Depth).save(&p);
+                }
+            }
+        }
+        if ui.add_enabled(have, egui::Button::new("Save the normals of this view (.png)")).help("A picture of the direction of the surface seen from this side. Useful to steer a picture AI that follows normal maps.").clicked() {
+            if let Some(mesh) = &self.genr.mesh {
+                if let Some(p) = rfd::FileDialog::new().set_title("Save the normals of this view").set_file_name(format!("{}_view_normals.png", asset_file_name(&self.genr.asset))).add_filter("PNG picture", &["png"]).save_file() {
+                    let (yaw, pitch) = self.genr.view;
+                    let _ = mesh.render_view(yaw, pitch, 1024, 1024, false, View::Normals).save(&p);
                 }
             }
         }
@@ -822,7 +855,7 @@ mod tests {
 
     #[test]
     fn the_obj_has_every_point_texture_coordinate_and_triangle() {
-        let m = AssetMesh { verts: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], tris: vec![[0, 1, 2]], texture: None };
+        let m = AssetMesh { verts: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], tris: vec![[0, 1, 2]], texture: None, normal: None };
         let t = obj_text(&m, "lamp");
         assert_eq!(t.lines().filter(|l| l.starts_with("v ")).count(), 3);
         assert_eq!(t.lines().filter(|l| l.starts_with("vt ")).count(), 3);

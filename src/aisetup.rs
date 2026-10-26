@@ -199,7 +199,7 @@ pub fn unzip_stripped(bytes: &[u8], dest: &Path) -> Result<usize, String> {
 }
 
 /// Run a program and write what it says into the log file; Err with the end of the log when it fails.
-fn run_logged(mut cmd: Command, log: &Path) -> Result<(), String> {
+pub(crate) fn run_logged(mut cmd: Command, log: &Path) -> Result<(), String> {
     let file = std::fs::OpenOptions::new().create(true).append(true).open(log).map_err(|e| e.to_string())?;
     let file2 = file.try_clone().map_err(|e| e.to_string())?;
     cmd.stdout(Stdio::from(file)).stderr(Stdio::from(file2));
