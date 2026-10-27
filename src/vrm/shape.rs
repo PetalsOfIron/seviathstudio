@@ -12,6 +12,48 @@ use super::gltf::read_glb;
 use super::model::{Bone, Model3d, Options, Part3d, UncutSetup, add_face, face_marks, head_box, limb_group, normalize_to_t_pose, normals_of, point_weights, seg_dist, uncut_setup};
 use crate::doc::Document;
 
+/// The pictures of the other sides of the character that an AI drew (CharacterGen): cut out, so the see-through part is not the character.
+#[derive(Clone, Debug)]
+pub struct CharViews {
+    pub back: RgbaImage,
+}
+
+/// The picture of the back laid over the tile of the front: the figure of the one is stretched over the figure of the other (the two are never
+/// quite the same size), and the rest is see-through. `mask` tells which pixels of the tile are the figure.
+pub fn align_back_view(view: &RgbaImage, mask: &[bool], w: u32, h: u32) -> Option<RgbaImage> {
+    if mask.len() != (w * h) as usize {
+        return None;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
+    for y in 0..h {
+        for x in 0..w {
+            if mask[(y * w + x) as usize] {
+                x0 = x0.min(x);
+                x1 = x1.max(x);
+                y0 = y0.min(y);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    let (mut vx0, mut vy0, mut vx1, mut vy1) = (view.width(), view.height(), 0u32, 0u32);
+    for (x, y, p) in view.enumerate_pixels() {
+        if p.0[3] > 100 {
+            vx0 = vx0.min(x);
+            vx1 = vx1.max(x);
+            vy0 = vy0.min(y);
+            vy1 = vy1.max(y);
+        }
+    }
+    if x1 <= x0 + 8 || y1 <= y0 + 8 || vx1 <= vx0 + 8 || vy1 <= vy0 + 8 {
+        return None;
+    }
+    let crop = image::imageops::crop_imm(view, vx0, vy0, vx1 - vx0 + 1, vy1 - vy0 + 1).to_image();
+    let fitted = image::imageops::resize(&crop, x1 - x0 + 1, y1 - y0 + 1, image::imageops::FilterType::Lanczos3);
+    let mut out = RgbaImage::new(w, h);
+    image::imageops::replace(&mut out, &fitted, x0 as i64, y0 as i64);
+    Some(out)
+}
+
 /// A mesh without colours: points (x right, y up, z towards the viewer) and triangles.
 #[derive(Clone, Debug)]
 pub struct Shape {
@@ -286,9 +328,18 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
             }
         }
     }
+    // The back that the AI drew: it is laid over the figure, and what it does not cover keeps the front turned round (a little darker, like a back).
+    let real_back = opt.views.as_ref().and_then(|v| align_back_view(&v.back, &mask, front.width(), front.height()));
     for p in back.pixels_mut() {
         for k in 0..3 {
             p.0[k] = (p.0[k] as f32 * 0.82) as u8;
+        }
+    }
+    if let Some(rb) = &real_back {
+        for (x, y, p) in rb.enumerate_pixels() {
+            if p.0[3] > 128 {
+                back.put_pixel(x, y, image::Rgba([p.0[0], p.0[1], p.0[2], 255]));
+            }
         }
     }
     // The atlas: the front and the back side by side, and under them a small blurred copy of each, for the sides.
@@ -921,6 +972,33 @@ mod smooth_tests {
         assert_eq!(share(n - 1, 1), 1.0);
         assert!(share(n / 2 - 1, 1) > 0.15 && share(n / 2, 0) > 0.15, "the seam is blended");
         assert!(s.iter().all(|r| (r.iter().map(|a| a.1).sum::<f32>() - 1.0).abs() < 1e-4 && r.len() <= 4));
+    }
+}
+
+#[cfg(test)]
+mod back_view_tests {
+    use super::*;
+
+    #[test]
+    fn the_picture_of_the_back_is_stretched_over_the_figure_of_the_front() {
+        let (w, h) = (100u32, 200u32);
+        // the figure of the front: x 20 to 79, y 10 to 189
+        let mask: Vec<bool> = (0..h * w).map(|i| (20..80).contains(&(i % w)) && (10..190).contains(&(i / w))).collect();
+        // the back is drawn in another frame, smaller, with a see-through background; its left half is red and its right half blue
+        let mut view = RgbaImage::new(64, 96);
+        for y in 8..88 {
+            for x in 10..50 {
+                view.put_pixel(x, y, if x < 30 { image::Rgba([255, 0, 0, 255]) } else { image::Rgba([0, 0, 255, 255]) });
+            }
+        }
+        let out = align_back_view(&view, &mask, w, h).unwrap();
+        // its figure covers the figure of the front (and nothing outside)
+        assert_eq!(out.get_pixel(50, 100).0[3], 255);
+        assert_eq!(out.get_pixel(5, 100).0[3], 0, "outside the figure stays see-through");
+        assert_eq!(out.get_pixel(50, 3).0[3], 0);
+        assert!(out.get_pixel(25, 100).0[0] > 200 && out.get_pixel(75, 100).0[2] > 200, "left stays left, right stays right");
+        assert!(align_back_view(&view, &mask[..10], w, h).is_none());
+        assert!(align_back_view(&RgbaImage::new(10, 10), &mask, w, h).is_none(), "a picture with no figure gives nothing");
     }
 }
 

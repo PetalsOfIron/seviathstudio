@@ -42,11 +42,13 @@ pub struct Options {
     pub ai_skin: Option<std::sync::Arc<super::aiskin::AiSkin>>,
     /// Turn the arms out to the sides (a T-pose, which VRM wants); off for a game file, which keeps the pose the shape was made in.
     pub t_pose: bool,
+    /// The pictures of the other sides that CharacterGen drew: the back of the character is made from its picture of the back, not from the front turned round.
+    pub views: Option<std::sync::Arc<super::shape::CharViews>>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { name: "Character".into(), author: "Unknown".into(), height_m: 1.6, puff: 1.0, layer_gap: 0.003, max_texture: 2048, fingers: true, face: true, template: None, shape: None, hair: true, mesh_only: false, ai_skin: None, t_pose: true }
+        Self { name: "Character".into(), author: "Unknown".into(), height_m: 1.6, puff: 1.0, layer_gap: 0.003, max_texture: 2048, fingers: true, face: true, template: None, shape: None, hair: true, mesh_only: false, ai_skin: None, t_pose: true, views: None }
     }
 }
 

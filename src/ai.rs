@@ -123,6 +123,11 @@ fn charactergen_launcher(dir: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// The picture of the back that CharacterGen drew in its last run.
+pub fn charactergen_back() -> Option<RgbaImage> {
+    image::open(helper_folder().join("cg_views").join("back.png")).ok().map(|i| i.to_rgba8())
+}
+
 /// Make the shape of the character from the picture: the bytes of a GLB with the points and triangles. TripoSR takes about twenty seconds,
 /// CharacterGen a few minutes; the first time they download their models.
 pub fn make_shape(python: &str, page: &RgbaImage, model: ShapeModel) -> Result<Vec<u8>, String> {
@@ -159,6 +164,11 @@ pub fn make_shape(python: &str, page: &RgbaImage, model: ShapeModel) -> Result<V
     }
     match model {
         ShapeModel::CharacterGen => {
+            // it keeps the four pictures it draws (front, back, left and right): the back of the character is made from them
+            let views = dir.join("cg_views");
+            let _ = std::fs::remove_dir_all(&views);
+            args.push("--views-out".into());
+            args.push(views.to_string_lossy().to_string());
             let launcher = charactergen_launcher(&dir)?;
             run_json(&launcher.to_string_lossy(), &script, &args)?;
         }
