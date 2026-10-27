@@ -62,6 +62,8 @@ def main():
     ap.add_argument("--steps", type=int, default=40)
     ap.add_argument("--smooth", type=int, default=3, help="how many times the surface is smoothed")
     ap.add_argument("--sd21", default="sd2-community/stable-diffusion-2-1", help="where Stable Diffusion 2.1 is (the first-party repository was taken down; this mirror is the same model)")
+    ap.add_argument("--offload", default="model", choices=["model", "sequential", "none"], help="keep the parts of the 2D stage in the main memory until they are needed")
+    ap.add_argument("--views-in", default="", help="a folder with right.png, back.png, left.png and front.png from an earlier run: the drawing stage is skipped")
     ap.add_argument("--views-out", default="", help="a folder to keep the four pictures it drew (for looking at)")
     args = ap.parse_args()
     if not os.path.isdir(os.path.join(args.repo, "2D_Stage", "models")) or not os.path.isdir(os.path.join(args.repo, "3D_Stage", "models")):
@@ -85,21 +87,36 @@ def main():
     except Exception as e:  # noqa: BLE001
         fail("CharacterGen could not start: %s: %s" % (type(e).__name__, str(e)[:300]))
     try:
-        image = Image.open(args.image).convert("RGBA")
-        remover = W.rm_bg_api()
-        cfg2d = OmegaConf.load("./2D_Stage/configs/infer.yaml")
-        cfg2d.pretrained_model_path = args.sd21
-        api2d = W.Inference2D_API(**cfg2d)
-        views = api2d.inference(image, 512, 768, crop=True, seed=args.seed, timestep=args.steps)
-        views = remover.remove_background(imgs=views, alpha_min=0.2, alpha_max=0.9)
+        if args.views_in:
+            # the four pictures are there already (from an earlier run): only the 3D stage is done
+            views = [Image.open(os.path.join(args.views_in, n + ".png")).convert("RGBA") for n in ("right", "back", "left", "front")]
+        else:
+            image = Image.open(args.image).convert("RGBA")
+            remover = W.rm_bg_api()
+            cfg2d = OmegaConf.load("./2D_Stage/configs/infer.yaml")
+            cfg2d.pretrained_model_path = args.sd21
+            api2d = W.Inference2D_API(**cfg2d)
+            # 8 GB of video memory (the desktop uses some) is not enough for the two networks and four views at once: the parts wait in the main
+            # memory until they are needed. Without this the card swaps and a step takes minutes.
+            if args.offload != "none":
+                pipe = api2d.validation_pipeline
+                try:
+                    if args.offload == "sequential":
+                        pipe.enable_sequential_cpu_offload()
+                    else:
+                        pipe.enable_model_cpu_offload()
+                except Exception as e:  # noqa: BLE001
+                    sys.stderr.write("offloading skipped: %s" % e)
+            views = api2d.inference(image, 512, 768, crop=True, seed=args.seed, timestep=args.steps)
+            views = remover.remove_background(imgs=views, alpha_min=0.2, alpha_max=0.9)
+            del api2d
+            torch.cuda.empty_cache()
         # the order the pictures come in is right, back, left, front (as the web page of CharacterGen hands them on)
         right, back, left, front = views[0], views[1], views[2], views[3]
         if args.views_out:
             os.makedirs(args.views_out, exist_ok=True)
             for name, v in (("right", right), ("back", back), ("left", left), ("front", front)):
                 v.save(os.path.join(args.views_out, name + ".png"))
-        del api2d
-        torch.cuda.empty_cache()
         api3d = W.Inference3D_API()
         save_dir, _obj, glb = api3d.process_images(back, front, right, left, True, args.smooth)
     except torch.cuda.OutOfMemoryError:
@@ -112,6 +129,8 @@ def main():
     import trimesh
 
     mesh = trimesh.load(glb, force="mesh", process=False)
+    # CharacterGen faces the other way (its front is -z): turned half a round about the up axis, so the front looks to +z as for the other shape AI
+    mesh.apply_transform(trimesh.transformations.rotation_matrix(3.141592653589793, [0, 1, 0]))
     mesh.export(args.out)
     print(json.dumps({"mesh": args.out, "vertices": int(len(mesh.vertices)), "faces": int(len(mesh.faces)), "folder": save_dir}))
 

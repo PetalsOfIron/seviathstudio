@@ -4469,6 +4469,9 @@ fn make_the_example_character() {
     h.run_steps(4);
     h.state_mut().test_run_action_now("tab.7");
     let painted_weights = std::env::var("SEVIATH_NO_AI_SKIN").is_ok();
+    if std::env::var("SEVIATH_CG").is_ok() {
+        h.state_mut().test_game().shape_model = crate::ai::ShapeModel::CharacterGen;
+    }
     h.state_mut().test_game().use_ai_skin = !painted_weights && std::env::var("SEVIATH_AI_SKIN").is_ok();
     h.state_mut().test_gen().page = crate::app::generate_page_characters();
     h.state_mut().test_gen_set_pictures(vec![girl.clone()]);

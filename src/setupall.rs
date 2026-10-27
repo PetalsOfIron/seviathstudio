@@ -21,7 +21,7 @@ const CG_TORCH: &[&str] = &["torch==2.1.2", "torchvision==0.16.2"];
 const CG_PACKAGES: &[&str] = &[
     "numpy<2", "huggingface_hub<0.26", "diffusers==0.24.0", "transformers==4.36.2", "tokenizers<0.19", "accelerate==0.25.0", "omegaconf", "einops", "imageio", "onnxruntime-gpu",
     "opencv-python-headless", "pytorch_lightning==2.1.4", "jaxtyping", "lpips", "ninja", "trimesh", "pymeshlab", "pygltflib", "tqdm", "safetensors", "scipy", "scikit-image", "matplotlib",
-    "pyyaml", "typeguard<3", "pillow",
+    "pyyaml", "typeguard<3", "pillow", "ipdb", "wandb", "open3d",
 ];
 
 pub fn charactergen_folder() -> PathBuf {
@@ -109,6 +109,7 @@ pub fn setup_charactergen(step: &Sender<String>) -> Result<(), String> {
         unzip_stripped(&bytes, &code)?;
         let _ = std::fs::remove_file(&zip);
     }
+    patch_charactergen(&code)?;
     // its models (14 GB), into the folders of its code
     crate::downloads::fetch_hf_repo("zjpshadow/CharacterGen", &["2D_Stage/", "3D_Stage/"], &code, step)?;
     // its own Python environment
@@ -166,6 +167,22 @@ pub fn setup_charactergen(step: &Sender<String>) -> Result<(), String> {
     Ok(())
 }
 
+/// CharacterGen was written for Python 3.9; Python 3.11 refuses a value that is an object as the default of a field of a data class. The two places
+/// get a `default_factory` (the same thing, in the way 3.11 wants). Done again without harm when it is done already.
+pub fn patch_charactergen(code: &Path) -> Result<(), String> {
+    for (file, from, to) in [
+        ("3D_Stage/lrm/systems/base.py", "loss: BaseLossConfig = BaseLossConfig()", "loss: BaseLossConfig = field(default_factory=BaseLossConfig)"),
+        ("3D_Stage/lrm/systems/multiview_lrm.py", "loss: MultiviewLRMLossConfig = MultiviewLRMLossConfig()", "loss: MultiviewLRMLossConfig = field(default_factory=MultiviewLRMLossConfig)"),
+    ] {
+        let path = code.join(file);
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
+        if text.contains(from) {
+            std::fs::write(&path, text.replace(from, to)).map_err(|e| format!("Could not write {}: {e}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Is CharacterGen complete.
 pub fn charactergen_ready() -> bool {
     crate::aisetup::status().charactergen
@@ -196,6 +213,23 @@ mod tests {
         assert!(CG_PACKAGES.iter().any(|p| p.starts_with("numpy<2")));
         assert_eq!(CG_TORCH, ["torch==2.1.2", "torchvision==0.16.2"]);
         assert!(SD21_REPO.contains("stable-diffusion-2-1"));
+    }
+
+    #[test]
+    fn the_python_311_fix_of_charactergen_is_made_once_and_can_be_made_again() {
+        let d = std::env::temp_dir().join(format!("seviath_cg_patch_{}", std::process::id()));
+        std::fs::create_dir_all(d.join("3D_Stage/lrm/systems")).unwrap();
+        std::fs::write(d.join("3D_Stage/lrm/systems/base.py"), "class A:
+    loss: BaseLossConfig = BaseLossConfig()
+").unwrap();
+        std::fs::write(d.join("3D_Stage/lrm/systems/multiview_lrm.py"), "x
+    loss: MultiviewLRMLossConfig = MultiviewLRMLossConfig()
+").unwrap();
+        patch_charactergen(&d).unwrap();
+        patch_charactergen(&d).unwrap();
+        let base = std::fs::read_to_string(d.join("3D_Stage/lrm/systems/base.py")).unwrap();
+        assert!(base.contains("field(default_factory=BaseLossConfig)") && !base.contains("= BaseLossConfig()"), "{base}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

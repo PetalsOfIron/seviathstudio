@@ -76,7 +76,7 @@ impl GameUi {
 
 impl Default for GameUi {
     fn default() -> Self {
-        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, follow: false, expr: None, model: None, shape_model: Default::default(), message: None, svrm_notes: Vec::new(), template: None, ai_python: default_python(), guides: false, tex_dirty: false, paint_rev: 0, mesh_only: false, setup_job: None, setup_step: None, setup_text: String::new(), setup_agree: false, paint3d: false, brush: Default::default(), overlay: None, last_pt: None, paint_gen: 0, paint_undo: Vec::new(), paint_rebuild: false, ai_backend: 0, ai_job: None, shape: None, shape_job: None, tex: None, made: 0, ai_skin: None, skin_job: None, use_ai_skin: false }
+        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, follow: false, expr: None, model: None, shape_model: if crate::aisetup::status().charactergen { crate::ai::ShapeModel::CharacterGen } else { crate::ai::ShapeModel::TripoSr }, message: None, svrm_notes: Vec::new(), template: None, ai_python: default_python(), guides: false, tex_dirty: false, paint_rev: 0, mesh_only: false, setup_job: None, setup_step: None, setup_text: String::new(), setup_agree: false, paint3d: false, brush: Default::default(), overlay: None, last_pt: None, paint_gen: 0, paint_undo: Vec::new(), paint_rebuild: false, ai_backend: 0, ai_job: None, shape: None, shape_job: None, tex: None, made: 0, ai_skin: None, skin_job: None, use_ai_skin: false }
     }
 }
 
@@ -387,7 +387,7 @@ impl SeviathApp {
             if widgets::chip(ui, "TripoSR", self.rigs.game.shape_model == crate::ai::ShapeModel::TripoSr).help("MIT licence, usable everywhere, about 6 GB of video memory, about 20 seconds. A rougher shape.").clicked() {
                 self.rigs.game.shape_model = crate::ai::ShapeModel::TripoSr;
             }
-            if widgets::chip(ui, "CharacterGen", self.rigs.game.shape_model == crate::ai::ShapeModel::CharacterGen).help("Apache 2.0, made for anime characters: it draws the character from four sides in an A-pose and builds the shape from them, so arms, hair and clothes are kept apart better. A few minutes. It needs its own set-up (see CharacterGen in the Downloads window).").clicked() {
+            if widgets::chip(ui, "CharacterGen", self.rigs.game.shape_model == crate::ai::ShapeModel::CharacterGen).help("Apache 2.0, made for anime characters: it draws the character from four sides in an A-pose and builds the shape from them, so arms, hair and clothes are kept apart much better than with TripoSR. About 7 minutes, and it needs nearly all of the video memory: close games and other programs that use the graphics card. It needs its own set-up (see CharacterGen in the Downloads window).").clicked() {
                 self.rigs.game.shape_model = crate::ai::ShapeModel::CharacterGen;
             }
         });
