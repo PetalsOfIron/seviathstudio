@@ -1099,3 +1099,26 @@ fn a_motion_frame_moves_the_picture_of_the_character() {
     let diff = rest.pixels().zip(wave.pixels()).filter(|(a, b)| a != b).count();
     assert!(diff > 300, "{diff} pixels differ between standing and waving");
 }
+
+#[test]
+fn the_depth_and_the_normals_of_the_character_show_where_it_is_and_which_way_it_faces() {
+    use super::preview::{MapKind, render_map};
+    let m = uncut_model();
+    let (w, h) = (160u32, 260u32);
+    let depth = render_map(&m, 0.0, w, h, MapKind::Depth);
+    let normals = render_map(&m, 0.0, w, h, MapKind::Normals);
+    let colour = render_map(&m, 0.0, w, h, MapKind::Colour);
+    // the same silhouette in the three
+    let inside = |img: &image::RgbaImage| img.pixels().enumerate().filter(|(_, p)| **p != *img.get_pixel(0, 0)).count();
+    let (d, n, c) = (inside(&depth), inside(&normals), inside(&colour));
+    assert!(d > 1500, "{d} pixels of depth");
+    assert!((d as i64 - c as i64).abs() < 40 && (n as i64 - c as i64).abs() < 40, "{d} {n} {c}");
+    // seen from the front the middle of the body faces the viewer (blue), and turned by 90 degrees it faces sideways
+    let mid = normals.get_pixel(w / 2, h / 2).0;
+    assert!(mid[2] > 150, "the chest looks at the viewer: {mid:?}");
+    let side = render_map(&m, 90.0, w, h, MapKind::Normals);
+    assert!(side.pixels().any(|p| p.0[0] > 200 || p.0[0] < 56), "from the side some of the body faces right or left");
+    // depth: the nearest part is the whitest
+    let bright = depth.pixels().map(|p| p.0[0]).max().unwrap();
+    assert!(bright > 200 && bright <= 255);
+}

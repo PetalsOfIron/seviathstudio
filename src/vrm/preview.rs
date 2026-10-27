@@ -139,7 +139,7 @@ pub fn render_motion(model: &Model3d, yaw_deg: f32, w: u32, h: u32, frame: &crat
             rots[i] = *r;
         }
     }
-    render_core(model, yaw_deg, w, h, &[], &Posing::Full(rots, frame.hips), room)
+    render_core(model, yaw_deg, w, h, &[], &Posing::Full(rots, frame.hips), room, MapKind::Colour)
 }
 
 /// The same picture with the skeleton posed (the skin weights move the parts).
@@ -150,11 +150,33 @@ pub fn render_posed(model: &Model3d, yaw_deg: f32, w: u32, h: u32, active: &[(&s
             turn[i] = *a;
         }
     }
-    render_core(model, yaw_deg, w, h, active, &Posing::Plane(turn), 1.0)
+    render_core(model, yaw_deg, w, h, active, &Posing::Plane(turn), 1.0, MapKind::Colour)
 }
 
-fn render_core(model: &Model3d, yaw_deg: f32, w: u32, h: u32, active: &[(&str, f32)], posing: &Posing, room: f32) -> RgbaImage {
-    let mut img = RgbaImage::from_pixel(w, h, Rgba([244, 242, 236, 255]));
+/// What a picture of the model shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MapKind {
+    /// The model with its picture and a light.
+    Colour,
+    /// How far every point is: white is near, black is far (and nothing is black).
+    Depth,
+    /// The direction of the surface: red to the right, green up, blue to the viewer (a flat normal map colour where there is nothing).
+    Normals,
+}
+
+/// The depth or the normals of the model seen from a side (the angle turns it round the up axis), as a picture the size of `render_posed`'s:
+/// for pictures AIs that follow depth or normal maps, and for projecting pictures back on the model. Only what the texture shows counts.
+pub fn render_map(model: &Model3d, yaw_deg: f32, w: u32, h: u32, kind: MapKind) -> RgbaImage {
+    render_core(model, yaw_deg, w, h, &[], &Posing::Plane(vec![0.0; model.bones.len()]), 1.0, kind)
+}
+
+fn render_core(model: &Model3d, yaw_deg: f32, w: u32, h: u32, active: &[(&str, f32)], posing: &Posing, room: f32, kind: MapKind) -> RgbaImage {
+    let background = match kind {
+        MapKind::Colour => Rgba([244, 242, 236, 255]),
+        MapKind::Depth => Rgba([0, 0, 0, 255]),
+        MapKind::Normals => Rgba([128, 128, 255, 255]),
+    };
+    let mut img = RgbaImage::from_pixel(w, h, background);
     let mut depth = vec![f32::MIN; (w * h) as usize];
     let (s, c) = yaw_deg.to_radians().sin_cos();
     let top = model.parts.iter().flat_map(|p| p.verts.iter().map(|v| v[1])).fold(0.0f32, f32::max).max(0.1);
@@ -223,7 +245,31 @@ fn render_core(model: &Model3d, yaw_deg: f32, w: u32, h: u32, active: &[(&str, f
                         continue;
                     }
                     depth[di] = z;
-                    img.put_pixel(x as u32, y as u32, Rgba([(p[0] as f32 * shade) as u8, (p[1] as f32 * shade) as u8, (p[2] as f32 * shade) as u8, 255]));
+                    match kind {
+                        MapKind::Colour => img.put_pixel(x as u32, y as u32, Rgba([(p[0] as f32 * shade) as u8, (p[1] as f32 * shade) as u8, (p[2] as f32 * shade) as u8, 255])),
+                        MapKind::Depth => {}
+                        MapKind::Normals => {
+                            // the smooth normal of the point, turned with the model
+                            let (na, nb, nc) = (part.normals[t[0] as usize], part.normals[t[1] as usize], part.normals[t[2] as usize]);
+                            let m = [na[0] * l1 + nb[0] * l2 + nc[0] * l3, na[1] * l1 + nb[1] * l2 + nc[1] * l3, na[2] * l1 + nb[2] * l2 + nc[2] * l3];
+                            let v = [m[0] * c + m[2] * s, m[1], -m[0] * s + m[2] * c];
+                            let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-9);
+                            let q = |x: f32| ((x / len * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
+                            img.put_pixel(x as u32, y as u32, Rgba([q(v[0]), q(v[1]), q(v[2]), 255]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if kind == MapKind::Depth {
+        let seen: Vec<f32> = depth.iter().copied().filter(|d| *d > f32::MIN).collect();
+        if let (Some(lo), Some(hi)) = (seen.iter().copied().reduce(f32::min), seen.iter().copied().reduce(f32::max)) {
+            for (i, d) in depth.iter().enumerate() {
+                if *d > f32::MIN {
+                    // near (a big z) is white; nothing that is there is quite black, so the picture says where the model is
+                    let v = 20.0 + 235.0 * ((*d - lo) / (hi - lo).max(1e-6));
+                    img.put_pixel((i as u32) % w, (i as u32) / w, Rgba([v as u8, v as u8, v as u8, 255]));
                 }
             }
         }

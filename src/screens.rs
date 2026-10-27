@@ -4521,6 +4521,20 @@ fn make_the_example_character() {
         }
         sheet.save(dir.join(if painted_weights { "ExampleGirl_poses_painted_weights.png" } else { "ExampleGirl_poses.png" })).unwrap();
     }
+    // the depth and the normals of the character from the front, a side and the back (for pictures AIs that follow them)
+    {
+        let model = h.state_mut().test_game().model.take().unwrap();
+        let (cw, ch) = (300u32, 440u32);
+        let mut sheet = image::RgbaImage::new(cw * 4, ch * 3);
+        for (row, kind) in [crate::vrm::preview::MapKind::Colour, crate::vrm::preview::MapKind::Depth, crate::vrm::preview::MapKind::Normals].into_iter().enumerate() {
+            for (k, yaw) in [0.0f32, 45.0, 90.0, 180.0].into_iter().enumerate() {
+                let img = crate::vrm::preview::render_map(&model, yaw, cw, ch, kind);
+                image::imageops::replace(&mut sheet, &img, (k as u32 * cw) as i64, (row as u32 * ch) as i64);
+            }
+        }
+        sheet.save(dir.join("ExampleGirl_maps.png")).unwrap();
+        h.state_mut().test_game().model = Some(model);
+    }
     // which bone each point follows: a map of the points coloured by the part of the body that moves them most
     {
         let model = h.state_mut().test_game().model.take().unwrap();
