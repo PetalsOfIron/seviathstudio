@@ -62,6 +62,7 @@ pub struct GameUi {
     /// How many times the model was made (so the preview picture knows to change).
     made: u64,
     /// Skin weights an AI worked out for the AI shape (Make-It-Animatable), the job that makes them, and whether to use them.
+    pub views: Option<std::sync::Arc<crate::vrm::shape::CharViews>>,
     pub ai_skin: Option<std::sync::Arc<crate::vrm::aiskin::AiSkin>>,
     pub(super) skin_job: Option<std::sync::mpsc::Receiver<Result<crate::vrm::aiskin::AiSkin, String>>>,
     pub use_ai_skin: bool,
@@ -76,7 +77,7 @@ impl GameUi {
 
 impl Default for GameUi {
     fn default() -> Self {
-        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, follow: false, expr: None, model: None, shape_model: if crate::aisetup::status().charactergen { crate::ai::ShapeModel::CharacterGen } else { crate::ai::ShapeModel::TripoSr }, message: None, svrm_notes: Vec::new(), template: None, ai_python: default_python(), guides: false, tex_dirty: false, paint_rev: 0, mesh_only: false, setup_job: None, setup_step: None, setup_text: String::new(), setup_agree: false, paint3d: false, brush: Default::default(), overlay: None, last_pt: None, paint_gen: 0, paint_undo: Vec::new(), paint_rebuild: false, ai_backend: 0, ai_job: None, shape: None, shape_job: None, tex: None, made: 0, ai_skin: None, skin_job: None, use_ai_skin: false }
+        Self { name: String::new(), author: String::new(), height_m: 1.6, puff: 1.0, yaw: 0.0, follow: false, expr: None, model: None, shape_model: if crate::aisetup::status().charactergen { crate::ai::ShapeModel::CharacterGen } else { crate::ai::ShapeModel::TripoSr }, message: None, svrm_notes: Vec::new(), template: None, ai_python: default_python(), guides: false, tex_dirty: false, paint_rev: 0, mesh_only: false, setup_job: None, setup_step: None, setup_text: String::new(), setup_agree: false, paint3d: false, brush: Default::default(), overlay: None, last_pt: None, paint_gen: 0, paint_undo: Vec::new(), paint_rebuild: false, ai_backend: 0, ai_job: None, shape: None, shape_job: None, tex: None, made: 0, ai_skin: None, views: None, skin_job: None, use_ai_skin: false }
     }
 }
 
@@ -84,7 +85,7 @@ impl SeviathApp {
     fn game_options(&self) -> Options {
         let g = &self.rigs.game;
         let name = if g.name.trim().is_empty() { self.files.name.clone() } else { g.name.clone() };
-        Options { name, author: if g.author.trim().is_empty() { "Unknown".into() } else { g.author.clone() }, height_m: g.height_m, puff: g.puff, template: g.template.as_ref().map(|t| t.1.clone()), shape: g.shape.clone(), mesh_only: g.mesh_only, ai_skin: g.ai_skin.clone(), ..Default::default() }
+        Options { name, author: if g.author.trim().is_empty() { "Unknown".into() } else { g.author.clone() }, height_m: g.height_m, puff: g.puff, template: g.template.as_ref().map(|t| t.1.clone()), shape: g.shape.clone(), mesh_only: g.mesh_only, ai_skin: g.ai_skin.clone(), views: g.views.clone(), ..Default::default() }
     }
 
     /// The character as a game file wants it: in the pose the shape was made in (arms down), not turned to a T-pose (that stretches what the AI
@@ -359,6 +360,7 @@ impl SeviathApp {
                             let (v, t) = (sh.verts.len(), sh.tris.len());
                             self.rigs.game.shape = Some(std::sync::Arc::new(sh));
                             self.rigs.game.ai_skin = None;
+                            self.rigs.game.views = if self.rigs.game.shape_model == crate::ai::ShapeModel::CharacterGen { crate::ai::charactergen_back().map(|back| std::sync::Arc::new(crate::vrm::shape::CharViews { back })) } else { None };
                             self.rigs.game.model = None;
                             format!("The AI made a 3D shape ({v} points, {t} triangles). Make the 3D character to put your drawing on it.")
                         }
