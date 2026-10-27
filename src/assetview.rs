@@ -304,3 +304,27 @@ mod tests {
         assert!(AssetMesh::from_glb(b"nothing").is_err());
     }
 }
+
+/// Looks at the two AI shapes of the example girl, side by side, when the files are on this computer:
+/// `cargo test --release compare_the_two_shapes -- --ignored`, picture in target/screens/shapes_compare.png.
+#[test]
+#[ignore]
+fn compare_the_two_shapes() {
+    let files = [("TripoSR", r"C:\Users\SaphiresSilver\AppData\Roaming\SeviathStudio\ai\shape.glb"), ("CharacterGen", r"C:\Users\SaphiresSilver\Projects\seviathstudio-rs\target\gen\cg_shape.glb")];
+    let mut sheet = image::RgbaImage::new(300 * 4, 440 * 4);
+    for (row, (name, path)) in files.iter().enumerate() {
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        let m = AssetMesh::from_glb(&bytes).unwrap();
+        let st = m.stats();
+        println!("{name}: {} triangles, size {:?}", st.triangles, st.size);
+        for (k, yaw) in [0.0f32, 45.0, 90.0, 180.0].into_iter().enumerate() {
+            for (r2, view) in [View::Normals, View::Depth].into_iter().enumerate() {
+                let img = m.render_view(yaw, 0.0, 300, 440, false, view);
+                image::imageops::replace(&mut sheet, &img, (k as u32 * 300) as i64, ((row * 2 + r2) as u32 * 440) as i64);
+            }
+        }
+    }
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("screens");
+    std::fs::create_dir_all(&dir).unwrap();
+    sheet.save(dir.join("shapes_compare.png")).unwrap();
+}
