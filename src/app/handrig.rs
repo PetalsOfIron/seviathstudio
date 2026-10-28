@@ -18,6 +18,7 @@ use crate::brush::engine::{Sample as BrushSample, Stroke as BrushStroke};
 use crate::doc::{Document, LayerKind, TILE};
 use crate::meshbrush::{self, Brush, Kind as BrushKind, Spot};
 use crate::meshedit::{self, Cut};
+use crate::meshops;
 use crate::theme::*;
 use crate::widgets::{self, HelpExt, section_title};
 
@@ -335,6 +336,16 @@ pub struct HandRig {
     /// The picture of the hair has been put on the texture, and the window for drawing it.
     hair_ready: bool,
     hair_editor: Option<HairEditor>,
+    /// A shape (ball, disc...) that is being made: which, its numbers, where it is, and the sizes of the mesh from before it was put on.
+    pub shape_pending: Option<(meshops::Shape, meshops::ShapeParams, [f32; 3], usize, usize)>,
+    /// What fixing and fitting does: the biggest hole that is closed (in edges), how near to a joint the faces are cut smaller, how many times, and whether the
+    /// files get quads.
+    pub hole_edges: usize,
+    pub joint_radius: f32,
+    pub joint_levels: usize,
+    pub quads: bool,
+    pub quad_angle: f32,
+    pub geometry_message: Option<String>,
 }
 
 impl Default for HandRig {
@@ -427,6 +438,13 @@ impl Default for HandRig {
             strand_move: false,
             hair_ready: false,
             hair_editor: None,
+            shape_pending: None,
+            hole_edges: 40,
+            joint_radius: 0.12,
+            joint_levels: 1,
+            quads: false,
+            quad_angle: 12.0,
+            geometry_message: None,
         }
     }
 }
@@ -1310,6 +1328,89 @@ impl HandRig {
         self.version += 1;
     }
 
+    /// A drawn object is turned about its root (the start of its line, or the middle of a part): its points, its line and its bones.
+    pub fn strand_rotate(&mut self, mesh: &mut AssetMesh, i: usize, axis: usize, degrees: f32) {
+        let Some(s) = self.strands.get_mut(i) else { return };
+        let pivot = s.line.first().copied().unwrap_or_else(|| {
+            let n = (s.verts.1 - s.verts.0).max(1) as f32;
+            let mut c = [0.0f32; 3];
+            for v in mesh.verts.iter().take(s.verts.1).skip(s.verts.0) {
+                for k in 0..3 {
+                    c[k] += v[k] / n;
+                }
+            }
+            c
+        });
+        let (sn, cs) = degrees.to_radians().sin_cos();
+        let turn = |p: [f32; 3]| {
+            let d = [p[0] - pivot[0], p[1] - pivot[1], p[2] - pivot[2]];
+            let r = match axis {
+                0 => [d[0], d[1] * cs - d[2] * sn, d[1] * sn + d[2] * cs],
+                1 => [d[0] * cs + d[2] * sn, d[1], -d[0] * sn + d[2] * cs],
+                _ => [d[0] * cs - d[1] * sn, d[0] * sn + d[1] * cs, d[2]],
+            };
+            [pivot[0] + r[0], pivot[1] + r[1], pivot[2] + r[2]]
+        };
+        for v in mesh.verts.iter_mut().take(s.verts.1).skip(s.verts.0) {
+            *v = turn(*v);
+        }
+        for p in &mut s.line {
+            *p = turn(*p);
+        }
+        if let Some((first, n)) = s.bones {
+            for b in self.rig.bones.iter_mut().skip(first).take(n) {
+                if b.name.starts_with("hair") {
+                    b.head = turn(b.head);
+                    b.tail = turn(b.tail);
+                }
+            }
+        }
+        self.hair_sim = None;
+        self.painted = true;
+        self.version += 1;
+    }
+
+    /// A drawn object is made bigger or smaller about its root (all of it, the thickness too).
+    pub fn strand_scale(&mut self, mesh: &mut AssetMesh, i: usize, k: f32) {
+        let Some(s) = self.strands.get_mut(i) else { return };
+        let pivot = s.line.first().copied().unwrap_or_else(|| {
+            let n = (s.verts.1 - s.verts.0).max(1) as f32;
+            let mut c = [0.0f32; 3];
+            for v in mesh.verts.iter().take(s.verts.1).skip(s.verts.0) {
+                for a in 0..3 {
+                    c[a] += v[a] / n;
+                }
+            }
+            c
+        });
+        let grow = |p: [f32; 3]| [pivot[0] + (p[0] - pivot[0]) * k, pivot[1] + (p[1] - pivot[1]) * k, pivot[2] + (p[2] - pivot[2]) * k];
+        for v in mesh.verts.iter_mut().take(s.verts.1).skip(s.verts.0) {
+            *v = grow(*v);
+        }
+        for p in &mut s.line {
+            *p = grow(*p);
+        }
+        if let Some((first, n)) = s.bones {
+            for b in self.rig.bones.iter_mut().skip(first).take(n) {
+                if b.name.starts_with("hair") {
+                    b.head = grow(b.head);
+                    b.tail = grow(b.tail);
+                }
+            }
+        }
+        self.hair_sim = None;
+        self.painted = true;
+        self.version += 1;
+    }
+
+    /// An object becomes a part of the mesh (it is not in the list any more: it cannot be moved on its own any more). It stays where it is and keeps its bones.
+    pub fn strand_merge(&mut self, i: usize) {
+        if i < self.strands.len() {
+            self.strands.remove(i);
+            self.strand_sel = None;
+        }
+    }
+
     /// The strand under a pixel of the picture (the triangle that is seen there belongs to it).
     fn strand_at(&self, mesh: &AssetMesh, cam: &Camera, at: Pos2) -> Option<usize> {
         let (px, py) = (at.x as i32, at.y as i32);
@@ -1329,6 +1430,150 @@ impl HandRig {
                 (Pos2::new(q[0], q[1]) - at).length() < 10.0
             })
         })
+    }
+
+    /// A shape is made (or made again with other numbers): it takes the place of the shape that was being made.
+    pub fn shape_apply(&mut self, mesh: &mut AssetMesh) {
+        let Some((shape, params, at, v0, t0)) = self.shape_pending else { return };
+        mesh.verts.truncate(v0);
+        mesh.uvs.truncate(v0);
+        mesh.tris.truncate(t0);
+        self.rig.weights.truncate(v0);
+        let m = meshops::make(shape, &params);
+        let built = meshbrush::Built { verts: m.verts.iter().map(|v| [v[0] + at[0], v[1] + at[1], v[2] + at[2]]).collect(), uvs: m.uvs.clone(), tris: m.tris.clone() };
+        let from = mesh.verts.iter().enumerate().min_by(|a, b| {
+            let d = |p: &[f32; 3]| (p[0] - at[0]).powi(2) + (p[1] - at[1]).powi(2) + (p[2] - at[2]).powi(2);
+            d(a.1).total_cmp(&d(b.1))
+        }).map(|x| x.0);
+        // a shape is not hair: its colours are in a cell of their own
+        let hair = std::mem::replace(&mut self.hair, false);
+        let _ = self.append_built(mesh, &built, self.strip_next, from);
+        self.hair = hair;
+    }
+
+    /// Start a shape (or change to another): it is put in the middle of the body, to be moved where it is wanted.
+    pub fn shape_start(&mut self, mesh: &mut AssetMesh, shape: meshops::Shape) {
+        if !self.ensure_strip(mesh) {
+            self.message = Some("This mesh has no texture, so the colours of a shape have no place. Unwrap it first (the Redraw and sculpt page).".into());
+            return;
+        }
+        let (v0, t0) = match self.shape_pending {
+            Some((_, _, _, v, t)) => (v, t),
+            None => (mesh.verts.len(), mesh.tris.len()),
+        };
+        let (lo, hi) = self.bounds;
+        let at = match self.shape_pending {
+            Some((_, _, at, _, _)) => at,
+            None => [(lo[0] + hi[0]) / 2.0, lo[1] + (hi[1] - lo[1]) * 0.6, (lo[2] + hi[2]) / 2.0 + 0.1 * (hi[1] - lo[1])],
+        };
+        let params = meshops::ShapeParams { size: 0.05 * (hi[1] - lo[1]).max(0.2), height: 0.1 * (hi[1] - lo[1]).max(0.2), ..Default::default() };
+        self.shape_pending = Some((shape, params, at, v0, t0));
+        self.shape_apply(mesh);
+    }
+
+    /// Keep the shape: it is an object of the mesh now (it can be moved, turned and made bigger on its own, and taken back).
+    pub fn shape_keep(&mut self, mesh: &AssetMesh) {
+        if let Some((shape, _, _, v0, t0)) = self.shape_pending.take() {
+            if mesh.verts.len() > v0 {
+                self.geo_undo.push((v0, t0));
+                self.strip_next += 1;
+                self.strands.push(Strand { name: shape.label().to_string(), verts: (v0, mesh.verts.len()), bones: None, line: Vec::new(), width_mul: 1.0 });
+                self.strand_sel = Some(self.strands.len() - 1);
+            }
+        }
+    }
+
+    pub fn shape_drop(&mut self, mesh: &mut AssetMesh) {
+        if let Some((_, _, _, v0, t0)) = self.shape_pending.take() {
+            mesh.verts.truncate(v0);
+            mesh.uvs.truncate(v0);
+            mesh.tris.truncate(t0);
+            self.rig.weights.truncate(v0);
+            self.version += 1;
+        }
+    }
+
+    /// The mesh is made another mesh with more points: the old one is kept to take it back, and a new point (the middle of two points) moves with the mean of what
+    /// moves the two.
+    fn apply_subdivided(&mut self, mesh: &mut AssetMesh, new: AssetMesh, parents: &[(u32, u32)]) {
+        let before = (mesh.clone(), self.rig.weights.clone());
+        let old = mesh.verts.len();
+        let mut weights = self.rig.weights.clone();
+        if weights.len() == old {
+            for (a, b) in parents {
+                let mut mix: std::collections::HashMap<u16, f32> = std::collections::HashMap::new();
+                for (bone, x) in weights[*a as usize].iter().chain(weights[*b as usize].iter()) {
+                    *mix.entry(*bone).or_default() += x * 0.5;
+                }
+                let mut v: Vec<(u16, f32)> = mix.into_iter().collect();
+                v.sort_by(|x, y| y.1.total_cmp(&x.1));
+                v.truncate(4);
+                v.sort_by(|x, y| x.0.cmp(&y.0));
+                weights.push(v);
+            }
+        }
+        self.cut_undo.push(before);
+        if self.cut_undo.len() > 3 {
+            self.cut_undo.remove(0);
+        }
+        *mesh = new;
+        self.rig.weights = weights;
+        self.rig.normalize(4);
+        self.selected = vec![false; mesh.verts.len()];
+        self.strands.clear();
+        self.strand_sel = None;
+        self.geo_undo.clear();
+        self.painted = true;
+        self.near = None;
+        self.version += 1;
+    }
+
+    /// The faces are cut smaller: the picked ones, or all of them when nothing is picked.
+    pub fn subdivide_picked(&mut self, mesh: &mut AssetMesh) {
+        let faces = if self.selected.len() == mesh.verts.len() && self.selected.iter().any(|s| *s) { meshedit::selected_tris(mesh, &self.selected) } else { vec![true; mesh.tris.len()] };
+        if let Some((new, parents)) = meshops::subdivide(mesh, &faces) {
+            let (a, b) = (mesh.verts.len(), new.verts.len());
+            self.apply_subdivided(mesh, new, &parents);
+            self.geometry_message = Some(format!("{} points more ({} now).", b - a, b));
+        }
+    }
+
+    /// More points where the body bends: the faces near the joints of the bones are cut smaller (a few times), so the mesh bends well there.
+    pub fn fit_joints(&mut self, mesh: &mut AssetMesh) {
+        if self.rig.bones.len() < 2 {
+            self.geometry_message = Some("Put the bones in first (the Bones and weights page): the joints are where the bones meet.".into());
+            return;
+        }
+        let start = mesh.verts.len();
+        for _ in 0..self.joint_levels.clamp(1, 3) {
+            let faces = meshops::faces_near_joints(mesh, &self.rig, self.joint_radius);
+            let Some((new, parents)) = meshops::subdivide(mesh, &faces) else { break };
+            self.apply_subdivided(mesh, new, &parents);
+        }
+        self.geometry_message = Some(format!("{} points added near the joints.", mesh.verts.len() - start));
+    }
+
+    /// The holes of the mesh are closed (up to the size asked for).
+    pub fn fix_holes(&mut self, mesh: &mut AssetMesh) {
+        let max = self.hole_edges;
+        let mut found = 0;
+        self.edit_mesh(mesh, |_, m| {
+            let (new, copy_of, n) = meshops::fill_holes(m, max)?;
+            found = n;
+            let map: Vec<Option<u32>> = (0..m.verts.len() as u32).map(Some).collect();
+            let mut selection = vec![false; new.verts.len()];
+            for s in selection.iter_mut().skip(m.verts.len()) {
+                *s = true;
+            }
+            *m = new;
+            Some((map, copy_of, selection))
+        });
+        self.geometry_message = Some(if found == 0 { "No holes to close (or they are bigger than the size set).".into() } else { format!("{found} holes closed.") });
+    }
+
+    /// The faces for a file with quads (when the option is on): the triangles that pair up, as quads.
+    pub fn quads_for_export(&self, mesh: &AssetMesh) -> Option<(Vec<[u32; 4]>, Vec<[u32; 3]>)> {
+        self.quads.then(|| meshops::pair_quads(mesh, self.quad_angle))
     }
 
     /// Take the last stroke of the mesh brush back.
@@ -2566,6 +2811,28 @@ impl HandRig {
                         });
                     }
                 });
+                ui.add_space(4.0);
+                section_title(ui, "Points and faces");
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("More points").help("The picked faces (all of them when nothing is picked) are cut into smaller ones: more points to bend and sculpt").clicked() {
+                        self.subdivide_picked(mesh);
+                    }
+                    if ui.button("Fix holes").help("Closes the holes of the mesh (a hole of no more edges than the size below)").clicked() {
+                        self.fix_holes(mesh);
+                    }
+                });
+                ui.add(egui::Slider::new(&mut self.hole_edges, 4..=400).text("Biggest hole (edges)"));
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Count the quads").help("How many pairs of triangles make a quad").clicked() {
+                        let (q, l) = meshops::pair_quads(mesh, self.quad_angle);
+                        self.geometry_message = Some(format!("{} quads and {} triangles left.", q.len(), l.len()));
+                    }
+                    ui.checkbox(&mut self.quads, "Save .fbx and .obj with quads").help("Triangles that are flat together are saved as quads (fewer, bigger faces). The .glb always has triangles.");
+                });
+                ui.add(egui::Slider::new(&mut self.quad_angle, 1.0..=40.0).text("Flat within").suffix(" deg"));
+                if let Some(m) = &self.geometry_message {
+                    ui.label(RichText::new(m).size(11.5).color(TEXT_DIM));
+                }
                 if ui.add_enabled(!self.cut_undo.is_empty(), egui::Button::new("Take the last change back")).clicked() {
                     self.undo_cut(mesh);
                     self.selected = vec![false; mesh.verts.len()];
@@ -2656,7 +2923,6 @@ impl HandRig {
                         }
                     }
                 });
-                self.strands_ui(ui, mesh);
                 if self.hair && ui.button("Draw the hair picture...").help("Open the picture all the lines of hair look into (like the hair texture of VRoid) and draw it by hand").clicked() {
                     self.open_hair_editor(mesh);
                 }
@@ -2677,6 +2943,45 @@ impl HandRig {
                     self.undo_stroke(mesh);
                 }
                 ui.label(RichText::new(format!("{} strokes drawn. Drag over the mesh, from the root outwards. The colours are painted in a strip of the texture, and the new parts follow the bone under their start.", self.geo_undo.len())).size(11.0).color(TEXT_DIM));
+                section_title(ui, "Shapes");
+                ui.horizontal_wrapped(|ui| {
+                    for shape in meshops::Shape::ALL {
+                        let on = self.shape_pending.is_some_and(|s| s.0 == shape);
+                        if widgets::chip(ui, shape.label(), on).help("Put this shape on the mesh. Change its numbers, then keep it, and move, turn or enlarge it like any drawn thing").clicked() {
+                            self.shape_start(mesh, shape);
+                        }
+                    }
+                });
+                if let Some((shape, mut p, mut at, v0, t0)) = self.shape_pending {
+                    let mut changed = false;
+                    changed |= ui.add(egui::Slider::new(&mut p.size, 0.005..=0.6).logarithmic(true).text("Size").suffix(" m")).changed();
+                    if matches!(shape, meshops::Shape::Cylinder | meshops::Shape::Cone) {
+                        changed |= ui.add(egui::Slider::new(&mut p.height, 0.01..=1.0).logarithmic(true).text("Height").suffix(" m")).changed();
+                    }
+                    changed |= ui.add(egui::Slider::new(&mut p.segments, 3..=96).text(if matches!(shape, meshops::Shape::Cube | meshops::Shape::Plane) { "Points along a side" } else { "Points round" })).help("How many points the shape has: more is rounder and can be bent and sculpted finer").changed();
+                    if matches!(shape, meshops::Shape::Ball | meshops::Shape::Cylinder | meshops::Shape::Cone) {
+                        changed |= ui.add(egui::Slider::new(&mut p.rings, 2..=96).text("Rings")).changed();
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Place").size(12.0).color(TEXT_DIM));
+                        for (k, axis) in ["x", "y", "z"].into_iter().enumerate() {
+                            changed |= ui.add(egui::DragValue::new(&mut at[k]).speed(0.005).prefix(format!("{axis} ")).suffix(" m")).changed();
+                        }
+                    });
+                    if changed {
+                        self.shape_pending = Some((shape, p, at, v0, t0));
+                        self.shape_apply(mesh);
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button(RichText::new("Keep it").strong()).clicked() {
+                            self.shape_keep(mesh);
+                        }
+                        if ui.button("Take it away").clicked() {
+                            self.shape_drop(mesh);
+                        }
+                    });
+                }
+                self.strands_ui(ui, mesh);
             }
             Tool::Parts | Tool::Lasso => {
                 section_title(ui, "Parts");
@@ -2708,6 +3013,17 @@ impl HandRig {
                 }
                 let loose = self.rig.unweighted();
                 ui.label(RichText::new(format!("{loose} points are moved by no bone")).size(11.5).color(if loose > 0 { GOLD } else { TEXT_DIM }));
+                ui.add_space(4.0);
+                section_title(ui, "Fit the mesh to the bones");
+                ui.label(RichText::new("A body bends well when it has points where the bones bend: elbows, knees, hips, shoulders. This cuts the faces near the joints smaller.").size(11.0).color(TEXT_DIM));
+                ui.add(egui::Slider::new(&mut self.joint_radius, 0.02..=0.4).text("Near a joint").suffix(" m"));
+                ui.add(egui::Slider::new(&mut self.joint_levels, 1..=3).text("How many times"));
+                if ui.button("Add points at the joints").clicked() {
+                    self.fit_joints(mesh);
+                }
+                if let Some(m) = &self.geometry_message {
+                    ui.label(RichText::new(m).size(11.5).color(TEXT_DIM));
+                }
             }
             Tool::Texture => {
                 section_title(ui, "Paint the texture");
@@ -3153,6 +3469,28 @@ impl HandRig {
                 }
             }
         });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Turn").size(12.0).color(TEXT_DIM));
+            for (k, axis) in ["x", "y", "z"].into_iter().enumerate() {
+                let mut d = 0.0f32;
+                if ui.add(egui::DragValue::new(&mut d).speed(0.5).prefix(format!("{axis} ")).suffix(" deg")).help("Drag, or type how many degrees: turned about its root").changed() {
+                    self.strand_rotate(mesh, i, k, d);
+                }
+            }
+        });
+        let mut grow = 1.0f32;
+        if ui.add(egui::DragValue::new(&mut grow).speed(0.005).prefix("Bigger x ").range(0.2..=5.0)).help("Drag to make it bigger (above 1) or smaller (below 1), about its root").changed() {
+            self.strand_scale(mesh, i, grow);
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Merge it into the mesh").help("It becomes a part of the mesh: it keeps its place and its bones, but it is not in this list any more and cannot be moved on its own").clicked() {
+                self.strand_merge(i);
+            }
+            if ui.button("Merge all").clicked() {
+                self.strands.clear();
+                self.strand_sel = None;
+            }
+        });
         ui.checkbox(&mut self.strand_move, "Drag it with the mouse").help("Dragging in the picture moves the picked line (instead of drawing a new one). The round handle at the end of a line always makes it longer or shorter.");
         ui.label(RichText::new("Drag the round handle at the end of a line to make it longer or shorter, if it was drawn too short.").size(11.0).color(TEXT_DIM));
     }
@@ -3429,7 +3767,8 @@ impl SeviathApp {
         let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or(name);
         let anims = if self.m3.hand.with_animations { self.mesh_all_anims(true) } else { Vec::new() };
         let Some(mesh) = &self.m3.mesh else { return };
-        let ex = crate::fbx::write_fbx_anims(mesh, Some(&self.m3.hand.rig), &anims, self.m3.anim.fps as f32, &stem);
+        let quads = self.m3.hand.quads_for_export(mesh);
+        let ex = crate::fbx::write_fbx_polys(mesh, Some(&self.m3.hand.rig), &anims, self.m3.anim.fps as f32, &stem, quads);
         let mut res = std::fs::write(&p, &ex.fbx).map_err(|e| e.to_string());
         if let (Ok(()), Some(tex), Some(file)) = (&res, &mesh.texture, &ex.texture_name) {
             res = tex.save(p.with_file_name(file)).map_err(|e| e.to_string());
@@ -3921,5 +4260,94 @@ mod tests {
         let px = mesh.texture.as_ref().unwrap().get_pixel(rx, ry).0;
         let c = crate::blend::from_px(first);
         assert!((c.r() as i32 - px[0] as i32).abs() <= 2, "{c:?} {px:?}");
+    }
+
+    #[test]
+    fn a_drawn_object_is_turned_and_enlarged_about_its_root_with_its_bones_and_can_be_merged() {
+        let (mut mesh, mut hand, _cam) = hair_figure();
+        let first = hand.strands[0].bones.unwrap().0;
+        let root = hand.strands[0].line[0];
+        let v0 = hand.strands[0].verts.0;
+        let dist = |a: [f32; 3], b: [f32; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+        let reach = dist(mesh.verts[v0], root);
+        let tail_before = hand.rig.bones[first].tail;
+        hand.strand_rotate(&mut mesh, 0, 2, 90.0);
+        // turned about the root: the distance to the root is the same, the end is somewhere else, the bones went with it
+        assert!((dist(mesh.verts[v0], root) - reach).abs() < 1e-4);
+        assert!(dist(hand.rig.bones[first].tail, tail_before) > 0.005, "the bones turned too");
+        assert!(dist(hand.strands[0].line[0], root) < 1e-5, "the root stays");
+        let line_len = |h: &HandRig| dist(h.strands[0].line[0], *h.strands[0].line.last().unwrap());
+        let before = line_len(&hand);
+        hand.strand_scale(&mut mesh, 0, 2.0);
+        assert!((line_len(&hand) / before - 2.0).abs() < 0.01);
+        // merged: it is not in the list, and still in the mesh with its bones
+        let n = mesh.verts.len();
+        hand.strand_merge(0);
+        assert!(hand.strands.is_empty() && mesh.verts.len() == n && hand.has_hair());
+    }
+
+    #[test]
+    fn a_shape_is_made_with_the_number_of_points_asked_for_changed_and_kept() {
+        let (mut mesh, mut hand, _cam) = mirror_setup();
+        let before = mesh.verts.len();
+        hand.shape_start(&mut mesh, meshops::Shape::Ball);
+        let few = mesh.verts.len() - before;
+        assert!(few > 20, "{few}");
+        let (shape, mut p, at, v0, t0) = hand.shape_pending.unwrap();
+        p.segments = 40;
+        p.rings = 20;
+        hand.shape_pending = Some((shape, p, at, v0, t0));
+        hand.shape_apply(&mut mesh);
+        assert!(mesh.verts.len() - before > few * 4, "more points when asked for: {} {few}", mesh.verts.len() - before);
+        assert_eq!(hand.rig.weights.len(), mesh.verts.len());
+        hand.shape_keep(&mesh);
+        assert!(hand.shape_pending.is_none() && hand.strands.len() == 1 && hand.strands[0].name == "Ball");
+        hand.strand_translate(&mut mesh, 0, [0.0, 0.1, 0.0]);
+        // another shape is thrown away
+        let kept = mesh.verts.len();
+        hand.shape_start(&mut mesh, meshops::Shape::Cylinder);
+        hand.shape_drop(&mut mesh);
+        assert_eq!(mesh.verts.len(), kept);
+        hand.undo_stroke(&mut mesh);
+        assert_eq!(mesh.verts.len(), before);
+    }
+
+    #[test]
+    fn faces_are_cut_smaller_at_the_joints_and_the_new_points_have_the_weights_of_their_neighbours() {
+        let (mut mesh, mut hand, _cam) = sculpt_setup();
+        // a bone on the grid, with a child: the joint is in the middle
+        hand.rig.add_bone("a", None, [0.0, 0.0, 0.0], [0.0, 0.2, 0.0]);
+        hand.rig.add_bone("b", Some(0), [0.0, 0.2, 0.0], [0.0, 0.4, 0.0]);
+        hand.rig.assign_nearest_parts(&mesh.verts);
+        hand.joint_radius = 0.1;
+        let (v0, t0) = (mesh.verts.len(), mesh.tris.len());
+        hand.fit_joints(&mut mesh);
+        assert!(mesh.verts.len() > v0 && mesh.tris.len() > t0);
+        assert_eq!(hand.rig.weights.len(), mesh.verts.len());
+        assert!(hand.rig.weights.iter().all(|w| !w.is_empty() && (w.iter().map(|x| x.1).sum::<f32>() - 1.0).abs() < 1e-3), "every point has a bone, adding up to one");
+        // it can be taken back
+        hand.undo_cut(&mut mesh);
+        assert_eq!(mesh.verts.len(), v0);
+        // all faces smaller
+        hand.subdivide_picked(&mut mesh);
+        assert_eq!(mesh.tris.len(), t0 * 4);
+    }
+
+    #[test]
+    fn the_holes_are_fixed_through_the_tool_and_the_weights_follow() {
+        let (_, mut hand, _cam) = sculpt_setup();
+        let mut tube = meshops::make(meshops::Shape::Cylinder, &meshops::ShapeParams { size: 0.1, height: 0.5, segments: 12, rings: 4 });
+        let keep = tube.tris.len() - 24;
+        tube.tris.truncate(keep);
+        hand.start_for(&tube);
+        hand.rig.add_bone("a", None, [0.0; 3], [0.0, 0.5, 0.0]);
+        hand.rig.assign_nearest_parts(&tube.verts);
+        let v0 = tube.verts.len();
+        hand.fix_holes(&mut tube);
+        assert_eq!(tube.verts.len(), v0 + 2, "a point in the middle of each hole");
+        assert_eq!(hand.rig.weights.len(), tube.verts.len());
+        assert!(hand.geometry_message.as_deref().unwrap().contains("2 holes closed"));
+        hand.fix_holes(&mut tube);
+        assert!(hand.geometry_message.as_deref().unwrap().contains("No holes"));
     }
 }

@@ -521,6 +521,11 @@ fn fbx_nodes(b: &[u8], mut pos: usize, end: usize, wide: bool) -> Result<Vec<FNo
     Ok(out)
 }
 
+#[cfg(test)]
+pub fn load_fbx_for_test(bytes: &[u8]) -> Result<AssetMesh, String> {
+    fbx(bytes).map(|i| i.mesh)
+}
+
 fn fbx(bytes: &[u8]) -> Result<Imported, String> {
     if !bytes.starts_with(b"Kaydara FBX Binary") {
         return Err("Only binary .fbx files can be opened (a text .fbx can be saved as binary in Blender or in Autodesk's converter).".into());
