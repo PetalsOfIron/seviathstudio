@@ -106,8 +106,6 @@ impl Tool {
 pub struct Bench {
     /// The tool window that is open.
     pub open: Option<Tool>,
-    /// The Rig tab shows the 3D character page instead of the 2D rig.
-    pub view3d: bool,
     /// Physics and Animate tabs: the picture in the middle is the one the rig is edited on (drag its points there).
     pub edit_here: bool,
     /// The new changer being set up.
@@ -117,23 +115,19 @@ pub struct Bench {
     pub smooth: bool,
     pub flip_vertical: bool,
     pub pivot: Option<[f32; 2]>,
-    /// The Animate tab shows the 3D character (posed by the bone sliders) instead of the 2D picture.
-    pub anim_3d: bool,
-    /// The 3D page shows the drawing (to drag the face marks and the hair) instead of the 3D character.
-    pub picture: bool,
 }
 
 impl Default for Bench {
     fn default() -> Self {
-        Self { open: None, view3d: false, edit_here: false, name: String::new(), parent: None, line_points: 5, smooth: true, flip_vertical: false, pivot: None, anim_3d: false, picture: false }
+        Self { open: None, edit_here: false, name: String::new(), parent: None, line_points: 5, smooth: true, flip_vertical: false, pivot: None }
     }
 }
 
 impl SeviathApp {
-    /// The row of tools along the top. `with_view_switch`: the Rig tab also has the switch between the 2D rig and the 3D character.
-    pub(super) fn rig_toolbar(&mut self, ui: &mut Ui, with_view_switch: bool, with_physics: bool, with_edit_here: bool) {
+    /// The row of tools along the top.
+    pub(super) fn rig_toolbar(&mut self, ui: &mut Ui, with_physics: bool, with_edit_here: bool) {
         let before = self.rigs.bench.open;
-        self.rig_toolbar_row(ui, with_view_switch, with_physics, with_edit_here);
+        self.rig_toolbar_row(ui, with_physics, with_edit_here);
         // another tool: what the last one was waiting for on the picture (a path, a pin, a pivot) is over
         if self.rigs.bench.open != before {
             self.rigs.mode = if self.rigs.bench.open == Some(Tool::Brush) { super::rigtab::Mode::Brush } else { super::rigtab::Mode::Look };
@@ -141,21 +135,9 @@ impl SeviathApp {
         }
     }
 
-    fn rig_toolbar_row(&mut self, ui: &mut Ui, with_view_switch: bool, with_physics: bool, with_edit_here: bool) {
+    fn rig_toolbar_row(&mut self, ui: &mut Ui, with_physics: bool, with_edit_here: bool) {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-            if with_view_switch {
-                if widgets::chip(ui, "2D rig", !self.rigs.bench.view3d).help("Rig a drawing by hand or automatically: meshes, changers, sliders").clicked() {
-                    self.rigs.bench.view3d = false;
-                }
-                if widgets::chip(ui, "3D character", self.rigs.bench.view3d).help("Turn the drawing into a 3D character with a skeleton, for games and VRM apps").clicked() {
-                    self.rigs.bench.view3d = true;
-                }
-                ui.separator();
-            }
-            if with_view_switch && self.rigs.bench.view3d {
-                return;
-            }
             ui.label(RichText::new("Rig by hand").size(12.0).color(TEXT_DIM));
             let mut set = |ui: &mut Ui, bench: &mut Bench, tool: Tool, label: &str, tip: &str| {
                 if widgets::chip(ui, label, bench.open == Some(tool)).help(tip).clicked() {
@@ -187,12 +169,6 @@ impl SeviathApp {
                 let on = self.rigs.bench.edit_here;
                 if widgets::chip(ui, if on { "Editing the rig on the picture" } else { "Edit the rig on the picture" }, on).help("Shows the rig editor in the middle (drag the points of a changer, pick parts by clicking them) instead of the finished picture").clicked() {
                     self.rigs.bench.edit_here = !on;
-                    self.rigs.bench.anim_3d = false;
-                }
-                let on3 = self.rigs.bench.anim_3d;
-                if widgets::chip(ui, "3D view", on3).help("Shows the 3D character, posed by the 3D bones sliders on the left (make them on the Rig tab, 3D character page): key them like any slider").clicked() {
-                    self.rigs.bench.anim_3d = !on3;
-                    self.rigs.bench.edit_here = false;
                 }
             }
         });
@@ -225,27 +201,6 @@ impl SeviathApp {
             });
         if !open {
             self.rigs.bench.open = None;
-        }
-    }
-
-    /// The middle of the Rig tab's 3D page: the 3D character, or the drawing when the face marks or the hair are being dragged.
-    pub(super) fn rig_3d_center(&mut self, ui: &mut Ui, now: f64, picked: &mut Option<(LayerId, bool, bool)>) {
-        let marks = self.rigs.face_edit || self.rigs.hair_edit;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-            if widgets::chip(ui, "3D character", !self.rigs.bench.picture && !marks).help("Show the 3D character page: the skeleton, the face and the file for games.").clicked() {
-                self.rigs.bench.picture = false;
-                self.rigs.face_edit = false;
-                self.rigs.hair_edit = false;
-            }
-            if widgets::chip(ui, "The drawing (face marks, hair)", self.rigs.bench.picture || marks).help("The drawing, to drag the eyes and the mouth or the strands of the hair").clicked() {
-                self.rigs.bench.picture = true;
-            }
-        });
-        if self.rigs.bench.picture || marks {
-            self.rig_view(ui, now, picked);
-        } else {
-            self.game_preview_ui(ui);
         }
     }
 
@@ -513,7 +468,6 @@ impl SeviathApp {
     pub fn test_open_tool(&mut self, which: &str) {
         self.rigs.mode = if which == "brush" { super::rigtab::Mode::Brush } else { super::rigtab::Mode::Look };
         let b = &mut self.rigs.bench;
-        b.view3d = which == "3d";
         b.open = match which {
             "meshes" => Some(Tool::Meshes),
             "skin" => Some(Tool::Skin),

@@ -86,7 +86,17 @@ impl AssetMesh {
         AssetStats { triangles: self.tris.len(), vertices: self.verts.len(), size: [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]], texture: self.texture.as_ref().map(|t| t.dimensions()), normal_map: self.normal.is_some() }
     }
 
-    fn bounds(&self) -> ([f32; 3], [f32; 3]) {
+    /// Scaled to a height in metres, with its feet on the floor (y is 0) and its middle over the origin (x and z).
+    pub fn stand_on_floor(&mut self, height_m: f32) {
+        let (lo, hi) = self.bounds();
+        let s = height_m / (hi[1] - lo[1]).max(1e-6);
+        let (cx, cz) = ((lo[0] + hi[0]) / 2.0, (lo[2] + hi[2]) / 2.0);
+        for v in &mut self.verts {
+            *v = [(v[0] - cx) * s, (v[1] - lo[1]) * s, (v[2] - cz) * s];
+        }
+    }
+
+    pub fn bounds(&self) -> ([f32; 3], [f32; 3]) {
         let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
         for v in &self.verts {
             for k in 0..3 {
@@ -104,6 +114,19 @@ impl AssetMesh {
 
     /// The same, as colours, as the directions of the surface, or as depth.
     pub fn render_view(&self, yaw: f32, pitch: f32, w: u32, h: u32, wire: bool, view: View) -> RgbaImage {
+        self.render_cam(&self.verts, &Camera::fit(self.bounds(), yaw, pitch, w, h), wire, view, None).0
+    }
+
+    /// The model with its points at other places (a pose), seen by a camera. `tint` gives a colour to every point (the weights of a bone, for
+    /// example) instead of the texture. Also gives the depth of every pixel (`f32::MAX` where nothing is), for picking what is seen.
+    pub fn render_cam(&self, verts: &[[f32; 3]], cam: &Camera, wire: bool, view: View, tint: Option<&[[u8; 3]]>) -> (RgbaImage, Vec<f32>) {
+        let (img, depth, _) = self.render_full(verts, cam, wire, view, tint);
+        (img, depth)
+    }
+
+    /// The same, and the triangle that is seen in every pixel (`u32::MAX` where nothing is): what painting on the surface needs.
+    pub fn render_full(&self, verts: &[[f32; 3]], cam: &Camera, wire: bool, view: View, tint: Option<&[[u8; 3]]>) -> (RgbaImage, Vec<f32>, Vec<u32>) {
+        let (w, h) = (cam.w, cam.h);
         let background = match view {
             View::Textured => Rgba([40, 42, 48, 255]),
             View::Normals => Rgba([128, 128, 255, 255]),
@@ -111,27 +134,16 @@ impl AssetMesh {
         };
         let mut img = RgbaImage::from_pixel(w, h, background);
         let mut depth = vec![f32::MAX; (w * h) as usize];
-        let (lo, hi) = self.bounds();
-        let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
-        let radius = (0..3).map(|k| (hi[k] - lo[k]).powi(2)).sum::<f32>().sqrt().max(1e-6) / 2.0;
-        let (sy, cy) = yaw.to_radians().sin_cos();
-        let (sp, cp) = pitch.to_radians().sin_cos();
-        let scale = (w.min(h) as f32) * 0.46 / radius;
-        // the point on the screen and its depth (smaller is nearer)
-        let project = |v: [f32; 3]| -> [f32; 3] {
-            let (x, y, z) = (v[0] - centre[0], v[1] - centre[1], v[2] - centre[2]);
-            let (x1, z1) = (x * cy + z * sy, -x * sy + z * cy);
-            let (y2, z2) = (y * cp - z1 * sp, y * sp + z1 * cp);
-            [w as f32 / 2.0 + x1 * scale, h as f32 / 2.0 - y2 * scale, -z2 * scale]
-        };
-        let pts: Vec<[f32; 3]> = self.verts.iter().map(|v| project(*v)).collect();
+        let mut ids = vec![u32::MAX; (w * h) as usize];
+        let (radius, scale) = (cam.radius, cam.scale());
+        let pts: Vec<[f32; 3]> = verts.iter().map(|v| cam.project(*v)).collect();
         let (zmin, zmax) = pts.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p[2]), hi.max(p[2])));
         let light = {
             let l = [0.4f32, 0.6, 0.7];
             let n = (l[0] * l[0] + l[1] * l[1] + l[2] * l[2]).sqrt();
             [l[0] / n, l[1] / n, l[2] / n]
         };
-        for t in &self.tris {
+        for (ti, t) in self.tris.iter().enumerate() {
             let (a, b, c) = (pts[t[0] as usize], pts[t[1] as usize], pts[t[2] as usize]);
             // the face's own direction (in the turned space), for the light, and which side faces the viewer
             let (e1, e2) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
@@ -169,6 +181,7 @@ impl AssetMesh {
                         continue;
                     }
                     depth[at] = z;
+                    ids[at] = ti as u32;
                     if view != View::Textured {
                         let c = match view {
                             View::Normals => [((view_normal[0] * 0.5 + 0.5) * 255.0) as u8, ((view_normal[1] * 0.5 + 0.5) * 255.0) as u8, ((view_normal[2] * 0.5 + 0.5) * 255.0) as u8],
@@ -181,6 +194,12 @@ impl AssetMesh {
                         continue;
                     }
                     let base = match &self.texture {
+                        _ if tint.is_some() => {
+                            let tn = tint.unwrap();
+                            let (ca, cb, cc) = (tn[t[0] as usize], tn[t[1] as usize], tn[t[2] as usize]);
+                            let mix = |k: usize| (w0 * ca[k] as f32 + w1 * cb[k] as f32 + w2 * cc[k] as f32).clamp(0.0, 255.0) as u8;
+                            [mix(0), mix(1), mix(2), 255]
+                        }
                         Some(tex) => {
                             let (u, v) = (w0 * ua[0] + w1 * ub[0] + w2 * uc[0], w0 * ua[1] + w1 * ub[1] + w2 * uc[1]);
                             let (tx, ty) = (((u.rem_euclid(1.0)) * (tex.width() - 1) as f32) as u32, ((v.rem_euclid(1.0)) * (tex.height() - 1) as f32) as u32);
@@ -207,7 +226,75 @@ impl AssetMesh {
                 }
             }
         }
-        img
+        (img, depth, ids)
+    }
+
+    /// The texture coordinates of a pixel of a view, from the triangle that is seen there.
+    pub fn uv_at(&self, verts: &[[f32; 3]], cam: &Camera, tri: usize, px: f32, py: f32) -> Option<[f32; 2]> {
+        let t = self.tris.get(tri)?;
+        let (a, b, c) = (cam.project(verts[t[0] as usize]), cam.project(verts[t[1] as usize]), cam.project(verts[t[2] as usize]));
+        let area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        if area.abs() < 1e-6 {
+            return None;
+        }
+        let w0 = ((b[0] - px) * (c[1] - py) - (b[1] - py) * (c[0] - px)) / area;
+        let w1 = ((c[0] - px) * (a[1] - py) - (c[1] - py) * (a[0] - px)) / area;
+        let w2 = 1.0 - w0 - w1;
+        let (ua, ub, uc) = (self.uvs[t[0] as usize], self.uvs[t[1] as usize], self.uvs[t[2] as usize]);
+        Some([w0 * ua[0] + w1 * ub[0] + w2 * uc[0], w0 * ua[1] + w1 * ub[1] + w2 * uc[1]])
+    }
+}
+
+/// Where the model is looked at from: turned (`yaw` about the up axis, `pitch` tipped forward, degrees), zoomed and moved on the screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Camera {
+    pub centre: [f32; 3],
+    pub radius: f32,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub zoom: f32,
+    /// How far the picture is moved on the screen, in pixels.
+    pub pan: [f32; 2],
+    pub w: u32,
+    pub h: u32,
+}
+
+impl Camera {
+    /// The whole model in view, from the front (yaw 0).
+    pub fn fit(bounds: ([f32; 3], [f32; 3]), yaw: f32, pitch: f32, w: u32, h: u32) -> Camera {
+        let (lo, hi) = bounds;
+        let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+        let radius = (0..3).map(|k| (hi[k] - lo[k]).powi(2)).sum::<f32>().sqrt().max(1e-6) / 2.0;
+        Camera { centre, radius, yaw, pitch, zoom: 1.0, pan: [0.0; 2], w, h }
+    }
+
+    /// Pixels per metre.
+    pub fn scale(&self) -> f32 {
+        (self.w.min(self.h) as f32) * 0.46 / self.radius * self.zoom
+    }
+
+    /// The point on the screen and its depth (smaller is nearer).
+    pub fn project(&self, v: [f32; 3]) -> [f32; 3] {
+        let (sy, cy) = self.yaw.to_radians().sin_cos();
+        let (sp, cp) = self.pitch.to_radians().sin_cos();
+        let (x, y, z) = (v[0] - self.centre[0], v[1] - self.centre[1], v[2] - self.centre[2]);
+        let (x1, z1) = (x * cy + z * sy, -x * sy + z * cy);
+        let (y2, z2) = (y * cp - z1 * sp, y * sp + z1 * cp);
+        let s = self.scale();
+        [self.w as f32 / 2.0 + self.pan[0] + x1 * s, self.h as f32 / 2.0 + self.pan[1] - y2 * s, -z2 * s]
+    }
+
+    /// The place in space of a point of the screen at a depth (the way back from `project`).
+    pub fn unproject(&self, p: [f32; 3]) -> [f32; 3] {
+        let (sy, cy) = self.yaw.to_radians().sin_cos();
+        let (sp, cp) = self.pitch.to_radians().sin_cos();
+        let s = self.scale();
+        let x1 = (p[0] - self.w as f32 / 2.0 - self.pan[0]) / s;
+        let y2 = -(p[1] - self.h as f32 / 2.0 - self.pan[1]) / s;
+        let z2 = -p[2] / s;
+        let (y, z1) = (y2 * cp + z2 * sp, -y2 * sp + z2 * cp);
+        let (x, z) = (x1 * cy - z1 * sy, x1 * sy + z1 * cy);
+        [x + self.centre[0], y + self.centre[1], z + self.centre[2]]
     }
 }
 
@@ -248,6 +335,42 @@ mod tests {
         b.nodes.push(json!({ "mesh": 0 }));
         b.scenes.push(json!({ "nodes": [0] }));
         b.glb()
+    }
+
+    #[test]
+    fn a_mesh_stands_on_the_floor_at_the_height_asked_for() {
+        let mut m = AssetMesh::from_glb(&box_glb()).unwrap();
+        m.stand_on_floor(1.0);
+        let (lo, hi) = m.bounds();
+        assert!(lo[1].abs() < 1e-6 && (hi[1] - 1.0).abs() < 1e-5);
+        assert!(((lo[0] + hi[0]) / 2.0).abs() < 1e-6 && ((lo[2] + hi[2]) / 2.0).abs() < 1e-6);
+        assert!((hi[0] - lo[0] - 0.5).abs() < 1e-5, "it keeps its shape (the box is half as wide as tall)");
+    }
+
+    #[test]
+    fn the_camera_goes_there_and_back() {
+        let mut c = Camera::fit(([-1.0, 0.0, -0.5], [1.0, 2.0, 0.5]), 35.0, 18.0, 400, 500);
+        c.zoom = 1.7;
+        c.pan = [12.0, -30.0];
+        for p in [[0.3, 1.2, -0.4], [-0.9, 0.1, 0.4], [0.0, 0.0, 0.0]] {
+            let back = c.unproject(c.project(p));
+            for k in 0..3 {
+                assert!((back[k] - p[k]).abs() < 1e-4, "{p:?} {back:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_tint_replaces_the_texture_and_the_depth_is_given() {
+        let m = AssetMesh::from_glb(&box_glb()).unwrap();
+        let cam = Camera::fit(m.bounds(), 20.0, 10.0, 64, 64);
+        let tint = vec![[255u8, 0, 0]; m.verts.len()];
+        let (img, depth) = m.render_cam(&m.verts, &cam, false, View::Textured, Some(&tint));
+        assert_eq!(depth.len(), 64 * 64);
+        let p = img.get_pixel(32, 32).0;
+        assert!(p[0] > 100 && p[1] < 5 && p[2] < 5, "{p:?}");
+        assert!(depth[32 * 64 + 32] < f32::MAX);
+        assert_eq!(depth[0], f32::MAX);
     }
 
     #[test]

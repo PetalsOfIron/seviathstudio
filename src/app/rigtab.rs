@@ -123,16 +123,11 @@ impl RigState {
 pub struct RigState {
     /// How the arms and legs of an uncut figure are held (for the automatic skeleton).
     pub uncut_hints: rig::uncut::Hints,
-    pub game: super::gameui::GameUi,
     /// The turn at every point of the curve(s) being edited (curves after curve), next to `warp_edit`.
     pub(super) turn_edit: Option<Vec<f32>>,
-    /// The eyes and the mouth of an uncut figure are shown on the picture to be dragged.
-    pub(super) face_edit: bool,
     /// The joints of the skeleton are shown on the picture to be dragged, and the picture of the doc from before a drag.
     pub(super) joint_edit: bool,
     pub(super) joint_before: Option<crate::history::DocState>,
-    /// Clicking the face points one after the other: 0 off, 1 first eye, 2 second eye, 3 mouth (with the first eye kept here).
-    pub(super) face_click: u8,
     /// The Animate tab: playhead, timeline view and the saving job.
     pub(super) anim: super::animtab::AnimUi,
     /// The Stream tab: tracking sources, inputs, outputs.
@@ -140,21 +135,6 @@ pub struct RigState {
     /// Layers that expressions show or hide right now (Stream tab): whether to show, and how far.
     pub expr_layers: std::collections::HashMap<LayerId, (bool, f32)>,
     pub views_message: Option<String>,
-    /// Editing the hair: on or off, the tool (0 move joints, 1 add a strand, 2 add hair with the brush, 3 take hair away), the picked
-    /// strand, the joints of the strand being made, the radius of the hair brush, the picture of the hair on the canvas, the hair the
-    /// app found (before corrections) and a change waiting to be built.
-    pub(super) hair_edit: bool,
-    pub(super) hair_tool: u8,
-    pub(super) hair_sel: Option<usize>,
-    pub(super) hair_new: Vec<[f32; 2]>,
-    pub(super) hair_r: f32,
-    pub(super) hair_tex: Option<(usize, egui::TextureHandle, [i32; 2])>,
-    pub(super) hair_base: Option<crate::vrm::hair::HairMask>,
-    pub(super) hair_dirty: bool,
-    /// Picking a part of the texture again: which part, and where the circle was started on the page.
-    pub(super) pick_part: Option<crate::vrm::texedit::Part>,
-    pub(super) pick_from: Option<[f32; 2]>,
-    pub(super) face_first: [f32; 2],
     /// How many degrees the next *Turn* button turns by.
     pub(super) turn_by: f32,
     /// The numbers of a numeric changer being set, and whether they are shown on the picture now.
@@ -881,10 +861,9 @@ impl SeviathApp {
         }
         self.rig_render(&ctx);
         let mut picked: Option<(LayerId, bool, bool)> = None;
-        let view3d = self.rigs.bench.view3d;
 
         // the tools of rigging by hand along the top, the parts and the parameters on the left, the automatic rig on the right
-        egui::Panel::top("rig_toolbar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.rig_toolbar(ui, true, false, false));
+        egui::Panel::top("rig_toolbar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.rig_toolbar(ui, false, false));
         egui::Panel::left("rig_layers").default_size(270.0).size_range(210.0..=440.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             picked = self.rig_left_panel(ui, &ctx, now, "rig", true, false);
         });
@@ -896,11 +875,7 @@ impl SeviathApp {
         });
 
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(14, 20, 18))).show(ui, |ui| {
-            if view3d {
-                self.rig_3d_center(ui, now, &mut picked);
-            } else {
-                self.rig_view(ui, now, &mut picked);
-            }
+            self.rig_view(ui, now, &mut picked);
         });
         self.rig_tool_window(&ctx, now);
 
@@ -941,13 +916,8 @@ impl SeviathApp {
         });
     }
 
-    /// The right side: the automatic rig (2D page), or the 3D character (3D page).
+    /// The right side: the automatic rig.
     fn rig_side(&mut self, ui: &mut Ui, now: f64) {
-        if self.rigs.bench.view3d {
-            section_title(ui, "3D character");
-            self.rig_game_section(ui, now);
-            return;
-        }
         section_title(ui, "Automatic rig");
         ui.label(RichText::new("Tags tell the automatic rig what each part is (Parts tab). Rigging by hand needs no tags: use the tools along the top.").size(11.5).color(TEXT_DIM));
         ui.checkbox(&mut self.rigs.hq, "Sharp curves").help("Adds triangles where a part bends, so the picture stays sharp. Turn it off if the picture is slow to move.");
@@ -2707,121 +2677,6 @@ impl SeviathApp {
                     let hr = Rect::from_center_size(at, vec2(14.0, 14.0));
                     p.circle_filled(at, 7.0, if editing { Color32::from_rgb(255, 200, 60) } else { Color32::from_rgb(120, 110, 60) });
                     grab_handle(ui, hr, egui::Id::new(("soft_handle", c.id)), 0, sc, editing || can_pick_shape, &mut grab);
-                }
-            }
-        }
-        // the hair: its strands and its brush
-        if self.rigs.hair_edit {
-            self.hair_canvas(ui, &resp, &p, &to_screen, &to_page, sc);
-        }
-        // the pieces picked again for the texture parts (drawn as amber circles), and the guide lines at the features
-        if let Some(sk) = &rig.skin {
-            for pk in &sk.tex.picks {
-                let (a, b) = (to_screen([pk.centre[0] - pk.radii[0], pk.centre[1] - pk.radii[1]]), to_screen([pk.centre[0] + pk.radii[0], pk.centre[1] + pk.radii[1]]));
-                let amber = Color32::from_rgb(255, 200, 60);
-                p.add(egui::Shape::ellipse_stroke(to_screen(pk.centre), (b - a) * 0.5, Stroke::new(1.5, amber)));
-                p.text(a, egui::Align2::LEFT_BOTTOM, pk.part.label(), egui::FontId::proportional(11.0), amber);
-            }
-            if self.rigs.game.guides {
-                if let Some(m0) = crate::vrm::model::face_marks(&rig) {
-                    let t = &sk.tex;
-                    let m = t.effective(&m0);
-                    let base = [t.head[0] + t.face[0], t.head[1] + t.face[1]];
-                    let brow = |left: bool| { let b = crate::vrm::texedit::TexEdit::brow_at(&m0, left); let o = if left { t.brow_l } else { t.brow_r }; [b[0] + base[0] + o[0], b[1] + base[1] + o[1]] };
-                    let nose = { let n = crate::vrm::texedit::TexEdit::nose_at(&m0); [n[0] + base[0] + t.nose[0], n[1] + base[1] + t.nose[1]] };
-                    let wide = m.eye_distance() * 1.1;
-                    let cx = m.eye_center()[0];
-                    for (y, name) in [((brow(true)[1] + brow(false)[1]) / 2.0, "eyebrows"), ((m.eye_l[1] + m.eye_r[1]) / 2.0, "eyes"), (nose[1], "nose"), (m.mouth[1], "mouth")] {
-                        let (a, b) = (to_screen([cx - wide, y]), to_screen([cx + wide, y]));
-                        p.line_segment([a, b], Stroke::new(1.0, Color32::from_rgb(0, 190, 220)));
-                        p.text(b + vec2(4.0, 0.0), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional(10.5), Color32::from_rgb(0, 190, 220));
-                    }
-                }
-            }
-        }
-        // picking a part again: drag a circle round the right piece of the drawing
-        if let Some(part) = self.rigs.pick_part {
-            p.text(rect.center_top() + vec2(0.0, 10.0), egui::Align2::CENTER_TOP, format!("Drag a circle around the {} on the picture", part.label().to_lowercase()), egui::FontId::proportional(15.0), Color32::from_rgb(255, 200, 60));
-            if resp.drag_started_by(egui::PointerButton::Primary) {
-                if let Some(pos) = ui.input(|i| i.pointer.press_origin()) {
-                    self.rigs.pick_from = Some(to_page(pos));
-                }
-            }
-            if let (Some(from), Some(pos)) = (self.rigs.pick_from, ui.input(|i| i.pointer.latest_pos())) {
-                let cur = to_page(pos);
-                let radii = [(cur[0] - from[0]).abs().max(3.0), (cur[1] - from[1]).abs().max(3.0)];
-                p.add(egui::Shape::ellipse_stroke(to_screen(from), vec2(radii[0] * sc, radii[1] * sc), Stroke::new(2.0, Color32::from_rgb(255, 200, 60))));
-                if resp.drag_stopped() {
-                    let pick = crate::vrm::texedit::Pick { part, centre: from, radii };
-                    if let Some(sk) = Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut() {
-                        sk.tex.picks.retain(|k| k.part != part);
-                        sk.tex.picks.push(pick);
-                    }
-                    self.rigs.pick_part = None;
-                    self.rigs.pick_from = None;
-                    self.rigs.game.tex_dirty = true;
-                }
-            }
-        }
-        // clicking the face points: the two eyes, then the mouth
-        if self.rigs.face_click > 0 {
-            let words = ["", "Click the first eye", "Click the other eye", "Click the middle of the mouth"][self.rigs.face_click as usize];
-            p.text(rect.center_top() + vec2(0.0, 10.0), egui::Align2::CENTER_TOP, words, egui::FontId::proportional(15.0), Color32::from_rgb(60, 220, 200));
-            if resp.clicked_by(egui::PointerButton::Primary) {
-                if let (Some(pos), Some(mut f)) = (resp.interact_pointer_pos(), crate::vrm::model::face_marks(&rig)) {
-                    let at = to_page(pos);
-                    match self.rigs.face_click {
-                        1 => self.rigs.face_first = at,
-                        2 => {
-                            let a = self.rigs.face_first;
-                            let (l, r) = if a[0] >= at[0] { (a, at) } else { (at, a) };
-                            f.eye_l = l;
-                            f.eye_r = r;
-                            f.eye_w = (l[0] - r[0]).hypot(l[1] - r[1]) * 0.36;
-                        }
-                        _ => {
-                            f.mouth = at;
-                            f.mouth_w = f.eye_distance() * 0.8;
-                        }
-                    }
-                    if self.rigs.face_click >= 2 {
-                        if let Some(sk) = Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut() {
-                            sk.face = Some(f);
-                        }
-                        self.rigs.game.model = None;
-                    }
-                    self.rigs.face_click = if self.rigs.face_click >= 3 { 0 } else { self.rigs.face_click + 1 };
-                }
-            }
-        }
-        // the face points of an uncut figure (for its blend shapes): drag the eyes and the mouth into place
-        if self.rigs.face_edit {
-            if let Some(mut f) = crate::vrm::model::face_marks(&rig) {
-                let mut changed = false;
-                let teal = Color32::from_rgb(60, 220, 200);
-                for (k, (at, label)) in [(f.eye_l, "eye"), (f.eye_r, "eye"), (f.mouth, "mouth")].into_iter().enumerate() {
-                    let s = to_screen(at);
-                    let (w, h) = if k == 2 { (f.mouth_w, f.mouth_w * 0.3) } else { (f.eye_w, f.eye_w * 0.55) };
-                    p.rect_stroke(Rect::from_center_size(s, vec2(w * sc, h * sc)), 4.0, Stroke::new(1.5, teal), egui::StrokeKind::Outside);
-                    p.circle_filled(s, 4.0, teal);
-                    p.text(s + vec2(0.0, -h * sc * 0.5 - 8.0), egui::Align2::CENTER_BOTTOM, label, egui::FontId::proportional(11.0), teal);
-                    let r = ui.interact(Rect::from_center_size(s, vec2(18.0, 18.0)), egui::Id::new(("face_point", k)), Sense::drag());
-                    if r.dragged() {
-                        let d = r.drag_delta() / sc;
-                        let v = [at[0] + d.x, at[1] + d.y];
-                        match k {
-                            0 => f.eye_l = v,
-                            1 => f.eye_r = v,
-                            _ => f.mouth = v,
-                        }
-                        changed = true;
-                    }
-                }
-                if changed {
-                    if let Some(sk) = Arc::make_mut(&mut self.draw.doc.rig).skin.as_mut() {
-                        sk.face = Some(f);
-                    }
-                    self.rigs.game.model = None;
                 }
             }
         }

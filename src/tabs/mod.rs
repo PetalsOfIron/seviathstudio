@@ -17,11 +17,11 @@ pub enum Tab {
     Physics,
     Animate,
     Stream,
-    Generate,
+    Mesh3d,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 7] = [Tab::Draw, Tab::Parts, Tab::Rig, Tab::Physics, Tab::Animate, Tab::Stream, Tab::Generate];
+    pub const ALL: [Tab; 7] = [Tab::Draw, Tab::Parts, Tab::Rig, Tab::Physics, Tab::Animate, Tab::Stream, Tab::Mesh3d];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -31,7 +31,7 @@ impl Tab {
             Tab::Physics => "Physics",
             Tab::Animate => "Animate",
             Tab::Stream => "Stream",
-            Tab::Generate => "Generate",
+            Tab::Mesh3d => "3D",
         }
     }
 
@@ -43,7 +43,7 @@ impl Tab {
             Tab::Physics => Icon::Physics,
             Tab::Animate => Icon::Animate,
             Tab::Stream => Icon::Stream,
-            Tab::Generate => Icon::Generate,
+            Tab::Mesh3d => Icon::Generate,
         }
     }
 
@@ -56,7 +56,7 @@ impl Tab {
             Tab::Physics => Color32::from_rgb(92, 150, 240),
             Tab::Animate => Color32::from_rgb(172, 122, 240),
             Tab::Stream => Color32::from_rgb(240, 110, 120),
-            Tab::Generate => Color32::from_rgb(120, 220, 120),
+            Tab::Mesh3d => Color32::from_rgb(120, 220, 120),
         }
     }
 
@@ -68,7 +68,7 @@ impl Tab {
             Tab::Physics => "Tick what should move: hair, cloth, earrings… (Ctrl+4)",
             Tab::Animate => "Animate parameters over time and export video (Ctrl+5)",
             Tab::Stream => "Use the model live with face tracking (Ctrl+6)",
-            Tab::Generate => "Make game assets and rigged 3D characters from a text (Ctrl+7)",
+            Tab::Mesh3d => "Make a 3D mesh from a text, a picture or a drawing, and rig it by hand (Ctrl+7)",
         }
     }
 }

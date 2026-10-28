@@ -41,6 +41,8 @@ mod randomizer;
 mod recorder;
 mod refs;
 mod rig;
+mod meshfile;
+mod rig3d;
 mod select;
 mod icons;
 mod layerfilter;
