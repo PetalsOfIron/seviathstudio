@@ -27,18 +27,34 @@ mod layoutmenu;
 mod fontmaker;
 mod newproject;
 mod partstab;
-mod gameui;
+mod aisetupui;
 mod animpage;
-mod generatetab;
+mod meshtab;
+mod handrig;
 
 #[cfg(test)]
-pub fn generate_page_characters() -> generatetab::Page {
-    generatetab::Page::Characters
+pub fn mesh_page_text() -> meshtab::Page {
+    meshtab::Page::FromText
 }
 
 #[cfg(test)]
-pub fn generate_page_animations() -> generatetab::Page {
-    generatetab::Page::Animations
+pub fn mesh_page_image() -> meshtab::Page {
+    meshtab::Page::FromImage
+}
+
+#[cfg(test)]
+pub use handrig::Tool as MeshTool;
+#[cfg(test)]
+pub use meshtab::Kind as MeshKind;
+
+#[cfg(test)]
+pub fn mesh_page_rig() -> meshtab::Page {
+    meshtab::Page::Rig
+}
+
+#[cfg(test)]
+pub fn mesh_page_animations() -> meshtab::Page {
+    meshtab::Page::Animations
 }
 mod physicsui;
 mod prerigui;
@@ -83,7 +99,7 @@ pub struct SeviathApp {
     parts: partstab::PartsState,
     prerig: prerigui::PreRig,
     rigs: rigtab::RigState,
-    genr: generatetab::GenerateUi,
+    m3: meshtab::MeshUi,
     layout_name: String,
 }
 
@@ -133,7 +149,7 @@ impl SeviathApp {
             parts: Default::default(),
             prerig: Default::default(),
             rigs: Default::default(),
-            genr: Default::default(),
+            m3: Default::default(),
             layout_name: String::new(),
         }
     }
@@ -629,7 +645,7 @@ impl eframe::App for SeviathApp {
         self.apply_settings(&ctx);
         self.pen.update(&ctx);
         self.command_keys(&ctx);
-        self.gen_poll(&ctx, ctx.input(|i| i.time));
+        self.mesh_poll(&ctx);
 
         Panel::top("top_bar")
             .exact_size(54.0)
@@ -659,7 +675,7 @@ impl eframe::App for SeviathApp {
             (_, Tab::Physics) => self.physics_ui(ui),
             (_, Tab::Animate) => self.anim_ui(ui),
             (_, Tab::Stream) => self.stream_ui(ui),
-            (_, Tab::Generate) => self.generate_ui(ui),
+            (_, Tab::Mesh3d) => self.mesh_ui(ui),
             (_, t) => tabs::placeholder::ui(ui, t),
         }
 

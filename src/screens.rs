@@ -3230,158 +3230,6 @@ fn path_turns_and_turn_the_whole_shape_screens() {
     assert!(h.state_mut().test_moved(layer) > 20.0);
 }
 
-#[test]
-fn rig_for_games_screens() {
-    use crate::vrm::export::Format;
-    use egui_kittest::kittest::Queryable;
-    let _gpu = lock_gpu();
-    let doc = crate::vrm::tests_build::character();
-    let mut h = Harness::builder().with_size([1440.0, 2300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
-    h.run_steps(4);
-    h.state_mut().draw_mut().replace_document(doc);
-    h.state_mut().test_run_action_now("tab.3");
-    h.run_steps(5);
-    h.state_mut().test_game().author = "Me".into();
-    rig_tool(&mut h, "3d");
-    h.get_by_label("Make the 3D character").click();
-    h.run_steps(4);
-    assert!(h.state_mut().test_game().model.is_some());
-    assert!(h.state_mut().test_game().message.as_deref().unwrap().contains("expressions"));
-    // turn it round and show the blink in the preview
-    h.state_mut().test_game().yaw = 30.0;
-    h.state_mut().test_game().expr = Some("blink".into());
-    h.run_steps(4);
-    save(&mut h, "game_1_preview");
-    // both formats come out checked
-    let (one, s1) = h.state_mut().game_bytes(Format::Vrm1).unwrap();
-    let (zero, s0) = h.state_mut().game_bytes(Format::Vrm0).unwrap();
-    assert_eq!((s1.version, s0.version), (1, 0));
-    assert!(one.len() > 1000 && zero.len() > 1000);
-    // with no meshes there is nothing to build
-    h.state_mut().test_game().model = None;
-    h.state_mut().test_rig_edit(|r| r.meshes.clear());
-    rig_tool(&mut h, "3d");
-    h.get_by_label("Make the 3D character").click();
-    h.run_steps(3);
-    assert!(h.state_mut().test_game().model.is_none());
-    assert!(h.state_mut().test_game().message.as_deref().unwrap().contains("Nothing to build"));
-}
-
-#[test]
-fn uncut_face_points_screens() {
-    use egui_kittest::kittest::Queryable;
-    let _gpu = lock_gpu();
-    let img = crate::rig::uncut::tests::figure_image();
-    let mut doc = crate::vrm::tests_build::uncut_doc(&img);
-    let ids: Vec<crate::doc::LayerId> = doc.layers.iter().map(|l| l.id).collect();
-    let mut rig = crate::rig::Rig::default();
-    crate::rig::uncut::auto_rig(&mut rig, &doc, &ids, 0.6).unwrap();
-    doc.rig = std::sync::Arc::new(rig);
-    let mut h = Harness::builder().with_size([1440.0, 2300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
-    h.run_steps(4);
-    h.state_mut().draw_mut().replace_document(doc);
-    h.state_mut().test_run_action_now("tab.3");
-    h.run_steps(5);
-    rig_tool(&mut h, "3d");
-    h.get_by_label("Make the 3D character").click();
-    h.run_steps(4);
-    assert!(h.state_mut().test_game().model.is_some());
-    let msg = h.state_mut().test_game().message.clone().unwrap();
-    assert!(msg.contains("guessed"), "{msg}");
-    save(&mut h, "game_2_uncut_face_points");
-    // the face points can be set by clicking: the instruction shows on the picture
-    h.state_mut().test_face_click(1);
-    h.run_steps(3);
-    save(&mut h, "game_3_click_the_face");
-    // the AI finder is there, and without Python packages it says so plainly instead of failing
-    h.state_mut().test_game().ai_python = "definitely-not-python-xyz".into();
-    rig_tool(&mut h, "3d");
-    h.get_by_label("Find the face with AI").click();
-    h.run_steps(30);
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    h.run_steps(10);
-    let msg = h.state_mut().test_game().message.clone().unwrap();
-    assert!(msg.contains("Install Python"), "{msg}");
-}
-
-#[test]
-fn uncut_joints_screens() {
-    let _gpu = lock_gpu();
-    let img = crate::rig::uncut::tests::figure_image();
-    let mut doc = crate::vrm::tests_build::uncut_doc(&img);
-    let ids: Vec<crate::doc::LayerId> = doc.layers.iter().map(|l| l.id).collect();
-    let mut rig = crate::rig::Rig::default();
-    crate::rig::uncut::auto_rig(&mut rig, &doc, &ids, 0.6).unwrap();
-    doc.rig = std::sync::Arc::new(rig);
-    let mut h = Harness::builder().with_size([1440.0, 1900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
-    h.run_steps(4);
-    h.state_mut().draw_mut().replace_document(doc);
-    h.state_mut().test_run_action_now("tab.3");
-    h.state_mut().test_joint_edit(true);
-    h.run_steps(5);
-    save(&mut h, "rig_joints");
-}
-
-/// The hair editor and the texture parts on the real Midlander (when the AI files are on this computer).
-#[test]
-fn hair_and_texture_parts_screens() {
-    use egui_kittest::kittest::Queryable;
-    let dir = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("SeviathAI/jobs/midlander");
-    let (Ok(png), Ok(glb)) = (std::fs::read(dir.join("original.png")), std::fs::read(dir.join("shape.glb"))) else { return };
-    let _gpu = lock_gpu();
-    let img = image::load_from_memory(&png).unwrap().to_rgba8();
-    let mut doc = crate::vrm::tests_build::uncut_doc(&img);
-    let ids: Vec<crate::doc::LayerId> = doc.layers.iter().map(|l| l.id).collect();
-    let mut rig = crate::rig::Rig::default();
-    crate::rig::uncut::auto_rig(&mut rig, &doc, &ids, 0.5).unwrap();
-    doc.rig = std::sync::Arc::new(rig);
-    let mut h = Harness::builder().with_size([1440.0, 2600.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
-    h.run_steps(4);
-    h.state_mut().draw_mut().replace_document(doc);
-    h.state_mut().test_run_action_now("tab.3");
-    h.run_steps(5);
-    h.state_mut().test_game().shape = Some(std::sync::Arc::new(crate::vrm::shape::Shape::from_glb(&glb).unwrap()));
-    h.state_mut().test_game_make();
-    h.run_steps(6);
-    let msg = h.state_mut().test_game().message.clone();
-    assert!(h.state_mut().test_game().model.is_some(), "{msg:?}");
-    h.state_mut().test_game().guides = true;
-    h.state_mut().test_hair_edit(true);
-    h.run_steps(6);
-    save(&mut h, "game_4_hair_and_texture_parts");
-    let strands = h.state().draw_mut_ref().doc.rig.skin.as_ref().unwrap().hair.chains.len();
-    assert!(strands >= 6, "the strands of the app are the start: {strands}");
-}
-
-/// With the AI files missing the panel says so and offers the download; the AI buttons wait.
-#[test]
-fn missing_ai_files_show_the_download_button_screens() {
-    use egui_kittest::kittest::Queryable;
-    let _gpu = lock_gpu();
-    let empty = std::env::temp_dir().join(format!("seviath_noai_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&empty);
-    crate::aisetup::TEST_ROOT.with(|r| *r.borrow_mut() = Some(empty.clone()));
-    let img = crate::rig::uncut::tests::figure_image();
-    let mut doc = crate::vrm::tests_build::uncut_doc(&img);
-    let ids: Vec<crate::doc::LayerId> = doc.layers.iter().map(|l| l.id).collect();
-    let mut rig = crate::rig::Rig::default();
-    crate::rig::uncut::auto_rig(&mut rig, &doc, &ids, 0.6).unwrap();
-    doc.rig = std::sync::Arc::new(rig);
-    let mut h = Harness::builder().with_size([1440.0, 2300.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
-    h.run_steps(4);
-    h.state_mut().draw_mut().replace_document(doc);
-    h.state_mut().test_run_action_now("tab.3");
-    h.run_steps(5);
-    // the card is on the 3D page; the download button waits for the licences
-    rig_tool(&mut h, "3d");
-    h.get_by_label("The AI files are missing");
-    h.get_by_label("Download the AI files");
-    assert!(!h.state_mut().test_game().setup_agree);
-    save(&mut h, "game_5_ai_files_missing");
-    crate::aisetup::TEST_ROOT.with(|r| *r.borrow_mut() = None);
-    let _ = std::fs::remove_dir_all(&empty);
-}
-
 /// The Live2D files section of the Physics tab, and the swinging of a Live2D model moving sliders.
 #[test]
 fn live2d_runtime_physics_screens() {
@@ -4168,42 +4016,6 @@ fn the_rig_workbench_is_the_same_in_the_rig_physics_and_animate_tabs() {
     h.run_steps(4);
     h.get_by_label("Parameters");
     save(&mut h, "workbench_3_animate");
-    // the 3D character is its own page
-    h.state_mut().test_run_action_now("tab.3");
-    rig_tool(&mut h, "3d");
-    h.get_by_label("Make the 3D character");
-    assert!(h.query_by_label("Automatic rig").is_none(), "the automatic rig is not on the 3D page");
-    save(&mut h, "workbench_4_3d");
-}
-
-/// The bones of the 3D character get sliders, which pose it and can be keyed in the Animate tab.
-#[test]
-fn the_bones_of_the_3d_character_get_sliders_that_pose_it() {
-    use egui_kittest::kittest::Queryable;
-    let _gpu = lock_gpu();
-    let doc = crate::vrm::tests_build::character();
-    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
-    h.run_steps(4);
-    h.state_mut().draw_mut().replace_document(doc);
-    h.state_mut().test_run_action_now("tab.3");
-    rig_tool(&mut h, "3d");
-    h.get_by_label("Make the 3D character").click();
-    h.run_steps(4);
-    assert!(h.state_mut().test_game().model.is_some());
-    h.get_by_label("Sliders for the bones").click();
-    h.run_steps(3);
-    let id = h.state().draw_mut_ref().doc.rig.params.iter().find(|p| p.name == "3D leftUpperArm").map(|p| p.id).expect("a slider for the left upper arm");
-    assert_eq!(h.state().bone_pose_for_test().len(), 0, "all in the middle: no pose");
-    h.state_mut().test_rig().values.set(id, 40.0);
-    h.run_steps(3);
-    let pose = h.state().bone_pose_for_test();
-    assert_eq!(pose, vec![("leftUpperArm".to_string(), 40.0)]);
-    save(&mut h, "bones_1_posed");
-    // the Animate tab shows it too
-    h.state_mut().test_run_action_now("tab.5");
-    h.state_mut().test_rig().bench.anim_3d = true;
-    h.run_steps(4);
-    save(&mut h, "bones_2_animate");
 }
 
 /// Black paint at full opacity on a Normal layer must be fully black where the brush went over.
@@ -4404,256 +4216,73 @@ fn the_parameters_column_lists_every_standard_slider() {
     save(&mut h, "rig_14_standard_after");
 }
 
-/// The Generate tab, both pages, with a made game asset in the viewer (the real lantern the AI helper made, when it is there).
+/// The 3D tab: the two pages that make a mesh, with a mesh in the viewer (the real lantern the AI helper made, when it is there).
 #[test]
-fn generate_tab_screens() {
+fn mesh_tab_screens() {
     let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1500.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     h.state_mut().test_run_action_now("tab.7");
     h.run_steps(4);
     {
-        let g = h.state_mut().test_gen();
+        let g = h.state_mut().test_mesh();
         g.asset.what = "an old iron lantern with a glowing glass".into();
         g.asset.details = "rusty dark metal, warm orange glow".into();
     }
     h.run_steps(2);
-    save(&mut h, "generate_1_assets_empty");
+    save(&mut h, "mesh_1_text_empty");
     let real = std::path::Path::new("target/gen/lantern.glb");
     let glb = if real.exists() { std::fs::read(real).unwrap() } else { crate::assetview::tests_box_glb() };
-    let pic = image::open("target/gen/prop/gen_11.png").map(|i| i.to_rgba8()).unwrap_or_else(|_| image::RgbaImage::from_pixel(256, 256, image::Rgba([220, 200, 120, 255])));
-    h.state_mut().test_gen_set_pictures(vec![pic.clone(), pic]);
-    h.state_mut().test_gen_show_asset(glb);
+    let pic = image::open("target/gen/prop/mesh_11.png").map(|i| i.to_rgba8()).unwrap_or_else(|_| image::RgbaImage::from_pixel(256, 256, image::Rgba([220, 200, 120, 255])));
+    h.state_mut().test_mesh_set_pictures(vec![pic.clone(), pic]);
+    h.state_mut().test_mesh_show(glb);
     h.run_steps(4);
-    save(&mut h, "generate_2_assets_made");
-    h.state_mut().test_gen().page = crate::app::generate_page_characters();
+    save(&mut h, "mesh_2_text_made");
+    h.state_mut().test_mesh().kind = crate::app::MeshKind::Character;
     {
-        let g = h.state_mut().test_gen();
+        let g = h.state_mut().test_mesh();
         g.look.who = "a girl with long pink hair and green eyes".into();
         g.look.outfit = "a green jacket, white skirt, boots".into();
     }
-    let girl = image::open("target/gen/c2/gen_3.png").map(|i| i.to_rgba8()).unwrap_or_else(|_| image::RgbaImage::from_pixel(256, 384, image::Rgba([240, 240, 240, 255])));
-    h.state_mut().test_gen_set_pictures(vec![girl]);
     h.run_steps(4);
-    save(&mut h, "generate_3_characters");
+    save(&mut h, "mesh_3_text_character");
+    h.state_mut().test_mesh().page = crate::app::mesh_page_image();
+    h.run_steps(4);
+    save(&mut h, "mesh_4_image_page");
 }
 
-/// A generated picture of a standing character becomes a rigged 3D character (the flat card, which needs no AI), shown in the Generate tab.
+/// A mesh is rigged by hand without any AI: the bones of a person are put in, the weights are made, a bone is turned, and the file keeps all of it.
 #[test]
-fn a_generated_picture_becomes_a_rigged_character_in_the_generate_tab() {
-    let _gpu = lock_gpu();
-    let Ok(girl) = image::open("target/gen/c2/gen_3.png").map(|i| i.to_rgba8()) else { return };
-    let mut h = Harness::builder().with_size([1500.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
-    h.run_steps(4);
-    h.state_mut().test_run_action_now("tab.7");
-    h.state_mut().test_gen().page = crate::app::generate_page_characters();
-    h.state_mut().test_gen().flat_card = true;
-    h.state_mut().test_gen_set_pictures(vec![girl]);
-    h.state_mut().test_gen_make_character();
-    h.run_steps(6);
-    let msg = h.state_mut().test_gen().message.clone();
-    assert!(h.state_mut().test_game().model.is_some(), "a character was made: {msg:?}");
-    let bones = h.state_mut().test_game().model.as_ref().unwrap().bones.len();
-    assert!(bones >= 15, "the skeleton has {bones} bones");
-    save(&mut h, "generate_4_character_made");
-}
-
-/// Makes the example character with the real AI (the TripoSR shape) from the picture the Generate tab made, and saves it as VRM 1.0, VRM 0.x and
-/// GLB in Downloads/3d, to check in Blender. Run by hand: `cargo test --release make_the_example_character -- --ignored`.
-#[test]
-#[ignore]
-fn make_the_example_character() {
-    let _gpu = lock_gpu();
-    let girl = image::open("target/gen/c2/gen_3.png").expect("the generated picture").to_rgba8();
-    let mut h = Harness::builder().with_size([1500.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
-    h.run_steps(4);
-    h.state_mut().test_run_action_now("tab.7");
-    let painted_weights = std::env::var("SEVIATH_NO_AI_SKIN").is_ok();
-    if std::env::var("SEVIATH_CG").is_ok() {
-        h.state_mut().test_game().shape_model = crate::ai::ShapeModel::CharacterGen;
-    }
-    h.state_mut().test_game().use_ai_skin = !painted_weights && std::env::var("SEVIATH_AI_SKIN").is_ok();
-    h.state_mut().test_gen().page = crate::app::generate_page_characters();
-    h.state_mut().test_gen_set_pictures(vec![girl.clone()]);
-    h.state_mut().test_gen_make_character();
-    let start = std::time::Instant::now();
-    while h.state_mut().test_game().model.is_none() && start.elapsed().as_secs() < 900 {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        h.run_steps(2);
-        if start.elapsed().as_secs() % 20 == 0 {
-            let (st, m) = { let g = h.state_mut().test_gen(); (g.stage, g.message.clone()) };
-            println!("{}s stage {:?} msg {:?}", start.elapsed().as_secs(), st, m);
-        }
-    }
-    let msg = h.state_mut().test_gen().message.clone();
-    assert!(h.state_mut().test_game().model.is_some(), "no character: {msg:?}");
-    h.state_mut().test_game().name = "ExampleGirl".into();
-    h.run_steps(3);
-    save(&mut h, "generate_5_example_character");
-    let dir = std::path::Path::new(r"C:\Users\SaphiresSilver\Downloads\3d");
-    std::fs::create_dir_all(dir).unwrap();
-    use crate::vrm::export::Format;
-    for (fmt, name) in [(Format::Vrm1, "ExampleGirl_vrm1.vrm"), (Format::Vrm0, "ExampleGirl_vrm0.vrm"), (Format::Glb, "ExampleGirl_game.glb")] {
-        let (bytes, summary) = h.state_mut().test_game_bytes(fmt).expect("the file");
-        std::fs::write(dir.join(name), &bytes).unwrap();
-        println!("{name}: {} bytes, {} parts, {} bones, {} expressions", bytes.len(), summary.parts, summary.bones, summary.expressions);
-    }
-    let all: Vec<crate::motion::Clip> = crate::motion::MOTIONS.iter().map(|i| crate::motion::Clip::new(i.motion, crate::motion::Style::default())).collect();
-    let (bytes, _) = h.state_mut().test_game_glb_with(&all, 30.0).expect("the animated file");
-    std::fs::write(dir.join("ExampleGirl_game_animated.glb"), &bytes).unwrap();
-    println!("ExampleGirl_game_animated.glb: {} bytes, {} animations", bytes.len(), all.len());
-    // the game file as it is saved (arms down, no T-pose), at rest and in a few moves: to look at how it bends
-    {
-        let model = h.state_mut().test_game_model_for_games().expect("the game model");
-        let (cw, ch) = (260u32, 400u32);
-        let mut rest_sheet = image::RgbaImage::new(cw * 3, ch);
-        let rest_frames = [crate::motion::Frame::default(), crate::motion::eval(crate::motion::Motion::IdleBreathe, 0.25).minus_rest(), crate::motion::eval(crate::motion::Motion::Wave, 0.5).minus_rest()];
-        for (k, f) in rest_frames.iter().enumerate() {
-            let img = crate::vrm::preview::render_motion(&model, 0.0, cw, ch, f, 1.0);
-            image::imageops::replace(&mut rest_sheet, &img, (k as u32 * cw) as i64, 0);
-        }
-        rest_sheet.save(dir.join("ExampleGirl_rest.png")).unwrap();
-        let mut sheet = image::RgbaImage::new(cw * 6, ch * 2);
-        for (row, m) in [crate::motion::Motion::Walk, crate::motion::Motion::Cheer].into_iter().enumerate() {
-            let clip = crate::motion::Clip::new(m, crate::motion::Style::default());
-            for k in 0..6u32 {
-                let t = clip.seconds() * k as f32 / 6.0 + 0.04;
-                let img = crate::vrm::preview::render_motion(&model, 20.0, cw, ch, &clip.at(t).minus_rest(), 1.3);
-                image::imageops::replace(&mut sheet, &img, (k * cw) as i64, (row as u32 * ch) as i64);
-            }
-        }
-        sheet.save(dir.join(if painted_weights { "ExampleGirl_poses_painted_weights.png" } else { "ExampleGirl_poses.png" })).unwrap();
-    }
-    // the depth and the normals of the character from the front, a side and the back (for pictures AIs that follow them)
-    {
-        let model = h.state_mut().test_game().model.take().unwrap();
-        let (cw, ch) = (300u32, 440u32);
-        let mut sheet = image::RgbaImage::new(cw * 4, ch * 3);
-        for (row, kind) in [crate::vrm::preview::MapKind::Colour, crate::vrm::preview::MapKind::Depth, crate::vrm::preview::MapKind::Normals].into_iter().enumerate() {
-            for (k, yaw) in [0.0f32, 45.0, 90.0, 180.0].into_iter().enumerate() {
-                let img = crate::vrm::preview::render_map(&model, yaw, cw, ch, kind);
-                image::imageops::replace(&mut sheet, &img, (k as u32 * cw) as i64, (row as u32 * ch) as i64);
-            }
-        }
-        sheet.save(dir.join("ExampleGirl_maps.png")).unwrap();
-        h.state_mut().test_game().model = Some(model);
-    }
-    // how much of what follows an arm, a hand or a leg is hair-coloured (it should be nothing: hair follows the head)
-    {
-        let model = h.state_mut().test_game().model.take().unwrap();
-        let pink = |p: [u8; 4]| p[3] > 128 && p[0] > 200 && p[0] as i32 - p[1] as i32 > 25 && p[2] as i32 > p[1] as i32 + 2 && (p[0] as i32 - p[2] as i32).abs() < 70;
-        let (mut by_part, mut total) = (std::collections::BTreeMap::<String, (usize, usize)>::new(), 0usize);
-        for part in model.parts.iter() {
-            for (i, uv) in part.uvs.iter().enumerate() {
-                let best = (0..4).max_by(|a, b| part.weights[i][*a].total_cmp(&part.weights[i][*b])).unwrap();
-                let name = model.bones[part.joints[i][best] as usize].name.clone();
-                let limb = crate::vrm::shape::limb_group_of(&name);
-                if limb == 0 {
-                    continue;
-                }
-                let (x, y) = (((uv[0] * part.image.width() as f32) as u32).min(part.image.width() - 1), ((uv[1] * part.image.height() as f32) as u32).min(part.image.height() - 1));
-                total += 1;
-                let e = by_part.entry(format!("{} / limb {}", part.name, limb)).or_default();
-                e.1 += 1;
-                if pink(part.image.get_pixel(x, y).0) {
-                    e.0 += 1;
-                }
-            }
-        }
-        println!("hair-coloured points that follow a limb (name: pink of all): {by_part:?} (of {total} limb points)");
-        h.state_mut().test_game().model = Some(model);
-    }
-    // which bone each point follows: a map of the points coloured by the part of the body that moves them most
-    {
-        let model = h.state_mut().test_game().model.take().unwrap();
-        let (w, hh) = (500u32, 760u32);
-        let mut img = image::RgbaImage::from_pixel(w * 2, hh, image::Rgba([250, 250, 250, 255]));
-        let top = model.parts.iter().flat_map(|p| p.verts.iter().map(|v| v[1])).fold(0.0f32, f32::max);
-        let k = hh as f32 * 0.9 / top;
-        for (pi, part) in model.parts.iter().enumerate() {
-            for (i, v) in part.verts.iter().enumerate() {
-                let best = (0..4).max_by(|a, b| part.weights[i][*a].total_cmp(&part.weights[i][*b])).unwrap();
-                let name = &model.bones[part.joints[i][best] as usize].name;
-                let col = match name.as_str() {
-                    n if n.starts_with("leftUpperArm") || n.starts_with("leftLowerArm") || n.starts_with("leftHand") || n.starts_with("left") && n.contains("Thumb") || n.starts_with("leftIndex") || n.starts_with("leftMiddle") || n.starts_with("leftRing") || n.starts_with("leftLittle") => [230, 40, 40],
-                    n if n.starts_with("rightUpperArm") || n.starts_with("rightLowerArm") || n.starts_with("rightHand") || n.starts_with("right") && (n.contains("Thumb") || n.contains("Index") || n.contains("Middle") || n.contains("Ring") || n.contains("Little")) => [40, 60, 230],
-                    n if n.starts_with("left") && (n.contains("Leg") || n.contains("Foot") || n.contains("Toes")) => [30, 170, 60],
-                    n if n.starts_with("right") && (n.contains("Leg") || n.contains("Foot") || n.contains("Toes")) => [220, 190, 20],
-                    "head" | "neck" => [160, 60, 200],
-                    "hips" | "spine" | "chest" | "upperChest" => [90, 90, 90],
-                    "leftShoulder" | "rightShoulder" => [250, 130, 30],
-                    _ => [0, 200, 200],
-                };
-                let _ = pi;
-                let (x, y) = ((w as f32 / 2.0 + v[0] * k) as i32, (hh as f32 * 0.95 - v[1] * k) as i32);
-                for (ox, oy) in [(0, 0), (1, 0), (0, 1)] {
-                    let (xx, yy) = (x + ox, y + oy);
-                    if xx >= 0 && yy >= 0 && (xx as u32) < w && (yy as u32) < hh {
-                        img.put_pixel(xx as u32, yy as u32, image::Rgba([col[0], col[1], col[2], 255]));
-                    }
-                }
-            }
-        }
-        // the skeleton on the right: the bones as lines
-        for b in &model.bones {
-            if !b.humanoid {
-                continue;
-            }
-            let (p, q) = (b.pos, b.tip);
-            let steps = 40;
-            for s in 0..=steps {
-                let f = s as f32 / steps as f32;
-                let (x, y) = ((w as f32 * 1.5 + (p[0] + (q[0] - p[0]) * f) * k) as i32, (hh as f32 * 0.95 - (p[1] + (q[1] - p[1]) * f) * k) as i32);
-                if x >= 0 && y >= 0 && (x as u32) < w * 2 && (y as u32) < hh {
-                    img.put_pixel(x as u32, y as u32, image::Rgba([0, 0, 0, 255]));
-                }
-            }
-        }
-        img.save(dir.join("ExampleGirl_weights_map.png")).unwrap();
-        h.state_mut().test_game().model = Some(model);
-    }
-    girl.save(dir.join("ExampleGirl_picture.png")).unwrap();
-}
-
-/// The Animations page: a character plays a ready animation, a described animation is found, and the game file carries all of them.
-#[test]
-fn the_animations_page_plays_and_saves_animations_for_the_game_file() {
+fn a_mesh_is_rigged_by_hand_and_saved_with_its_bones_weights_and_animations() {
     use egui_kittest::kittest::Queryable;
     let _gpu = lock_gpu();
-    let Ok(girl) = image::open("target/gen/c2/gen_3.png").map(|i| i.to_rgba8()) else { return };
+    let (mesh, _) = crate::meshfile::tests_figure();
+    let glb = crate::meshfile::write_glb(&mesh, None, &[], 30.0);
     let mut h = Harness::builder().with_size([1500.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     h.state_mut().test_run_action_now("tab.7");
-    h.state_mut().test_gen().flat_card = true;
-    h.state_mut().test_gen().page = crate::app::generate_page_characters();
-    h.state_mut().test_gen_set_pictures(vec![girl]);
-    h.state_mut().test_gen_make_character();
+    h.state_mut().test_mesh_show(glb);
+    h.state_mut().test_mesh().page = crate::app::mesh_page_rig();
+    h.run_steps(5);
+    save(&mut h, "mesh_5_rig_empty");
+    h.get_by_label("Add the bones of a person").click();
     h.run_steps(4);
-    assert!(h.state_mut().test_game().model.is_some(), "a character");
-    assert_eq!(h.state_mut().test_tab_is_generate(), true, "making the character keeps the Generate tab");
-    h.state_mut().test_gen().page = crate::app::generate_page_animations();
+    assert!(h.state_mut().test_mesh().hand.rig.bones.len() >= 22, "the bones of a person");
+    h.state_mut().test_mesh().hand.tool = crate::app::MeshTool::Weights;
+    h.run_steps(3);
+    h.get_by_label("Automatic weights").click();
     h.run_steps(4);
+    assert_eq!(h.state_mut().test_mesh().hand.rig.unweighted(), 0, "every point has a bone");
+    save(&mut h, "mesh_6_rig_weights");
+    h.state_mut().test_mesh().page = crate::app::mesh_page_animations();
+    h.run_steps(3);
     h.get_by_label("Add all the ready animations").click();
-    h.run_steps(3);
-    assert!(h.state_mut().test_gen().anim.added.len() >= 20);
-    h.state_mut().test_gen().anim.motion = crate::motion::Motion::Wave;
-    h.state_mut().test_gen().anim.time = 1.2;
     h.run_steps(4);
-    save(&mut h, "generate_6_animations");
-    // the words
-    h.state_mut().test_gen().anim.words = "an angry fast punch".into();
-    h.run_steps(2);
-    h.get_by_label("Make it from the words").scroll_to_me();
-    h.run_steps(2);
-    save(&mut h, "generate_7_words");
-    h.get_by_label("Make it from the words").click();
-    h.run_steps(3);
-    let a = &h.state_mut().test_gen().anim;
-    assert_eq!(a.motion, crate::motion::Motion::Punch);
-    assert_eq!(a.style.mood, crate::motion::Mood::Angry);
-    // the game file has them all
-    let clips = h.state_mut().test_gen().anim.added.clone();
-    let (bytes, _) = h.state_mut().test_game_glb_with(&clips, 30.0).unwrap();
+    save(&mut h, "mesh_7_animations");
+    let clips = h.state_mut().test_mesh().anim.added.clone();
+    assert!(clips.len() >= 20);
+    let bytes = h.state_mut().test_mesh_game_glb(&clips, 30.0).expect("the animated file");
     let g = crate::vrm::gltf::read_glb(&bytes).unwrap();
     assert_eq!(g.json["animations"].as_array().unwrap().len(), clips.len());
+    assert!(crate::meshfile::rig_from_glb(&bytes).is_some_and(|r| r.bones.len() >= 22), "the rig is in the file");
 }

@@ -163,7 +163,7 @@ impl SeviathApp {
         self.phys_tick(&ctx);
         self.rig_render(&ctx);
         let mut picked: Option<(LayerId, bool, bool)> = None;
-        egui::Panel::top("phys_toolbar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.rig_toolbar(ui, false, true, false));
+        egui::Panel::top("phys_toolbar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.rig_toolbar(ui, true, false));
         egui::Panel::left("phys_layers").default_size(270.0).size_range(210.0..=440.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             picked = self.rig_left_panel(ui, &ctx, now, "phys", true, true);
         });

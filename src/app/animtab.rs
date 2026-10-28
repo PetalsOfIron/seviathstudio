@@ -261,7 +261,7 @@ impl SeviathApp {
         self.rig_render(&ctx);
 
         let mut picked: Option<(crate::doc::LayerId, bool, bool)> = None;
-        egui::Panel::top("anim_toolbar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.rig_toolbar(ui, false, false, true));
+        egui::Panel::top("anim_toolbar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.rig_toolbar(ui, false, true));
         egui::Panel::left("anim_parts").default_size(270.0).size_range(210.0..=440.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             picked = self.rig_left_panel(ui, &ctx, now, "anim", true, false);
         });
@@ -273,12 +273,7 @@ impl SeviathApp {
             egui::ScrollArea::vertical().id_salt("anim_right").show(ui, |ui| self.anim_side_ui(ui, now));
         });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(14, 20, 18))).show(ui, |ui| {
-            if self.rigs.bench.anim_3d {
-                self.game_preview_ui(ui);
-                if self.bone_slider_count().unwrap_or(0) == 0 {
-                    ui.label(RichText::new("No bone sliders yet: Rig tab, 3D character page, Make the 3D character, then Sliders for the bones.").size(11.5).color(TEXT_DIM));
-                }
-            } else if self.rigs.bench.edit_here {
+            if self.rigs.bench.edit_here {
                 self.rig_view(ui, now, &mut picked);
             } else {
                 self.anim_preview(ui);
