@@ -25,6 +25,8 @@ pub enum Page {
     FromText,
     FromImage,
     Rig,
+    Parts,
+    Animate,
     Animations,
 }
 
@@ -156,7 +158,7 @@ impl MeshUi {
 impl SeviathApp {
     pub(super) fn mesh_ui(&mut self, ui: &mut Ui) {
         egui::Panel::top("mesh_top").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.mesh_top(ui));
-        if self.m3.page == Page::Rig {
+        if matches!(self.m3.page, Page::Rig | Page::Parts | Page::Animate) {
             self.mesh_rig_ui(ui);
             return;
         }
@@ -193,8 +195,10 @@ impl SeviathApp {
             for (p, label, tip) in [
                 (Page::FromText, "From a text", "Write what you want: pictures are made, and the picture you pick becomes a 3D mesh"),
                 (Page::FromImage, "From a picture or drawing", "Your own picture, or your drawing from the Draw tab, becomes a 3D mesh"),
-                (Page::Rig, "Rig by hand", "Draw the bones in the mesh and paint which part each bone moves, by hand"),
-                (Page::Animations, "Animations", "22 ready animations and an animation maker for the rigged mesh, saved in the game file"),
+                (Page::Rig, "Bones and weights", "Draw the bones in the mesh and paint how much each bone moves every part, by hand"),
+                (Page::Parts, "Parts (no weights)", "The simple way to rig: draw the bones, then say which part of the mesh each bone moves, by painting or by a loop"),
+                (Page::Animate, "Animate by hand", "Turn the bones frame by frame, keep the keys and play the animation on the mesh"),
+                (Page::Animations, "Ready animations", "22 ready animations and an animation maker for the rigged mesh, saved in the game file"),
             ] {
                 if widgets::chip(ui, label, self.m3.page == p).help(tip).clicked() {
                     self.m3.page = p;

@@ -224,12 +224,16 @@ impl SeviathApp {
     }
 
     /// The game file with some animations.
-    pub fn game_glb_with(&self, clips: &[Clip], fps: f32) -> Result<Vec<u8>, String> {
+    pub fn game_glb_with(&self, clips: &[Clip], fps: f32, with_takes: bool) -> Result<Vec<u8>, String> {
         let mesh = self.m3.mesh.as_ref().ok_or("There is no mesh to save.")?;
         if self.m3.hand.rig.bones.is_empty() {
             return Err("The mesh has no bones yet.".into());
         }
-        Ok(crate::meshfile::write_glb(mesh, Some(&self.m3.hand.rig), clips, fps))
+        let mut anims = crate::take::anims_from_clips(&self.m3.hand.rig, clips, fps);
+        if with_takes {
+            anims.extend(self.m3.hand.take_anims());
+        }
+        Ok(crate::meshfile::write_glb_anims(mesh, Some(&self.m3.hand.rig), &anims))
     }
 
     fn mesh_save_game_glb(&mut self, each: bool) {
@@ -241,7 +245,7 @@ impl SeviathApp {
             let mut done = 0;
             for c in &clips {
                 let name: String = c.name.chars().map(|ch| if ch.is_alphanumeric() { ch } else { '_' }).collect();
-                match self.game_glb_with(std::slice::from_ref(c), fps) {
+                match self.game_glb_with(std::slice::from_ref(c), fps, false) {
                     Ok(bytes) => {
                         if std::fs::write(dir.join(format!("{stem}_{name}.glb")), bytes).is_ok() {
                             done += 1;
@@ -255,7 +259,7 @@ impl SeviathApp {
             }
             self.m3.anim.message = Some(format!("Saved {done} files in {}.", dir.display()));
         } else {
-            match self.game_glb_with(&clips, fps) {
+            match self.game_glb_with(&clips, fps, true) {
                 Ok(bytes) => {
                     if let Some(p) = rfd::FileDialog::new().set_title("Save the game file").set_directory(self.settings.projects_folder()).set_file_name(format!("{stem}_animated.glb")).add_filter("glTF binary", &["glb"]).save_file() {
                         self.m3.anim.message = Some(match std::fs::write(&p, bytes) {
@@ -271,6 +275,6 @@ impl SeviathApp {
 
     #[cfg(test)]
     pub fn test_mesh_game_glb(&self, clips: &[Clip], fps: f32) -> Result<Vec<u8>, String> {
-        self.game_glb_with(clips, fps)
+        self.game_glb_with(clips, fps, true)
     }
 }

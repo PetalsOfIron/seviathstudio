@@ -48,6 +48,16 @@ pub use handrig::Tool as MeshTool;
 pub use meshtab::Kind as MeshKind;
 
 #[cfg(test)]
+pub fn mesh_page_parts() -> meshtab::Page {
+    meshtab::Page::Parts
+}
+
+#[cfg(test)]
+pub fn mesh_page_animate() -> meshtab::Page {
+    meshtab::Page::Animate
+}
+
+#[cfg(test)]
 pub fn mesh_page_rig() -> meshtab::Page {
     meshtab::Page::Rig
 }
