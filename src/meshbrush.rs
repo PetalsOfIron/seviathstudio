@@ -151,8 +151,8 @@ fn resample(spots: &[Spot], spacing: f32, max: usize) -> Vec<Spot> {
         .collect()
 }
 
-/// The geometry of a stroke, or None when the stroke is too short to make anything.
-pub fn build(b: &Brush, stroke: &[Spot]) -> Option<Built> {
+/// The line the stroke is built along: evenly spaced, lifted off the surface, with the droop at the end (a spike is a straight line standing out).
+fn prepared(b: &Brush, stroke: &[Spot]) -> Option<Vec<Spot>> {
     if stroke.len() < 2 {
         return None;
     }
@@ -177,6 +177,41 @@ pub fn build(b: &Brush, stroke: &[Spot]) -> Option<Built> {
         let t = i as f32 / (count - 1) as f32;
         s.p = add(add(s.p, mul(s.n, b.lift)), [0.0, -b.droop * t * t, 0.0]);
     }
+    Some(path)
+}
+
+/// The joints of a chain of bones along the stroke: `pieces + 1` places, evenly spaced along the line the stroke is built along (the root first).
+pub fn joints(b: &Brush, stroke: &[Spot], pieces: usize) -> Option<Vec<[f32; 3]>> {
+    let path = prepared(b, stroke)?;
+    let mut along = vec![0.0f32];
+    for i in 1..path.len() {
+        along.push(along[i - 1] + len(sub(path[i].p, path[i - 1].p)));
+    }
+    let total = *along.last()?;
+    if total < 1e-5 || pieces == 0 {
+        return None;
+    }
+    Some(
+        (0..=pieces)
+            .map(|k| {
+                let d = total * k as f32 / pieces as f32;
+                let j = along.partition_point(|a| *a < d).clamp(1, path.len() - 1);
+                let t = ((d - along[j - 1]) / (along[j] - along[j - 1]).max(1e-9)).clamp(0.0, 1.0);
+                add(mul(path[j - 1].p, 1.0 - t), mul(path[j].p, t))
+            })
+            .collect(),
+    )
+}
+
+/// How long the line is, in metres.
+pub fn length(stroke: &[Spot]) -> f32 {
+    stroke.windows(2).map(|w| len(sub(w[1].p, w[0].p))).sum()
+}
+
+/// The geometry of a stroke, or None when the stroke is too short to make anything.
+pub fn build(b: &Brush, stroke: &[Spot]) -> Option<Built> {
+    let path = prepared(b, stroke)?;
+    let count = path.len();
     let round = matches!(b.kind, Kind::Strand | Kind::Rope | Kind::Spike);
     let taper = if b.kind == Kind::Spike { 1.0 } else { b.taper };
     let ring = if round { 5 } else { 2 };

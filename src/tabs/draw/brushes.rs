@@ -158,6 +158,11 @@ impl DrawState {
         &mut self.lib.mem[slot(self.tool)].s
     }
 
+    /// The brush that is picked now, its colour, and whether it erases: the 3D tab paints the texture of a mesh with the same brush.
+    pub fn brush_snapshot(&self) -> (BrushSettings, Color32, bool) {
+        (self.lib.mem[slot(self.tool)].s.clone(), self.primary, self.tool == Tool::Eraser)
+    }
+
     pub fn brush_name(&self) -> &str {
         &self.lib.mem[slot(self.tool)].name
     }

@@ -50,6 +50,7 @@ mod fbx;
 mod take;
 mod meshedit;
 mod meshbrush;
+mod hairsim;
 mod animlib;
 mod meshimport;
 mod attach;

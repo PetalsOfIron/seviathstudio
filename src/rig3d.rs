@@ -457,6 +457,11 @@ impl Rig3 {
         (0..self.bones.len()).map(|b| make(self, pose, b, &mut done, 0)).collect::<Vec<_>>().into_iter().map(|a| if a.0 == [[0.0; 3]; 3] { (id, pose.offset) } else { a }).collect()
     }
 
+    /// How a bone is turned in the world in a pose (what the turns of it and of the bones it hangs from add up to).
+    pub fn world_rotation(&self, pose: &Pose, bone: usize) -> [[f32; 3]; 3] {
+        self.matrices(pose).get(bone).map(|m| m.0).unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    }
+
     /// Where the head and the tail of every bone are in a pose.
     pub fn posed_bones(&self, pose: &Pose) -> Vec<([f32; 3], [f32; 3])> {
         let mats = self.matrices(pose);

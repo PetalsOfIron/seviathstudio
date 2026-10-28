@@ -276,6 +276,22 @@ impl SeviathApp {
     }
 
     #[cfg(test)]
+    pub fn test_mesh_drop_part(&mut self) {
+        if let Some(mut mesh) = self.m3.mesh.take() {
+            self.m3.hand.attach_drop(&mut mesh);
+            self.m3.mesh = Some(mesh);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn test_open_hair_editor(&mut self) {
+        if let Some(mut mesh) = self.m3.mesh.take() {
+            self.m3.hand.open_hair_editor(&mut mesh);
+            self.m3.mesh = Some(mesh);
+        }
+    }
+
+    #[cfg(test)]
     pub fn test_mesh_keep_part(&mut self) {
         if let Some(mesh) = self.m3.mesh.take() {
             self.m3.hand.attach_keep(&mesh);

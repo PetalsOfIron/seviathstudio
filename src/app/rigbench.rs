@@ -138,7 +138,6 @@ impl SeviathApp {
     fn rig_toolbar_row(&mut self, ui: &mut Ui, with_physics: bool, with_edit_here: bool) {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-            ui.label(RichText::new("Rig by hand").size(12.0).color(TEXT_DIM));
             let mut set = |ui: &mut Ui, bench: &mut Bench, tool: Tool, label: &str, tip: &str| {
                 if widgets::chip(ui, label, bench.open == Some(tool)).help(tip).clicked() {
                     bench.open = if bench.open == Some(tool) { None } else { Some(tool) };

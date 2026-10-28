@@ -584,7 +584,7 @@ impl SeviathApp {
         let Some(e) = rig.own_exprs.iter().find(|e| e.name == name) else { return };
         let mut e = e.clone();
         let before = e.clone();
-        egui::CollapsingHeader::new(RichText::new("Set it by hand").size(11.5).color(TEXT_DIM)).id_salt(("expr_edit", name)).show(ui, |ui| {
+        ui.indent(("expr_edit", name), |ui| {
             // what the face does
             ui.label(RichText::new("The face switches it on").size(11.5).color(TEXT_DIM));
             ui.horizontal_wrapped(|ui| {
