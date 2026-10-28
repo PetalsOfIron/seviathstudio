@@ -4385,3 +4385,24 @@ fn bases_page_screens() {
     }
 }
 
+/// Linked rigging: the other changers are ticked first, and what is done to the picked one is done to them as it is done (here mirrored).
+#[test]
+fn rigging_a_changer_rigs_the_ticked_ones_at_the_same_time() {
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1500.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    let (mut a, mut b, mut p) = (0, 0, 0);
+    h.state_mut().test_rig_edit(|r| {
+        a = r.add_changer("Arm L", crate::rig::Kind::Rotation { pivot: [700.0, 300.0] }, None);
+        b = r.add_changer("Arm R", crate::rig::Kind::Rotation { pivot: [300.0, 300.0] }, None);
+        p = r.add_param("Wave", -1.0, 1.0, 0.0);
+    });
+    h.state_mut().test_link(a, vec![b], true);
+    // the picked one is rigged: the other one gets the same, the other way round
+    h.state_mut().test_rig_edit(|r| r.bind_rotation(a, p, 25.0));
+    let rig = h.state().draw_mut_ref().doc.rig.clone();
+    let deg = |c: u32| rig.bindings.iter().find(|x| x.changer == c).and_then(|x| x.forms.iter().filter_map(|f| if let crate::rig::Form::Rot { deg } = f { Some(*deg) } else { None }).find(|d| d.abs() > 0.0));
+    let (da, db) = (deg(a).expect("the picked changer"), deg(b).expect("the linked changer"));
+    assert!((da + db).abs() < 1e-4 && da.abs() > 1.0, "{da} {db}");
+}
+

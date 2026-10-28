@@ -162,6 +162,9 @@ pub struct HandRig {
     cut_undo: Vec<(AssetMesh, Vec<Vec<(u16, f32)>>)>,
     /// The part that is being shaped (horns, wings...): which, its numbers, and the sizes of the mesh from before it was put on.
     pub attach: Option<(attach::Part, attach::Params, usize, usize)>,
+    /// Mirror mode: what is painted or drawn on one side is done on the other side too (across the middle of the body, x = `mirror_x`).
+    pub mirror: bool,
+    pub mirror_x: f32,
 }
 
 impl Default for HandRig {
@@ -219,6 +222,8 @@ impl Default for HandRig {
             cut: Cut { axis: 2, limit: 0.0, above: false },
             cut_undo: Vec::new(),
             attach: None,
+            mirror: false,
+            mirror_x: 0.0,
         }
     }
 }
@@ -276,7 +281,8 @@ impl HandRig {
     /// A mesh arrived: no bones yet, the view fits it.
     pub fn start_for(&mut self, mesh: &AssetMesh) {
         let bounds = mesh.bounds();
-        *self = HandRig { rig: Rig3::new(mesh.verts.len()), bounds, cut: Cut { axis: 2, limit: (bounds.0[2] + bounds.1[2]) / 2.0, above: false }, ..HandRig::default() };
+        let mirror_x = attach::Anchors::of(mesh).cx;
+        *self = HandRig { rig: Rig3::new(mesh.verts.len()), bounds, mirror_x, cut: Cut { axis: 2, limit: (bounds.0[2] + bounds.1[2]) / 2.0, above: false }, ..HandRig::default() };
     }
 
     /// A rig that came with a file (it must be of this mesh).
@@ -368,6 +374,61 @@ impl HandRig {
         }).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(i, _)| (i, Part::Body))
     }
 
+    /// The place of the picture that shows the mirror image of what is under a pixel: the point of the surface is turned across the middle of the body and
+    /// looked for on the picture (so it works in any view where both sides can be seen).
+    fn mirror_pixel(&self, mesh: &AssetMesh, cam: &Camera, at: Pos2) -> Option<Pos2> {
+        let (px, py) = (at.x as i32, at.y as i32);
+        if px < 0 || py < 0 || px >= cam.w as i32 || py >= cam.h as i32 {
+            return None;
+        }
+        let id = *self.ids.get(py as usize * cam.w as usize + px as usize)?;
+        if id == u32::MAX {
+            return None;
+        }
+        let (p, _) = mesh.surface_at(&mesh.verts, cam, id as usize, px as f32 + 0.5, py as f32 + 0.5)?;
+        let q = cam.project([2.0 * self.mirror_x - p[0], p[1], p[2]]);
+        Some(Pos2::new(q[0], q[1]))
+    }
+
+    /// The bone on the other side (Left and Right, .L and .R...), or the same bone when it is in the middle. None when the other side has no bone.
+    fn mirror_bone(&self, bone: usize) -> Option<usize> {
+        let name = &self.rig.bones.get(bone)?.name;
+        let other = crate::rig3d::mirrored_name(name);
+        if other == *name {
+            return Some(bone);
+        }
+        self.rig.bones.iter().position(|b| b.name == other)
+    }
+
+    /// Mirror mode for the weights: the bone on the other side gets the mirror image of the stroke.
+    fn mirror_weights(&mut self, mesh: &AssetMesh, cam: &Camera, at: Pos2, mode: Paint) {
+        if !self.mirror {
+            return;
+        }
+        let (Some(b), Some(m)) = (self.sel.and_then(|s| self.mirror_bone(s)), self.mirror_pixel(mesh, cam, at)) else { return };
+        let keep = self.sel;
+        self.sel = Some(b);
+        self.paint_at(mesh, cam, m, mode);
+        self.sel = keep;
+    }
+
+    #[cfg(test)]
+    fn mirror_part_test(&mut self, mesh: &AssetMesh, cam: &Camera, at: Pos2, bone: usize) {
+        let points: Vec<usize> = self.verts_under(mesh, cam, at, self.radius).into_iter().map(|p| p.0).collect();
+        self.rig.assign_part(&points, bone);
+        self.mirror_part(mesh, cam, at, bone);
+    }
+
+    /// Mirror mode for the parts: the mirror image of the stroke belongs to the bone on the other side.
+    fn mirror_part(&mut self, mesh: &AssetMesh, cam: &Camera, at: Pos2, bone: usize) {
+        if !self.mirror {
+            return;
+        }
+        let (Some(b), Some(m)) = (self.mirror_bone(bone), self.mirror_pixel(mesh, cam, at)) else { return };
+        let points: Vec<usize> = self.verts_under(mesh, cam, m, self.radius).into_iter().map(|p| p.0).collect();
+        self.rig.assign_part(&points, b);
+    }
+
     /// The points that are seen under a circle of the picture, each with how near the middle it is (1 in the middle, 0 at the edge).
     fn verts_under(&self, mesh: &AssetMesh, cam: &Camera, at: Pos2, r: f32) -> Vec<(usize, f32)> {
         let w = cam.w as i32;
@@ -395,6 +456,18 @@ impl HandRig {
     fn finish_lasso(&mut self, mesh: &AssetMesh, cam: &Camera) {
         let poly = std::mem::take(&mut self.lasso);
         let Some(bone) = self.sel else { return };
+        if self.mirror {
+            // the loop on the other side belongs to the bone on the other side
+            let other: Vec<Pos2> = poly.iter().filter_map(|p| self.mirror_pixel(mesh, cam, *p)).collect();
+            if let (Some(b), true) = (self.mirror_bone(bone), other.len() == poly.len()) {
+                self.lasso_into(mesh, cam, &other, b);
+            }
+        }
+        self.lasso_into(mesh, cam, &poly, bone);
+    }
+
+    /// Every point that is seen inside a loop belongs to a bone.
+    fn lasso_into(&mut self, mesh: &AssetMesh, cam: &Camera, poly: &[Pos2], bone: usize) {
         if poly.len() < 3 || self.rig.weights.len() != mesh.verts.len() {
             return;
         }
@@ -456,17 +529,43 @@ impl HandRig {
                 spots.push(Spot { p: pos, n });
             }
         }
-        let Some(built) = meshbrush::build(&self.brush, &spots) else {
-            self.message = Some("Draw the stroke over the mesh: it has to touch the surface and go somewhere.".into());
-            return;
-        };
         let from = first_tri.and_then(|t| mesh.tris.get(t)).map(|t| t[0] as usize);
+        let start = (mesh.verts.len(), mesh.tris.len());
+        if !self.place_stroke(mesh, &spots, from, false) {
+            return;
+        }
+        if self.mirror {
+            // the mirror image: the same places turned across the middle of the body, with the triangles turned the other way round so they face out
+            let image: Vec<Spot> = spots.iter().map(|s| Spot { p: [2.0 * self.mirror_x - s.p[0], s.p[1], s.p[2]], n: [-s.n[0], s.n[1], s.n[2]] }).collect();
+            if self.place_stroke(mesh, &image, from, true) {
+                // one step takes both strokes back
+                self.geo_undo.pop();
+            }
+        }
+        // what the first stroke started from is what is taken back
+        if let Some(last) = self.geo_undo.last_mut() {
+            *last = start;
+        }
+    }
+
+    /// One stroke of geometry from places of the surface.
+    fn place_stroke(&mut self, mesh: &mut AssetMesh, spots: &[Spot], from: Option<usize>, mirrored: bool) -> bool {
+        let Some(mut built) = meshbrush::build(&self.brush, spots) else {
+            self.message = Some("Draw the stroke over the mesh: it has to touch the surface and go somewhere.".into());
+            return false;
+        };
+        if mirrored {
+            for t in &mut built.tris {
+                t.swap(1, 2);
+            }
+        }
         let old = (mesh.verts.len(), mesh.tris.len());
         if !self.append_built(mesh, &built, self.strip_next, from) {
-            return;
+            return false;
         }
         self.geo_undo.push(old);
         self.strip_next += 1;
+        true
     }
 
     /// The geometry is put on the mesh: its colours (root to end) are painted in a cell of the strip of the texture, its texture coordinates look into that cell,
@@ -837,17 +936,22 @@ impl HandRig {
                     if let Some(now) = now {
                         let mode = if mods.command { Paint::Subtract } else if mods.shift { Paint::Smooth } else { self.mode };
                         self.paint_at(mesh, &cam, now, mode);
+                        self.mirror_weights(mesh, &cam, now, mode);
                     }
                 }
                 Grab::Texture => {
                     if let Some(now) = now {
                         self.paint_texture(mesh, &cam, now);
+                        if let (true, Some(m)) = (self.mirror, self.mirror_pixel(mesh, &cam, now)) {
+                            self.paint_texture(mesh, &cam, m);
+                        }
                     }
                 }
                 Grab::Parts => {
                     if let (Some(now), Some(bone)) = (now, self.sel) {
                         let points: Vec<usize> = self.verts_under(mesh, &cam, now, self.radius).into_iter().map(|p| p.0).collect();
                         self.rig.assign_part(&points, bone);
+                        self.mirror_part(mesh, &cam, now, bone);
                         self.version += 1;
                     }
                 }
@@ -1069,7 +1173,9 @@ impl HandRig {
                     return Grab::None;
                 }
                 self.checkpoint();
-                self.paint_at(mesh, cam, at, if mods.command { Paint::Subtract } else if mods.shift { Paint::Smooth } else { self.mode });
+                let mode = if mods.command { Paint::Subtract } else if mods.shift { Paint::Smooth } else { self.mode };
+                self.paint_at(mesh, cam, at, mode);
+                self.mirror_weights(mesh, cam, at, mode);
                 Grab::Brush
             }
             Tool::Texture => {
@@ -1084,6 +1190,9 @@ impl HandRig {
                 }
                 self.texture_checkpoint(mesh);
                 self.paint_texture(mesh, cam, at);
+                if let (true, Some(m)) = (self.mirror, self.mirror_pixel(mesh, cam, at)) {
+                    self.paint_texture(mesh, cam, m);
+                }
                 Grab::Texture
             }
             Tool::Attach => Grab::None,
@@ -1107,6 +1216,7 @@ impl HandRig {
                 }
                 let points: Vec<usize> = self.verts_under(mesh, cam, at, self.radius).into_iter().map(|p| p.0).collect();
                 self.rig.assign_part(&points, bone);
+                self.mirror_part(mesh, cam, at, bone);
                 self.version += 1;
                 Grab::Parts
             }
@@ -1155,6 +1265,9 @@ impl HandRig {
                 self.redo();
             }
         });
+        if matches!(self.tool, Tool::Texture | Tool::Mesh | Tool::Weights | Tool::Parts | Tool::Lasso) {
+            ui.checkbox(&mut self.mirror, "Mirror left and right").help("What you paint or draw on one side is done on the other side too, across the middle of the body. For the weights and the parts, the bone on the other side (Left and Right in the names) gets the mirror image. Both sides have to be seen in the picture.");
+        }
         ui.add_space(6.0);
         match self.tool {
             Tool::Select | Tool::Draw | Tool::Turn => {
@@ -2044,5 +2157,78 @@ mod tests {
         assert_eq!((mesh.verts.len(), hand.rig.weights.len()), (kept, kept));
         hand.undo_stroke(&mut mesh);
         assert_eq!((mesh.verts.len(), mesh.tris.len()), (v0, t0));
+    }
+
+    /// A figure with a texture and a strip, seen from the front, with the picture of ids made.
+    fn mirror_setup() -> (AssetMesh, HandRig, Camera) {
+        let (mut mesh, _) = crate::meshfile::tests_figure();
+        mesh.texture = Some(RgbaImage::from_pixel(256, 256, image::Rgba([200, 160, 140, 255])));
+        for uv in &mut mesh.uvs {
+            uv[1] *= 0.8;
+        }
+        let mut hand = HandRig::default();
+        hand.start_for(&mesh);
+        hand.strip_v0 = Some(0.875);
+        hand.mirror = true;
+        let cam = hand.camera(300, 300);
+        let (_, depth, ids) = mesh.render_full(&mesh.verts, &cam, false, crate::assetview::View::Textured, None);
+        hand.depth = depth;
+        hand.ids = ids;
+        (mesh, hand, cam)
+    }
+
+    #[test]
+    fn a_stroke_of_paint_is_done_on_the_other_side_too() {
+        let (mut mesh, mut hand, cam) = mirror_setup();
+        // the middle of the body is at x = 0: a point to the left of the middle
+        let left = {
+            let p = cam.project([-0.07, 1.0, 0.1]);
+            Pos2::new(p[0], p[1])
+        };
+        let m = hand.mirror_pixel(&mesh, &cam, left).expect("the other side is seen");
+        let back = cam.unproject([m.x, m.y, cam.project([0.07, 1.0, 0.1])[2]]);
+        assert!((back[0] - 0.07).abs() < 0.01, "{back:?}: the mirror image is across x = 0");
+        hand.color = [10, 200, 30];
+        hand.tex_opacity = 1.0;
+        hand.tex_radius = 6.0;
+        let before = mesh.texture.clone().unwrap();
+        hand.paint_texture(&mut mesh, &cam, left);
+        let one_side = mesh.texture.as_ref().unwrap().pixels().zip(before.pixels()).filter(|(a, b)| a != b).count();
+        let mut other = mesh.clone();
+        other.texture = Some(before.clone());
+        hand.paint_texture(&mut other, &cam, left);
+        hand.paint_texture(&mut other, &cam, m);
+        let both = other.texture.as_ref().unwrap().pixels().zip(before.pixels()).filter(|(a, b)| a != b).count();
+        assert!(one_side > 0 && both > one_side, "{one_side} {both}");
+    }
+
+    #[test]
+    fn mirrored_parts_and_strokes_go_to_the_bone_and_the_place_on_the_other_side() {
+        let (mut mesh, mut hand, cam) = mirror_setup();
+        let (lo, hi) = mesh.bounds();
+        hand.rig = Rig3::humanoid(mesh.verts.len(), lo, hi);
+        hand.rig.assign_nearest_parts(&mesh.verts);
+        let left_arm = hand.rig.bones.iter().position(|b| b.name == "leftUpperArm").unwrap();
+        let right_arm = hand.rig.bones.iter().position(|b| b.name == "rightUpperArm").unwrap();
+        assert_eq!(hand.mirror_bone(left_arm), Some(right_arm));
+        let hips = hand.rig.bones.iter().position(|b| b.name == "hips").unwrap();
+        assert_eq!(hand.mirror_bone(hips), Some(hips), "a bone in the middle is its own mirror image");
+        // painting the left arm part on the left of the body gives the right arm part on the right
+        let p = cam.project([-0.09, 1.2, 0.1]);
+        hand.radius = 14.0;
+        hand.mirror_part_test(&mesh, &cam, Pos2::new(p[0], p[1]), left_arm);
+        let right_points = (0..mesh.verts.len()).filter(|i| hand.rig.main_bone(*i) == Some(right_arm) && mesh.verts[*i][0] > 0.0).count();
+        assert!(right_points > 0, "the other side got its part");
+        // a stroke: the mirror image is one step, and takes both back
+        let v0 = mesh.verts.len();
+        hand.brush = hand.brush.with_kind(BrushKind::Card);
+        hand.stroke = (0..16).map(|i| Pos2::new(cam.project([-0.09, 0.0, 0.1])[0] + i as f32, 90.0 + i as f32 * 6.0)).collect();
+        hand.finish_stroke(&mut mesh, &cam);
+        let added = mesh.verts.len() - v0;
+        assert!(added > 0);
+        let xs: Vec<f32> = mesh.verts[v0..].iter().map(|v| v[0]).collect();
+        assert!(xs.iter().any(|x| *x < -0.03) && xs.iter().any(|x| *x > 0.03), "strokes on both sides");
+        hand.undo_stroke(&mut mesh);
+        assert_eq!(mesh.verts.len(), v0, "one step takes both back");
     }
 }

@@ -210,6 +210,11 @@ pub struct RigState {
     pub(super) weight_before: Option<crate::history::DocState>,
     pub(super) weight_gen: u64,
     pub mirror_axis: f32,
+    /// The changers that get the movement of the picked one ("the same movement for other parts").
+    pub(super) link_targets: Vec<Id>,
+    /// Linked rigging is on (the ticked changers follow what is done to the picked one), and whether they move the mirror way.
+    pub(super) link_live: bool,
+    pub(super) link_mirror: bool,
     pub mirror_to: Option<Id>,
     pub(super) tag_pick: Option<parts::Part>,
     pub(super) glue_reach: f32,
@@ -280,6 +285,13 @@ impl SeviathApp {
     pub(super) fn rig_edit(&mut self, label: &str, now: f64, f: impl FnOnce(&mut Rig)) {
         let before = self.draw.doc.snapshot();
         f(Arc::make_mut(&mut self.draw.doc.rig));
+        // linked rigging: what was done to the changer that is being rigged is done to the ticked ones too, as it is done
+        if let (true, Some(src)) = (self.rigs.link_live, self.rigs.sel_changer) {
+            if !self.rigs.link_targets.is_empty() && !self.draw.doc.same_as(&before) {
+                let (targets, mirror) = (self.rigs.link_targets.clone(), self.rigs.link_mirror);
+                Arc::make_mut(&mut self.draw.doc.rig).copy_movement(src, &targets, mirror);
+            }
+        }
         if self.draw.doc.same_as(&before) {
             return;
         }
@@ -292,6 +304,15 @@ impl SeviathApp {
     #[cfg(test)]
     pub fn test_joint_edit(&mut self, on: bool) {
         self.rigs.joint_edit = on;
+    }
+
+    /// Switch linked rigging on for a changer (a test stand-in for ticking the others and pressing the button).
+    #[cfg(test)]
+    pub fn test_link(&mut self, picked: Id, targets: Vec<Id>, mirror: bool) {
+        self.rigs.sel_changer = Some(picked);
+        self.rigs.link_targets = targets;
+        self.rigs.link_mirror = mirror;
+        self.rigs.link_live = true;
     }
 
     #[cfg(test)]
@@ -1624,6 +1645,30 @@ impl SeviathApp {
                     self.rig_edit("Copy a changer to the other side", now, |r| new_id = r.mirror_changer(cid, axis, &name));
                     if new_id.is_some() {
                         self.rigs.sel_changer = new_id;
+                    }
+                }
+            });
+            // linked rigging: tick the other changers first, then rig this one: they get every step as it is done
+            egui::CollapsingHeader::new(RichText::new("Rig other parts at the same time").size(12.0)).id_salt("link_changers").show(ui, |ui| {
+                ui.label(RichText::new("Tick the changers that should do what this one does, then switch it on and rig this one: every shape you save for a slider is done on the ticked ones too, at the same moment. A changer that does not fit (another kind, another number of points) is left alone.").size(11.0).color(TEXT_DIM));
+                for (oid, oname, ..) in changers.iter().filter(|c| c.0 != cid) {
+                    let mut on = self.rigs.link_targets.contains(oid);
+                    if ui.checkbox(&mut on, oname).changed() {
+                        self.rigs.link_targets.retain(|x| x != oid);
+                        if on {
+                            self.rigs.link_targets.push(*oid);
+                        }
+                    }
+                }
+                ui.checkbox(&mut self.rigs.link_mirror, "Mirror mode: the other way round").help("The ticked parts move as the mirror image: an arm on the other side turns the other way, a cheek on the other side bends the other way.");
+                if widgets::chip(ui, if self.rigs.link_live { "Rigging them together" } else { "Rig them together" }, self.rigs.link_live).help("While this is on, everything you do to the picked changer is done to the ticked ones too.").clicked() {
+                    self.rigs.link_live = !self.rigs.link_live;
+                    if self.rigs.link_live && !self.rigs.link_targets.is_empty() {
+                        // start from the same: they get what this one has now
+                        let (targets, mirror) = (self.rigs.link_targets.clone(), self.rigs.link_mirror);
+                        self.rig_edit("Link changers", now, |r| {
+                            r.copy_movement(cid, &targets, mirror);
+                        });
                     }
                 }
             });

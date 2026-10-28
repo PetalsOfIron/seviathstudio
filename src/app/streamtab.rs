@@ -273,6 +273,7 @@ impl SeviathApp {
             }
         }
         let defs = crate::expressions::defs(&rig);
+        self.rigs.stream.expr.watch(&defs, &ch);
         self.rigs.stream.expr.apply(&defs, &rig, &mut self.rigs.values, dt);
         self.rigs.expr_layers = self.rigs.stream.expr.layer_levels(&defs);
         if self.rigs.stream.vrc.is_some() {
@@ -509,6 +510,9 @@ impl SeviathApp {
                     }
                 }
             });
+            if d.own {
+                self.stream_expr_edit_ui(ui, &d.name, &rig, now);
+            }
             if d.own && !layer_names.is_empty() {
                 egui::CollapsingHeader::new(RichText::new("Layers it shows or hides").size(11.5).color(TEXT_DIM)).id_salt(("expr_layers", &d.name)).show(ui, |ui| {
                     egui::ScrollArea::vertical().max_height(140.0).id_salt(("expr_layers_scroll", &d.name)).show(ui, |ui| {
@@ -571,6 +575,71 @@ impl SeviathApp {
         });
         if ui.small_button("All expressions off").help("Switch every expression off, so the face is plain.").clicked() {
             self.rigs.stream.expr.clear();
+        }
+    }
+
+    /// An expression made by hand: what the face does to switch it on, and the value of every slider it moves (any slider can be added, so everything of the
+    /// rig can change with an expression).
+    fn stream_expr_edit_ui(&mut self, ui: &mut Ui, name: &str, rig: &crate::rig::Rig, now: f64) {
+        let Some(e) = rig.own_exprs.iter().find(|e| e.name == name) else { return };
+        let mut e = e.clone();
+        let before = e.clone();
+        egui::CollapsingHeader::new(RichText::new("Set it by hand").size(11.5).color(TEXT_DIM)).id_salt(("expr_edit", name)).show(ui, |ui| {
+            // what the face does
+            ui.label(RichText::new("The face switches it on").size(11.5).color(TEXT_DIM));
+            ui.horizontal_wrapped(|ui| {
+                let mut on = e.trigger.is_some();
+                if ui.checkbox(&mut on, "by itself when").help("The tracked face switches it on and off: cheeks puffed, a smile, a tongue out, an eye closed.").changed() {
+                    e.trigger = on.then(|| crate::expressions::Trigger { input: "CheekPuff".into(), value: 0.5, below: false });
+                }
+                if let Some(t) = e.trigger.as_mut() {
+                    egui::ComboBox::from_id_salt(("expr_trigger", name)).selected_text(CHANNELS.iter().find(|c| c.0 == t.input).map(|c| c.1).unwrap_or(&t.input)).width(170.0).show_ui(ui, |ui| {
+                        for c in CHANNELS.iter().filter(|c| !c.0.starts_with("Mouse")) {
+                            if ui.selectable_label(t.input == c.0, c.1).clicked() {
+                                t.input = c.0.to_string();
+                                t.value = (c.2 + c.3) / 2.0;
+                            }
+                        }
+                    });
+                    let (lo, hi) = CHANNELS.iter().find(|c| c.0 == t.input).map(|c| (c.2, c.3)).unwrap_or((0.0, 1.0));
+                    if widgets::chip(ui, if t.below { "is under" } else { "is over" }, true).help("Over or under the value").clicked() {
+                        t.below = !t.below;
+                    }
+                    ui.add(egui::DragValue::new(&mut t.value).range(lo..=hi).speed((hi - lo) * 0.01));
+                }
+            });
+            // the sliders it moves
+            ui.label(RichText::new("The sliders it moves").size(11.5).color(TEXT_DIM));
+            let mut remove: Option<usize> = None;
+            for (i, (pid, v)) in e.values.iter_mut().enumerate() {
+                let Some(p) = rig.params.iter().find(|p| p.id == *pid) else { continue };
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&p.name).size(11.5));
+                    ui.add(egui::Slider::new(v, p.min..=p.max).show_value(true));
+                    if ui.small_button("x").help("Stop moving this slider").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                e.values.remove(i);
+            }
+            egui::ComboBox::from_id_salt(("expr_add", name)).selected_text("Add a slider").width(150.0).show_ui(ui, |ui| {
+                let free: Vec<&crate::rig::Param> = rig.params.iter().filter(|p| !e.values.iter().any(|v| v.0 == p.id)).collect();
+                for p in free {
+                    if ui.selectable_label(false, &p.name).clicked() {
+                        e.values.push((p.id, p.max));
+                    }
+                }
+            });
+        });
+        if e != before {
+            let n = name.to_string();
+            self.rig_edit("Edit expression", now, move |r| {
+                if let Some(x) = r.own_exprs.iter_mut().find(|x| x.name == n) {
+                    *x = e.clone();
+                }
+            });
         }
     }
 
