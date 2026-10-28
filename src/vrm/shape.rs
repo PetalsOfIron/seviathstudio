@@ -700,16 +700,28 @@ pub fn smooth_weights(tris: &[[u32; 3]], weights: Vec<Vec<(usize, f32)>>, rounds
 /// Separate the limbs that the AI joined (the left arm, the right arm, the left leg, the right leg) without a gap: returns how many triangles
 /// changed. The limb of a point is the one of the bone that moves it most.
 pub fn split_fused_limbs(part: &mut Part3d, bones: &[Bone]) -> usize {
-    let limb: Vec<usize> = (0..part.verts.len())
-        .map(|i| {
-            let best = (0..4).max_by(|a, b| part.weights[i][*a].total_cmp(&part.weights[i][*b])).unwrap_or(0);
-            if part.weights[i][best] <= 0.0 {
-                return 0;
-            }
-            bones.get(part.joints[i][best] as usize).map(|b| limb_group(&b.name)).unwrap_or(0)
-        })
-        .collect();
-    super::model::separate_groups(part, &limb)
+    let limb_of = |part: &Part3d| -> Vec<usize> {
+        (0..part.verts.len())
+            .map(|i| {
+                let best = (0..4).max_by(|a, b| part.weights[i][*a].total_cmp(&part.weights[i][*b])).unwrap_or(0);
+                if part.weights[i][best] <= 0.0 {
+                    return 0;
+                }
+                bones.get(part.joints[i][best] as usize).map(|b| limb_group(&b.name)).unwrap_or(0)
+            })
+            .collect()
+    };
+    let mut changed = super::model::separate_groups(part, &limb_of(part));
+    // The cloth under an arm (the flap of a sleeve between the arm and the side of the body) is joined to both: when the arm goes up it is stretched
+    // into a sheet. Below the shoulder the arm and the body are separated too (the arm still joins the body at the shoulder, where it turns).
+    let shoulder = ["leftUpperArm", "rightUpperArm"].iter().filter_map(|n| bones.iter().find(|b| b.name == *n)).map(|b| b.pos[1]).fold(f32::MIN, f32::max);
+    if shoulder > f32::MIN / 2.0 {
+        let low = shoulder - 0.07;
+        let limb = limb_of(part);
+        let labels: Vec<usize> = (0..part.verts.len()).map(|i| if limb[i] == 1 || limb[i] == 2 { limb[i] } else if limb[i] == 0 && part.verts[i][1] < low { 5 } else { 0 }).collect();
+        changed += super::model::separate_groups(part, &labels);
+    }
+    changed
 }
 
 /// Weights from how close a point is to each bone (the bones are the segments from their head to their tail): the near ones
