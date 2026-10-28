@@ -302,7 +302,7 @@ pub fn bake(mesh: &AssetMesh, size: u32, look: &Look, face: &Face, seed: u32) ->
     let base = [look.skin[0], look.skin[1], look.skin[2], 255];
     let mut img = image::RgbaImage::from_pixel(size, size, image::Rgba(base));
     for (x, y, c) in cells {
-        img.put_pixel(x, size - 1 - y, image::Rgba([c[0], c[1], c[2], 255]));
+        img.put_pixel(x, y, image::Rgba([c[0], c[1], c[2], 255]));
     }
     img
 }
@@ -356,8 +356,8 @@ mod tests {
         let face = Face { centre: [0.0, 0.0, 0.0], scale: 0.1, front: 1.0 };
         let look = Look::default();
         let img = bake(&m, 256, &look, &face, 1);
-        // the middle of the left eye (in the picture the y is up from the lower edge): iris colour, near the eye gap
-        let px = |x: f32, y: f32| img.get_pixel((x * 256.0) as u32, 255 - (y * 256.0) as u32).0;
+        // the middle of the left eye (the row of the texture is the v of the texture coordinate): iris colour, near the eye gap
+        let px = |x: f32, y: f32| img.get_pixel((x * 256.0) as u32, (y * 256.0) as u32).0;
         let eye_x = 0.5 + look.eye_gap * 0.1 / 0.4;
         let at = px(eye_x + 0.03, 0.5 - 0.01);
         assert!(at[1] > at[0] && at[1] > 90, "an iris of the eye colour: {at:?}");

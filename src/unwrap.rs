@@ -16,11 +16,13 @@ pub struct Options {
     /// The space between pieces, in texels of the texture of `size`.
     pub margin: f32,
     pub size: u32,
+    /// The share of the texture (at the bottom of the picture, v from 1 - reserve to 1) that no piece uses: the strokes of the mesh brushes put their colours there.
+    pub reserve: f32,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { angle: 62.0, min_tris: 12, margin: 4.0, size: 2048 }
+        Options { angle: 62.0, min_tris: 12, margin: 4.0, size: 2048, reserve: 0.0 }
     }
 }
 
@@ -194,7 +196,7 @@ fn flatten(mesh: &AssetMesh, normals: &[[f32; 3]], areas: &[f32], chart: &[u32],
 
 /// Shelves, tallest first: where every piece goes (lower left corner, in units) when the pieces are `scale` times as large and `pad` apart, and whether it
 /// all fits in the square.
-fn pack(pieces: &[Piece], order: &[usize], scale: f32, pad: f32) -> Option<Vec<[f32; 2]>> {
+fn pack(pieces: &[Piece], order: &[usize], scale: f32, pad: f32, height: f32) -> Option<Vec<[f32; 2]>> {
     let mut at = vec![[0.0f32; 2]; pieces.len()];
     let (mut x, mut y, mut row) = (pad, pad, 0.0f32);
     for &i in order {
@@ -204,7 +206,7 @@ fn pack(pieces: &[Piece], order: &[usize], scale: f32, pad: f32) -> Option<Vec<[
             y += row + pad;
             row = 0.0;
         }
-        if y + h + pad > 1.0 || w + 2.0 * pad > 1.0 {
+        if y + h + pad > height || w + 2.0 * pad > 1.0 {
             return None;
         }
         at[i] = [x, y];
@@ -228,10 +230,10 @@ pub fn unwrap(mesh: &AssetMesh, o: &Options) -> AssetMesh {
     let (mut lo, mut hi) = (0.0f32, 4.0f32);
     for _ in 0..28 {
         let mid = (lo + hi) / 2.0;
-        if pack(&pieces, &order, mid, pad).is_some() { lo = mid } else { hi = mid }
+        if pack(&pieces, &order, mid, pad, 1.0 - o.reserve).is_some() { lo = mid } else { hi = mid }
     }
     let scale = lo.max(1e-4);
-    let at = pack(&pieces, &order, scale, pad).unwrap_or_else(|| vec![[0.0; 2]; pieces.len()]);
+    let at = pack(&pieces, &order, scale, pad, 1.0 - o.reserve).unwrap_or_else(|| vec![[0.0; 2]; pieces.len()]);
     let (mut verts, mut uvs, mut tris) = (Vec::with_capacity(mesh.verts.len() + mesh.verts.len() / 4), Vec::new(), Vec::with_capacity(mesh.tris.len()));
     for (pi, piece) in pieces.iter().enumerate() {
         let mut new_index: HashMap<u32, u32> = HashMap::with_capacity(piece.uv.len());
@@ -379,5 +381,13 @@ mod tests {
             }
         }
         sheet.save(dir.join(format!("unwrap_{name}_uv.png"))).unwrap();
+    }
+
+    #[test]
+    fn a_strip_of_the_square_can_be_kept_free() {
+        let m = cylinder();
+        let u = unwrap(&m, &Options { reserve: 0.125, ..Options::default() });
+        let top = u.uvs.iter().map(|q| q[1]).fold(0.0f32, f32::max);
+        assert!(top <= 0.875 + 1e-4, "{top}");
     }
 }

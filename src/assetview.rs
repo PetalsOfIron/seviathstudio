@@ -229,6 +229,32 @@ impl AssetMesh {
         (img, depth, ids)
     }
 
+    /// The place on the surface and the way the surface faces, under a pixel of a view, from the triangle that is seen there.
+    pub fn surface_at(&self, verts: &[[f32; 3]], cam: &Camera, tri: usize, px: f32, py: f32) -> Option<([f32; 3], [f32; 3])> {
+        let t = self.tris.get(tri)?;
+        let (pa, pb, pc) = (verts[t[0] as usize], verts[t[1] as usize], verts[t[2] as usize]);
+        let (a, b, c) = (cam.project(pa), cam.project(pb), cam.project(pc));
+        let area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        if area.abs() < 1e-6 {
+            return None;
+        }
+        let w0 = ((b[0] - px) * (c[1] - py) - (b[1] - py) * (c[0] - px)) / area;
+        let w1 = ((c[0] - px) * (a[1] - py) - (c[1] - py) * (a[0] - px)) / area;
+        let w2 = 1.0 - w0 - w1;
+        let p = [w0 * pa[0] + w1 * pb[0] + w2 * pc[0], w0 * pa[1] + w1 * pb[1] + w2 * pc[1], w0 * pa[2] + w1 * pb[2] + w2 * pc[2]];
+        let (e1, e2) = ([pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]], [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]]);
+        let mut n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+        let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-12);
+        n = [n[0] / l, n[1] / l, n[2] / l];
+        // the side that faces the camera
+        let to_cam = cam.unproject([px, py, -1e6]);
+        let view = [to_cam[0] - p[0], to_cam[1] - p[1], to_cam[2] - p[2]];
+        if n[0] * view[0] + n[1] * view[1] + n[2] * view[2] < 0.0 {
+            n = [-n[0], -n[1], -n[2]];
+        }
+        Some((p, n))
+    }
+
     /// The texture coordinates of a pixel of a view, from the triangle that is seen there.
     pub fn uv_at(&self, verts: &[[f32; 3]], cam: &Camera, tri: usize, px: f32, py: f32) -> Option<[f32; 2]> {
         let t = self.tris.get(tri)?;

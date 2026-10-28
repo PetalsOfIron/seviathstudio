@@ -48,6 +48,8 @@ mod bodyshape;
 mod features;
 mod fbx;
 mod take;
+mod meshedit;
+mod meshbrush;
 mod select;
 mod icons;
 mod layerfilter;

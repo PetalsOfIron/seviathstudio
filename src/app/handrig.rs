@@ -12,6 +12,8 @@ use super::SeviathApp;
 use crate::assetview::{AssetMesh, Camera};
 use crate::rig3d::{Paint, Pose, Rig3, neighbours};
 use crate::take::Take;
+use crate::meshbrush::{self, Brush, Kind as BrushKind, Spot};
+use crate::meshedit::{self, Cut};
 use crate::theme::*;
 use crate::widgets::{self, HelpExt, section_title};
 
@@ -34,6 +36,8 @@ pub enum Tool {
     Parts,
     /// Draw a loop round a part of the mesh: all of it belongs to the picked bone.
     Lasso,
+    /// Draw geometry on the surface with a brush: hair, ropes, strips, spikes.
+    Mesh,
 }
 
 /// Which tools a page has.
@@ -41,6 +45,8 @@ pub enum Tool {
 pub enum ToolSet {
     Rig,
     Parts,
+    /// The Bases page: turn the view and paint.
+    Look,
 }
 
 impl ToolSet {
@@ -48,6 +54,7 @@ impl ToolSet {
         match self {
             ToolSet::Rig => matches!(t, Tool::Select | Tool::Draw | Tool::Weights | Tool::Texture | Tool::Pose | Tool::Turn),
             ToolSet::Parts => matches!(t, Tool::Select | Tool::Draw | Tool::Parts | Tool::Lasso | Tool::Turn),
+            ToolSet::Look => matches!(t, Tool::Texture | Tool::Mesh | Tool::Turn),
         }
     }
 }
@@ -72,6 +79,7 @@ enum Grab {
     Texture,
     Parts,
     Lasso,
+    Mesh,
 }
 
 /// Which part of a bone is picked.
@@ -139,6 +147,16 @@ pub struct HandRig {
     pub auto_key: bool,
     pub animating: bool,
     anim_shown: bool,
+    /// The brush that draws geometry, the line being drawn, where the strip of the texture for the colours of the strokes starts (v), how many cells of it are
+    /// used, and what the strokes added (points, triangles) to take them back.
+    pub brush: Brush,
+    stroke: Vec<Pos2>,
+    pub strip_v0: Option<f32>,
+    strip_next: usize,
+    geo_undo: Vec<(usize, usize)>,
+    /// A cut of the mesh by a plane, and the meshes from before the cuts (with their weights).
+    pub cut: Cut,
+    cut_undo: Vec<(AssetMesh, Vec<Vec<(u16, f32)>>)>,
 }
 
 impl Default for HandRig {
@@ -188,6 +206,13 @@ impl Default for HandRig {
             auto_key: true,
             animating: false,
             anim_shown: false,
+            brush: Brush::default(),
+            stroke: Vec::new(),
+            strip_v0: None,
+            strip_next: 0,
+            geo_undo: Vec::new(),
+            cut: Cut { axis: 2, limit: 0.0, above: false },
+            cut_undo: Vec::new(),
         }
     }
 }
@@ -199,6 +224,7 @@ enum Ask {
     Open,
     Save,
     SaveFbx,
+    SaveMesh,
 }
 
 fn dist_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
@@ -243,7 +269,8 @@ fn part_color(bone: Option<usize>, picked: Option<usize>) -> [u8; 3] {
 impl HandRig {
     /// A mesh arrived: no bones yet, the view fits it.
     pub fn start_for(&mut self, mesh: &AssetMesh) {
-        *self = HandRig { rig: Rig3::new(mesh.verts.len()), bounds: mesh.bounds(), ..HandRig::default() };
+        let bounds = mesh.bounds();
+        *self = HandRig { rig: Rig3::new(mesh.verts.len()), bounds, cut: Cut { axis: 2, limit: (bounds.0[2] + bounds.1[2]) / 2.0, above: false }, ..HandRig::default() };
     }
 
     /// A rig that came with a file (it must be of this mesh).
@@ -262,6 +289,16 @@ impl HandRig {
             self.undo.remove(0);
         }
         self.redo.clear();
+    }
+
+    /// The texture was changed from outside (the looks were baked again): the picture is made again.
+    pub fn texture_changed(&mut self) {
+        self.version += 1;
+    }
+
+    #[cfg(test)]
+    pub fn start_rerender(&mut self) {
+        self.version += 1;
     }
 
     pub fn undo(&mut self) {
@@ -382,6 +419,110 @@ impl HandRig {
         }
         self.rig.assign_part(&points, bone);
         self.version += 1;
+    }
+
+    /// The stroke is let go: the places under it become a stroke of geometry with the brush, and its colours go in a cell of the strip of the texture.
+    fn finish_stroke(&mut self, mesh: &mut AssetMesh, cam: &Camera) {
+        let pts = std::mem::take(&mut self.stroke);
+        let Some(v0) = self.strip_v0 else { return };
+        let Some(size) = mesh.texture.as_ref().map(|t| t.width()) else { return };
+        let (cell, w) = (32u32, cam.w as usize);
+        let cols = (size / cell) as usize;
+        let y_start = (v0 * size as f32).ceil() as u32;
+        let rows = ((size - y_start) / cell) as usize;
+        if self.strip_next >= cols * rows {
+            self.message = Some("The strip of the texture for the colours of the strokes is full: take a stroke back, or use a bigger texture.".into());
+            return;
+        }
+        let mut spots = Vec::new();
+        let mut first_tri = None;
+        for p in &pts {
+            let (px, py) = (p.x as i32, p.y as i32);
+            if px < 0 || py < 0 || px >= cam.w as i32 || py >= cam.h as i32 {
+                continue;
+            }
+            let Some(&id) = self.ids.get(py as usize * w + px as usize) else { continue };
+            if id == u32::MAX {
+                continue;
+            }
+            if let Some((pos, n)) = mesh.surface_at(&mesh.verts, cam, id as usize, px as f32 + 0.5, py as f32 + 0.5) {
+                first_tri.get_or_insert(id as usize);
+                spots.push(Spot { p: pos, n });
+            }
+        }
+        let Some(built) = meshbrush::build(&self.brush, &spots) else {
+            self.message = Some("Draw the stroke over the mesh: it has to touch the surface and go somewhere.".into());
+            return;
+        };
+        let k = self.strip_next;
+        let (x0, y0) = ((k % cols) as u32 * cell, y_start + (k / cols) as u32 * cell);
+        if let Some(tex) = mesh.texture.as_mut() {
+            let img = meshbrush::cell_image(cell, self.brush.root, self.brush.tip, k as u32 + 1);
+            image::imageops::replace(tex, &img, x0 as i64, y0 as i64);
+        }
+        let base = mesh.verts.len() as u32;
+        let old = (mesh.verts.len(), mesh.tris.len());
+        for (v, uv) in built.verts.iter().zip(&built.uvs) {
+            mesh.verts.push(*v);
+            mesh.uvs.push([(x0 as f32 + 2.0 + uv[0] * (cell - 4) as f32) / size as f32, (y0 as f32 + 1.0 + uv[1] * (cell - 2) as f32) / size as f32]);
+        }
+        mesh.tris.extend(built.tris.iter().map(|t| [t[0] + base, t[1] + base, t[2] + base]));
+        // the new points move with what is under the start of the stroke
+        if self.rig.weights.len() == old.0 {
+            let w = first_tri.and_then(|t| mesh.tris.get(t)).and_then(|t| self.rig.weights.get(t[0] as usize)).cloned().unwrap_or_default();
+            self.rig.weights.extend(std::iter::repeat_n(w, built.verts.len()));
+        }
+        self.geo_undo.push(old);
+        self.strip_next += 1;
+        self.painted = true;
+        self.near = None;
+        self.version += 1;
+    }
+
+    /// Take the last stroke of the mesh brush back.
+    fn undo_stroke(&mut self, mesh: &mut AssetMesh) {
+        if let Some((v, t)) = self.geo_undo.pop() {
+            mesh.verts.truncate(v);
+            mesh.uvs.truncate(v);
+            mesh.tris.truncate(t);
+            self.rig.weights.truncate(v);
+            self.strip_next = self.strip_next.saturating_sub(1);
+            self.near = None;
+            self.version += 1;
+        }
+    }
+
+    /// Cut a side of the mesh away (what is left floating in pieces stays; `keep_biggest` takes it).
+    fn cut_mesh(&mut self, mesh: &mut AssetMesh, keep_biggest: bool) {
+        self.cut_undo.push((mesh.clone(), self.rig.weights.clone()));
+        if self.cut_undo.len() > 3 {
+            self.cut_undo.remove(0);
+        }
+        let (new, map) = if keep_biggest { meshedit::keep_biggest(mesh) } else { meshedit::cut_plane(mesh, self.cut) };
+        let mut weights = vec![Vec::new(); new.verts.len()];
+        if self.rig.weights.len() == map.len() {
+            for (old, to) in map.iter().enumerate() {
+                if let Some(j) = to {
+                    weights[*j as usize] = self.rig.weights[old].clone();
+                }
+            }
+        }
+        *mesh = new;
+        self.rig.weights = weights;
+        self.geo_undo.clear();
+        self.painted = true;
+        self.near = None;
+        self.version += 1;
+    }
+
+    fn undo_cut(&mut self, mesh: &mut AssetMesh) {
+        if let Some((m, w)) = self.cut_undo.pop() {
+            *mesh = m;
+            self.rig.weights = w;
+            self.geo_undo.clear();
+            self.near = None;
+            self.version += 1;
+        }
     }
 
     /// A bone was turned or the figure moved: when moving a bone keys it, the pose is kept as a key at this frame.
@@ -632,6 +773,13 @@ impl HandRig {
                         self.version += 1;
                     }
                 }
+                Grab::Mesh => {
+                    if let Some(now) = now {
+                        if self.stroke.last().is_none_or(|l| (*l - now).length() > 2.0) {
+                            self.stroke.push(now);
+                        }
+                    }
+                }
                 Grab::Lasso => {
                     if let Some(now) = now {
                         if self.lasso.last().is_none_or(|l| (*l - now).length() > 3.0) {
@@ -673,6 +821,12 @@ impl HandRig {
             }
             if self.grab == Grab::Lasso {
                 self.finish_lasso(mesh, &cam);
+            }
+            if self.grab == Grab::Mesh {
+                if let Some(now) = ui.input(|i| i.pointer.interact_pos()).map(local) {
+                    self.stroke.push(now);
+                }
+                self.finish_stroke(mesh, &cam);
             }
             self.grab = Grab::None;
             self.draw_to = None;
@@ -763,6 +917,10 @@ impl HandRig {
                 painter.text(pb + vec2(8.0, -8.0), egui::Align2::LEFT_BOTTOM, &self.rig.bones[i].name, egui::FontId::proportional(12.0), Color32::WHITE);
             }
         }
+        if self.stroke.len() > 1 {
+            let pts: Vec<Pos2> = self.stroke.iter().map(|p| to_screen(p.x, p.y)).collect();
+            painter.add(egui::Shape::line(pts, Stroke::new(3.0, EMERALD)));
+        }
         if self.lasso.len() > 1 {
             let pts: Vec<Pos2> = self.lasso.iter().map(|p| to_screen(p.x, p.y)).collect();
             painter.add(egui::Shape::line(pts, Stroke::new(2.0, GOLD)));
@@ -785,6 +943,7 @@ impl HandRig {
             Tool::Texture => "Paint on the mesh. Alt: pick the colour under the pointer. Right button: turn the view. Wheel: zoom.",
             Tool::Parts => "Paint the part of the mesh that moves with the picked bone. Right button: turn the view. Wheel: zoom.",
             Tool::Lasso => "Draw a loop round a part: all of it moves with the picked bone. Right button: turn the view. Wheel: zoom.",
+            Tool::Mesh => "Draw over the mesh: the stroke becomes hair, a rope, a strip or a spike. Right button: turn the view. Wheel: zoom.",
         });
     }
 
@@ -848,6 +1007,14 @@ impl HandRig {
                 self.paint_texture(mesh, cam, at);
                 Grab::Texture
             }
+            Tool::Mesh => {
+                if self.strip_v0.is_none() || mesh.texture.is_none() {
+                    self.message = Some("This mesh has no strip of texture for the colours of the strokes. Load a base on the Bases page: it has one.".into());
+                    return Grab::None;
+                }
+                self.stroke = vec![at];
+                Grab::Mesh
+            }
             Tool::Parts | Tool::Lasso => {
                 let Some(bone) = self.sel else {
                     self.message = Some("Pick a bone first (click it, or pick it in the list), then paint its part.".into());
@@ -884,6 +1051,7 @@ impl HandRig {
                 (Tool::Draw, "Draw bones", "Drag in the picture to draw a bone. Start at the end of a bone to continue the chain"),
                 (Tool::Weights, "Paint weights", "Paint which bone moves which part of the mesh"),
                 (Tool::Texture, "Paint texture", "Redraw the colours of the mesh, with colours picked from its own texture"),
+                (Tool::Mesh, "Draw mesh", "Draw hair, ropes, strips and spikes on the mesh with brushes"),
                 (Tool::Parts, "Paint parts", "Paint which part of the mesh moves with the picked bone: the whole part, no weights"),
                 (Tool::Lasso, "Loop a part", "Draw a loop round a part: all of it moves with the picked bone"),
                 (Tool::Pose, "Pose", "Turn bones to see how the mesh bends"),
@@ -975,6 +1143,30 @@ impl HandRig {
                 }
                 let loose = self.rig.unweighted();
                 ui.label(RichText::new(format!("{loose} points are moved by no bone")).size(11.5).color(if loose > 0 { GOLD } else { TEXT_DIM }));
+            }
+            Tool::Mesh => {
+                section_title(ui, "Mesh brushes");
+                ui.horizontal_wrapped(|ui| {
+                    for k in BrushKind::ALL {
+                        if widgets::chip(ui, k.label(), self.brush.kind == k).help(k.about()).clicked() {
+                            self.brush = self.brush.with_kind(k);
+                        }
+                    }
+                });
+                ui.add(egui::Slider::new(&mut self.brush.width, 0.002..=0.2).logarithmic(true).text("Width").suffix(" m")).help("How wide or thick the stroke is");
+                ui.add(egui::Slider::new(&mut self.brush.taper, 0.0..=1.0).text("Thinner to the end")).help("0: the same all along, 1: a point at the end");
+                ui.add(egui::Slider::new(&mut self.brush.lift, 0.0..=0.05).text("Off the surface").suffix(" m")).help("How far the stroke floats over the surface");
+                ui.add(egui::Slider::new(&mut self.brush.droop, 0.0..=0.5).text("Falls at the end").suffix(" m")).help("The end of the stroke hangs down, like hair");
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Root").size(12.0).color(TEXT_DIM));
+                    ui.color_edit_button_srgb(&mut self.brush.root);
+                    ui.label(RichText::new("End").size(12.0).color(TEXT_DIM));
+                    ui.color_edit_button_srgb(&mut self.brush.tip);
+                });
+                if ui.add_enabled(!self.geo_undo.is_empty(), egui::Button::new("Take the last stroke back")).clicked() {
+                    self.undo_stroke(mesh);
+                }
+                ui.label(RichText::new(format!("{} strokes drawn. Drag over the mesh, from the root outwards. The colours are painted in a strip of the texture, and the new parts follow the bone under their start.", self.geo_undo.len())).size(11.0).color(TEXT_DIM));
             }
             Tool::Parts | Tool::Lasso => {
                 section_title(ui, "Parts");
@@ -1069,6 +1261,42 @@ impl HandRig {
                     self.version += 1;
                 }
             }
+        }
+        if set == ToolSet::Look {
+            ui.add_space(6.0);
+            section_title(ui, "Cut away");
+            ui.label(RichText::new("Cut a part off the mesh (the wings of a base, a tail): everything on one side of a plane goes.").size(11.0).color(TEXT_DIM));
+            ui.horizontal_wrapped(|ui| {
+                for (axis, label) in [(0usize, "Sideways"), (1, "Up"), (2, "Front")] {
+                    if widgets::chip(ui, label, self.cut.axis == axis).clicked() {
+                        self.cut.axis = axis;
+                        let (lo, hi) = (self.bounds.0[axis], self.bounds.1[axis]);
+                        self.cut.limit = (lo + hi) / 2.0;
+                    }
+                }
+            });
+            let (lo, hi) = (self.bounds.0[self.cut.axis], self.bounds.1[self.cut.axis]);
+            ui.add(egui::Slider::new(&mut self.cut.limit, lo..=hi).text("Where").suffix(" m"));
+            ui.horizontal(|ui| {
+                if widgets::chip(ui, "Cut away the lower side", !self.cut.above).clicked() {
+                    self.cut.above = false;
+                }
+                if widgets::chip(ui, "the higher side", self.cut.above).clicked() {
+                    self.cut.above = true;
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Cut").help("Take that side away").clicked() {
+                    self.cut_mesh(mesh, false);
+                }
+                if ui.button("Keep the biggest piece").help("What the cut left floating goes").clicked() {
+                    self.cut_mesh(mesh, true);
+                }
+                if ui.add_enabled(!self.cut_undo.is_empty(), egui::Button::new("Take the cut back")).clicked() {
+                    self.undo_cut(mesh);
+                }
+            });
+            ui.label(RichText::new("The axes are those of the mesh: it faces the front (+z). Look at it from the side to see where to cut.").size(11.0).color(TEXT_DIM));
         }
         ui.add_space(6.0);
         section_title(ui, "View");
@@ -1392,7 +1620,18 @@ impl HandRig {
 
 impl SeviathApp {
     pub(super) fn mesh_rig_ui(&mut self, ui: &mut Ui) {
-        if self.m3.mesh.is_none() {
+        if self.m3.page == Page::Bases {
+            egui::Panel::left("mesh_bases_left").default_size(320.0).size_range(250.0..=480.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt("mesh_bases_scroll").show(ui, |ui| self.bases_panel(ui));
+            });
+            if self.m3.mesh.is_none() {
+                egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(14, 20, 18)).inner_margin(egui::Margin::same(16))).show(ui, |ui| {
+                    ui.label(RichText::new("Pick a base on the left.").size(14.0).strong());
+                    ui.label(RichText::new("It is unwrapped for painting, and its looks (skin, eyes, brows, mouth) are drawn on it. Everything else you paint by hand.").size(12.0).color(TEXT_DIM));
+                });
+                return;
+            }
+        } else if self.m3.mesh.is_none() {
             let mut open = false;
             egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(14, 20, 18)).inner_margin(egui::Margin::same(16))).show(ui, |ui| {
                 ui.label(RichText::new("There is no mesh yet.").size(14.0).strong());
@@ -1428,24 +1667,48 @@ impl SeviathApp {
             hand.anim_shown = false;
             hand.playing = false;
         }
-        let set = if page == Page::Parts { ToolSet::Parts } else { ToolSet::Rig };
+        let set = match page {
+            Page::Parts => ToolSet::Parts,
+            Page::Bases => ToolSet::Look,
+            _ => ToolSet::Rig,
+        };
+        if page == Page::Bases && !set.allows(hand.tool) {
+            hand.tool = Tool::Turn;
+        }
         if page == Page::Parts && !set.allows(hand.tool) {
             hand.tool = Tool::Parts;
         }
         if page == Page::Rig && !set.allows(hand.tool) {
             hand.tool = Tool::Select;
         }
-        egui::Panel::left("mesh_rig_left").default_size(300.0).size_range(240.0..=460.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
-            egui::ScrollArea::vertical().id_salt("mesh_rig_left_scroll").show(ui, |ui| {
-                if page == Page::Animate {
-                    hand.animate_ui(ui)
+        if page != Page::Bases {
+            egui::Panel::left("mesh_rig_left").default_size(300.0).size_range(240.0..=460.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt("mesh_rig_left_scroll").show(ui, |ui| {
+                    if page == Page::Animate {
+                        hand.animate_ui(ui)
+                    } else {
+                        hand.tools_ui(ui, &mut *mesh, set)
+                    }
+                });
+            });
+        }
+        egui::Panel::right("mesh_rig_right").default_size(290.0).size_range(240.0..=460.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("mesh_rig_right_scroll").show(ui, |ui| {
+                if page == Page::Bases {
+                    hand.tools_ui(ui, &mut *mesh, set);
+                    ui.add_space(8.0);
+                    section_title(ui, "Save");
+                    if ui.button(RichText::new("Save the mesh (.glb)").strong()).help("The mesh with its texture, for Unity, Godot and Blender").clicked() {
+                        ask = Ask::SaveMesh;
+                    }
+                    if ui.button("Save for Unreal (.fbx)").help("The mesh with its texture in an FBX file (the texture is saved next to it)").clicked() {
+                        ask = Ask::SaveFbx;
+                    }
+                    ui.label(RichText::new("Next: the Parts page (no weights) or the Bones and weights page, to rig it.").size(11.0).color(TEXT_DIM));
                 } else {
-                    hand.tools_ui(ui, &mut *mesh, set)
+                    hand.bones_ui(ui, &mut ask)
                 }
             });
-        });
-        egui::Panel::right("mesh_rig_right").default_size(290.0).size_range(240.0..=460.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
-            egui::ScrollArea::vertical().id_salt("mesh_rig_right_scroll").show(ui, |ui| hand.bones_ui(ui, &mut ask));
         });
         if page == Page::Animate {
             egui::Panel::bottom("mesh_timeline").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| hand.timeline_ui(ui));
@@ -1455,8 +1718,21 @@ impl SeviathApp {
             Ask::Open => self.mesh_open_glb(),
             Ask::Save => self.mesh_save_rigged(),
             Ask::SaveFbx => self.mesh_save_fbx(),
+            Ask::SaveMesh => self.mesh_save_plain(),
             Ask::None => {}
         }
+    }
+
+    /// The mesh with its texture, without bones.
+    fn mesh_save_plain(&mut self) {
+        let Some(mesh) = &self.m3.mesh else { return };
+        let name = self.m3.file_name();
+        let Some(p) = rfd::FileDialog::new().set_title("Save the mesh").set_directory(self.settings.projects_folder()).set_file_name(format!("{name}.glb")).add_filter("glTF binary", &["glb"]).save_file() else { return };
+        let bytes = crate::meshfile::write_glb(mesh, None, &[], 30.0);
+        self.m3.hand.message = Some(match std::fs::write(&p, bytes) {
+            Ok(()) => format!("Saved {}.", p.display()),
+            Err(e) => format!("Could not save the file: {e}"),
+        });
     }
 
     /// The animations that go in a saved file: the ready ones that were added, and the ones made by hand that have keys.
@@ -1551,5 +1827,56 @@ mod tests {
         let mut other = mesh.clone();
         hand.paint_texture(&mut other, &cam, Pos2::new(2.0, 2.0));
         assert_eq!(other.texture, mesh.texture);
+    }
+
+    #[test]
+    fn a_stroke_over_the_surface_becomes_geometry_with_its_colours_in_the_strip_and_can_be_taken_back() {
+        let (mut mesh, _) = crate::meshfile::tests_figure();
+        // a texture whose bottom eighth is the strip, and uvs that stay above it
+        mesh.texture = Some(RgbaImage::from_pixel(256, 256, image::Rgba([200, 160, 140, 255])));
+        for uv in &mut mesh.uvs {
+            uv[1] *= 0.8;
+        }
+        let mut hand = HandRig::default();
+        hand.start_for(&mesh);
+        hand.strip_v0 = Some(0.875);
+        let cam = hand.camera(200, 300);
+        let (_, depth, ids) = mesh.render_full(&mesh.verts, &cam, false, crate::assetview::View::Textured, None);
+        hand.depth = depth;
+        hand.ids = ids;
+        let (v0, t0) = (mesh.verts.len(), mesh.tris.len());
+        hand.brush = hand.brush.with_kind(BrushKind::Card);
+        hand.brush.root = [10, 10, 10];
+        hand.brush.tip = [250, 250, 250];
+        hand.stroke = (0..20).map(|i| Pos2::new(90.0 + i as f32 * 1.5, 80.0 + i as f32 * 6.0)).collect();
+        hand.finish_stroke(&mut mesh, &cam);
+        assert!(mesh.verts.len() > v0 && mesh.tris.len() > t0, "geometry was added");
+        assert_eq!(mesh.uvs.len(), mesh.verts.len());
+        assert_eq!(hand.rig.weights.len(), mesh.verts.len(), "the new points have weights");
+        // the new points look into the strip, and the strip has the colours of the brush from the root to the end
+        let new_v: Vec<f32> = mesh.uvs[v0..].iter().map(|q| q[1]).collect();
+        assert!(new_v.iter().all(|v| *v >= 0.875 && *v <= 1.0), "{new_v:?}");
+        let tex = mesh.texture.as_ref().unwrap();
+        let (top, bottom) = (tex.get_pixel(16, 224 + 2).0, tex.get_pixel(16, 224 + 29).0);
+        assert!(top[0] < 80 && bottom[0] > 150, "{top:?} {bottom:?}");
+        hand.undo_stroke(&mut mesh);
+        assert_eq!((mesh.verts.len(), mesh.tris.len(), hand.rig.weights.len()), (v0, t0, v0));
+    }
+
+    #[test]
+    fn a_cut_takes_a_side_away_and_can_be_taken_back_with_the_weights() {
+        let (mut mesh, _) = crate::meshfile::tests_figure();
+        let mut hand = HandRig::default();
+        hand.start_for(&mesh);
+        hand.rig.add_bone("a", None, [0.0; 3], [0.0, 1.0, 0.0]);
+        hand.rig.assign_nearest_parts(&mesh.verts);
+        let before = mesh.verts.len();
+        hand.cut = Cut { axis: 1, limit: 1.0, above: true };
+        hand.cut_mesh(&mut mesh, false);
+        assert!(mesh.verts.len() < before);
+        assert_eq!(hand.rig.weights.len(), mesh.verts.len());
+        assert!(mesh.verts.iter().all(|v| v[1] <= 1.0 + 1e-4));
+        hand.undo_cut(&mut mesh);
+        assert_eq!((mesh.verts.len(), hand.rig.weights.len()), (before, before));
     }
 }
