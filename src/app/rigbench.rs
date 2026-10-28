@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // The workbench for rigging by hand, the same in the Rig, Physics and Animate tabs: a row of tools along the top (every kind of changer, meshes,
-// skin and bones, glue, shapes), the parts and the parameters (the sliders) on the left, and the automatic rig on the right (Rig tab only).
+// skin and bones, glue, shapes), the parts and the parameters (the sliders) on the left, and a look at the rig on the right (Rig tab only).
 // A tool opens a small window of its own where its details are set: the grid of a warp, the pivot of a rotation, what it sits inside. Nothing
-// here needs the parts to be tagged: tags are only for the automatic rig.
+// here needs the parts to be tagged: tags only name the parts for the physics and the expressions.
 
 use crate::widgets::HelpExt;
 use eframe::egui::{self, Align2, Color32, RichText, Sense, Ui, vec2};
