@@ -4286,3 +4286,52 @@ fn a_mesh_is_rigged_by_hand_and_saved_with_its_bones_weights_and_animations() {
     assert_eq!(g.json["animations"].as_array().unwrap().len(), clips.len());
     assert!(crate::meshfile::rig_from_glb(&bytes).is_some_and(|r| r.bones.len() >= 22), "the rig is in the file");
 }
+
+/// Rigging without weights and animating by hand: the bones are put in, every point goes to its nearest bone as a whole part, a take gets keys and plays, and
+/// the files carry the take.
+#[test]
+fn a_mesh_is_rigged_in_parts_and_animated_by_hand() {
+    let _gpu = lock_gpu();
+    let (mesh, _) = crate::meshfile::tests_figure();
+    let glb = crate::meshfile::write_glb(&mesh, None, &[], 30.0);
+    let mut h = Harness::builder().with_size([1500.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().test_run_action_now("tab.7");
+    h.state_mut().test_mesh_show(glb);
+    h.state_mut().test_mesh().page = crate::app::mesh_page_parts();
+    h.run_steps(4);
+    {
+        let g = h.state_mut().test_mesh();
+        let (lo, hi) = g.mesh.as_ref().unwrap().bounds();
+        let n = g.mesh.as_ref().unwrap().verts.len();
+        g.hand.use_rig(crate::rig3d::Rig3::humanoid(n, lo, hi));
+        let verts = g.mesh.as_ref().unwrap().verts.clone();
+        g.hand.rig.assign_nearest_parts(&verts);
+        g.hand.sel = Some(1);
+    }
+    h.run_steps(4);
+    save(&mut h, "mesh_8_parts");
+    let rig = h.state_mut().test_mesh().hand.rig.clone();
+    assert!(rig.weights.iter().all(|w| w.len() == 1 && (w[0].1 - 1.0).abs() < 1e-6), "every point is one whole part");
+    // an animation by hand
+    h.state_mut().test_mesh().page = crate::app::mesh_page_animate();
+    h.run_steps(4);
+    {
+        let g = h.state_mut().test_mesh();
+        let i = g.hand.rig.bones.iter().position(|b| b.name == "leftUpperArm").unwrap();
+        g.hand.sel = Some(i);
+        let t = g.hand.current_take();
+        t.fit(22);
+        t.set_key(i, 0, [0.0; 3]);
+        t.set_key(i, 30, [0.0, 0.0, 70.0]);
+        g.hand.frame = 15.0;
+        g.hand.playing = false;
+    }
+    h.run_steps(3);
+    save(&mut h, "mesh_9_animate");
+    let bytes = h.state_mut().test_mesh_game_glb(&[], 30.0).unwrap();
+    let g = crate::vrm::gltf::read_glb(&bytes).unwrap();
+    let anims = g.json["animations"].as_array().expect("the take is in the file");
+    assert_eq!(anims[0]["name"], "Take 1");
+}
+

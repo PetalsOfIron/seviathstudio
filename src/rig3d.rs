@@ -467,6 +467,62 @@ impl Rig3 {
         self.bones.iter().zip(&mats).map(|(b, m)| (at(m, b.head), at(m, b.tail))).collect()
     }
 
+    /// A part of the mesh belongs to one bone completely (what rigging without weights is): the points move with that bone and with no other.
+    pub fn assign_part(&mut self, points: &[usize], bone: usize) {
+        if bone >= self.bones.len() {
+            return;
+        }
+        for &p in points {
+            if let Some(w) = self.weights.get_mut(p) {
+                *w = vec![(bone as u16, 1.0)];
+            }
+        }
+    }
+
+    /// Every point belongs completely to the bone that is nearest to it.
+    pub fn assign_nearest_parts(&mut self, verts: &[[f32; 3]]) {
+        let bones = self.bones.clone();
+        for (i, p) in verts.iter().enumerate().take(self.weights.len()) {
+            let best = bones.iter().enumerate().map(|(b, bone)| (b, distance_to_bone(*p, bone.head, bone.tail).0)).min_by(|a, b| a.1.total_cmp(&b.1));
+            self.weights[i] = best.map(|(b, _)| vec![(b as u16, 1.0)]).unwrap_or_default();
+        }
+    }
+
+    /// The bone that moves a point the most (None for a point nothing moves).
+    pub fn main_bone(&self, point: usize) -> Option<usize> {
+        self.weights.get(point)?.iter().max_by(|a, b| a.1.total_cmp(&b.1)).map(|x| x.0 as usize)
+    }
+
+    /// Soften the joints of a rigged-in-parts mesh: the points near another part take some of its bone, so the surface bends at a joint and does not tear.
+    /// `passes` times every point takes `strength` of the average of the points next to it.
+    pub fn soften(&mut self, near: &[Vec<u32>], passes: usize, strength: f32) {
+        for _ in 0..passes {
+            let old = self.weights.clone();
+            for i in 0..self.weights.len() {
+                let nb = near.get(i).map(|n| n.as_slice()).unwrap_or(&[]);
+                if nb.is_empty() {
+                    continue;
+                }
+                let mut avg: HashMap<u16, f32> = HashMap::new();
+                for j in nb {
+                    for (b, x) in &old[*j as usize] {
+                        *avg.entry(*b).or_default() += x / nb.len() as f32;
+                    }
+                }
+                let mut mixed: HashMap<u16, f32> = HashMap::new();
+                for (b, x) in &old[i] {
+                    *mixed.entry(*b).or_default() += x * (1.0 - strength);
+                }
+                for (b, x) in avg {
+                    *mixed.entry(b).or_default() += x * strength;
+                }
+                self.weights[i] = mixed.into_iter().collect();
+                self.weights[i].sort_by(|a, b| a.0.cmp(&b.0));
+            }
+        }
+        self.normalize(4);
+    }
+
     /// The mesh as the pose moves it (linear blend skinning).
     pub fn skin(&self, verts: &[[f32; 3]], pose: &Pose) -> Vec<[f32; 3]> {
         if self.bones.is_empty() {
@@ -694,5 +750,27 @@ mod rig3d_tests {
         assert_eq!(p.rot[0], [0.0; 3]);
         let rel = Pose::from_frame(&r, &crate::motion::Frame::rest(), true);
         assert!(rel.rot.iter().all(|v| *v == [0.0; 3]), "the relaxed stand is the rest of a figure built with its arms down");
+    }
+
+    #[test]
+    fn a_part_belongs_to_one_bone_and_the_joints_can_be_softened() {
+        let verts: Vec<[f32; 3]> = (0..10).map(|i| [0.0, i as f32 * 0.1, 0.0]).collect();
+        let tris: Vec<[u32; 3]> = (0..8).map(|i| [i, i + 1, i + 2]).collect();
+        let mut r = Rig3::new(10);
+        let a = r.add_bone("a", None, [0.0, 0.0, 0.0], [0.0, 0.5, 0.0]);
+        let b = r.add_bone("b", Some(a), [0.0, 0.5, 0.0], [0.0, 1.0, 0.0]);
+        r.assign_nearest_parts(&verts);
+        assert_eq!(r.main_bone(1), Some(a));
+        assert_eq!(r.main_bone(8), Some(b));
+        assert_eq!(r.weights[1], vec![(a as u16, 1.0)], "completely one bone");
+        r.assign_part(&[0, 1], b);
+        assert_eq!(r.main_bone(0), Some(b));
+        r.assign_nearest_parts(&verts);
+        let near = neighbours(&verts, &tris);
+        r.soften(&near, 2, 0.5);
+        let at_joint = r.weight_of(5, a) + r.weight_of(5, b);
+        assert!((at_joint - 1.0).abs() < 1e-4);
+        assert!(r.weight_of(4, b) > 0.05 && r.weight_of(4, a) > 0.05, "the points at the joint share their bones");
+        assert!(r.weight_of(0, a) > 0.95, "far from the joint nothing changes");
     }
 }

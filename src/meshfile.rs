@@ -8,6 +8,7 @@ use serde_json::json;
 use crate::assetview::AssetMesh;
 use crate::motion::Clip;
 use crate::rig3d::{Bone3, Rig3};
+use crate::take::Anim;
 use crate::vrm::gltf::{Builder, read_glb};
 
 fn png_bytes(img: &image::RgbaImage) -> Vec<u8> {
@@ -17,7 +18,7 @@ fn png_bytes(img: &image::RgbaImage) -> Vec<u8> {
 }
 
 /// The smooth normal of every point (the points that are the same place share it, so a seam does not show in the light).
-fn vertex_normals(verts: &[[f32; 3]], tris: &[[u32; 3]]) -> Vec<[f32; 3]> {
+pub(crate) fn vertex_normals(verts: &[[f32; 3]], tris: &[[u32; 3]]) -> Vec<[f32; 3]> {
     let key = |p: [f32; 3]| ((p[0] * 4000.0).round() as i32, (p[1] * 4000.0).round() as i32, (p[2] * 4000.0).round() as i32);
     let mut sum: std::collections::HashMap<(i32, i32, i32), [f32; 3]> = std::collections::HashMap::new();
     for t in tris {
@@ -52,6 +53,12 @@ pub fn arms_hang_down(rig: &Rig3) -> bool {
 
 /// The glb of a mesh, with a rig (and animations for it) when it has one.
 pub fn write_glb(mesh: &AssetMesh, rig: Option<&Rig3>, clips: &[Clip], fps: f32) -> Vec<u8> {
+    let anims = rig.map(|r| crate::take::anims_from_clips(r, clips, fps)).unwrap_or_default();
+    write_glb_anims(mesh, rig, &anims)
+}
+
+/// The glb of a mesh with a rig and animations that are already poses (the ready ones and the ones made by hand).
+pub fn write_glb_anims(mesh: &AssetMesh, rig: Option<&Rig3>, anims: &[Anim]) -> Vec<u8> {
     let mut b = Builder::new("SeviathStudio");
     let nb = rig.map(|r| r.bones.len()).unwrap_or(0);
     // the bones come first: node i is bone i
@@ -117,21 +124,42 @@ pub fn write_glb(mesh: &AssetMesh, rig: Option<&Rig3>, clips: &[Clip], fps: f32)
     let mut scene: Vec<usize> = roots.clone();
     scene.push(mesh_index);
     b.scenes.push(json!({ "nodes": scene }));
-    // animations, for the bones that have the name of a humanoid bone
-    if let Some(r) = rig.filter(|r| !clips.is_empty() && !r.bones.is_empty()) {
-        let relative = arms_hang_down(r);
-        let targets: Vec<crate::vrm::vrma::Target> = crate::motion::BONES
-            .iter()
-            .filter_map(|name| {
-                let i = r.bones.iter().position(|bn| bn.name.eq_ignore_ascii_case(name))?;
-                let up = r.bones[i].parent.map(|p| r.bones[p].head).unwrap_or([0.0; 3]);
-                let h = r.bones[i].head;
-                Some(crate::vrm::vrma::Target { bone: name, node: i, rest: [h[0] - up[0], h[1] - up[1], h[2] - up[2]] })
-            })
-            .collect();
-        for c in clips {
-            let frames: Vec<crate::motion::Frame> = if relative { c.frames(fps).iter().map(|f| f.minus_rest()).collect() } else { c.frames(fps) };
-            crate::vrm::vrma::add_animation(&mut b, &c.name, fps, &frames, &targets, false);
+    // the animations: the turn of every bone that moves, and the move of the figure on the bones that have no parent
+    if let Some(r) = rig.filter(|r| !anims.is_empty() && !r.bones.is_empty()) {
+        for an in anims.iter().filter(|a| !a.poses.is_empty()) {
+            let times: Vec<f32> = (0..an.poses.len()).map(|i| i as f32 / an.fps.max(1.0)).collect();
+            let mut samplers = Vec::new();
+            let mut channels = Vec::new();
+            for (bi, bone) in r.bones.iter().enumerate() {
+                if an.poses.iter().any(|p| p.rot.get(bi).is_some_and(|x| *x != [0.0; 3])) {
+                    let mut prev: Option<[f32; 4]> = None;
+                    let mut data: Vec<f32> = Vec::with_capacity(an.poses.len() * 4);
+                    for p in &an.poses {
+                        let mut q = crate::motion::euler_quat(p.rot.get(bi).copied().unwrap_or([0.0; 3]));
+                        // the nearer of the two quaternions of the same turn, so the file does not spin the long way
+                        if let Some(pq) = prev {
+                            if pq[0] * q[0] + pq[1] * q[1] + pq[2] * q[2] + pq[3] * q[3] < 0.0 {
+                                q = [-q[0], -q[1], -q[2], -q[3]];
+                            }
+                        }
+                        prev = Some(q);
+                        data.extend(q);
+                    }
+                    let input = b.animation_data(&times, "SCALAR");
+                    let output = b.animation_data(&data, "VEC4");
+                    samplers.push(json!({ "input": input, "output": output, "interpolation": "LINEAR" }));
+                    channels.push(json!({ "sampler": samplers.len() - 1, "target": { "node": bi, "path": "rotation" } }));
+                }
+                if bone.parent.is_none() && an.poses.iter().any(|p| p.offset != [0.0; 3]) {
+                    let rest = bone.head;
+                    let data: Vec<f32> = an.poses.iter().flat_map(|p| [rest[0] + p.offset[0], rest[1] + p.offset[1], rest[2] + p.offset[2]]).collect();
+                    let input = b.animation_data(&times, "SCALAR");
+                    let output = b.animation_data(&data, "VEC3");
+                    samplers.push(json!({ "input": input, "output": output, "interpolation": "LINEAR" }));
+                    channels.push(json!({ "sampler": samplers.len() - 1, "target": { "node": bi, "path": "translation" } }));
+                }
+            }
+            b.animations.push(json!({ "name": an.name, "samplers": samplers, "channels": channels }));
         }
     }
     b.glb()

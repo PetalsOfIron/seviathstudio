@@ -8,8 +8,10 @@ use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, TextureHa
 use image::RgbaImage;
 
 use super::SeviathApp;
+
 use crate::assetview::{AssetMesh, Camera};
 use crate::rig3d::{Paint, Pose, Rig3, neighbours};
+use crate::take::Take;
 use crate::theme::*;
 use crate::widgets::{self, HelpExt, section_title};
 
@@ -28,6 +30,26 @@ pub enum Tool {
     Turn,
     /// Paint the texture of the mesh, with colours picked from the texture itself.
     Texture,
+    /// Paint which bone a part of the mesh belongs to (the whole part moves with that bone: rigging without weights).
+    Parts,
+    /// Draw a loop round a part of the mesh: all of it belongs to the picked bone.
+    Lasso,
+}
+
+/// Which tools a page has.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ToolSet {
+    Rig,
+    Parts,
+}
+
+impl ToolSet {
+    fn allows(self, t: Tool) -> bool {
+        match self {
+            ToolSet::Rig => matches!(t, Tool::Select | Tool::Draw | Tool::Weights | Tool::Texture | Tool::Pose | Tool::Turn),
+            ToolSet::Parts => matches!(t, Tool::Select | Tool::Draw | Tool::Parts | Tool::Lasso | Tool::Turn),
+        }
+    }
 }
 
 /// What the left button holds at the moment.
@@ -48,6 +70,8 @@ enum Grab {
     Pan,
     Rotate,
     Texture,
+    Parts,
+    Lasso,
 }
 
 /// Which part of a bone is picked.
@@ -101,6 +125,20 @@ pub struct HandRig {
     tex_undo: Vec<RgbaImage>,
     /// The texture was painted (a saved .glb must be made again from the mesh).
     pub painted: bool,
+    /// The loop being drawn round a part (on the picture).
+    lasso: Vec<Pos2>,
+    /// How many times the joints are softened.
+    pub soften: usize,
+    /// The animations made by hand, the one that is shown, the names of the bones they were made for, the frame, whether it plays, whether moving a bone
+    /// keys it, and whether the page is the one of the animations.
+    pub takes: Vec<Take>,
+    pub take: usize,
+    take_names: Vec<String>,
+    pub frame: f32,
+    pub playing: bool,
+    pub auto_key: bool,
+    pub animating: bool,
+    anim_shown: bool,
 }
 
 impl Default for HandRig {
@@ -140,6 +178,16 @@ impl Default for HandRig {
             picking: false,
             tex_undo: Vec::new(),
             painted: false,
+            lasso: Vec::new(),
+            soften: 2,
+            takes: Vec::new(),
+            take: 0,
+            take_names: Vec::new(),
+            frame: 0.0,
+            playing: false,
+            auto_key: true,
+            animating: false,
+            anim_shown: false,
         }
     }
 }
@@ -150,6 +198,7 @@ enum Ask {
     None,
     Open,
     Save,
+    SaveFbx,
 }
 
 fn dist_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
@@ -170,6 +219,25 @@ fn heat(w: f32) -> [u8; 3] {
         (u, 1.0 - u * 0.8, 0.4 - u * 0.4)
     };
     [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8]
+}
+
+/// The colour of the part of a bone (the same bone, the same colour); the part of the picked bone is lighter, and a point no bone moves is grey.
+fn part_color(bone: Option<usize>, picked: Option<usize>) -> [u8; 3] {
+    let Some(b) = bone else { return [90, 90, 96] };
+    let h = (b as f32 * 0.618_034).fract();
+    let (s, v) = if picked == Some(b) { (0.55, 1.0) } else { (0.6, 0.62) };
+    let k = (h * 6.0).floor();
+    let f = h * 6.0 - k;
+    let (p, q, r) = (v * (1.0 - s), v * (1.0 - s * f), v * (1.0 - s * (1.0 - f)));
+    let (r, g, bl) = match k as i32 % 6 {
+        0 => (v, r, p),
+        1 => (q, v, p),
+        2 => (p, v, r),
+        3 => (p, q, v),
+        4 => (r, p, v),
+        _ => (v, p, q),
+    };
+    [(r * 255.0) as u8, (g * 255.0) as u8, (bl * 255.0) as u8]
 }
 
 impl HandRig {
@@ -255,6 +323,121 @@ impl HandRig {
             let d = dist_to_segment(at, s(shown[i].0), s(shown[i].1));
             (d < 8.0).then_some((i, d))
         }).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(i, _)| (i, Part::Body))
+    }
+
+    /// The points that are seen under a circle of the picture, each with how near the middle it is (1 in the middle, 0 at the edge).
+    fn verts_under(&self, mesh: &AssetMesh, cam: &Camera, at: Pos2, r: f32) -> Vec<(usize, f32)> {
+        let w = cam.w as i32;
+        let mut out = Vec::new();
+        for (i, v) in mesh.verts.iter().enumerate() {
+            let p = cam.project(*v);
+            let (dx, dy) = (p[0] - at.x, p[1] - at.y);
+            let d2 = dx * dx + dy * dy;
+            if d2 >= r * r {
+                continue;
+            }
+            let (px, py) = (p[0] as i32, p[1] as i32);
+            if px < 0 || py < 0 || px >= w || py >= cam.h as i32 {
+                continue;
+            }
+            if self.depth.get(py as usize * w as usize + px as usize).is_some_and(|d| p[2] > *d + 8.0) {
+                continue;
+            }
+            out.push((i, 1.0 - d2.sqrt() / r));
+        }
+        out
+    }
+
+    /// The loop is closed: every point that is seen inside it belongs to the picked bone.
+    fn finish_lasso(&mut self, mesh: &AssetMesh, cam: &Camera) {
+        let poly = std::mem::take(&mut self.lasso);
+        let Some(bone) = self.sel else { return };
+        if poly.len() < 3 || self.rig.weights.len() != mesh.verts.len() {
+            return;
+        }
+        let inside = |x: f32, y: f32| {
+            let mut c = false;
+            let mut j = poly.len() - 1;
+            for i in 0..poly.len() {
+                let (a, b) = (poly[i], poly[j]);
+                if (a.y > y) != (b.y > y) && x < (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x {
+                    c = !c;
+                }
+                j = i;
+            }
+            c
+        };
+        let w = cam.w as i32;
+        let mut points = Vec::new();
+        for (i, v) in mesh.verts.iter().enumerate() {
+            let p = cam.project(*v);
+            let (px, py) = (p[0] as i32, p[1] as i32);
+            if px < 0 || py < 0 || px >= w || py >= cam.h as i32 || !inside(p[0], p[1]) {
+                continue;
+            }
+            if self.depth.get(py as usize * w as usize + px as usize).is_some_and(|d| p[2] > *d + 8.0) {
+                continue;
+            }
+            points.push(i);
+        }
+        self.rig.assign_part(&points, bone);
+        self.version += 1;
+    }
+
+    /// A bone was turned or the figure moved: when moving a bone keys it, the pose is kept as a key at this frame.
+    fn pose_edited(&mut self, bone: usize) {
+        if !(self.animating && self.auto_key) {
+            return;
+        }
+        let frame = self.frame.round() as usize;
+        let rot = self.pose.rot.get(bone).copied().unwrap_or([0.0; 3]);
+        let bones = self.rig.bones.len();
+        let t = self.current_take();
+        t.fit(bones);
+        t.set_key(bone, frame, rot);
+    }
+
+    /// The take that is shown (there is always one).
+    pub fn current_take(&mut self) -> &mut Take {
+        if self.takes.is_empty() {
+            self.takes.push(Take::new("Take 1", self.rig.bones.len()));
+        }
+        self.take = self.take.min(self.takes.len() - 1);
+        &mut self.takes[self.take]
+    }
+
+    /// The pose of the take at the frame is the pose that is shown.
+    fn show_frame(&mut self) {
+        let f = self.frame;
+        let bones = self.rig.bones.len();
+        let pose = {
+            let t = self.current_take();
+            t.fit(bones);
+            t.pose_at(f)
+        };
+        self.pose = pose;
+        self.version += 1;
+    }
+
+    /// The bones changed (added, taken away, renamed): the keys of the takes follow the bones by their names.
+    fn sync_takes(&mut self) {
+        let names: Vec<String> = self.rig.bones.iter().map(|b| b.name.clone()).collect();
+        if names != self.take_names {
+            if !self.take_names.is_empty() {
+                let old = std::mem::take(&mut self.take_names);
+                let rig = self.rig.clone();
+                for t in &mut self.takes {
+                    t.remap(&old, &rig);
+                }
+            }
+            self.take_names = names;
+            self.pose.rot.resize(self.rig.bones.len(), [0.0; 3]);
+        }
+    }
+
+    /// Every take that has a key, as poses for a file.
+    pub fn take_anims(&self) -> Vec<crate::take::Anim> {
+        self.takes.iter().filter(|t| t.key_count() > 0).map(|t| t.bake()).collect()
     }
 
     /// The brush at a place of the picture: the points under it that are seen change.
@@ -442,6 +625,20 @@ impl HandRig {
                         self.paint_texture(mesh, &cam, now);
                     }
                 }
+                Grab::Parts => {
+                    if let (Some(now), Some(bone)) = (now, self.sel) {
+                        let points: Vec<usize> = self.verts_under(mesh, &cam, now, self.radius).into_iter().map(|p| p.0).collect();
+                        self.rig.assign_part(&points, bone);
+                        self.version += 1;
+                    }
+                }
+                Grab::Lasso => {
+                    if let Some(now) = now {
+                        if self.lasso.last().is_none_or(|l| (*l - now).length() > 3.0) {
+                            self.lasso.push(now);
+                        }
+                    }
+                }
                 Grab::Rotate => {
                     if let Some(i) = self.sel {
                         if i < self.pose.rot.len() {
@@ -452,6 +649,7 @@ impl HandRig {
                                 self.pose.rot[i][0] += delta.y * 0.5;
                             }
                             self.version += 1;
+                            self.pose_edited(i);
                         }
                     }
                 }
@@ -473,10 +671,14 @@ impl HandRig {
                     }
                 }
             }
+            if self.grab == Grab::Lasso {
+                self.finish_lasso(mesh, &cam);
+            }
             self.grab = Grab::None;
             self.draw_to = None;
+            self.lasso.clear();
         }
-        if resp.clicked_by(egui::PointerButton::Primary) && matches!(self.tool, Tool::Select | Tool::Pose | Tool::Weights) {
+        if resp.clicked_by(egui::PointerButton::Primary) && matches!(self.tool, Tool::Select | Tool::Pose | Tool::Weights | Tool::Parts | Tool::Lasso) {
             if let Some(at) = hover {
                 self.sel = self.pick(&cam, at).map(|p| p.0);
                 self.version += 1;
@@ -506,6 +708,7 @@ impl HandRig {
 
         // the picture of the mesh
         let tinting = self.tool == Tool::Weights && self.heat && self.sel.is_some();
+        let parts_tint = matches!(self.tool, Tool::Parts | Tool::Lasso);
         let key = [
             w as i64,
             h as i64,
@@ -515,17 +718,22 @@ impl HandRig {
             (self.pan[0] * 4.0) as i64 * 100_000 + (self.pan[1] * 4.0) as i64,
             self.version as i64,
             self.sel.map(|s| s as i64).unwrap_or(-1),
-            tinting as i64,
+            (tinting as i64) | ((parts_tint as i64) << 1),
             self.wire as i64,
             self.posed() as i64,
             mesh.verts.len() as i64,
         ];
         if self.view.as_ref().map(|v| v.0) != Some(key) {
             let verts = if self.posed() { self.rig.skin(&mesh.verts, &self.pose) } else { mesh.verts.clone() };
-            let tint: Option<Vec<[u8; 3]>> = match (tinting, self.sel) {
+            let tint: Option<Vec<[u8; 3]>> = if parts_tint && self.rig.weights.len() == mesh.verts.len() {
+                Some((0..mesh.verts.len()).map(|i| part_color(self.rig.main_bone(i), self.sel)).collect())
+            } else {
+                None
+            }
+            .or(match (tinting, self.sel) {
                 (true, Some(b)) if self.rig.weights.len() == mesh.verts.len() => Some((0..mesh.verts.len()).map(|i| heat(self.rig.weight_of(i, b))).collect()),
                 _ => None,
-            };
+            });
             let (img, depth, ids) = mesh.render_full(&verts, &cam, self.wire, crate::assetview::View::Textured, tint.as_deref());
             self.depth = depth;
             self.ids = ids;
@@ -555,11 +763,15 @@ impl HandRig {
                 painter.text(pb + vec2(8.0, -8.0), egui::Align2::LEFT_BOTTOM, &self.rig.bones[i].name, egui::FontId::proportional(12.0), Color32::WHITE);
             }
         }
+        if self.lasso.len() > 1 {
+            let pts: Vec<Pos2> = self.lasso.iter().map(|p| to_screen(p.x, p.y)).collect();
+            painter.add(egui::Shape::line(pts, Stroke::new(2.0, GOLD)));
+        }
         if let (Grab::Draw { from, .. }, Some(to)) = (self.grab, self.draw_to) {
             painter.line_segment([screen(from), to], Stroke::new(2.0, EMERALD));
             painter.circle_filled(screen(from), 4.0, EMERALD);
         }
-        if matches!(self.tool, Tool::Weights | Tool::Texture) {
+        if matches!(self.tool, Tool::Weights | Tool::Texture | Tool::Parts) {
             if let Some(at) = hover {
                 painter.circle_stroke(to_screen(at.x, at.y), if self.tool == Tool::Texture { self.tex_radius } else { self.radius }, Stroke::new(1.5, Color32::WHITE));
             }
@@ -571,6 +783,8 @@ impl HandRig {
             Tool::Pose => "Pick a bone and drag to turn it. Shift: twist.",
             Tool::Turn => "Drag to turn. Shift: move. Wheel: zoom.",
             Tool::Texture => "Paint on the mesh. Alt: pick the colour under the pointer. Right button: turn the view. Wheel: zoom.",
+            Tool::Parts => "Paint the part of the mesh that moves with the picked bone. Right button: turn the view. Wheel: zoom.",
+            Tool::Lasso => "Draw a loop round a part: all of it moves with the picked bone. Right button: turn the view. Wheel: zoom.",
         });
     }
 
@@ -634,6 +848,21 @@ impl HandRig {
                 self.paint_texture(mesh, cam, at);
                 Grab::Texture
             }
+            Tool::Parts | Tool::Lasso => {
+                let Some(bone) = self.sel else {
+                    self.message = Some("Pick a bone first (click it, or pick it in the list), then paint its part.".into());
+                    return Grab::None;
+                };
+                self.checkpoint();
+                if self.tool == Tool::Lasso {
+                    self.lasso = vec![at];
+                    return Grab::Lasso;
+                }
+                let points: Vec<usize> = self.verts_under(mesh, cam, at, self.radius).into_iter().map(|p| p.0).collect();
+                self.rig.assign_part(&points, bone);
+                self.version += 1;
+                Grab::Parts
+            }
             Tool::Pose => match self.pick(cam, at) {
                 Some((i, _)) => {
                     self.sel = Some(i);
@@ -647,7 +876,7 @@ impl HandRig {
 
     // ------------------------------------------------------------------ the panels
 
-    fn tools_ui(&mut self, ui: &mut Ui, mesh: &mut AssetMesh) {
+    fn tools_ui(&mut self, ui: &mut Ui, mesh: &mut AssetMesh, set: ToolSet) {
         section_title(ui, "Tool");
         ui.horizontal_wrapped(|ui| {
             for (t, label, tip) in [
@@ -655,9 +884,14 @@ impl HandRig {
                 (Tool::Draw, "Draw bones", "Drag in the picture to draw a bone. Start at the end of a bone to continue the chain"),
                 (Tool::Weights, "Paint weights", "Paint which bone moves which part of the mesh"),
                 (Tool::Texture, "Paint texture", "Redraw the colours of the mesh, with colours picked from its own texture"),
+                (Tool::Parts, "Paint parts", "Paint which part of the mesh moves with the picked bone: the whole part, no weights"),
+                (Tool::Lasso, "Loop a part", "Draw a loop round a part: all of it moves with the picked bone"),
                 (Tool::Pose, "Pose", "Turn bones to see how the mesh bends"),
                 (Tool::Turn, "Turn view", "The left button turns the view (for a pen or tablet)"),
-            ] {
+            ]
+            .into_iter()
+            .filter(|(t, _, _)| set.allows(*t))
+            {
                 if widgets::chip(ui, label, self.tool == t).help(tip).clicked() {
                     self.tool = t;
                     self.version += 1;
@@ -742,6 +976,37 @@ impl HandRig {
                 let loose = self.rig.unweighted();
                 ui.label(RichText::new(format!("{loose} points are moved by no bone")).size(11.5).color(if loose > 0 { GOLD } else { TEXT_DIM }));
             }
+            Tool::Parts | Tool::Lasso => {
+                section_title(ui, "Parts");
+                ui.label(RichText::new("Every colour is the part of one bone. Pick a bone (click it, or in the list), then paint its part or loop it. The whole part moves with that bone.").size(11.0).color(TEXT_DIM));
+                ui.add(egui::Slider::new(&mut self.radius, 5.0..=200.0).text("Size")).help("The size of the brush in pixels");
+                if ui.button("Every point to the nearest bone").help("A start: every point of the mesh moves with the bone that is nearest to it. Then paint over what is wrong.").clicked() {
+                    self.checkpoint();
+                    self.rig.assign_nearest_parts(&mesh.verts);
+                    self.version += 1;
+                }
+                if ui.add_enabled(self.sel.is_some(), egui::Button::new("Take the picked part away")).help("The picked bone moves nothing").clicked() {
+                    if let Some(b) = self.sel {
+                        self.checkpoint();
+                        self.rig.clear_bone(b);
+                        self.version += 1;
+                    }
+                }
+                ui.add_space(4.0);
+                ui.add(egui::Slider::new(&mut self.soften, 1..=8).text("Passes")).help("How many times the points at a joint take some of the bone next to them");
+                if ui.button("Soften the joints").help("So the surface bends at a joint and does not tear: the points at the border of two parts share their two bones a little. The parts stay parts.").clicked() {
+                    self.checkpoint();
+                    if self.near.is_none() {
+                        self.near = Some(neighbours(&mesh.verts, &mesh.tris));
+                    }
+                    let near = self.near.take().unwrap_or_default();
+                    self.rig.soften(&near, self.soften, 0.5);
+                    self.near = Some(near);
+                    self.version += 1;
+                }
+                let loose = self.rig.unweighted();
+                ui.label(RichText::new(format!("{loose} points are moved by no bone")).size(11.5).color(if loose > 0 { GOLD } else { TEXT_DIM }));
+            }
             Tool::Texture => {
                 section_title(ui, "Paint the texture");
                 ui.horizontal(|ui| {
@@ -788,6 +1053,7 @@ impl HandRig {
                         }
                         if changed {
                             self.version += 1;
+                            self.pose_edited(i);
                         }
                         if ui.button("Reset this bone").clicked() {
                             self.pose.rot[i] = [0.0; 3];
@@ -821,6 +1087,200 @@ impl HandRig {
         if ui.checkbox(&mut self.wire, "Show the triangles").changed() {
             self.version += 1;
         }
+    }
+
+    /// The left panel of the Animate page: the takes, playing, keys, the pose of the picked bone and the move of the figure.
+    fn animate_ui(&mut self, ui: &mut Ui) {
+        self.pose.rot.resize(self.rig.bones.len(), [0.0; 3]);
+        self.current_take();
+        section_title(ui, "Animation");
+        ui.horizontal_wrapped(|ui| {
+            for i in 0..self.takes.len() {
+                if widgets::chip(ui, &self.takes[i].name.clone(), self.take == i).help("Show this animation").clicked() {
+                    self.take = i;
+                    self.frame = 0.0;
+                    self.show_frame();
+                }
+            }
+            if ui.small_button("New").help("Another animation").clicked() {
+                let n = self.takes.len() + 1;
+                self.takes.push(Take::new(&format!("Take {n}"), self.rig.bones.len()));
+                self.take = self.takes.len() - 1;
+                self.frame = 0.0;
+                self.show_frame();
+            }
+        });
+        let bones = self.rig.bones.len();
+        let mut changed = false;
+        {
+            let t = self.current_take();
+            t.fit(bones);
+            ui.add(egui::TextEdit::singleline(&mut t.name).desired_width(f32::INFINITY));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Frames").size(12.0).color(TEXT_DIM));
+                changed |= ui.add(egui::DragValue::new(&mut t.frames).range(2..=2400).speed(1.0)).changed();
+                for f in [24.0f32, 30.0, 60.0] {
+                    if widgets::chip(ui, &format!("{f} fps"), t.fps == f).help("How many frames a second").clicked() {
+                        t.fps = f;
+                    }
+                }
+            });
+            ui.checkbox(&mut t.looping, "It loops").help("It starts again when it ends (walking, breathing)");
+            ui.label(RichText::new(format!("{:.2} seconds, {} keys", t.seconds(), t.key_count())).size(11.5).color(TEXT_DIM));
+        }
+        if self.takes.len() > 1 && ui.small_button("Delete this animation").clicked() {
+            self.takes.remove(self.take);
+            self.take = self.take.saturating_sub(1);
+            changed = true;
+        }
+        if changed {
+            self.frame = self.frame.min(self.current_take().frames as f32);
+            self.show_frame();
+        }
+        ui.add_space(6.0);
+        section_title(ui, "Play");
+        ui.horizontal(|ui| {
+            if ui.button(if self.playing { "Pause" } else { "Play" }).help("Play the animation on the mesh").clicked() {
+                self.playing = !self.playing;
+                if self.playing && self.frame >= self.current_take().frames as f32 {
+                    self.frame = 0.0;
+                }
+            }
+            if ui.button("Start").help("Go back to the first frame").clicked() {
+                self.playing = false;
+                self.frame = 0.0;
+                self.show_frame();
+            }
+        });
+        ui.add_space(6.0);
+        section_title(ui, "Keys");
+        ui.checkbox(&mut self.auto_key, "Key the bone when I move it").help("Turning a bone sets a key for it at this frame");
+        let frame = self.frame.round() as usize;
+        ui.horizontal_wrapped(|ui| {
+            if ui.add_enabled(self.sel.is_some(), egui::Button::new("Key this bone")).help("Keep the pose of the picked bone at this frame").clicked() {
+                if let Some(b) = self.sel {
+                    let rot = self.pose.rot.get(b).copied().unwrap_or([0.0; 3]);
+                    self.current_take().set_key(b, frame, rot);
+                }
+            }
+            if ui.button("Key every bone").help("Keep the whole pose at this frame").clicked() {
+                let (rots, off) = (self.pose.rot.clone(), self.pose.offset);
+                let t = self.current_take();
+                for (b, r) in rots.iter().enumerate() {
+                    t.set_key(b, frame, *r);
+                }
+                t.set_move(frame, off);
+            }
+            if ui.button("Take the keys of this frame away").clicked() {
+                self.current_take().remove_keys_at(frame);
+                self.show_frame();
+            }
+            if ui.button("Stand straight").help("Every bone back to its place (then key it to start an animation from the rest)").clicked() {
+                self.pose = Pose { rot: vec![[0.0; 3]; self.rig.bones.len()], offset: [0.0; 3] };
+                self.version += 1;
+            }
+        });
+        ui.add_space(6.0);
+        section_title(ui, "The picked bone");
+        match self.sel {
+            Some(i) if i < self.pose.rot.len() => {
+                ui.label(RichText::new(&self.rig.bones[i].name).size(12.5).strong());
+                let mut moved = false;
+                for (k, axis) in ["Bend (x)", "Turn (y)", "Tilt (z)"].into_iter().enumerate() {
+                    moved |= ui.add(egui::Slider::new(&mut self.pose.rot[i][k], -180.0..=180.0).text(axis).suffix(" deg")).changed();
+                }
+                if moved {
+                    self.version += 1;
+                    self.pose_edited(i);
+                }
+            }
+            _ => {
+                ui.label(RichText::new("Pick a bone in the picture or in the list, then drag it in the picture or use the sliders.").size(11.5).color(TEXT_DIM));
+            }
+        }
+        ui.add_space(4.0);
+        let mut moved = false;
+        for (k, axis) in ["Move right", "Move up", "Move forward"].into_iter().enumerate() {
+            moved |= ui.add(egui::Slider::new(&mut self.pose.offset[k], -1.5..=1.5).text(axis).suffix(" m")).changed();
+        }
+        if moved {
+            self.version += 1;
+            if self.auto_key {
+                let off = self.pose.offset;
+                self.current_take().set_move(frame, off);
+            }
+        }
+        section_title(ui, "View");
+        ui.horizontal_wrapped(|ui| {
+            for (label, to) in [("Front", (0.0, 0.0)), ("Side", (90.0, 0.0)), ("Back", (180.0, 0.0))] {
+                if ui.small_button(label).clicked() {
+                    self.yaw = to.0;
+                    self.pitch = to.1;
+                }
+            }
+        });
+        ui.label(RichText::new("Every animation that has keys is saved in the files (.glb and .fbx) with the ready animations.").size(11.0).color(TEXT_DIM));
+    }
+
+    /// The strip under the picture: the frames, the keys of the picked bone (gold) and of the others (grey), and the playhead. Click or drag to go to a frame.
+    fn timeline_ui(&mut self, ui: &mut Ui) {
+        self.current_take();
+        let (frames, keys_of): (usize, Vec<bool>) = {
+            let sel = self.sel;
+            let t = &self.takes[self.take];
+            (t.frames, (0..=t.frames).map(|f| sel.is_some_and(|b| t.has_key(b, f))).collect())
+        };
+        let any: Vec<bool> = (0..=frames).map(|f| self.takes[self.take].any_key_at(f)).collect();
+        let h = 46.0;
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click_and_drag());
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, 4.0, Color32::from_rgb(24, 32, 30));
+        let x_of = |f: f32| rect.left() + 8.0 + (rect.width() - 16.0) * f / frames.max(1) as f32;
+        for f in 0..=frames {
+            let tall = f % 10 == 0;
+            p.line_segment([Pos2::new(x_of(f as f32), rect.bottom() - if tall { 12.0 } else { 6.0 }), Pos2::new(x_of(f as f32), rect.bottom())], Stroke::new(1.0, TEXT_DIM));
+            if tall {
+                p.text(Pos2::new(x_of(f as f32) + 2.0, rect.bottom() - 14.0), egui::Align2::LEFT_BOTTOM, format!("{f}"), egui::FontId::proportional(10.0), TEXT_DIM);
+            }
+            if any[f] {
+                p.circle_filled(Pos2::new(x_of(f as f32), rect.top() + 12.0), 3.5, Color32::from_gray(130));
+            }
+            if keys_of[f] {
+                p.circle_filled(Pos2::new(x_of(f as f32), rect.top() + 12.0), 5.0, GOLD);
+            }
+        }
+        let head = x_of(self.frame);
+        p.line_segment([Pos2::new(head, rect.top()), Pos2::new(head, rect.bottom())], Stroke::new(2.0, EMERALD));
+        if let (true, Some(pos)) = (resp.dragged() || resp.clicked(), resp.interact_pointer_pos()) {
+            let f = ((pos.x - rect.left() - 8.0) / (rect.width() - 16.0) * frames as f32).round().clamp(0.0, frames as f32);
+            if (f - self.frame).abs() > 0.4 {
+                self.playing = false;
+                self.frame = f;
+                self.show_frame();
+            }
+        }
+        ui.label(RichText::new(format!("Frame {} of {}", self.frame.round() as usize, frames)).size(11.5).color(TEXT_DIM));
+    }
+
+    /// The time goes on while it plays.
+    fn advance(&mut self, dt: f32) {
+        if !self.playing {
+            return;
+        }
+        let (frames, fps, looping) = {
+            let t = self.current_take();
+            (t.frames as f32, t.fps, t.looping)
+        };
+        self.frame += dt * fps;
+        if self.frame > frames {
+            if looping {
+                self.frame = self.frame.rem_euclid(frames.max(1.0));
+            } else {
+                self.frame = frames;
+                self.playing = false;
+            }
+        }
+        self.show_frame();
     }
 
     fn bones_ui(&mut self, ui: &mut Ui, ask: &mut Ask) {
@@ -921,6 +1381,9 @@ impl HandRig {
         if ui.add_enabled(!self.rig.bones.is_empty(), egui::Button::new(RichText::new("Save the rigged mesh (.glb)").strong())).help("The mesh, its pictures, the bones and the weights in one .glb file. Unity, Unreal, Godot and Blender open it.").clicked() {
             *ask = Ask::Save;
         }
+        if ui.add_enabled(!self.rig.bones.is_empty(), egui::Button::new(RichText::new("Save for Unreal (.fbx)").strong())).help("The same in an FBX file for Unreal Engine, Unity, Maya and Blender: mesh, skeleton, skin, texture and the animations. The texture is also saved next to it.").clicked() {
+            *ask = Ask::SaveFbx;
+        }
         if let Some(m) = &self.message {
             ui.label(RichText::new(m).size(11.5).color(TEXT_DIM));
         }
@@ -944,20 +1407,65 @@ impl SeviathApp {
             return;
         }
         let mut ask = Ask::None;
+        let page = self.m3.page;
+        let dt = ui.input(|i| i.stable_dt).min(0.1);
         let MeshUi { hand, mesh, .. } = &mut self.m3;
         let mesh = mesh.as_mut().expect("there is a mesh");
+        hand.animating = page == Page::Animate;
+        if hand.animating {
+            hand.tool = Tool::Pose;
+            hand.sync_takes();
+            hand.pose.rot.resize(hand.rig.bones.len(), [0.0; 3]);
+            if !hand.anim_shown {
+                hand.anim_shown = true;
+                hand.show_frame();
+            }
+            if hand.playing {
+                hand.advance(dt);
+                ui.ctx().request_repaint();
+            }
+        } else {
+            hand.anim_shown = false;
+            hand.playing = false;
+        }
+        let set = if page == Page::Parts { ToolSet::Parts } else { ToolSet::Rig };
+        if page == Page::Parts && !set.allows(hand.tool) {
+            hand.tool = Tool::Parts;
+        }
+        if page == Page::Rig && !set.allows(hand.tool) {
+            hand.tool = Tool::Select;
+        }
         egui::Panel::left("mesh_rig_left").default_size(300.0).size_range(240.0..=460.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
-            egui::ScrollArea::vertical().id_salt("mesh_rig_left_scroll").show(ui, |ui| hand.tools_ui(ui, &mut *mesh));
+            egui::ScrollArea::vertical().id_salt("mesh_rig_left_scroll").show(ui, |ui| {
+                if page == Page::Animate {
+                    hand.animate_ui(ui)
+                } else {
+                    hand.tools_ui(ui, &mut *mesh, set)
+                }
+            });
         });
         egui::Panel::right("mesh_rig_right").default_size(290.0).size_range(240.0..=460.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("mesh_rig_right_scroll").show(ui, |ui| hand.bones_ui(ui, &mut ask));
         });
+        if page == Page::Animate {
+            egui::Panel::bottom("mesh_timeline").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| hand.timeline_ui(ui));
+        }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(14, 20, 18)).inner_margin(egui::Margin::same(6))).show(ui, |ui| hand.viewport(ui, &mut *mesh));
         match ask {
             Ask::Open => self.mesh_open_glb(),
             Ask::Save => self.mesh_save_rigged(),
+            Ask::SaveFbx => self.mesh_save_fbx(),
             Ask::None => {}
         }
+    }
+
+    /// The animations that go in a saved file: the ready ones that were added, and the ones made by hand that have keys.
+    pub(super) fn mesh_all_anims(&self, with_takes: bool) -> Vec<crate::take::Anim> {
+        let mut all = crate::take::anims_from_clips(&self.m3.hand.rig, &self.m3.anim.added, self.m3.anim.fps as f32);
+        if with_takes {
+            all.extend(self.m3.hand.take_anims());
+        }
+        all
     }
 
     /// A .glb is opened as the mesh (with its rig, when it has one).
@@ -977,21 +1485,41 @@ impl SeviathApp {
         }
     }
 
+    /// The rigged mesh is saved as an .fbx for Unreal, with the animations when asked, and its texture next to it.
+    fn mesh_save_fbx(&mut self) {
+        let Some(mesh) = &self.m3.mesh else { return };
+        let name = self.m3.file_name();
+        let Some(p) = rfd::FileDialog::new().set_title("Save for Unreal").set_directory(self.settings.projects_folder()).set_file_name(format!("{name}.fbx")).add_filter("FBX", &["fbx"]).save_file() else { return };
+        let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or(name);
+        let anims = if self.m3.hand.with_animations { self.mesh_all_anims(true) } else { Vec::new() };
+        let Some(mesh) = &self.m3.mesh else { return };
+        let ex = crate::fbx::write_fbx_anims(mesh, Some(&self.m3.hand.rig), &anims, self.m3.anim.fps as f32, &stem);
+        let mut res = std::fs::write(&p, &ex.fbx).map_err(|e| e.to_string());
+        if let (Ok(()), Some(tex), Some(file)) = (&res, &mesh.texture, &ex.texture_name) {
+            res = tex.save(p.with_file_name(file)).map_err(|e| e.to_string());
+        }
+        self.m3.hand.message = Some(match res {
+            Ok(()) => format!("Saved {} for Unreal with {} bones{}.", p.display(), self.m3.hand.rig.bones.len(), if anims.is_empty() { String::new() } else { format!(" and {} animations", anims.len()) }),
+            Err(e) => format!("Could not save the file: {e}"),
+        });
+    }
+
     /// The rigged mesh is saved as a .glb, with the animations when asked.
     fn mesh_save_rigged(&mut self) {
         let Some(mesh) = &self.m3.mesh else { return };
         let name = self.m3.file_name();
         let Some(p) = rfd::FileDialog::new().set_title("Save the rigged mesh").set_directory(self.settings.projects_folder()).set_file_name(format!("{name}_rigged.glb")).add_filter("glTF binary", &["glb"]).save_file() else { return };
-        let clips = if self.m3.hand.with_animations { self.m3.anim.added.clone() } else { Vec::new() };
-        let bytes = crate::meshfile::write_glb(mesh, Some(&self.m3.hand.rig), &clips, self.m3.anim.fps as f32);
+        let anims = if self.m3.hand.with_animations { self.mesh_all_anims(true) } else { Vec::new() };
+        let Some(mesh) = &self.m3.mesh else { return };
+        let bytes = crate::meshfile::write_glb_anims(mesh, Some(&self.m3.hand.rig), &anims);
         self.m3.hand.message = Some(match std::fs::write(&p, bytes) {
-            Ok(()) => format!("Saved {} with {} bones{}.", p.display(), self.m3.hand.rig.bones.len(), if clips.is_empty() { String::new() } else { format!(" and {} animations", clips.len()) }),
+            Ok(()) => format!("Saved {} with {} bones{}.", p.display(), self.m3.hand.rig.bones.len(), if anims.is_empty() { String::new() } else { format!(" and {} animations", anims.len()) }),
             Err(e) => format!("Could not save the file: {e}"),
         });
     }
 }
 
-use super::meshtab::MeshUi;
+use super::meshtab::{MeshUi, Page};
 
 #[cfg(test)]
 mod tests {
