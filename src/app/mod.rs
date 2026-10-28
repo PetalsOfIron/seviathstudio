@@ -46,6 +46,8 @@ pub fn mesh_page_image() -> meshtab::Page {
 #[cfg(test)]
 pub use handrig::Tool as MeshTool;
 #[cfg(test)]
+pub use crate::attach::Part as MeshPart;
+#[cfg(test)]
 pub use meshtab::Kind as MeshKind;
 
 #[cfg(test)]

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // The Bases page of the 3D tab: the ready bases of the races (a folder of .glb files that are only points and triangles) are the start of a game character.
-// A base is loaded, turned into the other sex when asked (`bodyshape.rs`), unwrapped so it has a texture (`unwrap.rs`), and its looks (skin, pattern, eyes, brows,
-// nose, mouth...) are baked as a variable first layer of the texture (`features.rs`). Everything else is painted by hand with the tools of the page, and the
-// mesh goes on to the Parts or Bones pages. A button makes the other sex of every base and saves the files. No AI.
+// A base is loaded, turned into the other sex when asked (`bodyshape.rs`), unwrapped so it has a texture (`unwrap.rs`), and its looks (skin colour, tone,
+// a pattern) are baked as a variable first layer of the texture (`features.rs`). The face is not drawn: it is painted by hand with the tools of the page, like
+// everything else, and the mesh goes on to the Parts or Bones pages. A button makes the other sex of every base and saves the files. No AI.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -13,7 +13,7 @@ use image::RgbaImage;
 use super::SeviathApp;
 use crate::assetview::AssetMesh;
 use crate::bodyshape::{self, Shift};
-use crate::features::{self, Face, Look, Pattern};
+use crate::features::{self, Look, Pattern};
 use crate::theme::*;
 use crate::widgets::{self, HelpExt, section_title};
 
@@ -26,7 +26,7 @@ pub struct BaseEntry {
     pub kb: u64,
 }
 
-type LoadJob = Receiver<Result<(AssetMesh, Vec<u8>, Face, RgbaImage), String>>;
+type LoadJob = Receiver<Result<(AssetMesh, Vec<u8>, RgbaImage), String>>;
 type BakeJob = Receiver<RgbaImage>;
 
 pub struct BasesUi {
@@ -40,9 +40,6 @@ pub struct BasesUi {
     /// The size of the texture.
     pub size: u32,
     pub look: Look,
-    pub face: Face,
-    /// Where the face was guessed (the sliders of the place go round it).
-    guess: Face,
     pub seed: u32,
     load_job: Option<LoadJob>,
     bake_job: Option<BakeJob>,
@@ -66,8 +63,6 @@ impl Default for BasesUi {
             amount: 1.0,
             size: 2048,
             look: Look::default(),
-            face: Face { centre: [0.0, 1.8, 0.1], scale: 0.07, front: 1.0 },
-            guess: Face { centre: [0.0, 1.8, 0.1], scale: 0.07, front: 1.0 },
             seed: 1,
             load_job: None,
             bake_job: None,
@@ -94,18 +89,17 @@ pub fn scan(folder: &Path) -> Vec<BaseEntry> {
 }
 
 /// The base as a mesh to paint: the other sex when asked, unwrapped, with the looks baked.
-fn prepare(path: &Path, other: Option<Shift>, size: u32, look: &Look, seed: u32) -> Result<(AssetMesh, Vec<u8>, Face, RgbaImage), String> {
+fn prepare(path: &Path, other: Option<Shift>, size: u32, look: &Look, seed: u32) -> Result<(AssetMesh, Vec<u8>, RgbaImage), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("The base could not be read: {e}"))?;
     let mut mesh = AssetMesh::from_glb(&bytes)?;
     if let Some(s) = other {
         mesh = bodyshape::other_sex(&mesh, s);
     }
     let mut mesh = crate::unwrap::unwrap(&mesh, &crate::unwrap::Options { size, reserve: STRIP, ..Default::default() });
-    let face = Face::guess(&mesh);
-    let tex = features::bake(&mesh, size, look, &face, seed);
+    let tex = features::bake(&mesh, size, look, seed);
     mesh.texture = Some(tex.clone());
     let glb = crate::meshfile::write_glb(&mesh, None, &[], 30.0);
-    Ok((mesh, glb, face, tex))
+    Ok((mesh, glb, tex))
 }
 
 /// The looks are baked again without losing the strokes of the brush: the texels that differ from the last bake are the strokes, and they stay.
@@ -127,16 +121,14 @@ impl SeviathApp {
     pub(super) fn bases_poll(&mut self, ctx: &egui::Context) {
         let job = self.m3.bases.load_job.as_ref().map(|rx| rx.try_recv());
         match job {
-            Some(Ok(Ok((mesh, glb, face, tex)))) => {
+            Some(Ok(Ok((mesh, glb, tex)))) => {
                 self.m3.bases.load_job = None;
-                self.m3.bases.face = face;
-                self.m3.bases.guess = face;
                 self.m3.bases.baked = Some(tex);
                 let s = mesh.stats();
                 self.m3.set_mesh(mesh, glb);
                 self.m3.hand.tool = super::handrig::Tool::Turn;
                 self.m3.hand.strip_v0 = Some(1.0 - STRIP);
-                self.m3.bases.message = Some(format!("The base is ready to paint: {} triangles, texture {} x {}. Now paint it, or go on to the Parts or Bones pages.", s.triangles, self.m3.bases.size, self.m3.bases.size));
+                self.m3.bases.message = Some(format!("The base is ready to paint: {} triangles, texture {} x {}. Paint it, draw hair with the mesh brushes, or go on to the Parts or Bones pages.", s.triangles, self.m3.bases.size, self.m3.bases.size));
             }
             Some(Ok(Err(e))) => {
                 self.m3.bases.load_job = None;
@@ -211,11 +203,11 @@ impl SeviathApp {
             self.m3.bases.dirty = true;
             return;
         }
-        let (mut m, size, look, face, seed) = (mesh.clone(), self.m3.bases.size, self.m3.bases.look.clone(), self.m3.bases.face, self.m3.bases.seed);
+        let (mut m, size, look, seed) = (mesh.clone(), self.m3.bases.size, self.m3.bases.look.clone(), self.m3.bases.seed);
         m.texture = None;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(features::bake(&m, size, &look, &face, seed));
+            let _ = tx.send(features::bake(&m, size, &look, seed));
         });
         self.m3.bases.bake_job = Some(rx);
         self.m3.bases.dirty = false;
@@ -264,6 +256,22 @@ impl SeviathApp {
             self.bases_poll(&ctx);
         }
         self.m3.mesh.is_some()
+    }
+
+    #[cfg(test)]
+    pub fn test_mesh_add_part(&mut self, part: crate::attach::Part) {
+        if let Some(mut mesh) = self.m3.mesh.take() {
+            self.m3.hand.attach_start(&mut mesh, part);
+            self.m3.mesh = Some(mesh);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn test_mesh_keep_part(&mut self) {
+        if let Some(mesh) = self.m3.mesh.take() {
+            self.m3.hand.attach_keep(&mesh);
+            self.m3.mesh = Some(mesh);
+        }
     }
 
     #[cfg(test)]
@@ -330,11 +338,9 @@ impl SeviathApp {
         section_title(ui, "Looks");
         let mut changed = false;
         ui.horizontal(|ui| {
-            if ui.button("Random").help("Another person: skin, eyes, brows, mouth").clicked() {
+            if ui.button("Random").help("Another skin colour and tone").clicked() {
                 self.m3.bases.seed = self.m3.bases.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                let keep = (self.m3.bases.look.pattern, self.m3.bases.look.pattern_color);
-                self.m3.bases.look = features::random_look(self.m3.bases.seed);
-                (self.m3.bases.look.pattern, self.m3.bases.look.pattern_color) = keep;
+                self.m3.bases.look = features::random_look(self.m3.bases.seed, &self.m3.bases.look);
                 changed = true;
             }
             if ui.button("Standard").help("The starting looks").clicked() {
@@ -371,42 +377,7 @@ impl SeviathApp {
             slider(ui, &mut look.pattern_size, 0.3..=3.0, "Pattern size", &mut changed, &mut released);
             slider(ui, &mut look.pattern_strength, 0.0..=1.0, "Pattern strength", &mut changed, &mut released);
         }
-        egui::CollapsingHeader::new(RichText::new("Eyes and brows").size(12.5).strong()).id_salt("bases_eyes").show(ui, |ui| {
-            color(ui, "Eyes", &mut look.eye, &mut changed);
-            slider(ui, &mut look.eye_w, 0.15..=0.5, "Width", &mut changed, &mut released);
-            slider(ui, &mut look.eye_h, 0.08..=0.35, "Height", &mut changed, &mut released);
-            slider(ui, &mut look.eye_gap, 0.3..=0.9, "Apart", &mut changed, &mut released);
-            slider(ui, &mut look.eye_y, -0.3..=0.3, "Up or down", &mut changed, &mut released);
-            color(ui, "Brows", &mut look.brow, &mut changed);
-            slider(ui, &mut look.brow_thick, 0.02..=0.12, "Thickness", &mut changed, &mut released);
-            slider(ui, &mut look.brow_y, 0.2..=0.7, "Height over the eye", &mut changed, &mut released);
-            slider(ui, &mut look.brow_tilt, -0.3..=0.4, "Tilt", &mut changed, &mut released);
-        });
-        egui::CollapsingHeader::new(RichText::new("Nose, mouth, cheeks").size(12.5).strong()).id_salt("bases_mouth").show(ui, |ui| {
-            slider(ui, &mut look.nose_y, -0.9..=-0.3, "Nose height", &mut changed, &mut released);
-            slider(ui, &mut look.nose_shade, 0.0..=0.8, "Nose shade", &mut changed, &mut released);
-            color(ui, "Lips", &mut look.lip, &mut changed);
-            slider(ui, &mut look.mouth_w, 0.2..=0.8, "Mouth width", &mut changed, &mut released);
-            slider(ui, &mut look.mouth_y, -1.5..=-0.7, "Mouth height", &mut changed, &mut released);
-            slider(ui, &mut look.mouth_thick, 0.03..=0.18, "Lips", &mut changed, &mut released);
-            color(ui, "Blush", &mut look.blush_color, &mut changed);
-            slider(ui, &mut look.blush, 0.0..=0.8, "Blush strength", &mut changed, &mut released);
-            slider(ui, &mut look.freckles, 0.0..=1.0, "Freckles", &mut changed, &mut released);
-        });
-        egui::CollapsingHeader::new(RichText::new("Where the face is").size(12.5).strong()).id_salt("bases_face").show(ui, |ui| {
-            ui.label(RichText::new("The face is put on the front of the head by a guess. Move it if it is not on the face of this base.").size(11.0).color(TEXT_DIM));
-            let g = self.m3.bases.guess;
-            let face = &mut self.m3.bases.face;
-            slider(ui, &mut face.centre[1], g.centre[1] - 0.4..=g.centre[1] + 0.4, "Up or down", &mut changed, &mut released);
-            slider(ui, &mut face.centre[0], g.centre[0] - 0.3..=g.centre[0] + 0.3, "Left or right", &mut changed, &mut released);
-            slider(ui, &mut face.centre[2], g.centre[2] - 0.3..=g.centre[2] + 0.3, "Depth", &mut changed, &mut released);
-            slider(ui, &mut face.scale, 0.02..=0.18, "Size", &mut changed, &mut released);
-            if ui.button("Turn the face round").help("The face looks the other way: from +z to -z or back").clicked() {
-                face.front = -face.front;
-                changed = true;
-                released = true;
-            }
-        });
+        ui.label(RichText::new("The face is not drawn: paint it by hand with the brush on the right.").size(11.0).color(TEXT_DIM));
         if changed && released {
             self.m3.bases.dirty = true;
         }
@@ -459,7 +430,7 @@ mod tests {
         plain.texture = None;
         plain.normal = None;
         std::fs::write(&path, crate::meshfile::write_glb(&plain, None, &[], 30.0)).unwrap();
-        let (m, glb, _face, tex) = prepare(&path, Some(Shift { amount: 1.0, from_male: false }), 256, &Look::default(), 1).unwrap();
+        let (m, glb, tex) = prepare(&path, Some(Shift { amount: 1.0, from_male: false }), 256, &Look::default(), 1).unwrap();
         assert_eq!(m.texture.as_ref().unwrap().dimensions(), (256, 256));
         assert_eq!(tex.dimensions(), (256, 256));
         assert!(AssetMesh::from_glb(&glb).unwrap().texture.is_some());

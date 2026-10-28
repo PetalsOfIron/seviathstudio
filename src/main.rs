@@ -50,6 +50,7 @@ mod fbx;
 mod take;
 mod meshedit;
 mod meshbrush;
+mod attach;
 mod select;
 mod icons;
 mod layerfilter;

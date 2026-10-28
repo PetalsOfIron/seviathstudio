@@ -12,6 +12,7 @@ use super::SeviathApp;
 use crate::assetview::{AssetMesh, Camera};
 use crate::rig3d::{Paint, Pose, Rig3, neighbours};
 use crate::take::Take;
+use crate::attach;
 use crate::meshbrush::{self, Brush, Kind as BrushKind, Spot};
 use crate::meshedit::{self, Cut};
 use crate::theme::*;
@@ -38,6 +39,8 @@ pub enum Tool {
     Lasso,
     /// Draw geometry on the surface with a brush: hair, ropes, strips, spikes.
     Mesh,
+    /// Put parts on the body with numbers: horns, wings, a tail, ears.
+    Attach,
 }
 
 /// Which tools a page has.
@@ -54,7 +57,7 @@ impl ToolSet {
         match self {
             ToolSet::Rig => matches!(t, Tool::Select | Tool::Draw | Tool::Weights | Tool::Texture | Tool::Pose | Tool::Turn),
             ToolSet::Parts => matches!(t, Tool::Select | Tool::Draw | Tool::Parts | Tool::Lasso | Tool::Turn),
-            ToolSet::Look => matches!(t, Tool::Texture | Tool::Mesh | Tool::Turn),
+            ToolSet::Look => matches!(t, Tool::Texture | Tool::Mesh | Tool::Attach | Tool::Turn),
         }
     }
 }
@@ -157,6 +160,8 @@ pub struct HandRig {
     /// A cut of the mesh by a plane, and the meshes from before the cuts (with their weights).
     pub cut: Cut,
     cut_undo: Vec<(AssetMesh, Vec<Vec<(u16, f32)>>)>,
+    /// The part that is being shaped (horns, wings...): which, its numbers, and the sizes of the mesh from before it was put on.
+    pub attach: Option<(attach::Part, attach::Params, usize, usize)>,
 }
 
 impl Default for HandRig {
@@ -213,6 +218,7 @@ impl Default for HandRig {
             geo_undo: Vec::new(),
             cut: Cut { axis: 2, limit: 0.0, above: false },
             cut_undo: Vec::new(),
+            attach: None,
         }
     }
 }
@@ -454,29 +460,101 @@ impl HandRig {
             self.message = Some("Draw the stroke over the mesh: it has to touch the surface and go somewhere.".into());
             return;
         };
-        let k = self.strip_next;
+        let from = first_tri.and_then(|t| mesh.tris.get(t)).map(|t| t[0] as usize);
+        let old = (mesh.verts.len(), mesh.tris.len());
+        if !self.append_built(mesh, &built, self.strip_next, from) {
+            return;
+        }
+        self.geo_undo.push(old);
+        self.strip_next += 1;
+    }
+
+    /// The geometry is put on the mesh: its colours (root to end) are painted in a cell of the strip of the texture, its texture coordinates look into that cell,
+    /// and its points move with what the point `from` of the mesh moves with.
+    fn append_built(&mut self, mesh: &mut AssetMesh, built: &meshbrush::Built, k: usize, from: Option<usize>) -> bool {
+        let Some(v0) = self.strip_v0 else { return false };
+        let Some(size) = mesh.texture.as_ref().map(|t| t.width()) else { return false };
+        let cell = 32u32;
+        let cols = (size / cell) as usize;
+        let y_start = (v0 * size as f32).ceil() as u32;
+        let rows = ((size - y_start) / cell) as usize;
+        if k >= cols * rows {
+            self.message = Some("The strip of the texture for the colours of the strokes is full: take a stroke back, or use a bigger texture.".into());
+            return false;
+        }
         let (x0, y0) = ((k % cols) as u32 * cell, y_start + (k / cols) as u32 * cell);
         if let Some(tex) = mesh.texture.as_mut() {
             let img = meshbrush::cell_image(cell, self.brush.root, self.brush.tip, k as u32 + 1);
             image::imageops::replace(tex, &img, x0 as i64, y0 as i64);
         }
         let base = mesh.verts.len() as u32;
-        let old = (mesh.verts.len(), mesh.tris.len());
+        let old_len = mesh.verts.len();
         for (v, uv) in built.verts.iter().zip(&built.uvs) {
             mesh.verts.push(*v);
             mesh.uvs.push([(x0 as f32 + 2.0 + uv[0] * (cell - 4) as f32) / size as f32, (y0 as f32 + 1.0 + uv[1] * (cell - 2) as f32) / size as f32]);
         }
         mesh.tris.extend(built.tris.iter().map(|t| [t[0] + base, t[1] + base, t[2] + base]));
-        // the new points move with what is under the start of the stroke
-        if self.rig.weights.len() == old.0 {
-            let w = first_tri.and_then(|t| mesh.tris.get(t)).and_then(|t| self.rig.weights.get(t[0] as usize)).cloned().unwrap_or_default();
+        if self.rig.weights.len() == old_len {
+            let w = from.and_then(|f| self.rig.weights.get(f)).cloned().unwrap_or_default();
             self.rig.weights.extend(std::iter::repeat_n(w, built.verts.len()));
         }
-        self.geo_undo.push(old);
-        self.strip_next += 1;
         self.painted = true;
         self.near = None;
         self.version += 1;
+        true
+    }
+
+    /// The part that is being shaped is built (again) on the mesh: what it was before is taken away first.
+    pub fn attach_apply(&mut self, mesh: &mut AssetMesh) {
+        let Some((part, params, v0, t0)) = self.attach else { return };
+        mesh.verts.truncate(v0);
+        mesh.uvs.truncate(v0);
+        mesh.tris.truncate(t0);
+        self.rig.weights.truncate(v0);
+        let anchors = attach::Anchors::of(mesh);
+        let Some(built) = attach::build(part, &params, &anchors) else { return };
+        // it moves with the point of the mesh nearest to its first point
+        let first = built.verts[0];
+        let from = mesh.verts.iter().enumerate().min_by(|a, b| {
+            let d = |p: &[f32; 3]| (p[0] - first[0]).powi(2) + (p[1] - first[1]).powi(2) + (p[2] - first[2]).powi(2);
+            d(a.1).total_cmp(&d(b.1))
+        }).map(|x| x.0);
+        self.append_built(mesh, &built, self.strip_next, from);
+    }
+
+    /// Start a part (or change to another one): it is put on the mesh with its first numbers.
+    pub fn attach_start(&mut self, mesh: &mut AssetMesh, part: attach::Part) {
+        if self.strip_v0.is_none() || mesh.texture.is_none() {
+            self.message = Some("Parts need the strip of the texture for their colours. Load a base on the Bases page: it has one.".into());
+            return;
+        }
+        let (v0, t0) = match self.attach {
+            Some((_, _, v, t)) => (v, t),
+            None => (mesh.verts.len(), mesh.tris.len()),
+        };
+        self.attach = Some((part, part.defaults(), v0, t0));
+        self.attach_apply(mesh);
+    }
+
+    /// Keep the part: it is a part of the mesh now (it can be taken back like a stroke).
+    pub fn attach_keep(&mut self, mesh: &AssetMesh) {
+        if let Some((_, _, v0, t0)) = self.attach.take() {
+            if mesh.verts.len() > v0 {
+                self.geo_undo.push((v0, t0));
+                self.strip_next += 1;
+            }
+        }
+    }
+
+    /// Take the part that is being shaped away.
+    pub fn attach_drop(&mut self, mesh: &mut AssetMesh) {
+        if let Some((_, _, v0, t0)) = self.attach.take() {
+            mesh.verts.truncate(v0);
+            mesh.uvs.truncate(v0);
+            mesh.tris.truncate(t0);
+            self.rig.weights.truncate(v0);
+            self.version += 1;
+        }
     }
 
     /// Take the last stroke of the mesh brush back.
@@ -944,6 +1022,7 @@ impl HandRig {
             Tool::Parts => "Paint the part of the mesh that moves with the picked bone. Right button: turn the view. Wheel: zoom.",
             Tool::Lasso => "Draw a loop round a part: all of it moves with the picked bone. Right button: turn the view. Wheel: zoom.",
             Tool::Mesh => "Draw over the mesh: the stroke becomes hair, a rope, a strip or a spike. Right button: turn the view. Wheel: zoom.",
+            Tool::Attach => "Horns, wings, a tail or ears with numbers. Right button: turn the view. Wheel: zoom.",
         });
     }
 
@@ -1007,6 +1086,7 @@ impl HandRig {
                 self.paint_texture(mesh, cam, at);
                 Grab::Texture
             }
+            Tool::Attach => Grab::None,
             Tool::Mesh => {
                 if self.strip_v0.is_none() || mesh.texture.is_none() {
                     self.message = Some("This mesh has no strip of texture for the colours of the strokes. Load a base on the Bases page: it has one.".into());
@@ -1051,6 +1131,7 @@ impl HandRig {
                 (Tool::Draw, "Draw bones", "Drag in the picture to draw a bone. Start at the end of a bone to continue the chain"),
                 (Tool::Weights, "Paint weights", "Paint which bone moves which part of the mesh"),
                 (Tool::Texture, "Paint texture", "Redraw the colours of the mesh, with colours picked from its own texture"),
+                (Tool::Attach, "Add parts", "Horns, wings, a tail, ears: with numbers you change"),
                 (Tool::Mesh, "Draw mesh", "Draw hair, ropes, strips and spikes on the mesh with brushes"),
                 (Tool::Parts, "Paint parts", "Paint which part of the mesh moves with the picked bone: the whole part, no weights"),
                 (Tool::Lasso, "Loop a part", "Draw a loop round a part: all of it moves with the picked bone"),
@@ -1143,6 +1224,58 @@ impl HandRig {
                 }
                 let loose = self.rig.unweighted();
                 ui.label(RichText::new(format!("{loose} points are moved by no bone")).size(11.5).color(if loose > 0 { GOLD } else { TEXT_DIM }));
+            }
+            Tool::Attach => {
+                section_title(ui, "Parts with numbers");
+                ui.label(RichText::new("Pick a part: it is put on the body. Change the numbers until it is right, then keep it. Colours: the root and end colours of the mesh brushes.").size(11.0).color(TEXT_DIM));
+                ui.horizontal_wrapped(|ui| {
+                    for part in attach::Part::ALL {
+                        let on = self.attach.is_some_and(|a| a.0 == part);
+                        if widgets::chip(ui, part.label(), on).help("Put this part on the body").clicked() {
+                            self.attach_start(mesh, part);
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Root").size(12.0).color(TEXT_DIM));
+                    let a = ui.color_edit_button_srgb(&mut self.brush.root).changed();
+                    ui.label(RichText::new("End").size(12.0).color(TEXT_DIM));
+                    let b = ui.color_edit_button_srgb(&mut self.brush.tip).changed();
+                    if (a || b) && self.attach.is_some() {
+                        self.attach_apply(mesh);
+                    }
+                });
+                if let Some((part, mut p, v0, t0)) = self.attach {
+                    let mut changed = false;
+                    if matches!(part, attach::Part::Horns | attach::Part::Wings) {
+                        let (lo, hi) = if part == attach::Part::Horns { (1usize, 4usize) } else { (3, 24) };
+                        changed |= ui.add(egui::Slider::new(&mut p.count, lo..=hi).text(if part == attach::Part::Horns { "How many on a side" } else { "Feathers on a wing" })).changed();
+                    }
+                    changed |= ui.add(egui::Slider::new(&mut p.size, 0.3..=3.0).text("Size")).changed();
+                    changed |= ui.add(egui::Slider::new(&mut p.thick, 0.3..=3.0).text(if matches!(part, attach::Part::Wings | attach::Part::Ears) { "Wide" } else { "Thick" })).changed();
+                    changed |= ui.add(egui::Slider::new(&mut p.curl, -1.0..=1.0).text("Curl")).changed();
+                    if part != attach::Part::Tail {
+                        changed |= ui.add(egui::Slider::new(&mut p.spread, 0.0..=90.0).text(if part == attach::Part::Wings { "Raised" } else { "Stands out" }).suffix(" deg")).changed();
+                        changed |= ui.add(egui::Slider::new(&mut p.apart, 0.3..=2.5).text("Apart")).changed();
+                    }
+                    changed |= ui.add(egui::Slider::new(&mut p.up, -0.1..=0.1).text("Up")).changed();
+                    changed |= ui.add(egui::Slider::new(&mut p.back, -0.1..=0.1).text("Back")).changed();
+                    if changed {
+                        self.attach = Some((part, p, v0, t0));
+                        self.attach_apply(mesh);
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button(RichText::new("Keep it").strong()).clicked() {
+                            self.attach_keep(mesh);
+                        }
+                        if ui.button("Take it away").clicked() {
+                            self.attach_drop(mesh);
+                        }
+                    });
+                }
+                if ui.add_enabled(!self.geo_undo.is_empty() && self.attach.is_none(), egui::Button::new("Take the last part or stroke back")).clicked() {
+                    self.undo_stroke(mesh);
+                }
             }
             Tool::Mesh => {
                 section_title(ui, "Mesh brushes");
@@ -1878,5 +2011,38 @@ mod tests {
         assert!(mesh.verts.iter().all(|v| v[1] <= 1.0 + 1e-4));
         hand.undo_cut(&mut mesh);
         assert_eq!((mesh.verts.len(), hand.rig.weights.len()), (before, before));
+    }
+
+    #[test]
+    fn a_part_is_built_changed_by_its_numbers_kept_and_taken_back() {
+        let (mut mesh, _) = crate::meshfile::tests_figure();
+        mesh.texture = Some(RgbaImage::from_pixel(256, 256, image::Rgba([200, 160, 140, 255])));
+        for uv in &mut mesh.uvs {
+            uv[1] *= 0.8;
+        }
+        let mut hand = HandRig::default();
+        hand.start_for(&mesh);
+        hand.strip_v0 = Some(0.875);
+        let (v0, t0) = (mesh.verts.len(), mesh.tris.len());
+        hand.attach_start(&mut mesh, attach::Part::Horns);
+        let one = mesh.verts.len();
+        assert!(one > v0 && mesh.tris.len() > t0);
+        assert_eq!(hand.rig.weights.len(), mesh.verts.len());
+        // other numbers: the part is built again, not added again
+        let (part, mut p, a, b) = hand.attach.unwrap();
+        p.count = 3;
+        hand.attach = Some((part, p, a, b));
+        hand.attach_apply(&mut mesh);
+        assert!(mesh.verts.len() > one * 2 && mesh.verts.len() < one * 4, "{} {}", mesh.verts.len(), one);
+        hand.attach_keep(&mesh);
+        assert!(hand.attach.is_none() && hand.geo_undo.len() == 1);
+        // wings on top of the horns, then thrown away
+        let kept = mesh.verts.len();
+        hand.attach_start(&mut mesh, attach::Part::Wings);
+        assert!(mesh.verts.len() > kept);
+        hand.attach_drop(&mut mesh);
+        assert_eq!((mesh.verts.len(), hand.rig.weights.len()), (kept, kept));
+        hand.undo_stroke(&mut mesh);
+        assert_eq!((mesh.verts.len(), mesh.tris.len()), (v0, t0));
     }
 }
