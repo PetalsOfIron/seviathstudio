@@ -49,6 +49,11 @@ pub struct BasesUi {
     baked: Option<RgbaImage>,
     batch: Option<Receiver<String>>,
     pub message: Option<String>,
+    /// Which mesh (`MeshUi::made`) came from a base: only that one has its looks baked by the sliders.
+    base_made: u64,
+    /// The height for "Set it", and the colour for "Colour the whole mesh".
+    pub height: f32,
+    pub fill: [u8; 3],
 }
 
 impl Default for BasesUi {
@@ -70,6 +75,9 @@ impl Default for BasesUi {
             baked: None,
             batch: None,
             message: None,
+            base_made: 0,
+            height: 1.8,
+            fill: [200, 200, 205],
         }
     }
 }
@@ -126,6 +134,7 @@ impl SeviathApp {
                 self.m3.bases.baked = Some(tex);
                 let s = mesh.stats();
                 self.m3.set_mesh(mesh, glb);
+                self.m3.bases.base_made = self.m3.made;
                 self.m3.hand.tool = super::handrig::Tool::Turn;
                 self.m3.hand.strip_v0 = Some(1.0 - STRIP);
                 self.m3.bases.message = Some(format!("The base is ready to paint: {} triangles, texture {} x {}. Paint it, draw hair with the mesh brushes, or go on to the Parts or Bones pages.", s.triangles, self.m3.bases.size, self.m3.bases.size));
@@ -274,6 +283,18 @@ impl SeviathApp {
         }
     }
 
+    /// Open a mesh file the way the button does (without the dialog).
+    #[cfg(test)]
+    pub fn test_mesh_import(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let i = crate::meshimport::load(path)?;
+        let glb = crate::meshfile::write_glb(&i.mesh, None, &[], 30.0);
+        self.m3.set_mesh(i.mesh, glb);
+        if let Some(r) = i.rig {
+            self.m3.hand.use_rig(r);
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub fn test_bases_load_named(&mut self, name: &str) -> bool {
         self.test_bases_load(name, false)
@@ -282,6 +303,93 @@ impl SeviathApp {
     #[cfg(test)]
     pub fn test_mesh_bases_load_other(&mut self) -> bool {
         self.test_bases_load("Midlanderbasefemale", true)
+    }
+
+    /// Open a file that has a mesh in it (glb, gltf, fbx, obj, stl, ply) to edit it: a base that is wrong, a model from another program.
+    pub(super) fn mesh_import_dialog(&mut self) {
+        let Some(p) = rfd::FileDialog::new().set_title("Open a mesh").add_filter("Meshes", crate::meshimport::EXTENSIONS).pick_file() else { return };
+        match crate::meshimport::load(&p) {
+            Ok(i) => {
+                let glb = crate::meshfile::write_glb(&i.mesh, None, &[], 30.0);
+                let stats = i.mesh.stats();
+                self.m3.set_mesh(i.mesh, glb);
+                if let Some(r) = i.rig {
+                    self.m3.hand.use_rig(r);
+                }
+                self.m3.bases.message = Some(format!("Opened {}: {} triangles. {}It can be edited now: paint, sculpt, cut, add parts.", p.display(), stats.triangles, i.note));
+            }
+            Err(e) => self.m3.bases.message = Some(e),
+        }
+    }
+
+    /// The left side of the page for a mesh that was made from a text, a picture or a drawing (or opened from a file): what it is, and how to get it ready for
+    /// drawing on it.
+    pub(super) fn edit_panel(&mut self, ui: &mut Ui) {
+        section_title(ui, "Redraw and sculpt");
+        if ui.button("Open a mesh from a file...").help("A .glb, .gltf, .fbx, .obj, .stl or .ply file: a base that is wrong, a model from another program. It can be edited like any mesh.").clicked() {
+            self.mesh_import_dialog();
+        }
+        if let Some(m) = &self.m3.bases.message {
+            ui.label(RichText::new(m).size(11.0).color(TEXT_DIM));
+        }
+        let Some(mesh) = self.m3.mesh.as_mut() else {
+            ui.label(RichText::new("Make a mesh on the From a text or From a picture pages, or open one from a file.").size(11.5).color(TEXT_DIM));
+            return;
+        };
+        let s = mesh.stats();
+        ui.label(RichText::new(format!("{} triangles, {} points{}.", s.triangles, s.vertices, s.texture.map(|t| format!(", texture {} x {}", t.0, t.1)).unwrap_or_else(|| ", no texture".into()))).size(11.5).color(TEXT_DIM));
+        ui.label(RichText::new("Paint it, sculpt it, draw hair and ropes on it, add parts, cut pieces off: everything the tools on the right do, as in Blender. The strip of texture for the colours of strokes and parts is added when you need it.").size(11.5).color(TEXT_DIM));
+        // the size and the way it stands
+        ui.add_space(6.0);
+        section_title(ui, "Size and direction");
+        let hand = &mut self.m3.hand;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Height").size(12.0).color(TEXT_DIM));
+            ui.add(egui::DragValue::new(&mut self.m3.bases.height).range(0.05..=60.0).speed(0.01).suffix(" m"));
+            if ui.button("Set it").help("Scales the mesh (and its bones) to this height and puts its feet on the floor").clicked() {
+                let (lo, hi) = mesh.bounds();
+                let k = self.m3.bases.height / (hi[1] - lo[1]).max(1e-6);
+                let (cx, cz) = ((lo[0] + hi[0]) / 2.0, (lo[2] + hi[2]) / 2.0);
+                hand.transform(mesh, |p| [(p[0] - cx) * k, (p[1] - lo[1]) * k, (p[2] - cz) * k]);
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Z is up: turn it").help("A mesh from a program where the z axis is up (CAD, 3ds Max, Blender without the export setting) is turned to stand").clicked() {
+                hand.transform(mesh, |p| [p[0], p[2], -p[1]]);
+            }
+            if ui.button("Turn it round").help("The back becomes the front").clicked() {
+                hand.transform(mesh, |p| [-p[0], p[1], -p[2]]);
+            }
+            if ui.button("Stand it on the floor").clicked() {
+                let (lo, hi) = mesh.bounds();
+                let (cx, cz) = ((lo[0] + hi[0]) / 2.0, (lo[2] + hi[2]) / 2.0);
+                hand.transform(mesh, |p| [p[0] - cx, p[1] - lo[1], p[2] - cz]);
+            }
+        });
+        // colour
+        ui.add_space(6.0);
+        section_title(ui, "Colour");
+        ui.horizontal(|ui| {
+            ui.color_edit_button_srgb(&mut self.m3.bases.fill);
+            if ui.button("Colour the whole mesh").help("Every part of the picture of the mesh gets this colour (paint over it after that: the paint tool, the recolour of a picked colour, the mesh brushes).").clicked() {
+                let c = self.m3.bases.fill;
+                if !hand.fill_color(mesh, c) {
+                    self.m3.bases.message = Some("The mesh has no texture yet: unwrap it first.".into());
+                }
+            }
+        });
+        if mesh.texture.is_none() {
+            ui.add_space(4.0);
+            ui.label(RichText::new("This mesh has no texture (its colours are not in a picture), so it cannot be painted yet.").size(11.5).color(GOLD));
+            if ui.button("Unwrap it and give it a plain texture").help("Cuts the mesh into pieces laid flat (it gets more points on the cuts) and gives it a grey texture to paint on. The bones are lost: do it before rigging.").clicked() {
+                let mut m = crate::unwrap::unwrap(mesh, &crate::unwrap::Options { size: 2048, reserve: STRIP, ..Default::default() });
+                m.texture = Some(RgbaImage::from_pixel(2048, 2048, image::Rgba([170, 170, 175, 255])));
+                let glb = crate::meshfile::write_glb(&m, None, &[], 30.0);
+                self.m3.set_mesh(m, glb);
+                self.m3.hand.strip_v0 = Some(1.0 - STRIP);
+                self.m3.bases.message = Some("Unwrapped. It has a plain texture to paint on now.".into());
+            }
+        }
     }
 
     /// The left side of the page: the bases, the other sex, and the looks.
@@ -303,6 +411,9 @@ impl SeviathApp {
         });
         if self.m3.bases.list.is_empty() {
             ui.label(RichText::new("No .glb files in this folder.").size(11.5).color(GOLD));
+        }
+        if ui.button("Import a base from a file...").help("A .glb, .gltf, .fbx, .obj, .stl or .ply file, to edit it").clicked() {
+            self.mesh_import_dialog();
         }
         egui::ScrollArea::vertical().id_salt("bases_list").max_height(190.0).show(ui, |ui| {
             for i in 0..self.m3.bases.list.len() {
@@ -331,7 +442,11 @@ impl SeviathApp {
         if let Some(m) = &self.m3.bases.message {
             ui.label(RichText::new(m).size(11.5).color(TEXT_DIM));
         }
-        if self.m3.mesh.is_none() {
+        if self.m3.mesh.is_none() || self.m3.bases.base_made != self.m3.made {
+            if self.m3.mesh.is_some() {
+                ui.add_space(6.0);
+                ui.label(RichText::new("This mesh did not come from a base, so there are no looks to change. Use the Redraw and sculpt page to edit it.").size(11.5).color(TEXT_DIM));
+            }
             return;
         }
         ui.add_space(8.0);

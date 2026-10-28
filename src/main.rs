@@ -50,6 +50,8 @@ mod fbx;
 mod take;
 mod meshedit;
 mod meshbrush;
+mod animlib;
+mod meshimport;
 mod attach;
 mod select;
 mod icons;

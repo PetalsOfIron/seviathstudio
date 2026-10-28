@@ -80,6 +80,29 @@ pub fn remove_tris(mesh: &AssetMesh, remove: &[bool]) -> (AssetMesh, Vec<Option<
     (AssetMesh { verts, uvs, tris, texture: mesh.texture.clone(), normal: mesh.normal.clone() }, new_index)
 }
 
+/// A strip of the texture that nothing uses is added at the bottom (for the colours of the strokes of the mesh brushes and of parts), on a mesh that has a
+/// texture but no free place: the picture gets taller, the old picture keeps its place at the top, and the texture coordinates are squeezed to fit. The normal
+/// map, when there is one, grows the same way. Returns where the strip starts (v).
+pub fn add_strip(mesh: &mut AssetMesh, share: f32) -> Option<f32> {
+    let tex = mesh.texture.as_ref()?;
+    let (w, h) = tex.dimensions();
+    let new_h = (h as f32 / (1.0 - share)).ceil() as u32;
+    let grow = |img: &image::RgbaImage, fill: image::Rgba<u8>| {
+        let mut out = image::RgbaImage::from_pixel(img.width(), new_h, fill);
+        image::imageops::replace(&mut out, img, 0, 0);
+        out
+    };
+    let keep = h as f32 / new_h as f32;
+    mesh.texture = Some(grow(tex, image::Rgba([128, 128, 128, 255])));
+    if let Some(n) = mesh.normal.as_ref().filter(|n| n.dimensions() == (w, h)) {
+        mesh.normal = Some(grow(n, image::Rgba([128, 128, 255, 255])));
+    }
+    for uv in &mut mesh.uvs {
+        uv[1] *= keep;
+    }
+    Some(keep)
+}
+
 /// Which side of a plane is cut away.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cut {
@@ -207,5 +230,31 @@ mod tests {
             }
             println!("y {y0:.1}-{y1:.1}: middle z {zl:.2}..{zh:.2}   all z {al:.2}..{ah:.2}");
         }
+    }
+
+    #[test]
+    fn a_strip_is_added_under_the_texture_and_the_coordinates_still_find_their_colours() {
+        let mut m = mesh();
+        m.uvs = vec![[0.0, 1.0], [1.0, 1.0], [0.0, 0.5], [0.0, 0.0], [1.0, 0.0], [0.0, 0.25], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5]];
+        let mut tex = image::RgbaImage::new(64, 64);
+        for (_, y, p) in tex.enumerate_pixels_mut() {
+            *p = image::Rgba([y as u8 * 4, 0, 0, 255]);
+        }
+        let colour_at = |m: &AssetMesh, i: usize| {
+            let t = m.texture.as_ref().unwrap();
+            let (u, v) = (m.uvs[i][0], m.uvs[i][1]);
+            t.get_pixel((u * (t.width() - 1) as f32) as u32, (v * (t.height() - 1) as f32) as u32).0[0] as i32
+        };
+        m.texture = Some(tex);
+        let before: Vec<i32> = (0..m.verts.len()).map(|i| colour_at(&m, i)).collect();
+        let v0 = add_strip(&mut m, 0.125).unwrap();
+        assert!((v0 - 0.875).abs() < 0.03, "{v0}");
+        assert!(m.texture.as_ref().unwrap().height() > 64);
+        assert!(m.uvs.iter().all(|q| q[1] <= v0 + 1e-4), "the picture keeps to the top, the strip is free");
+        for (i, b) in before.iter().enumerate() {
+            assert!((colour_at(&m, i) - b).abs() <= 8, "point {i}: {} {}", colour_at(&m, i), b);
+        }
+        let mut none = mesh();
+        assert!(add_strip(&mut none, 0.125).is_none(), "no texture: nothing to add to");
     }
 }

@@ -36,6 +36,7 @@ Source: "..\target\release\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\COPYING"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\docs\virtual-camera.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "..\animations\*.sevanim"; DestDir: "{app}\animations"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
