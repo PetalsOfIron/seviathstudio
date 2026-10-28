@@ -158,6 +158,18 @@ impl DrawState {
         &mut self.lib.mem[slot(self.tool)].s
     }
 
+    /// The brushes, as another place (the 3D tab) shows them: which tool the brush is for (brush, eraser, smudge), and the list and the settings of the brushes.
+    pub fn brush_window_ui(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            for (tool, label) in [(Tool::Brush, "Brush"), (Tool::Eraser, "Eraser"), (Tool::Smudge, "Smudge")] {
+                if widgets::chip(ui, label, self.tool == tool).clicked() {
+                    self.tool = tool;
+                }
+            }
+        });
+        self.brush_panel(ui);
+    }
+
     /// The brush that is picked now, its colour, and whether it erases: the 3D tab paints the texture of a mesh with the same brush.
     pub fn brush_snapshot(&self) -> (BrushSettings, Color32, bool) {
         (self.lib.mem[slot(self.tool)].s.clone(), self.primary, self.tool == Tool::Eraser)

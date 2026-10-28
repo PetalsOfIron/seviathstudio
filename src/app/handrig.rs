@@ -16,7 +16,7 @@ use crate::attach;
 use crate::brush::BrushSettings;
 use crate::brush::engine::{Sample as BrushSample, Stroke as BrushStroke};
 use crate::doc::{Document, LayerKind, TILE};
-use crate::meshbrush::{self, Brush, Kind as BrushKind, Spot};
+use crate::meshbrush::{self, Brush, Curl, Kind as BrushKind, Spot};
 use crate::meshedit::{self, Cut};
 use crate::meshops;
 use crate::theme::*;
@@ -147,6 +147,13 @@ pub struct Strand {
     /// The line it follows, from the root to the end (empty for a part).
     line: Vec<[f32; 3]>,
     pub width_mul: f32,
+    /// The picture of hair it looks into (hair only).
+    pub tex: Option<usize>,
+}
+
+/// The bones that are made with a drawn thing or a part (hair, a tail, a wing) and go where it goes.
+fn is_part_bone(name: &str) -> bool {
+    name.starts_with("hair") || name.starts_with("tail") || name.starts_with("wing")
 }
 
 /// The nearest place on a line of points (and how far along the line it is, as a share of its length is not needed: the segment and the place).
@@ -166,15 +173,26 @@ fn near_on_line(line: &[[f32; 3]], p: [f32; 3]) -> [f32; 3] {
     best.1
 }
 
+/// A picture of hair: a rectangle of the strip of the texture (the rectangle that VRoid has for its hair: across the strand left to right, the root at the top and
+/// the end at the bottom). A line of hair covers the whole of it, and all the hair that is drawn with it looks the same.
+#[derive(Clone, Debug)]
+pub struct HairTex {
+    pub name: String,
+    slot: usize,
+    ready: bool,
+}
+
+/// The width of a picture of hair, in texels.
+const HAIR_W: u32 = 64;
+
 /// The window in which the picture of the hair is drawn.
 struct HairEditor {
     doc: Document,
     stroke: Option<BrushStroke>,
     handle: Option<TextureHandle>,
-    /// Where the picture is on the texture of the mesh (x, y, size).
-    region: (u32, u32, u32),
-    #[allow(dead_code)]
-    last: Option<Pos2>,
+    /// Where the picture is on the texture of the mesh (x, y, width, height), and which picture of hair it is.
+    region: (u32, u32, u32, u32),
+    tex: usize,
 }
 
 /// How the faces are picked.
@@ -212,6 +230,8 @@ enum Grab {
     /// Dragging a strand about, or the end of one to make it longer or shorter.
     StrandMove(usize),
     StrandTip(usize),
+    /// A shape is put where the pointer is (and follows it).
+    ShapePlace,
 }
 
 /// Which part of a bone is picked.
@@ -334,10 +354,15 @@ pub struct HandRig {
     pub strand_sel: Option<usize>,
     pub strand_move: bool,
     /// The picture of the hair has been put on the texture, and the window for drawing it.
-    hair_ready: bool,
+    /// The pictures of hair that were made, and the one the hair brush draws with.
+    pub hair_textures: Vec<HairTex>,
+    pub hair_cur: usize,
     hair_editor: Option<HairEditor>,
     /// A shape (ball, disc...) that is being made: which, its numbers, where it is, and the sizes of the mesh from before it was put on.
     pub shape_pending: Option<(meshops::Shape, meshops::ShapeParams, [f32; 3], usize, usize)>,
+    /// A shape goes where the mesh is clicked (and dragged) instead of the middle of the body.
+    pub shape_place: bool,
+    pub brush_window: bool,
     /// What fixing and fitting does: the biggest hole that is closed (in edges), how near to a joint the faces are cut smaller, how many times, and whether the
     /// files get quads.
     pub hole_edges: usize,
@@ -436,9 +461,12 @@ impl Default for HandRig {
             strands: Vec::new(),
             strand_sel: None,
             strand_move: false,
-            hair_ready: false,
+            hair_textures: Vec::new(),
+            hair_cur: 0,
             hair_editor: None,
             shape_pending: None,
+            shape_place: true,
+            brush_window: false,
             hole_edges: 40,
             joint_radius: 0.12,
             joint_levels: 1,
@@ -999,7 +1027,8 @@ impl HandRig {
         let n = self.strands.len() + 1;
         let (kind, side) = (if self.hair { "Hair" } else { self.brush.kind.label() }, if mirrored { " (other side)" } else { "" });
         let bones = if self.hair && self.rig.bones.len() > bones_before { Some((bones_before, self.rig.bones.len() - bones_before)) } else { None };
-        self.strands.push(Strand { name: format!("{kind} {n}{side}"), verts: (old.0, mesh.verts.len()), bones, line: meshbrush::joints(&self.brush, spots, 10).unwrap_or_default(), width_mul: 1.0 });
+        let tex = if self.hair { Some(self.hair_cur) } else { None };
+        self.strands.push(Strand { name: format!("{kind} {n}{side}"), verts: (old.0, mesh.verts.len()), bones, line: meshbrush::joints(&self.brush, spots, 10).unwrap_or_default(), width_mul: 1.0, tex });
         self.strand_sel = Some(self.strands.len() - 1);
         true
     }
@@ -1040,27 +1069,22 @@ impl HandRig {
         self.hair_sim = None;
     }
 
-    /// The geometry is put on the mesh: its colours (root to end) are painted in a cell of the strip of the texture, its texture coordinates look into that cell,
-    /// and its points move with what the point `from` of the mesh moves with.
+    /// The geometry is put on the mesh: its colours (root to end) are painted in a cell of the strip of the texture (hair looks into a picture of hair instead), its
+    /// texture coordinates look into that, and its points move with what the point `from` of the mesh moves with.
     fn append_built(&mut self, mesh: &mut AssetMesh, built: &meshbrush::Built, k: usize, from: Option<usize>) -> Option<bool> {
         let v0 = self.strip_v0?;
         let (size, high) = mesh.texture.as_ref().map(|t| (t.width(), t.height()))?;
         let y_start = (v0 * high as f32).ceil() as u32;
-        let region = Self::hair_region(size, high, y_start);
-        // hair: all the lines of hair look into the one picture of the hair; the other strokes have a cell of their own
-        let hair_uv = self.hair && region.is_some();
+        let slots = Self::hair_slots(size, high, y_start);
+        // hair: all the lines of hair look into the picture of hair that is picked; the other strokes have a cell of their own
+        let hair_uv = self.hair && !slots.is_empty();
         let (cx, cy, cw, ch, used_cell) = if hair_uv {
-            let (rx, ry, rs) = region?;
-            if !self.hair_ready {
-                if let Some(tex) = mesh.texture.as_mut() {
-                    let img = meshbrush::cell_image(rs, self.brush.root, self.brush.tip, 1);
-                    image::imageops::replace(tex, &img, rx as i64, ry as i64);
-                }
-                self.hair_ready = true;
-            }
-            (rx, ry, rs, rs, false)
+            let idx = self.ensure_hair_texture(mesh)?;
+            let (rx, ry, rw, rh) = slots[self.hair_textures[idx].slot];
+            self.paint_hair_default(mesh, idx);
+            (rx, ry, rw, rh, false)
         } else {
-            let cells = Self::strip_cells(size, high, y_start, region);
+            let cells = Self::strip_cells(size, high, y_start, Self::hair_block(&slots));
             let Some(&(x0, y0)) = cells.get(k) else {
                 self.message = Some("The strip of the texture for the colours of the strokes is full: take a stroke back, or use a bigger texture.".into());
                 return None;
@@ -1088,22 +1112,34 @@ impl HandRig {
         Some(used_cell)
     }
 
-    /// The square of the strip that holds the picture of the hair (where it is and how big): at the right end of the first rows of the strip. None when the strip
-    /// is too small.
-    fn hair_region(size: u32, high: u32, y_start: u32) -> Option<(u32, u32, u32)> {
+    /// The places for pictures of hair: rectangles (`HAIR_W` texels wide, as tall as the strip lets them be, up to 256) at the right end of the strip, in the half of it
+    /// that the cells of the strokes leave free. Empty when the strip is too small.
+    fn hair_slots(size: u32, high: u32, y_start: u32) -> Vec<(u32, u32, u32, u32)> {
         let rows = high.saturating_sub(y_start);
-        let s = ((rows / 32) * 32).min(256).min((size / 4 / 32) * 32);
-        (s >= 32).then(|| (size - s, y_start, s))
+        let h = ((rows / 32) * 32).min(256);
+        if h < 64 || size < HAIR_W * 4 {
+            return Vec::new();
+        }
+        let cols = (size / 2) / HAIR_W;
+        let x0 = size - cols * HAIR_W;
+        let rows_n = (rows / h).max(1);
+        (0..rows_n).flat_map(|r| (0..cols).map(move |c| (x0 + c * HAIR_W, y_start + r * h, HAIR_W, h))).collect()
     }
 
-    /// The origins of the cells of the strip (32 texels square), not the ones that are under the picture of the hair.
-    fn strip_cells(size: u32, high: u32, y_start: u32, region: Option<(u32, u32, u32)>) -> Vec<(u32, u32)> {
+    /// The block of the strip that all the places for hair take (the cells of the strokes keep out of it).
+    fn hair_block(slots: &[(u32, u32, u32, u32)]) -> Option<(u32, u32, u32, u32)> {
+        let (first, last) = (slots.first()?, slots.last()?);
+        Some((first.0, first.1, last.0 + last.2 - first.0, last.1 + last.3 - first.1))
+    }
+
+    /// The origins of the cells of the strip (32 texels square), not the ones that are under the block of the hair.
+    fn strip_cells(size: u32, high: u32, y_start: u32, block: Option<(u32, u32, u32, u32)>) -> Vec<(u32, u32)> {
         let (cols, rows) = ((size / 32) as usize, (high.saturating_sub(y_start) / 32) as usize);
         let mut out = Vec::with_capacity(cols * rows);
         for r in 0..rows {
             for c in 0..cols {
                 let (x, y) = (c as u32 * 32, y_start + r as u32 * 32);
-                let under = region.is_some_and(|(rx, ry, rs)| x + 32 > rx && x < rx + rs && y + 32 > ry && y < ry + rs);
+                let under = block.is_some_and(|(bx, by, bw, bh)| x + 32 > bx && x < bx + bw && y + 32 > by && y < by + bh);
                 if !under {
                     out.push((x, y));
                 }
@@ -1112,41 +1148,135 @@ impl HandRig {
         out
     }
 
-    /// Open the picture of the hair to draw it: the whole picture all the hair lines look into, with the brush of the Draw tab.
+    /// The rectangle of a picture of hair on the texture of the mesh.
+    fn hair_rect(&self, mesh: &AssetMesh, idx: usize) -> Option<(u32, u32, u32, u32)> {
+        let tex = mesh.texture.as_ref()?;
+        let y_start = (self.strip_v0? * tex.height() as f32).ceil() as u32;
+        let slot = self.hair_textures.get(idx)?.slot;
+        Self::hair_slots(tex.width(), tex.height(), y_start).get(slot).copied()
+    }
+
+    /// There is always a picture of hair to draw with (the first one is made when it is needed).
+    fn ensure_hair_texture(&mut self, mesh: &AssetMesh) -> Option<usize> {
+        let tex = mesh.texture.as_ref()?;
+        let y_start = (self.strip_v0? * tex.height() as f32).ceil() as u32;
+        if Self::hair_slots(tex.width(), tex.height(), y_start).is_empty() {
+            return None;
+        }
+        if self.hair_textures.is_empty() {
+            self.hair_textures.push(HairTex { name: "Hair 1".into(), slot: 0, ready: false });
+        }
+        self.hair_cur = self.hair_cur.min(self.hair_textures.len() - 1);
+        Some(self.hair_cur)
+    }
+
+    /// A picture of hair that has not got its colours yet gets a smooth colour from the root to the end (the colours of the brush).
+    fn paint_hair_default(&mut self, mesh: &mut AssetMesh, idx: usize) {
+        if self.hair_textures.get(idx).is_none_or(|h| h.ready) {
+            return;
+        }
+        if let Some((rx, ry, rw, rh)) = self.hair_rect(mesh, idx) {
+            if let Some(tex) = mesh.texture.as_mut() {
+                image::imageops::replace(tex, &meshbrush::gradient_image(rw, rh, self.brush.root, self.brush.tip, idx as u32 + 1), rx as i64, ry as i64);
+            }
+            self.hair_textures[idx].ready = true;
+        }
+    }
+
+    /// Another picture of hair, made of the colours of the brush: it is the one the hair brush draws with from now on.
+    pub fn new_hair_texture(&mut self, mesh: &mut AssetMesh) {
+        if !self.ensure_strip(mesh) || self.ensure_hair_texture(mesh).is_none() {
+            self.message = Some("This mesh has no room for a picture of hair: it needs a texture (unwrap it first) that is big enough.".into());
+            return;
+        }
+        let Some(tex) = mesh.texture.as_ref() else { return };
+        let y_start = (self.strip_v0.unwrap_or(0.9) * tex.height() as f32).ceil() as u32;
+        if self.hair_textures.len() >= Self::hair_slots(tex.width(), tex.height(), y_start).len() {
+            self.message = Some("There is no room for more pictures of hair: use a bigger texture.".into());
+            return;
+        }
+        self.hair_textures.push(HairTex { name: format!("Hair {}", self.hair_textures.len() + 1), slot: self.hair_textures.len(), ready: false });
+        self.hair_cur = self.hair_textures.len() - 1;
+        self.paint_hair_default(mesh, self.hair_cur);
+        self.hair_editor = None;
+    }
+
+    /// A picture from a file becomes a picture of hair (it is made as big as the place for it) and the one the hair brush draws with.
+    pub fn import_hair_texture(&mut self, mesh: &mut AssetMesh, path: &std::path::Path) {
+        let img = match image::open(path) {
+            Ok(i) => i.to_rgba8(),
+            Err(e) => {
+                self.message = Some(format!("The picture could not be opened: {e}"));
+                return;
+            }
+        };
+        let before = self.hair_textures.len();
+        self.new_hair_texture(mesh);
+        if self.hair_textures.len() == before {
+            return;
+        }
+        if let Some((rx, ry, rw, rh)) = self.hair_rect(mesh, self.hair_cur) {
+            let fit = image::imageops::resize(&img, rw, rh, image::imageops::FilterType::Lanczos3);
+            if let Some(tex) = mesh.texture.as_mut() {
+                image::imageops::replace(tex, &fit, rx as i64, ry as i64);
+            }
+            if let Some(name) = path.file_stem() {
+                self.hair_textures[self.hair_cur].name = name.to_string_lossy().chars().take(20).collect();
+            }
+        }
+        self.painted = true;
+        self.version += 1;
+    }
+
+    /// A line of hair looks into another picture of hair: its texture coordinates move from the rectangle it had to the new one.
+    pub fn strand_set_hair_texture(&mut self, mesh: &mut AssetMesh, i: usize, tex: usize) {
+        let Some(s) = self.strands.get(i) else { return };
+        let Some(old) = s.tex else { return };
+        let (Some(from), Some(to)) = (self.hair_rect(mesh, old), self.hair_rect(mesh, tex)) else { return };
+        let Some(t) = mesh.texture.as_ref() else { return };
+        let (size, high) = (t.width() as f32, t.height() as f32);
+        for uv in mesh.uvs.iter_mut().take(s.verts.1).skip(s.verts.0) {
+            let u = (uv[0] * size - from.0 as f32 - 2.0) / (from.2 - 4) as f32;
+            let v = (uv[1] * high - from.1 as f32 - 1.0) / (from.3 - 2) as f32;
+            *uv = [(to.0 as f32 + 2.0 + u * (to.2 - 4) as f32) / size, (to.1 as f32 + 1.0 + v * (to.3 - 2) as f32) / high];
+        }
+        self.strands[i].tex = Some(tex);
+        self.paint_hair_default(mesh, tex);
+        self.version += 1;
+    }
+
+    /// Open a picture of hair to draw it: the whole rectangle every line of hair that looks into it covers, with the brush of the Draw tab.
     pub fn open_hair_editor(&mut self, mesh: &mut AssetMesh) {
         if !self.ensure_strip(mesh) {
             self.message = Some("This mesh has no texture, so the hair has no picture. Unwrap it first (the Redraw and sculpt page).".into());
             return;
         }
-        let (Some(v0), Some(tex)) = (self.strip_v0, mesh.texture.as_mut()) else { return };
-        let y_start = (v0 * tex.height() as f32).ceil() as u32;
-        let Some((rx, ry, rs)) = Self::hair_region(tex.width(), tex.height(), y_start) else {
+        let Some(idx) = self.ensure_hair_texture(mesh) else {
             self.message = Some("The strip of the texture is too small for a hair picture: use a bigger texture.".into());
             return;
         };
-        if !self.hair_ready {
-            let img = meshbrush::cell_image(rs, self.brush.root, self.brush.tip, 1);
-            image::imageops::replace(tex, &img, rx as i64, ry as i64);
-            self.hair_ready = true;
-        }
-        let crop = image::imageops::crop_imm(tex, rx, ry, rs, rs).to_image();
-        let mut doc = Document::new(rs, rs);
-        doc.layers[0].tiles = crate::files::tiles_from_rgba(&crop, 0, 0, rs, rs);
-        self.hair_editor = Some(HairEditor { doc, stroke: None, handle: None, region: (rx, ry, rs), last: None });
+        self.paint_hair_default(mesh, idx);
+        let Some((rx, ry, rw, rh)) = self.hair_rect(mesh, idx) else { return };
+        let Some(tex) = mesh.texture.as_ref() else { return };
+        let crop = image::imageops::crop_imm(tex, rx, ry, rw, rh).to_image();
+        let mut doc = Document::new(rw, rh);
+        doc.layers[0].tiles = crate::files::tiles_from_rgba(&crop, 0, 0, rw, rh);
+        self.hair_editor = Some(HairEditor { doc, stroke: None, handle: None, region: (rx, ry, rw, rh), tex: idx });
     }
 
-    /// The window for drawing the picture of the hair.
+    /// The window for drawing the picture of hair.
     pub fn hair_editor_ui(&mut self, ctx: &egui::Context, mesh: &mut AssetMesh) {
         let Some(mut ed) = self.hair_editor.take() else { return };
         let mut open = true;
         let kit = self.kit.clone();
-        let rs = ed.region.2;
-        let zoom = (360 / rs).max(1) as f32;
+        let (rw, rh) = (ed.region.2, ed.region.3);
+        let zoom = (440 / rh).max(1) as f32;
         let mut redo_default = false;
-        egui::Window::new(RichText::new("Hair picture").strong()).id(egui::Id::new("hair_picture_window")).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
-            ui.label(RichText::new("Every line of hair has this picture: across the line left to right, the root at the top and the end at the bottom. Draw it with the brush of the Draw tab (the same brush and colour).").size(11.5).color(TEXT_DIM));
-            let (rect, resp) = ui.allocate_exact_size(vec2(rs as f32 * zoom, rs as f32 * zoom), Sense::click_and_drag());
-            let to_doc = |p: Pos2| BrushSample { x: ((p.x - rect.min.x) / zoom).clamp(0.0, rs as f32 - 1.0), y: ((p.y - rect.min.y) / zoom).clamp(0.0, rs as f32 - 1.0), p: 1.0 };
+        let title = self.hair_textures.get(ed.tex).map(|h| h.name.clone()).unwrap_or_default();
+        egui::Window::new(RichText::new(format!("Hair picture: {title}")).strong()).id(egui::Id::new("hair_picture_window")).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+            ui.label(RichText::new("Every line of hair that uses this picture is covered by the whole of it: across the line left to right, the root at the top and the end at the bottom. Draw it with the brush of the Draw tab (the same brush and colour).").size(11.5).color(TEXT_DIM));
+            let (rect, resp) = ui.allocate_exact_size(vec2(rw as f32 * zoom, rh as f32 * zoom), Sense::click_and_drag());
+            let to_doc = |p: Pos2| BrushSample { x: ((p.x - rect.min.x) / zoom).clamp(0.0, rw as f32 - 1.0), y: ((p.y - rect.min.y) / zoom).clamp(0.0, rh as f32 - 1.0), p: 1.0 };
             let none = |_: i32, _: i32| -> Option<egui::Color32> { None };
             if let Some(kit) = &kit {
                 let mut settings = kit.settings.clone();
@@ -1168,13 +1298,13 @@ impl HandRig {
                 }
             }
             // the picture, as it is now
-            let mut img = RgbaImage::new(rs, rs);
-            for ty in 0..=((rs as usize - 1) / TILE) {
-                for tx in 0..=((rs as usize - 1) / TILE) {
+            let mut img = RgbaImage::new(rw, rh);
+            for ty in 0..=((rh as usize - 1) / TILE) {
+                for tx in 0..=((rw as usize - 1) / TILE) {
                     Self::put_tile(&mut img, &ed.doc, (tx as i32, ty as i32));
                 }
             }
-            let color = egui::ColorImage::from_rgba_unmultiplied([rs as usize, rs as usize], img.as_raw());
+            let color = egui::ColorImage::from_rgba_unmultiplied([rw as usize, rh as usize], img.as_raw());
             let tex = ui.ctx().load_texture("hair_picture", color, TextureOptions::NEAREST);
             ui.painter().image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
             ed.handle = Some(tex);
@@ -1189,8 +1319,8 @@ impl HandRig {
             });
         });
         if redo_default {
-            let img = meshbrush::cell_image(rs, self.brush.root, self.brush.tip, 1);
-            ed.doc.layers[0].tiles = crate::files::tiles_from_rgba(&img, 0, 0, rs, rs);
+            let img = meshbrush::gradient_image(rw, rh, self.brush.root, self.brush.tip, ed.tex as u32 + 1);
+            ed.doc.layers[0].tiles = crate::files::tiles_from_rgba(&img, 0, 0, rw, rh);
             ed.doc.layers[0].rev += 1;
         }
         self.painted = true;
@@ -1236,14 +1366,74 @@ impl HandRig {
 
     /// Keep the part: it is a part of the mesh now (it can be taken back like a stroke).
     pub fn attach_keep(&mut self, mesh: &AssetMesh) {
-        if let Some((_, _, v0, t0)) = self.attach.take() {
+        if let Some((part, params, v0, t0)) = self.attach.take() {
             if mesh.verts.len() > v0 {
                 self.geo_undo.push((v0, t0));
                 self.strip_next += 1;
-                let part = self.attach_label.take().unwrap_or_else(|| "Part".into());
-                self.strands.push(Strand { name: part, verts: (v0, mesh.verts.len()), bones: None, line: Vec::new(), width_mul: 1.0 });
+                let bones_before = self.rig.bones.len();
+                let chains = attach::rigging(part, &params, &attach::Anchors::of(&AssetMesh { verts: mesh.verts[..v0].to_vec(), uvs: Vec::new(), tris: Vec::new(), texture: None, normal: None }));
+                let bones = self.rig_part(mesh, v0, &chains);
+                if bones.is_some() {
+                    self.hair_marks.push((self.geo_undo.len() - 1, bones_before));
+                }
+                let name = self.attach_label.take().unwrap_or_else(|| "Part".into());
+                self.strands.push(Strand { name, verts: (v0, mesh.verts.len()), bones, line: Vec::new(), width_mul: 1.0, tex: None });
             }
         }
+    }
+
+    /// The bones of a part that moves (a tail, wings): chains along it, hanging from the bone that moves what is under their root, and the points of the part follow
+    /// the bones of the chain they are nearest to, along its length.
+    fn rig_part(&mut self, mesh: &AssetMesh, v0: usize, chains: &[attach::RigChain]) -> Option<(usize, usize)> {
+        if chains.is_empty() || self.rig.weights.len() != mesh.verts.len() {
+            return None;
+        }
+        let first = self.rig.bones.len();
+        let k = self.hair_count + 1;
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
+        for c in chains {
+            let root = c.joints[0];
+            let near = mesh.verts[..v0].iter().enumerate().min_by(|a, b| {
+                let d = |p: &[f32; 3]| (p[0] - root[0]).powi(2) + (p[1] - root[1]).powi(2) + (p[2] - root[2]).powi(2);
+                d(a.1).total_cmp(&d(b.1))
+            }).map(|x| x.0);
+            let parent = near.and_then(|f| self.rig.main_bone(f));
+            let start = self.rig.bones.len();
+            for i in 0..c.joints.len() - 1 {
+                let name = if c.name == "tail" { format!("tail_{k}_{i}") } else { format!("{}_{i}", c.name) };
+                let up = if i == 0 { parent } else { Some(start + i - 1) };
+                self.rig.add_bone(&name, up, c.joints[i], c.joints[i + 1]);
+            }
+            ranges.push((start, c.joints.len() - 1));
+        }
+        // every point of the part follows the chain that is nearest to it, along the chain
+        for j in v0..mesh.verts.len() {
+            let p = mesh.verts[j];
+            let mut best = (f32::MAX, 0usize, 0.0f32);
+            for (ci, c) in chains.iter().enumerate() {
+                let n = c.joints.len() - 1;
+                for s in 0..n {
+                    let (a, b) = (c.joints[s], c.joints[s + 1]);
+                    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                    let l2 = (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]).max(1e-12);
+                    let t = (((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1] + (p[2] - a[2]) * ab[2]) / l2).clamp(0.0, 1.0);
+                    let q = [a[0] + ab[0] * t, a[1] + ab[1] * t, a[2] + ab[2] * t];
+                    let d = (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2) + (q[2] - p[2]).powi(2);
+                    if d < best.0 {
+                        best = (d, ci, s as f32 + t);
+                    }
+                }
+            }
+            let (_, ci, u) = best;
+            let (start, n) = ranges[ci];
+            let i = (u.floor() as usize).min(n - 1);
+            let f = u - i as f32;
+            let next = if i + 1 < n { ((f - 0.55) / 0.45).clamp(0.0, 1.0).powi(2) * (3.0 - 2.0 * ((f - 0.55) / 0.45).clamp(0.0, 1.0)) } else { 0.0 };
+            self.rig.weights[j] = if next > 0.0 { vec![((start + i) as u16, 1.0 - next), ((start + i + 1) as u16, next)] } else { vec![((start + i) as u16, 1.0)] };
+        }
+        self.pose.rot.resize(self.rig.bones.len(), [0.0; 3]);
+        self.hair_sim = None;
+        Some((first, self.rig.bones.len() - first))
     }
 
     /// Take the part that is being shaped away.
@@ -1268,7 +1458,7 @@ impl HandRig {
         }
         if let Some((first, n)) = s.bones {
             for b in self.rig.bones.iter_mut().skip(first).take(n) {
-                if b.name.starts_with("hair") {
+                if is_part_bone(&b.name) {
                     for p in [&mut b.head, &mut b.tail] {
                         *p = [p[0] + d[0], p[1] + d[1], p[2] + d[2]];
                     }
@@ -1317,7 +1507,7 @@ impl HandRig {
         }
         if let Some((first, n)) = s.bones {
             for b in self.rig.bones.iter_mut().skip(first).take(n) {
-                if b.name.starts_with("hair") {
+                if is_part_bone(&b.name) {
                     b.head = grow(b.head);
                     b.tail = grow(b.tail);
                 }
@@ -1359,7 +1549,7 @@ impl HandRig {
         }
         if let Some((first, n)) = s.bones {
             for b in self.rig.bones.iter_mut().skip(first).take(n) {
-                if b.name.starts_with("hair") {
+                if is_part_bone(&b.name) {
                     b.head = turn(b.head);
                     b.tail = turn(b.tail);
                 }
@@ -1392,7 +1582,7 @@ impl HandRig {
         }
         if let Some((first, n)) = s.bones {
             for b in self.rig.bones.iter_mut().skip(first).take(n) {
-                if b.name.starts_with("hair") {
+                if is_part_bone(&b.name) {
                     b.head = grow(b.head);
                     b.tail = grow(b.tail);
                 }
@@ -1451,6 +1641,27 @@ impl HandRig {
         self.hair = hair;
     }
 
+    /// The shape that is being made goes where the pointer is on the surface (a little out of it, so it sits on it).
+    fn place_shape_at(&mut self, mesh: &mut AssetMesh, cam: &Camera, at: Pos2) {
+        let Some((shape, params, _, v0, t0)) = self.shape_pending else { return };
+        let (px, py) = (at.x as i32, at.y as i32);
+        if px < 0 || py < 0 || px >= cam.w as i32 || py >= cam.h as i32 {
+            return;
+        }
+        let Some(&id) = self.ids.get(py as usize * cam.w as usize + px as usize) else { return };
+        if id == u32::MAX {
+            return;
+        }
+        // the ids are of the mesh as it was drawn: a triangle of the shape itself is not a place to put it on
+        if id as usize >= t0 {
+            return;
+        }
+        let Some((p, n)) = mesh.surface_at(&mesh.verts, cam, id as usize, px as f32 + 0.5, py as f32 + 0.5) else { return };
+        let r = params.size * 0.8;
+        self.shape_pending = Some((shape, params, [p[0] + n[0] * r, p[1] + n[1] * r, p[2] + n[2] * r], v0, t0));
+        self.shape_apply(mesh);
+    }
+
     /// Start a shape (or change to another): it is put in the middle of the body, to be moved where it is wanted.
     pub fn shape_start(&mut self, mesh: &mut AssetMesh, shape: meshops::Shape) {
         if !self.ensure_strip(mesh) {
@@ -1477,7 +1688,7 @@ impl HandRig {
             if mesh.verts.len() > v0 {
                 self.geo_undo.push((v0, t0));
                 self.strip_next += 1;
-                self.strands.push(Strand { name: shape.label().to_string(), verts: (v0, mesh.verts.len()), bones: None, line: Vec::new(), width_mul: 1.0 });
+                self.strands.push(Strand { name: shape.label().to_string(), verts: (v0, mesh.verts.len()), bones: None, line: Vec::new(), width_mul: 1.0, tex: None });
                 self.strand_sel = Some(self.strands.len() - 1);
             }
         }
@@ -1650,12 +1861,13 @@ impl HandRig {
     }
 
     /// The hair swings: the chains of bones that hang from the head are run by the simulation, and their turns are put in the pose that is shown.
-    pub fn apply_hair(&mut self, dt: f32) {
+    pub fn apply_hair(&mut self, mesh: &AssetMesh, dt: f32) {
         if !self.hair_physics {
             return;
         }
         if self.hair_sim.is_none() || self.hair_sig != self.rig.bones.len() {
-            self.hair_sim = Some(crate::hairsim::HairSim::new(&self.rig));
+            let colliders = self.hair_colliders(mesh);
+            self.hair_sim = Some(crate::hairsim::HairSim::with_colliders(&self.rig, &colliders));
             self.hair_sig = self.rig.bones.len();
         }
         let params = self.hair_params;
@@ -1670,15 +1882,38 @@ impl HandRig {
         }
     }
 
+    /// How wide the body is round the bones that the hair must not go through (the head, the neck, the chest, the shoulders and the upper arms): the mean
+    /// distance of the points that each moves from the bone, a little less.
+    pub fn hair_colliders(&self, mesh: &AssetMesh) -> Vec<crate::hairsim::Collider> {
+        let wanted = ["head", "neck", "chest", "upperchest", "spine", "leftshoulder", "rightshoulder", "leftupperarm", "rightupperarm"];
+        let mut sum = vec![(0.0f32, 0u32); self.rig.bones.len()];
+        if self.rig.weights.len() != mesh.verts.len() {
+            return Vec::new();
+        }
+        for (i, v) in mesh.verts.iter().enumerate() {
+            if let Some(b) = self.rig.main_bone(i) {
+                if wanted.contains(&self.rig.bones[b].name.to_lowercase().as_str()) {
+                    let bone = &self.rig.bones[b];
+                    sum[b].0 += crate::rig3d::distance_to_bone(*v, bone.head, bone.tail).0;
+                    sum[b].1 += 1;
+                }
+            }
+        }
+        sum.iter().enumerate().filter(|(_, s)| s.1 > 20).map(|(b, s)| (b, 0.9 * s.0 / s.1 as f32)).collect()
+    }
+
     /// Is there hair that moves (bones of strands that were drawn)?
     pub fn has_hair(&self) -> bool {
-        self.rig.bones.iter().any(|b| b.name.to_lowercase().starts_with("hair"))
+        self.rig.bones.iter().any(|b| {
+            let n = b.name.to_lowercase();
+            n.starts_with("hair") || n.starts_with("tail")
+        })
     }
 
     /// The animations get the motion of the hair, when it is on: the files carry it as keys.
-    pub fn with_hair(&self, mut anims: Vec<crate::take::Anim>) -> Vec<crate::take::Anim> {
+    pub fn with_hair(&self, mut anims: Vec<crate::take::Anim>, mesh: &AssetMesh) -> Vec<crate::take::Anim> {
         if self.hair_physics && self.has_hair() {
-            crate::hairsim::bake(&self.rig, &mut anims, &self.hair_params);
+            crate::hairsim::bake(&self.rig, &mut anims, &self.hair_params, &self.hair_colliders(mesh));
         }
         anims
     }
@@ -2194,6 +2429,11 @@ impl HandRig {
                         self.version += 1;
                     }
                 }
+                Grab::ShapePlace => {
+                    if let Some(now) = now {
+                        self.place_shape_at(mesh, &cam, now);
+                    }
+                }
                 Grab::StrandMove(i) => {
                     if let Some(now) = now {
                         let depth = self.strands.get(i).and_then(|s| s.line.first().copied()).map(|p| cam.project(p)[2]).unwrap_or(0.0);
@@ -2548,6 +2788,10 @@ impl HandRig {
                 }
                 Grab::Sculpt
             }
+            Tool::Mesh if self.shape_pending.is_some() && self.shape_place => {
+                self.place_shape_at(mesh, cam, at);
+                Grab::ShapePlace
+            }
             Tool::Mesh if self.tip_at(cam, at).is_some() => {
                 let i = self.tip_at(cam, at).unwrap_or(0);
                 self.strand_sel = Some(i);
@@ -2875,6 +3119,17 @@ impl HandRig {
                         self.attach_apply(mesh);
                     }
                 });
+                if let Some((part, _, v0, t0)) = self.attach {
+                    ui.label(RichText::new("Presets").size(12.0).color(TEXT_DIM));
+                    ui.horizontal_wrapped(|ui| {
+                        for (name, params) in part.presets() {
+                            if widgets::chip(ui, name, false).help("The numbers of this kind: change them afterwards like any others").clicked() {
+                                self.attach = Some((part, params, v0, t0));
+                                self.attach_apply(mesh);
+                            }
+                        }
+                    });
+                }
                 if let Some((part, mut p, v0, t0)) = self.attach {
                     let mut changed = false;
                     if matches!(part, attach::Part::Horns | attach::Part::Wings) {
@@ -2910,7 +3165,7 @@ impl HandRig {
             Tool::Mesh => {
                 section_title(ui, "Mesh brushes");
                 ui.horizontal_wrapped(|ui| {
-                    if widgets::chip(ui, "Hair line", self.hair).help("Draw one line for a strand of hair: the strand is made along it and its bones are made and rigged, so it swings like hair when the head moves").clicked() {
+                    if widgets::chip(ui, "Hair", self.hair).help("Draw one line for a strand of hair: the strand is made along it and its bones are made and rigged, so it swings like hair when the head moves").clicked() {
                         self.hair = true;
                         self.brush = self.brush.with_kind(BrushKind::Card);
                         self.brush.width = 0.02;
@@ -2923,8 +3178,63 @@ impl HandRig {
                         }
                     }
                 });
-                if self.hair && ui.button("Draw the hair picture...").help("Open the picture all the lines of hair look into (like the hair texture of VRoid) and draw it by hand").clicked() {
-                    self.open_hair_editor(mesh);
+                if self.hair {
+                    ui.label(RichText::new("Kind of hair").size(12.0).color(TEXT_DIM));
+                    ui.horizontal_wrapped(|ui| {
+                        // every kind is one line with its bones inside: the bones are along the line you draw, the curl is on the strand
+                        for (name, tip, kind, width, taper, curl, size, turn) in [
+                            ("Straight", "A flat strand of straight hair", BrushKind::Card, 0.02, 0.75, Curl::None, 0.0, 0.05),
+                            ("Wavy", "A strand that waves to the side as it goes", BrushKind::Card, 0.02, 0.7, Curl::Wave, 0.012, 0.09),
+                            ("Curly", "A thin round strand that curls round the line you draw: ringlets", BrushKind::Strand, 0.009, 0.5, Curl::Spiral, 0.012, 0.05),
+                            ("Coil", "A thick strand with big tight turns: coils, springs", BrushKind::Strand, 0.012, 0.4, Curl::Spiral, 0.022, 0.045),
+                            ("Locks", "A wide flat clump of hair with a soft wave", BrushKind::Card, 0.05, 0.55, Curl::Wave, 0.008, 0.14),
+                            ("Spiky", "A short stiff point that stands out", BrushKind::Card, 0.03, 0.95, Curl::None, 0.0, 0.05),
+                        ] {
+                            let on = self.brush.kind == kind && self.brush.curl == curl && (self.brush.width - width).abs() < 1e-4;
+                            if widgets::chip(ui, name, on).help(tip).clicked() {
+                                self.hair = true;
+                                self.brush = self.brush.with_kind(kind);
+                                (self.brush.width, self.brush.taper, self.brush.curl, self.brush.curl_size, self.brush.curl_len) = (width, taper, curl, size, turn);
+                            }
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        for (c, label) in [(Curl::None, "No curl"), (Curl::Wave, "Wave"), (Curl::Spiral, "Spiral")] {
+                            if widgets::chip(ui, label, self.brush.curl == c).clicked() {
+                                self.brush.curl = c;
+                            }
+                        }
+                    });
+                    if self.brush.curl != Curl::None {
+                        ui.add(egui::Slider::new(&mut self.brush.curl_size, 0.002..=0.06).text("Curl size").suffix(" m")).help("How far the strand goes from the line you draw");
+                        ui.add(egui::Slider::new(&mut self.brush.curl_len, 0.01..=0.3).logarithmic(true).text("One turn").suffix(" m")).help("How long one turn or wave is");
+                    }
+                    section_title(ui, "Hair texture");
+                    ui.label(RichText::new("A hair texture is a rectangle (like the hair texture of VRoid): across the line, the root at the top, the end at the bottom. It covers the whole of every line of hair that uses it. The hair brush draws with the picked one.").size(11.0).color(TEXT_DIM));
+                    ui.horizontal_wrapped(|ui| {
+                        for i in 0..self.hair_textures.len() {
+                            if widgets::chip(ui, &self.hair_textures[i].name.clone(), self.hair_cur == i).help("Draw hair with this texture").clicked() {
+                                self.hair_cur = i;
+                                self.hair_editor = None;
+                            }
+                        }
+                        if self.hair_textures.is_empty() {
+                            ui.label(RichText::new("The first one is made with the first line of hair.").size(11.0).color(TEXT_DIM));
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("New").help("Another hair texture, from the root and end colours").clicked() {
+                            self.new_hair_texture(mesh);
+                        }
+                        if ui.button("Import a picture...").help("A picture file becomes a hair texture").clicked() {
+                            if let Some(p) = rfd::FileDialog::new().set_title("A hair texture").add_filter("Pictures", &["png", "jpg", "jpeg", "webp"]).pick_file() {
+                                self.import_hair_texture(mesh, &p);
+                            }
+                        }
+                        if ui.button("Draw it...").help("Open the picked texture and draw it by hand, with the brush of the Draw tab").clicked() {
+                            self.open_hair_editor(mesh);
+                        }
+                    });
                 }
                 if self.hair {
                     ui.label(RichText::new("One line is one strand: from the root outwards, the way the hair lies. The strand and the bones that make it swing come from the line. Put the bones of a person in first (the Bones and weights page), so the hair hangs from the head. Then play an animation on the Animate by hand page.").size(11.0).color(TEXT_DIM));
@@ -2962,6 +3272,7 @@ impl HandRig {
                     if matches!(shape, meshops::Shape::Ball | meshops::Shape::Cylinder | meshops::Shape::Cone) {
                         changed |= ui.add(egui::Slider::new(&mut p.rings, 2..=96).text("Rings")).changed();
                     }
+                    ui.checkbox(&mut self.shape_place, "Click the mesh to put it there").help("Click or drag on the mesh and the shape goes there (it is turned off to draw strokes while a shape is being made)");
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Place").size(12.0).color(TEXT_DIM));
                         for (k, axis) in ["x", "y", "z"].into_iter().enumerate() {
@@ -3035,6 +3346,9 @@ impl HandRig {
                         self.picking = !self.picking;
                     }
                 });
+                if ui.button(if self.brush_window { "Close the brushes" } else { "Pick a brush..." }).help("The brushes of the Draw tab: every brush, its settings and its textures (cloth, leopard dots, scales, fur...)").clicked() {
+                    self.brush_window = !self.brush_window;
+                }
                 if self.kit.is_some() {
                     ui.label(RichText::new("It paints with the brush you picked in the Draw tab: every brush, its size, shape, dynamics and texture, and the colour. The eraser and the smudge of the Draw tab work here too.").size(11.0).color(TEXT_DIM));
                     ui.add(egui::Slider::new(&mut self.tex_size_mul, 0.2..=4.0).text("Brush size here")).help("How big the brush of the Draw tab is on the mesh (as a multiplier)");
@@ -3452,6 +3766,23 @@ impl HandRig {
             ui.label(RichText::new("Pick one of them (or click it in the picture) to change it.").size(11.0).color(TEXT_DIM));
             return;
         };
+        if let Some(cur) = self.strands[i].tex {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Texture").size(12.0).color(TEXT_DIM));
+                for k in 0..self.hair_textures.len() {
+                    if widgets::chip(ui, &self.hair_textures[k].name.clone(), cur == k).help("This line of hair looks into this texture").clicked() && cur != k {
+                        self.strand_set_hair_texture(mesh, i, k);
+                    }
+                }
+            });
+            if ui.small_button("All the hair uses the picked texture").help("Every line of hair gets the texture that the hair brush draws with").clicked() {
+                for j in 0..self.strands.len() {
+                    if self.strands[j].tex.is_some() && self.strands[j].tex != Some(self.hair_cur) {
+                        self.strand_set_hair_texture(mesh, j, self.hair_cur);
+                    }
+                }
+            }
+        }
         if !self.strands[i].line.is_empty() {
             let mut mul = self.strands[i].width_mul;
             if ui.add(egui::Slider::new(&mut mul, 0.3..=4.0).text("Thickness")).help("How thick it is, as a multiplier of how it was drawn").changed() {
@@ -3657,7 +3988,7 @@ impl SeviathApp {
                 ui.ctx().request_repaint();
             }
             if hand.has_hair() {
-                hand.apply_hair(dt);
+                hand.apply_hair(&*mesh, dt);
                 ui.ctx().request_repaint();
             }
         } else {
@@ -3712,6 +4043,15 @@ impl SeviathApp {
         }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(14, 20, 18)).inner_margin(egui::Margin::same(6))).show(ui, |ui| hand.viewport(ui, &mut *mesh));
         hand.hair_editor_ui(&ui.ctx().clone(), &mut *mesh);
+        if hand.brush_window {
+            let mut open = true;
+            egui::Window::new(RichText::new("Brushes").strong()).id(egui::Id::new("brushes_3d")).open(&mut open).default_size([380.0, 620.0]).show(&ui.ctx().clone(), |ui| {
+                egui::ScrollArea::vertical().id_salt("brushes_3d_scroll").show(ui, |ui| self.draw.brush_window_ui(ui));
+            });
+            if !open {
+                hand.brush_window = false;
+            }
+        }
         match ask {
             Ask::Open => self.mesh_open_glb(),
             Ask::Save => self.mesh_save_rigged(),
@@ -3739,7 +4079,10 @@ impl SeviathApp {
         if with_takes {
             all.extend(self.m3.hand.take_anims());
         }
-        self.m3.hand.with_hair(all)
+        match self.m3.mesh.as_ref() {
+            Some(m) => self.m3.hand.with_hair(all, m),
+            None => all,
+        }
     }
 
     /// A .glb is opened as the mesh (with its rig, when it has one).
@@ -4160,6 +4503,8 @@ mod tests {
     /// A hair stroke drawn on the figure with the bones of a person in it.
     fn hair_figure() -> (AssetMesh, HandRig, Camera) {
         let (mut mesh, mut hand, cam) = mirror_setup();
+        // a texture that is big enough for the pictures of hair (rectangles in the strip)
+        mesh.texture = Some(RgbaImage::from_pixel(1024, 1024, image::Rgba([200, 160, 140, 255])));
         hand.mirror = false;
         let (lo, hi) = mesh.bounds();
         hand.rig = Rig3::humanoid(mesh.verts.len(), lo, hi);
@@ -4230,124 +4575,124 @@ mod tests {
     }
 
     #[test]
-    fn all_the_lines_of_hair_look_into_one_picture_that_is_not_a_cell_and_can_be_opened_to_draw() {
+    fn hair_has_rectangular_textures_that_cover_every_line_and_each_line_can_use_another() {
         let (mut mesh, mut hand, cam) = hair_figure();
         let tex = mesh.texture.as_ref().unwrap();
         let (size, high) = tex.dimensions();
         let y_start = (hand.strip_v0.unwrap() * high as f32).ceil() as u32;
-        let (rx, ry, rs) = HandRig::hair_region(size, high, y_start).expect("a place for the picture of the hair");
-        // the points of the strand look into the square of the picture of the hair
+        let slots = HandRig::hair_slots(size, high, y_start);
+        assert!(slots.len() >= 2, "{} places for pictures of hair", slots.len());
+        let (rx, ry, rw, rh) = slots[0];
+        assert!(rh > rw, "a tall rectangle, like the hair texture of VRoid: {rw} x {rh}");
+        // the points of the line look into the rectangle, and the rectangle is covered from the top to the bottom
         let (v0, v1) = (hand.strands[0].verts.0, hand.strands[0].verts.1);
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
         for i in v0..v1 {
             let (x, y) = (mesh.uvs[i][0] * size as f32, mesh.uvs[i][1] * high as f32);
-            assert!(x >= rx as f32 && x <= (rx + rs) as f32 && y >= ry as f32 && y <= (ry + rs) as f32, "point {i} looks at {x} {y}");
+            assert!(x >= rx as f32 && x <= (rx + rw) as f32 && y >= ry as f32 && y <= (ry + rh) as f32, "point {i} looks at {x} {y}");
+            lo = lo.min(y);
+            hi = hi.max(y);
         }
-        // no cell of the strip was used, and a second line uses the same picture
-        assert_eq!(hand.strip_next, 0);
+        assert!(lo < ry as f32 + rh as f32 * 0.1 && hi > ry as f32 + rh as f32 * 0.9, "the whole length of the line covers the whole rectangle: {lo} {hi}");
+        assert_eq!(hand.strip_next, 0, "no cell was used");
+        assert_eq!(hand.strands[0].tex, Some(0));
+        // another texture: the next line of hair looks into it, and the first line can be changed to it
+        hand.new_hair_texture(&mut mesh);
+        assert_eq!((hand.hair_textures.len(), hand.hair_cur), (2, 1));
         let x = cam.project([0.0, 1.9, 0.1])[0];
         hand.stroke = (0..20).map(|i| Pos2::new(x + 10.0 + i as f32 * 0.5, 40.0 + i as f32 * 8.0)).collect();
         hand.finish_stroke(&mut mesh, &cam);
-        assert_eq!((hand.strands.len(), hand.strip_next), (2, 0));
-        // the cells of the strip leave out the square of the picture
-        let cells = HandRig::strip_cells(size, high, y_start, Some((rx, ry, rs)));
-        assert!(cells.iter().all(|(cx, cy)| !(cx + 32 > rx && *cx < rx + rs && cy + 32 > ry && *cy < ry + rs)));
+        assert_eq!(hand.strands.len(), 2);
+        assert_eq!(hand.strands[1].tex, Some(1));
+        let (r2x, ..) = slots[1];
+        let second = hand.strands[1].verts.0;
+        assert!(mesh.uvs[second][0] * size as f32 >= r2x as f32, "the second line looks into the second rectangle");
+        hand.strand_set_hair_texture(&mut mesh, 0, 1);
+        assert_eq!(hand.strands[0].tex, Some(1));
+        for i in v0..v1 {
+            let x = mesh.uvs[i][0] * size as f32;
+            assert!(x >= r2x as f32 && x <= (r2x + rw) as f32, "the line moved to the second rectangle: {x}");
+        }
+        // a picture from a file is a texture of its own, as big as the place for it
+        let dir = std::env::temp_dir().join("sevi_hair_tex");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("curls.png");
+        RgbaImage::from_pixel(30, 90, image::Rgba([10, 240, 20, 255])).save(&file).unwrap();
+        hand.import_hair_texture(&mut mesh, &file);
+        assert_eq!((hand.hair_textures.len(), hand.hair_textures[2].name.as_str()), (3, "curls"));
+        let (ix, iy, ..) = HandRig::hair_slots(size, high, y_start)[2];
+        let px = mesh.texture.as_ref().unwrap().get_pixel(ix + 30, iy + 100).0;
+        assert!(px[1] > 200 && px[0] < 60, "{px:?}");
+        // the cells of the strokes keep out of the block of the pictures
+        let block = HandRig::hair_block(&slots);
+        let cells = HandRig::strip_cells(size, high, y_start, block);
+        let (bx, by, bw, bh) = block.unwrap();
+        assert!(cells.iter().all(|(cx, cy)| !(cx + 32 > bx && *cx < bx + bw && cy + 32 > by && *cy < by + bh)));
         assert!(!cells.is_empty());
         // opened, it has the pixels of the texture
+        hand.hair_cur = 0;
         hand.open_hair_editor(&mut mesh);
         let ed = hand.hair_editor.as_ref().expect("the editor is open");
-        assert_eq!(ed.region, (rx, ry, rs));
-        let first = ed.doc.flatten_tile((0, 0))[0];
-        let px = mesh.texture.as_ref().unwrap().get_pixel(rx, ry).0;
-        let c = crate::blend::from_px(first);
-        assert!((c.r() as i32 - px[0] as i32).abs() <= 2, "{c:?} {px:?}");
+        assert_eq!(ed.region, slots[0]);
+        let c = crate::blend::from_px(ed.doc.flatten_tile((0, 0))[0]);
+        let p = mesh.texture.as_ref().unwrap().get_pixel(rx, ry).0;
+        assert!((c.r() as i32 - p[0] as i32).abs() <= 2, "{c:?} {p:?}");
     }
 
     #[test]
-    fn a_drawn_object_is_turned_and_enlarged_about_its_root_with_its_bones_and_can_be_merged() {
-        let (mut mesh, mut hand, _cam) = hair_figure();
-        let first = hand.strands[0].bones.unwrap().0;
-        let root = hand.strands[0].line[0];
-        let v0 = hand.strands[0].verts.0;
-        let dist = |a: [f32; 3], b: [f32; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
-        let reach = dist(mesh.verts[v0], root);
-        let tail_before = hand.rig.bones[first].tail;
-        hand.strand_rotate(&mut mesh, 0, 2, 90.0);
-        // turned about the root: the distance to the root is the same, the end is somewhere else, the bones went with it
-        assert!((dist(mesh.verts[v0], root) - reach).abs() < 1e-4);
-        assert!(dist(hand.rig.bones[first].tail, tail_before) > 0.005, "the bones turned too");
-        assert!(dist(hand.strands[0].line[0], root) < 1e-5, "the root stays");
-        let line_len = |h: &HandRig| dist(h.strands[0].line[0], *h.strands[0].line.last().unwrap());
-        let before = line_len(&hand);
-        hand.strand_scale(&mut mesh, 0, 2.0);
-        assert!((line_len(&hand) / before - 2.0).abs() < 0.01);
-        // merged: it is not in the list, and still in the mesh with its bones
-        let n = mesh.verts.len();
-        hand.strand_merge(0);
-        assert!(hand.strands.is_empty() && mesh.verts.len() == n && hand.has_hair());
-    }
-
-    #[test]
-    fn a_shape_is_made_with_the_number_of_points_asked_for_changed_and_kept() {
-        let (mut mesh, mut hand, _cam) = mirror_setup();
-        let before = mesh.verts.len();
+    fn a_shape_goes_where_the_mesh_is_clicked_and_not_onto_itself() {
+        let (mut mesh, mut hand, cam) = mirror_setup();
         hand.shape_start(&mut mesh, meshops::Shape::Ball);
-        let few = mesh.verts.len() - before;
-        assert!(few > 20, "{few}");
-        let (shape, mut p, at, v0, t0) = hand.shape_pending.unwrap();
-        p.segments = 40;
-        p.rings = 20;
-        hand.shape_pending = Some((shape, p, at, v0, t0));
-        hand.shape_apply(&mut mesh);
-        assert!(mesh.verts.len() - before > few * 4, "more points when asked for: {} {few}", mesh.verts.len() - before);
-        assert_eq!(hand.rig.weights.len(), mesh.verts.len());
-        hand.shape_keep(&mesh);
-        assert!(hand.shape_pending.is_none() && hand.strands.len() == 1 && hand.strands[0].name == "Ball");
-        hand.strand_translate(&mut mesh, 0, [0.0, 0.1, 0.0]);
-        // another shape is thrown away
-        let kept = mesh.verts.len();
-        hand.shape_start(&mut mesh, meshops::Shape::Cylinder);
-        hand.shape_drop(&mut mesh);
-        assert_eq!(mesh.verts.len(), kept);
+        let before = hand.shape_pending.unwrap().2;
+        let p = cam.project([0.1, 1.5, 0.1]);
+        // the ids are of the mesh as it was last drawn: made again here
+        let (_, depth, ids) = mesh.render_full(&mesh.verts, &cam, false, crate::assetview::View::Textured, None);
+        hand.depth = depth;
+        hand.ids = ids;
+        hand.place_shape_at(&mut mesh, &cam, Pos2::new(p[0], p[1]));
+        let after = hand.shape_pending.unwrap().2;
+        assert_ne!(before, after, "the shape moved to where the mesh was clicked");
+        assert!(after[1] > 1.2 && after[1] < 1.8, "{after:?}: at the height that was clicked");
+    }
+
+    #[test]
+    fn a_tail_is_rigged_with_a_chain_that_swings_and_wings_with_bones_on_each_side_and_both_go_back_with_undo() {
+        let (mut mesh, mut hand, _cam) = hair_figure();
+        hand.hair = false;
+        let strands = hand.strands.len();
+        let bones0 = hand.rig.bones.len();
+        // a tail: a preset, kept
+        hand.attach_start(&mut mesh, attach::Part::Tail);
+        let (part, params) = (attach::Part::Tail, attach::Part::Tail.presets().into_iter().find(|p| p.0 == "Fox").unwrap().1);
+        let (_, _, v0, t0) = hand.attach.unwrap();
+        hand.attach = Some((part, params, v0, t0));
+        hand.attach_apply(&mut mesh);
+        let v_end = mesh.verts.len();
+        hand.attach_keep(&mesh);
+        let tail: Vec<usize> = (bones0..hand.rig.bones.len()).collect();
+        assert_eq!(tail.len(), 6, "six bones in a chain");
+        assert!(tail.iter().all(|i| hand.rig.bones[*i].name.starts_with("tail_")));
+        assert!(hand.rig.bones[tail[0]].parent.is_some(), "it hangs from a bone of the body");
+        assert_eq!(hand.rig.bones[tail[1]].parent, Some(tail[0]));
+        assert!(hand.has_hair(), "a tail swings like hair");
+        for j in v0..v_end {
+            assert!(hand.rig.weights[j].iter().all(|w| tail.contains(&(w.0 as usize))), "point {j}: {:?}", hand.rig.weights[j]);
+        }
+        // it goes with the strand record: moved, its bones move too
+        let b0 = hand.rig.bones[tail[0]].head;
+        let idx = hand.strands.len() - 1;
+        hand.strand_translate(&mut mesh, idx, [0.0, 0.0, -0.1]);
+        assert!((hand.rig.bones[tail[0]].head[2] - b0[2] + 0.1).abs() < 1e-5);
+        // wings: a chain on each side
+        hand.attach_start(&mut mesh, attach::Part::Wings);
+        hand.attach_keep(&mesh);
+        let names: Vec<&str> = hand.rig.bones.iter().map(|b| b.name.as_str()).filter(|n| n.starts_with("wing_")).collect();
+        assert!(names.iter().any(|n| n.starts_with("wing_L")) && names.iter().any(|n| n.starts_with("wing_R")), "{names:?}");
+        // taking them back takes the bones
         hand.undo_stroke(&mut mesh);
-        assert_eq!(mesh.verts.len(), before);
-    }
-
-    #[test]
-    fn faces_are_cut_smaller_at_the_joints_and_the_new_points_have_the_weights_of_their_neighbours() {
-        let (mut mesh, mut hand, _cam) = sculpt_setup();
-        // a bone on the grid, with a child: the joint is in the middle
-        hand.rig.add_bone("a", None, [0.0, 0.0, 0.0], [0.0, 0.2, 0.0]);
-        hand.rig.add_bone("b", Some(0), [0.0, 0.2, 0.0], [0.0, 0.4, 0.0]);
-        hand.rig.assign_nearest_parts(&mesh.verts);
-        hand.joint_radius = 0.1;
-        let (v0, t0) = (mesh.verts.len(), mesh.tris.len());
-        hand.fit_joints(&mut mesh);
-        assert!(mesh.verts.len() > v0 && mesh.tris.len() > t0);
-        assert_eq!(hand.rig.weights.len(), mesh.verts.len());
-        assert!(hand.rig.weights.iter().all(|w| !w.is_empty() && (w.iter().map(|x| x.1).sum::<f32>() - 1.0).abs() < 1e-3), "every point has a bone, adding up to one");
-        // it can be taken back
-        hand.undo_cut(&mut mesh);
-        assert_eq!(mesh.verts.len(), v0);
-        // all faces smaller
-        hand.subdivide_picked(&mut mesh);
-        assert_eq!(mesh.tris.len(), t0 * 4);
-    }
-
-    #[test]
-    fn the_holes_are_fixed_through_the_tool_and_the_weights_follow() {
-        let (_, mut hand, _cam) = sculpt_setup();
-        let mut tube = meshops::make(meshops::Shape::Cylinder, &meshops::ShapeParams { size: 0.1, height: 0.5, segments: 12, rings: 4 });
-        let keep = tube.tris.len() - 24;
-        tube.tris.truncate(keep);
-        hand.start_for(&tube);
-        hand.rig.add_bone("a", None, [0.0; 3], [0.0, 0.5, 0.0]);
-        hand.rig.assign_nearest_parts(&tube.verts);
-        let v0 = tube.verts.len();
-        hand.fix_holes(&mut tube);
-        assert_eq!(tube.verts.len(), v0 + 2, "a point in the middle of each hole");
-        assert_eq!(hand.rig.weights.len(), tube.verts.len());
-        assert!(hand.geometry_message.as_deref().unwrap().contains("2 holes closed"));
-        hand.fix_holes(&mut tube);
-        assert!(hand.geometry_message.as_deref().unwrap().contains("No holes"));
+        assert!(!hand.rig.bones.iter().any(|b| b.name.starts_with("wing_")));
+        hand.undo_stroke(&mut mesh);
+        assert_eq!(hand.rig.bones.len(), bones0);
+        assert_eq!(hand.strands.len(), strands);
     }
 }

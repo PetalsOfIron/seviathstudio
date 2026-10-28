@@ -46,6 +46,15 @@ impl Kind {
     }
 }
 
+/// How the line is curled about itself: a wave to the side, or a spiral round the line you drew (curls, coils).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Curl {
+    #[default]
+    None,
+    Wave,
+    Spiral,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Brush {
     pub kind: Kind,
@@ -59,11 +68,15 @@ pub struct Brush {
     pub droop: f32,
     pub root: [u8; 3],
     pub tip: [u8; 3],
+    /// The curl: how, how far it goes from the line (metres) and how long one turn or wave is (metres).
+    pub curl: Curl,
+    pub curl_size: f32,
+    pub curl_len: f32,
 }
 
 impl Default for Brush {
     fn default() -> Self {
-        Brush { kind: Kind::Card, width: 0.03, taper: 0.6, lift: 0.004, droop: 0.0, root: [60, 40, 35], tip: [150, 110, 80] }
+        Brush { kind: Kind::Card, width: 0.03, taper: 0.6, lift: 0.004, droop: 0.0, root: [60, 40, 35], tip: [150, 110, 80], curl: Curl::None, curl_size: 0.012, curl_len: 0.05 }
     }
 }
 
@@ -171,7 +184,8 @@ fn prepared(b: &Brush, stroke: &[Spot]) -> Option<Vec<Spot>> {
         let tip = add(z.p, mul(a.n, reach * 0.6));
         (0..5).map(|k| { let t = k as f32 / 4.0; Spot { p: add(mul(a.p, 1.0 - t), mul(tip, t)), n: a.n } }).collect::<Vec<_>>()
     } else {
-        resample(stroke, (b.width * 0.8).max(0.004), 60)
+        let spacing = if b.curl == Curl::None { (b.width * 0.8).max(0.004) } else { (b.width * 0.8).max(0.003).min(b.curl_len.max(0.01) / 8.0) };
+        resample(stroke, spacing, if b.curl == Curl::None { 60 } else { 240 })
     };
     if path.len() < 2 {
         return None;
@@ -183,6 +197,32 @@ fn prepared(b: &Brush, stroke: &[Spot]) -> Option<Vec<Spot>> {
         s.p = add(add(s.p, mul(s.n, b.lift)), [0.0, -b.droop * t * t, 0.0]);
     }
     Some(path)
+}
+
+/// The line is curled: every place moves away from the line you drew, to the side (a wave) or round it (a spiral), more and more over the first turn.
+fn curl_path(b: &Brush, path: &mut [Spot]) {
+    let mut along = vec![0.0f32; path.len()];
+    for i in 1..path.len() {
+        along[i] = along[i - 1] + len(sub(path[i].p, path[i - 1].p));
+    }
+    let straight: Vec<Spot> = path.to_vec();
+    let wavelength = b.curl_len.max(0.005);
+    for i in 0..path.len() {
+        let tangent = unit(sub(straight[(i + 1).min(path.len() - 1)].p, straight[i.saturating_sub(1)].p));
+        let mut side = cross(tangent, straight[i].n);
+        if len(side) < 1e-6 {
+            side = cross(tangent, [0.0, 1.0, 0.0]);
+        }
+        let side = unit(side);
+        let up = unit(cross(side, tangent));
+        let angle = std::f32::consts::TAU * along[i] / wavelength;
+        let ramp = (along[i] / wavelength).min(1.0);
+        let offset = match b.curl {
+            Curl::Wave => mul(side, b.curl_size * angle.sin() * ramp),
+            _ => add(mul(side, b.curl_size * angle.cos() * ramp), mul(up, b.curl_size * angle.sin() * ramp)),
+        };
+        path[i].p = add(straight[i].p, offset);
+    }
 }
 
 /// The joints of a chain of bones along the stroke: `pieces + 1` places, evenly spaced along the line the stroke is built along (the root first).
@@ -215,7 +255,10 @@ pub fn length(stroke: &[Spot]) -> f32 {
 
 /// The geometry of a stroke, or None when the stroke is too short to make anything.
 pub fn build(b: &Brush, stroke: &[Spot]) -> Option<Built> {
-    let path = prepared(b, stroke)?;
+    let mut path = prepared(b, stroke)?;
+    if b.curl != Curl::None && b.kind != Kind::Spike {
+        curl_path(b, &mut path);
+    }
     let count = path.len();
     let round = matches!(b.kind, Kind::Strand | Kind::Rope | Kind::Spike);
     let taper = if b.kind == Kind::Spike { 1.0 } else { b.taper };
@@ -267,19 +310,24 @@ pub fn build(b: &Brush, stroke: &[Spot]) -> Option<Built> {
     Some(out)
 }
 
-/// A cell of the texture for a stroke: the colour runs from the root to the tip (down the cell), with a few fine streaks across, like the hair it draws.
-pub fn cell_image(size: u32, root: [u8; 3], tip: [u8; 3], seed: u32) -> image::RgbaImage {
-    let mut img = image::RgbaImage::new(size, size);
+/// A picture of `w` by `h` texels for a stroke: the colour runs from the root to the tip (down the picture), with a few fine streaks across, like the hair it draws.
+pub fn gradient_image(w: u32, h: u32, root: [u8; 3], tip: [u8; 3], seed: u32) -> image::RgbaImage {
+    let mut img = image::RgbaImage::new(w, h);
     for (x, y, p) in img.enumerate_pixels_mut() {
-        let t = y as f32 / (size - 1).max(1) as f32;
+        let t = y as f32 / (h - 1).max(1) as f32;
         let streak = {
-            let h = (x.wrapping_mul(2654435761) ^ seed.wrapping_mul(40503)) >> 7;
-            ((h & 0xff) as f32 / 255.0 - 0.5) * 0.25
+            let k = (x.wrapping_mul(2654435761) ^ seed.wrapping_mul(40503)) >> 7;
+            ((k & 0xff) as f32 / 255.0 - 0.5) * 0.25
         };
         let mix = |a: u8, b: u8| ((a as f32 + (b as f32 - a as f32) * t) * (1.0 + streak)).clamp(0.0, 255.0) as u8;
         *p = image::Rgba([mix(root[0], tip[0]), mix(root[1], tip[1]), mix(root[2], tip[2]), 255]);
     }
     img
+}
+
+/// A cell of the texture for a stroke (a square).
+pub fn cell_image(size: u32, root: [u8; 3], tip: [u8; 3], seed: u32) -> image::RgbaImage {
+    gradient_image(size, size, root, tip, seed)
 }
 
 #[cfg(test)]
@@ -352,5 +400,30 @@ mod tests {
         let width = |i: usize| len(sub(m.verts[i * 2], m.verts[i * 2 + 1]));
         assert!(width(rows / 2) > width(1) * 1.5 && width(rows / 2) > width(rows - 1) * 10.0, "{} {} {}", width(1), width(rows / 2), width(rows - 1));
         assert!(Kind::ALL.contains(&Kind::Feather));
+    }
+
+    #[test]
+    fn a_curl_goes_round_the_line_and_the_joints_stay_on_the_line() {
+        let straight = Brush::default().with_kind(Kind::Strand);
+        let wave = Brush { curl: Curl::Wave, curl_size: 0.02, curl_len: 0.06, ..straight };
+        let spiral = Brush { curl: Curl::Spiral, curl_size: 0.02, curl_len: 0.06, ..straight };
+        let l = line(12, 0.3);
+        let (a, b, c) = (build(&straight, &l).unwrap(), build(&wave, &l).unwrap(), build(&spiral, &l).unwrap());
+        // the line is along x at y = 1, z = 0: how far the points are from it
+        let off = |m: &Built| m.verts.iter().map(|v| ((v[1] - 1.0).powi(2) + v[2].powi(2)).sqrt()).fold(0.0f32, f32::max);
+        assert!(off(&a) < 0.01 && off(&b) > 0.015 && off(&c) > 0.015, "{} {} {}", off(&a), off(&b), off(&c));
+        // a wide card has few points when straight: with a curl it has more, so it can be round
+        let card = Brush::default().with_kind(Kind::Card);
+        let card_curled = Brush { curl: Curl::Spiral, curl_size: 0.02, curl_len: 0.06, ..card };
+        assert!(build(&card_curled, &l).unwrap().verts.len() > build(&card, &l).unwrap().verts.len() * 2, "a curl needs more points to be round");
+        assert!(b.verts.len() >= a.verts.len());
+        assert!(off(&b) < 0.04 && off(&c) < 0.04, "no further than the size of the curl");
+        // a wave goes to one side only (a plane), a spiral round
+        let w_z: f32 = b.verts.iter().map(|v| v[2].abs()).fold(0.0, f32::max);
+        let w_y: f32 = b.verts.iter().map(|v| (v[1] - 1.0).abs()).fold(0.0, f32::max);
+        assert!(w_z.min(w_y) < 0.01, "a wave is flat: {w_z} {w_y}");
+        // the bones are along the line that was drawn, not along the curl
+        let joints = joints(&spiral, &l, 5).unwrap();
+        assert!(joints.iter().all(|j| (j[1] - 1.0).abs() < 0.01 && j[2].abs() < 0.01), "{joints:?}");
     }
 }
