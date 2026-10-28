@@ -103,6 +103,183 @@ pub fn add_strip(mesh: &mut AssetMesh, share: f32) -> Option<f32> {
     Some(keep)
 }
 
+/// The triangles that have all three corners selected (a face is selected when its points are).
+pub fn selected_tris(mesh: &AssetMesh, sel: &[bool]) -> Vec<bool> {
+    mesh.tris.iter().map(|t| t.iter().all(|i| sel.get(*i as usize).copied().unwrap_or(false))).collect()
+}
+
+/// The selected faces are taken away (the points nothing uses any more go with them).
+pub fn delete_selected(mesh: &AssetMesh, sel: &[bool]) -> (AssetMesh, Vec<Option<u32>>) {
+    remove_tris(mesh, &selected_tris(mesh, sel))
+}
+
+/// The selection one step wider: the points next to a selected point are selected too.
+pub fn grow(sel: &[bool], near: &[Vec<u32>]) -> Vec<bool> {
+    (0..sel.len()).map(|i| sel[i] || near.get(i).is_some_and(|n| n.iter().any(|j| sel.get(*j as usize).copied().unwrap_or(false)))).collect()
+}
+
+/// The selection one step narrower: a point stays selected when all the points next to it are.
+pub fn shrink(sel: &[bool], near: &[Vec<u32>]) -> Vec<bool> {
+    (0..sel.len()).map(|i| sel[i] && near.get(i).is_none_or(|n| n.iter().all(|j| sel.get(*j as usize).copied().unwrap_or(false)))).collect()
+}
+
+/// What an operation that makes new points gives back: the mesh, which old point every new point is a copy of (for what belongs to the points: the weights),
+/// and the new selection (the new points).
+pub struct Made {
+    pub mesh: AssetMesh,
+    pub copy_of: Vec<u32>,
+    pub selection: Vec<bool>,
+}
+
+fn place_key(p: [f32; 3]) -> (i32, i32, i32) {
+    ((p[0] * 20000.0).round() as i32, (p[1] * 20000.0).round() as i32, (p[2] * 20000.0).round() as i32)
+}
+
+/// New points for the points of the selected faces, moved by `shift` (or along the way the selected faces face, by `dist`).
+fn copy_selected(mesh: &AssetMesh, sel: &[bool], dist: f32, shift: [f32; 3], walls: bool, keep_old: bool) -> Option<Made> {
+    let faces = selected_tris(mesh, sel);
+    if !faces.iter().any(|f| *f) {
+        return None;
+    }
+    let old = mesh.verts.len();
+    // the way the selected faces face at every point of them
+    let mut normal = vec![[0.0f32; 3]; old];
+    for (t, f) in mesh.tris.iter().zip(&faces) {
+        if !*f {
+            continue;
+        }
+        let (a, b, c) = (mesh.verts[t[0] as usize], mesh.verts[t[1] as usize], mesh.verts[t[2] as usize]);
+        let (u, v) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+        let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+        for i in t {
+            for k in 0..3 {
+                normal[*i as usize][k] += n[k];
+            }
+        }
+    }
+    let mut out = mesh.clone();
+    let mut new_of: HashMap<u32, u32> = HashMap::new();
+    let mut copy_of = Vec::new();
+    for (t, f) in mesh.tris.iter().zip(&faces) {
+        if *f {
+            for i in t {
+                new_of.entry(*i).or_insert_with(|| {
+                    let n = normal[*i as usize];
+                    let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-12);
+                    let p = mesh.verts[*i as usize];
+                    out.verts.push([p[0] + shift[0] + n[0] / l * dist, p[1] + shift[1] + n[1] / l * dist, p[2] + shift[2] + n[2] / l * dist]);
+                    out.uvs.push(mesh.uvs[*i as usize]);
+                    copy_of.push(*i);
+                    (out.verts.len() - 1) as u32
+                });
+            }
+        }
+    }
+    // the edges of the selected faces that have no selected face on the other side: the border
+    let mut seen: HashMap<((i32, i32, i32), (i32, i32, i32)), u32> = HashMap::new();
+    let key = |a: u32, b: u32| {
+        let (ka, kb) = (place_key(mesh.verts[a as usize]), place_key(mesh.verts[b as usize]));
+        if ka <= kb { (ka, kb) } else { (kb, ka) }
+    };
+    for (t, f) in mesh.tris.iter().zip(&faces) {
+        if *f {
+            for k in 0..3 {
+                *seen.entry(key(t[k], t[(k + 1) % 3])).or_default() += 1;
+            }
+        }
+    }
+    let mut tris = Vec::new();
+    for (t, f) in mesh.tris.iter().zip(&faces) {
+        if !*f {
+            tris.push(*t);
+            continue;
+        }
+        let moved = [new_of[&t[0]], new_of[&t[1]], new_of[&t[2]]];
+        if keep_old {
+            tris.push(*t);
+        }
+        tris.push(moved);
+        if walls {
+            for k in 0..3 {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                if seen.get(&key(a, b)).copied() == Some(1) {
+                    let (a2, b2) = (new_of[&a], new_of[&b]);
+                    tris.push([a, b, b2]);
+                    tris.push([a, b2, a2]);
+                }
+            }
+        }
+    }
+    out.tris = tris;
+    let mut selection = vec![false; out.verts.len()];
+    for n in new_of.values() {
+        selection[*n as usize] = true;
+    }
+    Some(Made { mesh: out, copy_of, selection })
+}
+
+/// The selected faces are pushed out along the way they face (in when the distance is below 0), with walls round them, like the extrude of Blender.
+pub fn extrude(mesh: &AssetMesh, sel: &[bool], dist: f32) -> Option<Made> {
+    copy_selected(mesh, sel, dist, [0.0; 3], true, false)
+}
+
+/// A copy of the selected faces, moved by `offset` (as new geometry of its own).
+pub fn duplicate(mesh: &AssetMesh, sel: &[bool], offset: [f32; 3]) -> Option<Made> {
+    copy_selected(mesh, sel, 0.0, offset, false, true)
+}
+
+/// The selected points move along the way the surface faces there (the surface swells, or sinks when the distance is below 0).
+pub fn push_along_normals(mesh: &mut AssetMesh, sel: &[bool], dist: f32) {
+    let n = crate::meshfile::vertex_normals(&mesh.verts, &mesh.tris);
+    for (i, v) in mesh.verts.iter_mut().enumerate() {
+        if sel.get(i).copied().unwrap_or(false) {
+            for k in 0..3 {
+                v[k] += n[i][k] * dist;
+            }
+        }
+    }
+}
+
+/// The selected points are made smoother: each moves towards the middle of the points next to it.
+pub fn smooth_selected(mesh: &mut AssetMesh, sel: &[bool], near: &[Vec<u32>], passes: usize) {
+    for _ in 0..passes {
+        let old = mesh.verts.clone();
+        for i in 0..old.len() {
+            if !sel.get(i).copied().unwrap_or(false) || near[i].is_empty() {
+                continue;
+            }
+            let mut avg = [0.0f32; 3];
+            for j in &near[i] {
+                for k in 0..3 {
+                    avg[k] += old[*j as usize][k] / near[i].len() as f32;
+                }
+            }
+            for k in 0..3 {
+                mesh.verts[i][k] = old[i][k] + (avg[k] - old[i][k]) * 0.5;
+            }
+        }
+    }
+}
+
+/// The selected points are scaled about their middle.
+pub fn scale_selected(mesh: &mut AssetMesh, sel: &[bool], k: f32) {
+    let picked: Vec<usize> = (0..mesh.verts.len()).filter(|i| sel.get(*i).copied().unwrap_or(false)).collect();
+    if picked.is_empty() {
+        return;
+    }
+    let mut c = [0.0f32; 3];
+    for i in &picked {
+        for a in 0..3 {
+            c[a] += mesh.verts[*i][a] / picked.len() as f32;
+        }
+    }
+    for i in picked {
+        for a in 0..3 {
+            mesh.verts[i][a] = c[a] + (mesh.verts[i][a] - c[a]) * k;
+        }
+    }
+}
+
 /// Which side of a plane is cut away.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cut {
@@ -256,5 +433,84 @@ mod tests {
         }
         let mut none = mesh();
         assert!(add_strip(&mut none, 0.125).is_none(), "no texture: nothing to add to");
+    }
+
+    /// A flat strip of three squares in a row (x from 0 to 3), facing +z.
+    fn strip3() -> AssetMesh {
+        let mut verts = Vec::new();
+        for x in 0..=3 {
+            verts.push([x as f32, 0.0, 0.0]);
+            verts.push([x as f32, 1.0, 0.0]);
+        }
+        let mut tris = Vec::new();
+        for x in 0..3u32 {
+            let (a, b, c, d) = (x * 2, x * 2 + 1, x * 2 + 2, x * 2 + 3);
+            tris.push([a, c, b]);
+            tris.push([c, d, b]);
+        }
+        AssetMesh { uvs: verts.iter().map(|v| [v[0] / 3.0, v[1]]).collect(), verts, tris, texture: None, normal: None }
+    }
+
+    #[test]
+    fn the_selection_grows_shrinks_and_picks_the_faces_whose_points_are_all_selected() {
+        let m = strip3();
+        let near = crate::rig3d::neighbours(&m.verts, &m.tris);
+        let mut sel = vec![false; m.verts.len()];
+        sel[0] = true;
+        sel[1] = true;
+        assert_eq!(selected_tris(&m, &sel).iter().filter(|f| **f).count(), 0, "two points are no face");
+        let g = grow(&sel, &near);
+        assert!(g[2] && g[3] && !g[6], "one step wider");
+        assert_eq!(selected_tris(&m, &g).iter().filter(|f| **f).count(), 2, "the first square");
+        let s = shrink(&g, &near);
+        assert!(s.iter().filter(|x| **x).count() < g.iter().filter(|x| **x).count());
+    }
+
+    #[test]
+    fn selected_faces_are_deleted_and_the_others_stay() {
+        let m = strip3();
+        let sel: Vec<bool> = (0..m.verts.len()).map(|i| i < 4).collect();
+        let (out, map) = delete_selected(&m, &sel);
+        assert_eq!(out.tris.len(), 4, "the first square (two triangles) is gone");
+        assert!(map[0].is_none() && map[7].is_some());
+    }
+
+    #[test]
+    fn an_extrude_pushes_the_faces_out_and_puts_walls_round_them() {
+        let m = strip3();
+        // the middle square
+        let sel: Vec<bool> = (0..m.verts.len()).map(|i| (2..6).contains(&i)).collect();
+        let e = extrude(&m, &sel, 0.5).unwrap();
+        assert_eq!(e.copy_of.len(), 4, "four new points");
+        let new_start = m.verts.len();
+        assert!(e.mesh.verts[new_start..].iter().all(|v| (v[2] - 0.5).abs() < 1e-5), "pushed along the way the faces face");
+        // two triangles on top, the other four of the strip, and a wall of two triangles on each of the four sides of the square... of which two sides are shared
+        // with the squares next to it (they are not selected), so all four sides are borders
+        assert_eq!(e.mesh.tris.len(), 6 + 8, "{}", e.mesh.tris.len());
+        assert_eq!(e.selection.iter().filter(|x| **x).count(), 4);
+        assert!(e.selection[new_start]);
+        assert!(e.mesh.tris.iter().flatten().all(|i| (*i as usize) < e.mesh.verts.len()));
+        assert!(extrude(&m, &vec![false; m.verts.len()], 0.5).is_none(), "nothing selected, nothing made");
+    }
+
+    #[test]
+    fn a_duplicate_is_a_copy_apart_and_the_other_tools_move_the_selected_points() {
+        let m = strip3();
+        let sel: Vec<bool> = (0..m.verts.len()).map(|i| i < 4).collect();
+        let d = duplicate(&m, &sel, [0.0, 0.0, 2.0]).unwrap();
+        assert_eq!(d.mesh.tris.len(), m.tris.len() + 2);
+        assert!(d.mesh.verts[m.verts.len()..].iter().all(|v| (v[2] - 2.0).abs() < 1e-5));
+        let mut p = m.clone();
+        push_along_normals(&mut p, &sel, 0.25);
+        assert!((p.verts[0][2].abs() - 0.25).abs() < 1e-4 && p.verts[7][2] == 0.0);
+        let mut s = m.clone();
+        scale_selected(&mut s, &sel, 2.0);
+        assert!(s.verts[3][1] > m.verts[3][1] && s.verts[7] == m.verts[7]);
+        let mut sm = m.clone();
+        sm.verts[2][2] = 1.0;
+        let near = crate::rig3d::neighbours(&sm.verts, &sm.tris);
+        let only2: Vec<bool> = (0..sm.verts.len()).map(|i| i == 2).collect();
+        smooth_selected(&mut sm, &only2, &near, 1);
+        assert!(sm.verts[2][2] < 1.0);
     }
 }

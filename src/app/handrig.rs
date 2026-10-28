@@ -13,6 +13,9 @@ use crate::assetview::{AssetMesh, Camera};
 use crate::rig3d::{Paint, Pose, Rig3, neighbours};
 use crate::take::Take;
 use crate::attach;
+use crate::brush::BrushSettings;
+use crate::brush::engine::{Sample as BrushSample, Stroke as BrushStroke};
+use crate::doc::{Document, LayerKind, TILE};
 use crate::meshbrush::{self, Brush, Kind as BrushKind, Spot};
 use crate::meshedit::{self, Cut};
 use crate::theme::*;
@@ -37,6 +40,8 @@ pub enum Tool {
     Parts,
     /// Draw a loop round a part of the mesh: all of it belongs to the picked bone.
     Lasso,
+    /// Pick faces of the mesh with a loop or a brush, then delete, extrude, duplicate or change them.
+    Faces,
     /// Draw geometry on the surface with a brush: hair, ropes, strips, spikes.
     Mesh,
     /// Put parts on the body with numbers: horns, wings, a tail, ears.
@@ -101,9 +106,83 @@ impl ToolSet {
         match self {
             ToolSet::Rig => matches!(t, Tool::Select | Tool::Draw | Tool::Weights | Tool::Texture | Tool::Pose | Tool::Turn),
             ToolSet::Parts => matches!(t, Tool::Select | Tool::Draw | Tool::Parts | Tool::Lasso | Tool::Turn),
-            ToolSet::Look => matches!(t, Tool::Texture | Tool::Mesh | Tool::Attach | Tool::Sculpt | Tool::Turn),
+            ToolSet::Look => matches!(t, Tool::Texture | Tool::Faces | Tool::Mesh | Tool::Attach | Tool::Sculpt | Tool::Turn),
         }
     }
+}
+
+/// The brush of the Draw tab, as the 3D tab paints with it: every brush, the size, the shape, the dynamics, the texture of the brush and the colour are the ones
+/// picked there.
+#[derive(Clone)]
+pub struct PaintKit {
+    pub settings: BrushSettings,
+    pub color: egui::Color32,
+    pub erase: bool,
+}
+
+/// A stroke of the Draw brush on the texture: the texture is a canvas of its own (one layer), the engine paints on it as it does in the Draw tab, and the tiles
+/// that changed are put back on the texture of the mesh as the stroke goes.
+struct TexSession {
+    doc: Document,
+    settings: BrushSettings,
+    color: egui::Color32,
+    erase: bool,
+    /// How many texels the size of the brush is per pixel of the picture.
+    texels_per_pixel: f32,
+    last: Pos2,
+    /// One stroke for the pointer, one for its mirror image: the stroke, and where it was last (in texels).
+    strokes: Vec<(Option<BrushStroke>, Option<[f32; 2]>)>,
+    touched: std::collections::HashSet<(i32, i32)>,
+}
+
+/// A stroke that was drawn on the mesh (a strand of hair, a rope, a strip, a spike) or a part that was put on it: where its points are, the line it was drawn
+/// along (to change its thickness and its length), and the bones that move it when it is hair.
+#[derive(Clone, Debug)]
+pub struct Strand {
+    pub name: String,
+    verts: (usize, usize),
+    /// The first bone of its chain and how many bones there are, when it is hair.
+    bones: Option<(usize, usize)>,
+    /// The line it follows, from the root to the end (empty for a part).
+    line: Vec<[f32; 3]>,
+    pub width_mul: f32,
+}
+
+/// The nearest place on a line of points (and how far along the line it is, as a share of its length is not needed: the segment and the place).
+fn near_on_line(line: &[[f32; 3]], p: [f32; 3]) -> [f32; 3] {
+    let mut best = (f32::MAX, line.first().copied().unwrap_or(p));
+    for w in line.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let l2 = (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]).max(1e-12);
+        let t = (((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1] + (p[2] - a[2]) * ab[2]) / l2).clamp(0.0, 1.0);
+        let q = [a[0] + ab[0] * t, a[1] + ab[1] * t, a[2] + ab[2] * t];
+        let d = (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2) + (q[2] - p[2]).powi(2);
+        if d < best.0 {
+            best = (d, q);
+        }
+    }
+    best.1
+}
+
+/// The window in which the picture of the hair is drawn.
+struct HairEditor {
+    doc: Document,
+    stroke: Option<BrushStroke>,
+    handle: Option<TextureHandle>,
+    /// Where the picture is on the texture of the mesh (x, y, size).
+    region: (u32, u32, u32),
+    #[allow(dead_code)]
+    last: Option<Pos2>,
+}
+
+/// How the faces are picked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PickMode {
+    /// Draw a loop round them.
+    Loop,
+    /// Paint over them.
+    Brush,
 }
 
 /// What the left button holds at the moment.
@@ -128,6 +207,10 @@ enum Grab {
     Lasso,
     Mesh,
     Sculpt,
+    Faces,
+    /// Dragging a strand about, or the end of one to make it longer or shorter.
+    StrandMove(usize),
+    StrandTip(usize),
 }
 
 /// Which part of a bone is picked.
@@ -207,6 +290,7 @@ pub struct HandRig {
     cut_undo: Vec<(AssetMesh, Vec<Vec<(u16, f32)>>)>,
     /// The part that is being shaped (horns, wings...): which, its numbers, and the sizes of the mesh from before it was put on.
     pub attach: Option<(attach::Part, attach::Params, usize, usize)>,
+    attach_label: Option<String>,
     /// Mirror mode: what is painted or drawn on one side is done on the other side too (across the middle of the body, x = `mirror_x`).
     pub mirror: bool,
     pub mirror_x: f32,
@@ -221,6 +305,36 @@ pub struct HandRig {
     lib: Vec<crate::animlib::Entry>,
     lib_seen: bool,
     pub lib_message: Option<String>,
+    /// The brush of the Draw tab (set every frame by the page), the session of a stroke, and how big the brush is on the mesh as a multiplier.
+    pub kit: Option<PaintKit>,
+    tex_session: Option<TexSession>,
+    pub tex_size_mul: f32,
+    /// The colour was changed here: the Draw tab takes it.
+    pub color_dirty: bool,
+    /// The picked points of the mesh, how they are picked, whether the back is picked too, and the numbers of what is done with them.
+    pub selected: Vec<bool>,
+    pub pick_mode: PickMode,
+    pub through: bool,
+    pub ext_dist: f32,
+    pub push_dist: f32,
+    pub scale_by: f32,
+    pub smooth_passes: usize,
+    /// Hair: the strokes of the mesh brush are rigged as hair (a chain of bones along the line), how many strands there are, where the bones of the last strokes
+    /// began (to take them back), how the hair behaves, and the state of its motion.
+    pub hair: bool,
+    hair_count: usize,
+    hair_marks: Vec<(usize, usize)>,
+    pub hair_physics: bool,
+    pub hair_params: crate::hairsim::HairParams,
+    hair_sim: Option<crate::hairsim::HairSim>,
+    hair_sig: usize,
+    /// The strokes and parts that were drawn, which one is picked, and whether dragging moves it (and not draw a new one).
+    pub strands: Vec<Strand>,
+    pub strand_sel: Option<usize>,
+    pub strand_move: bool,
+    /// The picture of the hair has been put on the texture, and the window for drawing it.
+    hair_ready: bool,
+    hair_editor: Option<HairEditor>,
 }
 
 impl Default for HandRig {
@@ -278,6 +392,7 @@ impl Default for HandRig {
             cut: Cut { axis: 2, limit: 0.0, above: false },
             cut_undo: Vec::new(),
             attach: None,
+            attach_label: None,
             mirror: false,
             mirror_x: 0.0,
             sculpt: Sculpt::Draw,
@@ -289,6 +404,29 @@ impl Default for HandRig {
             lib: Vec::new(),
             lib_seen: false,
             lib_message: None,
+            kit: None,
+            tex_session: None,
+            tex_size_mul: 1.0,
+            color_dirty: false,
+            selected: Vec::new(),
+            pick_mode: PickMode::Loop,
+            through: false,
+            ext_dist: 0.02,
+            push_dist: 0.01,
+            scale_by: 1.1,
+            smooth_passes: 2,
+            hair: false,
+            hair_count: 0,
+            hair_marks: Vec::new(),
+            hair_physics: true,
+            hair_params: crate::hairsim::HairParams::default(),
+            hair_sim: None,
+            hair_sig: 0,
+            strands: Vec::new(),
+            strand_sel: None,
+            strand_move: false,
+            hair_ready: false,
+            hair_editor: None,
         }
     }
 }
@@ -779,15 +917,8 @@ impl HandRig {
     fn finish_stroke(&mut self, mesh: &mut AssetMesh, cam: &Camera) {
         let pts = std::mem::take(&mut self.stroke);
         let Some(v0) = self.strip_v0 else { return };
-        let Some((size, high)) = mesh.texture.as_ref().map(|t| (t.width(), t.height())) else { return };
-        let (cell, w) = (32u32, cam.w as usize);
-        let cols = (size / cell) as usize;
-        let y_start = (v0 * high as f32).ceil() as u32;
-        let rows = (high.saturating_sub(y_start) / cell) as usize;
-        if self.strip_next >= cols * rows {
-            self.message = Some("The strip of the texture for the colours of the strokes is full: take a stroke back, or use a bigger texture.".into());
-            return;
-        }
+        let w = cam.w as usize;
+        let _ = v0;
         let mut spots = Vec::new();
         let mut first_tri = None;
         for p in &pts {
@@ -815,6 +946,8 @@ impl HandRig {
             if self.place_stroke(mesh, &image, from, true) {
                 // one step takes both strokes back
                 self.geo_undo.pop();
+                let keep = self.geo_undo.len();
+                self.hair_marks.retain(|m| m.0 < keep);
             }
         }
         // what the first stroke started from is what is taken back
@@ -835,37 +968,96 @@ impl HandRig {
             }
         }
         let old = (mesh.verts.len(), mesh.tris.len());
-        if !self.append_built(mesh, &built, self.strip_next, from) {
-            return false;
-        }
+        let bones_before = self.rig.bones.len();
+        let Some(used_cell) = self.append_built(mesh, &built, self.strip_next, from) else { return false };
         self.geo_undo.push(old);
-        self.strip_next += 1;
+        if used_cell {
+            self.strip_next += 1;
+        }
+        if self.hair {
+            self.rig_hair(mesh, spots, &built, old.0, from, mirrored, bones_before);
+        }
+        // it is a stroke that can be picked, made thicker or thinner, longer or shorter, and moved
+        let n = self.strands.len() + 1;
+        let (kind, side) = (if self.hair { "Hair" } else { self.brush.kind.label() }, if mirrored { " (other side)" } else { "" });
+        let bones = if self.hair && self.rig.bones.len() > bones_before { Some((bones_before, self.rig.bones.len() - bones_before)) } else { None };
+        self.strands.push(Strand { name: format!("{kind} {n}{side}"), verts: (old.0, mesh.verts.len()), bones, line: meshbrush::joints(&self.brush, spots, 10).unwrap_or_default(), width_mul: 1.0 });
+        self.strand_sel = Some(self.strands.len() - 1);
         true
+    }
+
+    /// A line of hair is rigged: a chain of bones along it (hanging from the bone that moves what is under its start), and the strand is skinned to the chain, so
+    /// it bends along its length. The bones are called `hair_...`, which is how the hair is found when it is made to move.
+    #[allow(clippy::too_many_arguments)]
+    fn rig_hair(&mut self, mesh: &AssetMesh, spots: &[Spot], built: &meshbrush::Built, v0: usize, from: Option<usize>, mirrored: bool, bones_before: usize) {
+        let pieces = ((meshbrush::length(spots) / 0.05).round() as usize).clamp(3, 8);
+        let Some(joints) = meshbrush::joints(&self.brush, spots, pieces) else { return };
+        let mut parent = from.and_then(|f| self.rig.main_bone(f));
+        if mirrored {
+            parent = parent.and_then(|p| self.mirror_bone(p));
+        }
+        if !mirrored {
+            self.hair_count += 1;
+        }
+        let k = self.hair_count;
+        let first = self.rig.bones.len();
+        for i in 0..pieces {
+            let name = format!("hair_{k}{}_{i}", if mirrored { "m" } else { "" });
+            let up = if i == 0 { parent } else { Some(first + i - 1) };
+            self.rig.add_bone(&name, up, joints[i], joints[i + 1]);
+        }
+        // the strand follows the bones of its chain: along it, each bone moves the stretch it hangs over, and two share a joint
+        if self.rig.weights.len() == mesh.verts.len() {
+            for (j, uv) in built.uvs.iter().enumerate() {
+                let u = uv[1].clamp(0.0, 1.0) * pieces as f32;
+                let i = (u.floor() as usize).min(pieces - 1);
+                let f = u - i as f32;
+                let next = if i + 1 < pieces { ((f - 0.55) / 0.45).clamp(0.0, 1.0).powi(2) * (3.0 - 2.0 * ((f - 0.55) / 0.45).clamp(0.0, 1.0)) } else { 0.0 };
+                self.rig.weights[v0 + j] = if next > 0.0 { vec![((first + i) as u16, 1.0 - next), ((first + i + 1) as u16, next)] } else { vec![((first + i) as u16, 1.0)] };
+            }
+        }
+        self.hair_marks.push((self.geo_undo.len() - 1, bones_before));
+        let _ = mirrored;
+        self.pose.rot.resize(self.rig.bones.len(), [0.0; 3]);
+        self.hair_sim = None;
     }
 
     /// The geometry is put on the mesh: its colours (root to end) are painted in a cell of the strip of the texture, its texture coordinates look into that cell,
     /// and its points move with what the point `from` of the mesh moves with.
-    fn append_built(&mut self, mesh: &mut AssetMesh, built: &meshbrush::Built, k: usize, from: Option<usize>) -> bool {
-        let Some(v0) = self.strip_v0 else { return false };
-        let Some((size, high)) = mesh.texture.as_ref().map(|t| (t.width(), t.height())) else { return false };
-        let cell = 32u32;
-        let cols = (size / cell) as usize;
+    fn append_built(&mut self, mesh: &mut AssetMesh, built: &meshbrush::Built, k: usize, from: Option<usize>) -> Option<bool> {
+        let v0 = self.strip_v0?;
+        let (size, high) = mesh.texture.as_ref().map(|t| (t.width(), t.height()))?;
         let y_start = (v0 * high as f32).ceil() as u32;
-        let rows = (high.saturating_sub(y_start) / cell) as usize;
-        if k >= cols * rows {
-            self.message = Some("The strip of the texture for the colours of the strokes is full: take a stroke back, or use a bigger texture.".into());
-            return false;
-        }
-        let (x0, y0) = ((k % cols) as u32 * cell, y_start + (k / cols) as u32 * cell);
-        if let Some(tex) = mesh.texture.as_mut() {
-            let img = meshbrush::cell_image(cell, self.brush.root, self.brush.tip, k as u32 + 1);
-            image::imageops::replace(tex, &img, x0 as i64, y0 as i64);
-        }
+        let region = Self::hair_region(size, high, y_start);
+        // hair: all the lines of hair look into the one picture of the hair; the other strokes have a cell of their own
+        let hair_uv = self.hair && region.is_some();
+        let (cx, cy, cw, ch, used_cell) = if hair_uv {
+            let (rx, ry, rs) = region?;
+            if !self.hair_ready {
+                if let Some(tex) = mesh.texture.as_mut() {
+                    let img = meshbrush::cell_image(rs, self.brush.root, self.brush.tip, 1);
+                    image::imageops::replace(tex, &img, rx as i64, ry as i64);
+                }
+                self.hair_ready = true;
+            }
+            (rx, ry, rs, rs, false)
+        } else {
+            let cells = Self::strip_cells(size, high, y_start, region);
+            let Some(&(x0, y0)) = cells.get(k) else {
+                self.message = Some("The strip of the texture for the colours of the strokes is full: take a stroke back, or use a bigger texture.".into());
+                return None;
+            };
+            if let Some(tex) = mesh.texture.as_mut() {
+                let img = meshbrush::cell_image(32, self.brush.root, self.brush.tip, k as u32 + 1);
+                image::imageops::replace(tex, &img, x0 as i64, y0 as i64);
+            }
+            (x0, y0, 32, 32, true)
+        };
         let base = mesh.verts.len() as u32;
         let old_len = mesh.verts.len();
         for (v, uv) in built.verts.iter().zip(&built.uvs) {
             mesh.verts.push(*v);
-            mesh.uvs.push([(x0 as f32 + 2.0 + uv[0] * (cell - 4) as f32) / size as f32, (y0 as f32 + 1.0 + uv[1] * (cell - 2) as f32) / high as f32]);
+            mesh.uvs.push([(cx as f32 + 2.0 + uv[0] * (cw - 4) as f32) / size as f32, (cy as f32 + 1.0 + uv[1] * (ch - 2) as f32) / high as f32]);
         }
         mesh.tris.extend(built.tris.iter().map(|t| [t[0] + base, t[1] + base, t[2] + base]));
         if self.rig.weights.len() == old_len {
@@ -875,7 +1067,120 @@ impl HandRig {
         self.painted = true;
         self.near = None;
         self.version += 1;
-        true
+        Some(used_cell)
+    }
+
+    /// The square of the strip that holds the picture of the hair (where it is and how big): at the right end of the first rows of the strip. None when the strip
+    /// is too small.
+    fn hair_region(size: u32, high: u32, y_start: u32) -> Option<(u32, u32, u32)> {
+        let rows = high.saturating_sub(y_start);
+        let s = ((rows / 32) * 32).min(256).min((size / 4 / 32) * 32);
+        (s >= 32).then(|| (size - s, y_start, s))
+    }
+
+    /// The origins of the cells of the strip (32 texels square), not the ones that are under the picture of the hair.
+    fn strip_cells(size: u32, high: u32, y_start: u32, region: Option<(u32, u32, u32)>) -> Vec<(u32, u32)> {
+        let (cols, rows) = ((size / 32) as usize, (high.saturating_sub(y_start) / 32) as usize);
+        let mut out = Vec::with_capacity(cols * rows);
+        for r in 0..rows {
+            for c in 0..cols {
+                let (x, y) = (c as u32 * 32, y_start + r as u32 * 32);
+                let under = region.is_some_and(|(rx, ry, rs)| x + 32 > rx && x < rx + rs && y + 32 > ry && y < ry + rs);
+                if !under {
+                    out.push((x, y));
+                }
+            }
+        }
+        out
+    }
+
+    /// Open the picture of the hair to draw it: the whole picture all the hair lines look into, with the brush of the Draw tab.
+    pub fn open_hair_editor(&mut self, mesh: &mut AssetMesh) {
+        if !self.ensure_strip(mesh) {
+            self.message = Some("This mesh has no texture, so the hair has no picture. Unwrap it first (the Redraw and sculpt page).".into());
+            return;
+        }
+        let (Some(v0), Some(tex)) = (self.strip_v0, mesh.texture.as_mut()) else { return };
+        let y_start = (v0 * tex.height() as f32).ceil() as u32;
+        let Some((rx, ry, rs)) = Self::hair_region(tex.width(), tex.height(), y_start) else {
+            self.message = Some("The strip of the texture is too small for a hair picture: use a bigger texture.".into());
+            return;
+        };
+        if !self.hair_ready {
+            let img = meshbrush::cell_image(rs, self.brush.root, self.brush.tip, 1);
+            image::imageops::replace(tex, &img, rx as i64, ry as i64);
+            self.hair_ready = true;
+        }
+        let crop = image::imageops::crop_imm(tex, rx, ry, rs, rs).to_image();
+        let mut doc = Document::new(rs, rs);
+        doc.layers[0].tiles = crate::files::tiles_from_rgba(&crop, 0, 0, rs, rs);
+        self.hair_editor = Some(HairEditor { doc, stroke: None, handle: None, region: (rx, ry, rs), last: None });
+    }
+
+    /// The window for drawing the picture of the hair.
+    pub fn hair_editor_ui(&mut self, ctx: &egui::Context, mesh: &mut AssetMesh) {
+        let Some(mut ed) = self.hair_editor.take() else { return };
+        let mut open = true;
+        let kit = self.kit.clone();
+        let rs = ed.region.2;
+        let zoom = (360 / rs).max(1) as f32;
+        let mut redo_default = false;
+        egui::Window::new(RichText::new("Hair picture").strong()).id(egui::Id::new("hair_picture_window")).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+            ui.label(RichText::new("Every line of hair has this picture: across the line left to right, the root at the top and the end at the bottom. Draw it with the brush of the Draw tab (the same brush and colour).").size(11.5).color(TEXT_DIM));
+            let (rect, resp) = ui.allocate_exact_size(vec2(rs as f32 * zoom, rs as f32 * zoom), Sense::click_and_drag());
+            let to_doc = |p: Pos2| BrushSample { x: ((p.x - rect.min.x) / zoom).clamp(0.0, rs as f32 - 1.0), y: ((p.y - rect.min.y) / zoom).clamp(0.0, rs as f32 - 1.0), p: 1.0 };
+            let none = |_: i32, _: i32| -> Option<egui::Color32> { None };
+            if let Some(kit) = &kit {
+                let mut settings = kit.settings.clone();
+                settings.size = (settings.size / zoom * 2.0).max(1.0);
+                settings.stabilize = 0.0;
+                if resp.drag_started() {
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        ed.stroke = Some(BrushStroke::begin(&mut ed.doc, 0, &settings, kit.color, kit.erase, 1.0, false, to_doc(p), &none));
+                    }
+                } else if resp.dragged() {
+                    if let (Some(p), Some(st)) = (resp.interact_pointer_pos(), ed.stroke.as_mut()) {
+                        st.add(&mut ed.doc, &[to_doc(p)], &none);
+                    }
+                }
+                if resp.drag_stopped() {
+                    if let Some(st) = ed.stroke.take() {
+                        st.finish(&mut ed.doc, &none);
+                    }
+                }
+            }
+            // the picture, as it is now
+            let mut img = RgbaImage::new(rs, rs);
+            for ty in 0..=((rs as usize - 1) / TILE) {
+                for tx in 0..=((rs as usize - 1) / TILE) {
+                    Self::put_tile(&mut img, &ed.doc, (tx as i32, ty as i32));
+                }
+            }
+            let color = egui::ColorImage::from_rgba_unmultiplied([rs as usize, rs as usize], img.as_raw());
+            let tex = ui.ctx().load_texture("hair_picture", color, TextureOptions::NEAREST);
+            ui.painter().image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+            ed.handle = Some(tex);
+            // it goes on the texture of the mesh as it is drawn
+            if let Some(t) = mesh.texture.as_mut() {
+                image::imageops::replace(t, &img, ed.region.0 as i64, ed.region.1 as i64);
+            }
+            ui.horizontal(|ui| {
+                if ui.button("Root to end colours").help("The picture goes back to a smooth colour from the root colour to the end colour (the colours of the brush)").clicked() {
+                    redo_default = true;
+                }
+            });
+        });
+        if redo_default {
+            let img = meshbrush::cell_image(rs, self.brush.root, self.brush.tip, 1);
+            ed.doc.layers[0].tiles = crate::files::tiles_from_rgba(&img, 0, 0, rs, rs);
+            ed.doc.layers[0].rev += 1;
+        }
+        self.painted = true;
+        self.version += 1;
+        if open {
+            self.hair_editor = Some(ed);
+        }
+        ctx.request_repaint();
     }
 
     /// The part that is being shaped is built (again) on the mesh: what it was before is taken away first.
@@ -893,7 +1198,7 @@ impl HandRig {
             let d = |p: &[f32; 3]| (p[0] - first[0]).powi(2) + (p[1] - first[1]).powi(2) + (p[2] - first[2]).powi(2);
             d(a.1).total_cmp(&d(b.1))
         }).map(|x| x.0);
-        self.append_built(mesh, &built, self.strip_next, from);
+        let _ = self.append_built(mesh, &built, self.strip_next, from);
     }
 
     /// Start a part (or change to another one): it is put on the mesh with its first numbers.
@@ -907,6 +1212,7 @@ impl HandRig {
             None => (mesh.verts.len(), mesh.tris.len()),
         };
         self.attach = Some((part, part.defaults(), v0, t0));
+        self.attach_label = Some(part.label().to_string());
         self.attach_apply(mesh);
     }
 
@@ -916,6 +1222,8 @@ impl HandRig {
             if mesh.verts.len() > v0 {
                 self.geo_undo.push((v0, t0));
                 self.strip_next += 1;
+                let part = self.attach_label.take().unwrap_or_else(|| "Part".into());
+                self.strands.push(Strand { name: part, verts: (v0, mesh.verts.len()), bones: None, line: Vec::new(), width_mul: 1.0 });
             }
         }
     }
@@ -931,9 +1239,111 @@ impl HandRig {
         }
     }
 
+    /// A strand is moved: its points, its line and its bones.
+    pub fn strand_translate(&mut self, mesh: &mut AssetMesh, i: usize, d: [f32; 3]) {
+        let Some(s) = self.strands.get_mut(i) else { return };
+        for v in mesh.verts.iter_mut().take(s.verts.1).skip(s.verts.0) {
+            *v = [v[0] + d[0], v[1] + d[1], v[2] + d[2]];
+        }
+        for p in &mut s.line {
+            *p = [p[0] + d[0], p[1] + d[1], p[2] + d[2]];
+        }
+        if let Some((first, n)) = s.bones {
+            for b in self.rig.bones.iter_mut().skip(first).take(n) {
+                if b.name.starts_with("hair") {
+                    for p in [&mut b.head, &mut b.tail] {
+                        *p = [p[0] + d[0], p[1] + d[1], p[2] + d[2]];
+                    }
+                }
+            }
+        }
+        self.hair_sim = None;
+        self.painted = true;
+        self.version += 1;
+    }
+
+    /// A strand is made thicker or thinner (as a multiplier of how thick it was drawn): every point moves nearer to or further from the line it follows.
+    pub fn strand_thickness(&mut self, mesh: &mut AssetMesh, i: usize, mul: f32) {
+        let Some(s) = self.strands.get_mut(i) else { return };
+        if s.line.len() < 2 {
+            return;
+        }
+        let k = mul / s.width_mul.max(1e-3);
+        for v in mesh.verts.iter_mut().take(s.verts.1).skip(s.verts.0) {
+            let q = near_on_line(&s.line, *v);
+            *v = [q[0] + (v[0] - q[0]) * k, q[1] + (v[1] - q[1]) * k, q[2] + (v[2] - q[2]) * k];
+        }
+        s.width_mul = mul;
+        self.painted = true;
+        self.version += 1;
+    }
+
+    /// The end of a line is dragged to a place: the strand gets longer or shorter along the way it goes (its root stays, its thickness stays), and so do its bones.
+    pub fn strand_set_tip(&mut self, mesh: &mut AssetMesh, i: usize, tip: [f32; 3]) {
+        let Some(s) = self.strands.get_mut(i) else { return };
+        let (Some(root), Some(old)) = (s.line.first().copied(), s.line.last().copied()) else { return };
+        let dist = |a: [f32; 3], b: [f32; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+        let (was, now) = (dist(root, old), dist(root, tip));
+        if was < 1e-5 {
+            return;
+        }
+        let k = (now / was).clamp(0.15, 6.0);
+        let grow = |p: [f32; 3]| [root[0] + (p[0] - root[0]) * k, root[1] + (p[1] - root[1]) * k, root[2] + (p[2] - root[2]) * k];
+        for v in mesh.verts.iter_mut().take(s.verts.1).skip(s.verts.0) {
+            let q = near_on_line(&s.line, *v);
+            let q2 = grow(q);
+            *v = [q2[0] + (v[0] - q[0]), q2[1] + (v[1] - q[1]), q2[2] + (v[2] - q[2])];
+        }
+        for p in &mut s.line {
+            *p = grow(*p);
+        }
+        if let Some((first, n)) = s.bones {
+            for b in self.rig.bones.iter_mut().skip(first).take(n) {
+                if b.name.starts_with("hair") {
+                    b.head = grow(b.head);
+                    b.tail = grow(b.tail);
+                }
+            }
+        }
+        self.hair_sim = None;
+        self.painted = true;
+        self.version += 1;
+    }
+
+    /// The strand under a pixel of the picture (the triangle that is seen there belongs to it).
+    fn strand_at(&self, mesh: &AssetMesh, cam: &Camera, at: Pos2) -> Option<usize> {
+        let (px, py) = (at.x as i32, at.y as i32);
+        if px < 0 || py < 0 || px >= cam.w as i32 || py >= cam.h as i32 {
+            return None;
+        }
+        let id = *self.ids.get(py as usize * cam.w as usize + px as usize)?;
+        let v = *mesh.tris.get(id as usize)?.first()? as usize;
+        self.strands.iter().position(|s| (s.verts.0..s.verts.1).contains(&v))
+    }
+
+    /// The handle at the end of a line that is near a pixel of the picture.
+    fn tip_at(&self, cam: &Camera, at: Pos2) -> Option<usize> {
+        self.strands.iter().position(|s| {
+            s.line.last().is_some_and(|t| {
+                let q = cam.project(*t);
+                (Pos2::new(q[0], q[1]) - at).length() < 10.0
+            })
+        })
+    }
+
     /// Take the last stroke of the mesh brush back.
     fn undo_stroke(&mut self, mesh: &mut AssetMesh) {
         if let Some((v, t)) = self.geo_undo.pop() {
+            // the bones of a strand of hair that was drawn go with it
+            let at = self.geo_undo.len();
+            if let Some(b) = self.hair_marks.iter().filter(|m| m.0 == at).map(|m| m.1).min() {
+                self.rig.bones.truncate(b);
+                self.pose.rot.truncate(b);
+                self.hair_sim = None;
+            }
+            self.hair_marks.retain(|m| m.0 != at);
+            self.strands.retain(|s| s.verts.0 < v);
+            self.strand_sel = None;
             mesh.verts.truncate(v);
             mesh.uvs.truncate(v);
             mesh.tris.truncate(t);
@@ -961,6 +1371,8 @@ impl HandRig {
         }
         *mesh = new;
         self.rig.weights = weights;
+        self.strands.clear();
+        self.strand_sel = None;
         self.geo_undo.clear();
         self.painted = true;
         self.near = None;
@@ -971,6 +1383,8 @@ impl HandRig {
         if let Some((m, w)) = self.cut_undo.pop() {
             *mesh = m;
             self.rig.weights = w;
+            self.strands.clear();
+            self.strand_sel = None;
             self.geo_undo.clear();
             self.near = None;
             self.version += 1;
@@ -988,6 +1402,40 @@ impl HandRig {
         let t = self.current_take();
         t.fit(bones);
         t.set_key(bone, frame, rot);
+    }
+
+    /// The hair swings: the chains of bones that hang from the head are run by the simulation, and their turns are put in the pose that is shown.
+    pub fn apply_hair(&mut self, dt: f32) {
+        if !self.hair_physics {
+            return;
+        }
+        if self.hair_sim.is_none() || self.hair_sig != self.rig.bones.len() {
+            self.hair_sim = Some(crate::hairsim::HairSim::new(&self.rig));
+            self.hair_sig = self.rig.bones.len();
+        }
+        let params = self.hair_params;
+        if let Some(sim) = self.hair_sim.as_mut() {
+            if sim.is_empty() {
+                return;
+            }
+            let mut p = self.pose.clone();
+            sim.step(&self.rig, &mut p, &params, dt);
+            self.pose = p;
+            self.version += 1;
+        }
+    }
+
+    /// Is there hair that moves (bones of strands that were drawn)?
+    pub fn has_hair(&self) -> bool {
+        self.rig.bones.iter().any(|b| b.name.to_lowercase().starts_with("hair"))
+    }
+
+    /// The animations get the motion of the hair, when it is on: the files carry it as keys.
+    pub fn with_hair(&self, mut anims: Vec<crate::take::Anim>) -> Vec<crate::take::Anim> {
+        if self.hair_physics && self.has_hair() {
+            crate::hairsim::bake(&self.rig, &mut anims, &self.hair_params);
+        }
+        anims
     }
 
     /// The take that is shown (there is always one).
@@ -1068,6 +1516,271 @@ impl HandRig {
         self.version += 1;
     }
 
+    /// How many texels there are in a metre of the surface (the textures of the pieces have the same density, so this is for all of the mesh).
+    fn texels_per_metre(mesh: &AssetMesh) -> f32 {
+        let Some(tex) = mesh.texture.as_ref() else { return 500.0 };
+        let (w, h) = (tex.width() as f32, tex.height() as f32);
+        let (mut uv_area, mut world) = (0.0f64, 0.0f64);
+        for t in &mesh.tris {
+            let (a, b, c) = (mesh.uvs[t[0] as usize], mesh.uvs[t[1] as usize], mesh.uvs[t[2] as usize]);
+            uv_area += (0.5 * ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() * w * h) as f64;
+            let (p, q, r) = (mesh.verts[t[0] as usize], mesh.verts[t[1] as usize], mesh.verts[t[2] as usize]);
+            let (u, v) = ([q[0] - p[0], q[1] - p[1], q[2] - p[2]], [r[0] - p[0], r[1] - p[1], r[2] - p[2]]);
+            let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+            world += 0.5 * (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt() as f64;
+        }
+        if world < 1e-12 { 500.0 } else { (uv_area / world).sqrt() as f32 }
+    }
+
+    /// The texel of a pixel of the picture, as a place on the canvas of the texture.
+    fn uv_pixel(&self, mesh: &AssetMesh, cam: &Camera, at: Pos2, w: f32, h: f32) -> Option<[f32; 2]> {
+        let (px, py) = (at.x as i32, at.y as i32);
+        if px < 0 || py < 0 || px >= cam.w as i32 || py >= cam.h as i32 {
+            return None;
+        }
+        let id = *self.ids.get(py as usize * cam.w as usize + px as usize)?;
+        if id == u32::MAX {
+            return None;
+        }
+        let uv = mesh.uv_at(&mesh.verts, cam, id as usize, px as f32 + 0.5, py as f32 + 0.5)?;
+        Some([uv[0].rem_euclid(1.0) * w, uv[1].rem_euclid(1.0) * h])
+    }
+
+    /// The points that are picked or let go by a loop or a brush are worked out when the pointer is let go (the loop), or as the brush goes.
+    fn pick_points(&mut self, mesh: &AssetMesh, cam: &Camera, points: &[usize], how: u8) {
+        if self.selected.len() != mesh.verts.len() {
+            self.selected = vec![false; mesh.verts.len()];
+        }
+        for p in points {
+            if let Some(s) = self.selected.get_mut(*p) {
+                *s = how != 2;
+            }
+        }
+        let _ = cam;
+        self.version += 1;
+    }
+
+    /// The loop is closed: the points inside it are picked (shift adds to what is picked, ctrl takes away, and without them it starts again).
+    fn finish_faces(&mut self, mesh: &AssetMesh, cam: &Camera, mods: egui::Modifiers) {
+        if self.pick_mode != PickMode::Loop {
+            self.lasso.clear();
+            return;
+        }
+        let poly = std::mem::take(&mut self.lasso);
+        if poly.len() < 3 {
+            return;
+        }
+        let inside = |x: f32, y: f32| {
+            let mut c = false;
+            let mut j = poly.len() - 1;
+            for i in 0..poly.len() {
+                let (a, b) = (poly[i], poly[j]);
+                if (a.y > y) != (b.y > y) && x < (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x {
+                    c = !c;
+                }
+                j = i;
+            }
+            c
+        };
+        if !mods.shift && !mods.command {
+            self.selected = vec![false; mesh.verts.len()];
+        }
+        let w = cam.w as i32;
+        let mut points = Vec::new();
+        for (i, v) in mesh.verts.iter().enumerate() {
+            let p = cam.project(*v);
+            let (px, py) = (p[0] as i32, p[1] as i32);
+            if px < 0 || py < 0 || px >= w || py >= cam.h as i32 || !inside(p[0], p[1]) {
+                continue;
+            }
+            // the points on the back are not picked unless that is asked for
+            if !self.through && self.depth.get(py as usize * w as usize + px as usize).is_some_and(|d| p[2] > *d + 8.0) {
+                continue;
+            }
+            points.push(i);
+        }
+        self.pick_points(mesh, cam, &points, if mods.command { 2 } else { 1 });
+    }
+
+    /// Something is done to the mesh that makes it another mesh: the old one is kept to take it back, and what belongs to the points follows.
+    fn edit_mesh(&mut self, mesh: &mut AssetMesh, f: impl FnOnce(&mut Self, &mut AssetMesh) -> Option<(Vec<Option<u32>>, Vec<u32>, Vec<bool>)>) {
+        let before = (mesh.clone(), self.rig.weights.clone());
+        let old = mesh.verts.len();
+        let Some((map, copy_of, selection)) = f(self, mesh) else { return };
+        // the weights: the points that stay keep theirs, the new ones take the weights of the points they are copies of
+        let mut weights = vec![Vec::new(); mesh.verts.len()];
+        if before.1.len() == old {
+            for (o, to) in map.iter().enumerate() {
+                if let Some(j) = to {
+                    weights[*j as usize] = before.1[o].clone();
+                }
+            }
+            for (k, src) in copy_of.iter().enumerate() {
+                let at = old.saturating_sub(0) + k;
+                let _ = at;
+                let new_index = map.iter().filter(|m| m.is_some()).count() + k;
+                if new_index < weights.len() {
+                    weights[new_index] = before.1.get(*src as usize).cloned().unwrap_or_default();
+                }
+            }
+        }
+        self.strands.clear();
+        self.strand_sel = None;
+        self.cut_undo.push(before);
+        if self.cut_undo.len() > 3 {
+            self.cut_undo.remove(0);
+        }
+        self.rig.weights = weights;
+        self.selected = if selection.len() == mesh.verts.len() { selection } else { vec![false; mesh.verts.len()] };
+        self.geo_undo.clear();
+        self.painted = true;
+        self.near = None;
+        self.version += 1;
+    }
+
+    /// A stroke of the Draw brush starts on the surface.
+    fn tex_begin(&mut self, mesh: &mut AssetMesh, cam: &Camera, at: Pos2) -> bool {
+        let (Some(kit), Some(tex)) = (self.kit.clone(), mesh.texture.as_ref()) else { return false };
+        let (w, h) = tex.dimensions();
+        let mut doc = Document::new(w, h);
+        let mut layer = doc.new_layer("Texture", LayerKind::Raster);
+        layer.tiles = crate::files::tiles_from_rgba(tex, 0, 0, w, h);
+        doc.layers.clear();
+        let li = doc.insert_layer(layer, 0);
+        let _ = li;
+        let k = (Self::texels_per_metre(mesh) / cam.scale()).max(0.01);
+        let mut settings = kit.settings.clone();
+        settings.size = (settings.size * k * self.tex_size_mul).max(1.0);
+        settings.stabilize = 0.0;
+        self.texture_checkpoint(mesh);
+        self.tex_session = Some(TexSession { doc, settings, color: kit.color, erase: kit.erase, texels_per_pixel: k, last: at, strokes: vec![(None, None), (None, None)], touched: Default::default() });
+        self.tex_move(mesh, cam, at);
+        true
+    }
+
+    /// The pointer moved: the brush goes along the surface (a stroke is cut where the surface is cut: at the seams of the texture).
+    fn tex_move(&mut self, mesh: &mut AssetMesh, cam: &Camera, now: Pos2) {
+        let Some(mut s) = self.tex_session.take() else { return };
+        let Some(tex_dims) = mesh.texture.as_ref().map(|t| t.dimensions()) else {
+            self.tex_session = Some(s);
+            return;
+        };
+        let (w, h) = (tex_dims.0 as f32, tex_dims.1 as f32);
+        // the points between where the pointer was and where it is
+        let d = now - s.last;
+        let steps = (d.length() / 2.0).ceil().max(1.0) as usize;
+        let none = |_: i32, _: i32| -> Option<egui::Color32> { None };
+        let mut batches: Vec<Vec<BrushSample>> = vec![Vec::new(), Vec::new()];
+        let mut starts: Vec<Option<BrushSample>> = vec![None, None];
+        let jump = (s.settings.size * 4.0).max(48.0);
+        for i in 1..=steps {
+            let p = s.last + d * (i as f32 / steps as f32);
+            let mut spots = vec![self.uv_pixel(mesh, cam, p, w, h)];
+            spots.push(if self.mirror { self.mirror_pixel(mesh, cam, p).and_then(|m| self.uv_pixel(mesh, cam, m, w, h)) } else { None });
+            for (k, spot) in spots.into_iter().enumerate() {
+                let Some(uv) = spot else { continue };
+                let smp = BrushSample { x: uv[0], y: uv[1], p: 1.0 };
+                // a jump across the texture (a seam, or another piece of the surface): the stroke is ended and another one starts
+                let far = s.strokes[k].1.is_some_and(|l| ((l[0] - uv[0]).powi(2) + (l[1] - uv[1]).powi(2)).sqrt() > jump);
+                if far {
+                    if !batches[k].is_empty() {
+                        if let Some(st) = s.strokes[k].0.as_mut() {
+                            st.add(&mut s.doc, &batches[k], &none);
+                        }
+                        batches[k].clear();
+                    }
+                    if let Some(st) = s.strokes[k].0.take() {
+                        st.finish(&mut s.doc, &none);
+                    }
+                }
+                if s.strokes[k].0.is_none() {
+                    starts[k] = Some(smp);
+                    s.strokes[k].0 = Some(BrushStroke::begin(&mut s.doc, 0, &s.settings, s.color, s.erase, 1.0, false, smp, &none));
+                } else {
+                    batches[k].push(smp);
+                }
+                s.strokes[k].1 = Some(uv);
+            }
+        }
+        for k in 0..2 {
+            if let (false, Some(st)) = (batches[k].is_empty(), s.strokes[k].0.as_mut()) {
+                st.add(&mut s.doc, &batches[k], &none);
+            }
+        }
+        s.last = now;
+        // the tiles that were touched go back on the texture of the mesh
+        let reach = s.settings.size * 1.5 + 8.0;
+        let mut keys = std::collections::HashSet::new();
+        for (k, st) in s.strokes.iter().enumerate() {
+            if let (Some(_), Some(l)) = (&st.0, st.1) {
+                let _ = k;
+                let (x0, x1, y0, y1) = (((l[0] - reach).max(0.0) as usize) / TILE, ((l[0] + reach).min(w - 1.0).max(0.0) as usize) / TILE, ((l[1] - reach).max(0.0) as usize) / TILE, ((l[1] + reach).min(h - 1.0).max(0.0) as usize) / TILE);
+                for ty in y0..=y1 {
+                    for tx in x0..=x1 {
+                        keys.insert((tx as i32, ty as i32));
+                    }
+                }
+            }
+        }
+        // the whole stretch of this move: the tiles round the points that were just painted
+        for b in batches.iter().chain(starts.iter().map(|s| s.iter().cloned().collect::<Vec<_>>()).collect::<Vec<_>>().iter()) {
+            for p in b {
+                let (x0, x1, y0, y1) = (((p.x - reach).max(0.0) as usize) / TILE, ((p.x + reach).min(w - 1.0).max(0.0) as usize) / TILE, ((p.y - reach).max(0.0) as usize) / TILE, ((p.y + reach).min(h - 1.0).max(0.0) as usize) / TILE);
+                for ty in y0..=y1 {
+                    for tx in x0..=x1 {
+                        keys.insert((tx as i32, ty as i32));
+                    }
+                }
+            }
+        }
+        if let Some(tex) = mesh.texture.as_mut() {
+            for key in &keys {
+                Self::put_tile(tex, &s.doc, *key);
+            }
+        }
+        s.touched.extend(keys);
+        self.painted = true;
+        self.version += 1;
+        self.tex_session = Some(s);
+    }
+
+    /// The pixels of a tile of the canvas go on the picture.
+    fn put_tile(tex: &mut RgbaImage, doc: &Document, key: (i32, i32)) {
+        let px = doc.flatten_tile(key);
+        for j in 0..TILE {
+            let y = key.1 as usize * TILE + j;
+            if y >= tex.height() as usize {
+                break;
+            }
+            for i in 0..TILE {
+                let x = key.0 as usize * TILE + i;
+                if x >= tex.width() as usize {
+                    break;
+                }
+                let c = crate::blend::from_px(px[j * TILE + i]);
+                tex.put_pixel(x as u32, y as u32, image::Rgba(c.to_srgba_unmultiplied()));
+            }
+        }
+    }
+
+    /// The pointer is let go: the strokes are finished (the engine puts on its last touches) and the tiles go on the texture once more.
+    fn tex_end(&mut self, mesh: &mut AssetMesh) {
+        let Some(mut s) = self.tex_session.take() else { return };
+        let none = |_: i32, _: i32| -> Option<egui::Color32> { None };
+        for k in 0..s.strokes.len() {
+            if let Some(st) = s.strokes[k].0.take() {
+                st.finish(&mut s.doc, &none);
+            }
+        }
+        if let Some(tex) = mesh.texture.as_mut() {
+            for key in &s.touched {
+                Self::put_tile(tex, &s.doc, *key);
+            }
+        }
+        self.painted = true;
+        self.version += 1;
+    }
+
     /// The texel under a pixel of the picture.
     fn texel_at(&self, mesh: &AssetMesh, cam: &Camera, at: Pos2) -> Option<(u32, u32)> {
         let tex = mesh.texture.as_ref()?;
@@ -1089,6 +1802,7 @@ impl HandRig {
             let c = tex.get_pixel(x, y).0;
             self.color = [c[0], c[1], c[2]];
             self.sample = self.color;
+            self.color_dirty = true;
         }
     }
 
@@ -1214,6 +1928,11 @@ impl HandRig {
                         self.mirror_weights(mesh, &cam, now, mode);
                     }
                 }
+                Grab::Texture if self.tex_session.is_some() => {
+                    if let Some(now) = now {
+                        self.tex_move(mesh, &cam, now);
+                    }
+                }
                 Grab::Texture => {
                     if let Some(now) = now {
                         self.paint_texture(mesh, &cam, now);
@@ -1228,6 +1947,33 @@ impl HandRig {
                         self.rig.assign_part(&points, bone);
                         self.mirror_part(mesh, &cam, now, bone);
                         self.version += 1;
+                    }
+                }
+                Grab::StrandMove(i) => {
+                    if let Some(now) = now {
+                        let depth = self.strands.get(i).and_then(|s| s.line.first().copied()).map(|p| cam.project(p)[2]).unwrap_or(0.0);
+                        let (a, b) = (cam.unproject([now.x - delta.x, now.y - delta.y, depth]), cam.unproject([now.x, now.y, depth]));
+                        self.strand_translate(mesh, i, [b[0] - a[0], b[1] - a[1], b[2] - a[2]]);
+                    }
+                }
+                Grab::StrandTip(i) => {
+                    if let Some(now) = now {
+                        if let Some(tip) = self.strands.get(i).and_then(|s| s.line.last().copied()) {
+                            let depth = cam.project(tip)[2];
+                            self.strand_set_tip(mesh, i, cam.unproject([now.x, now.y, depth]));
+                        }
+                    }
+                }
+                Grab::Faces => {
+                    if let Some(now) = now {
+                        if self.pick_mode == PickMode::Loop {
+                            if self.lasso.last().is_none_or(|l| (*l - now).length() > 3.0) {
+                                self.lasso.push(now);
+                            }
+                        } else {
+                            let under: Vec<usize> = self.verts_under(mesh, &cam, now, self.radius).into_iter().map(|p| p.0).collect();
+                            self.pick_points(mesh, &cam, &under, if mods.command { 2 } else { 1 });
+                        }
                     }
                 }
                 Grab::Sculpt => {
@@ -1291,6 +2037,12 @@ impl HandRig {
             }
             if self.grab == Grab::Lasso {
                 self.finish_lasso(mesh, &cam);
+            }
+            if self.grab == Grab::Texture {
+                self.tex_end(mesh);
+            }
+            if self.grab == Grab::Faces {
+                self.finish_faces(mesh, &cam, mods);
             }
             if self.grab == Grab::Sculpt {
                 self.held.clear();
@@ -1393,6 +2145,33 @@ impl HandRig {
                 painter.text(pb + vec2(8.0, -8.0), egui::Align2::LEFT_BOTTOM, &self.rig.bones[i].name, egui::FontId::proportional(12.0), Color32::WHITE);
             }
         }
+        // the picked points as orange dots (the ones that are seen; a few of them when there are very many)
+        if self.tool == Tool::Faces && self.selected.len() == mesh.verts.len() {
+            let picked: Vec<usize> = (0..mesh.verts.len()).filter(|i| self.selected[*i]).collect();
+            let step = (picked.len() / 6000).max(1);
+            for i in picked.into_iter().step_by(step) {
+                let p = cam.project(mesh.verts[i]);
+                let (px, py) = (p[0] as i32, p[1] as i32);
+                if px < 0 || py < 0 || px >= cam.w as i32 || py >= cam.h as i32 {
+                    continue;
+                }
+                if !self.through && self.depth.get(py as usize * cam.w as usize + px as usize).is_some_and(|d| p[2] > *d + 8.0) {
+                    continue;
+                }
+                painter.circle_filled(to_screen(p[0], p[1]), 2.0, Color32::from_rgb(255, 150, 30));
+            }
+        }
+        // the handle at the end of every line: drag it to make the line longer or shorter
+        if self.tool == Tool::Mesh {
+            for (i, s) in self.strands.iter().enumerate() {
+                if let Some(t) = s.line.last() {
+                    let q = cam.project(*t);
+                    let picked = self.strand_sel == Some(i);
+                    painter.circle_filled(to_screen(q[0], q[1]), if picked { 6.0 } else { 4.5 }, if picked { GOLD } else { Color32::from_rgb(230, 180, 90) });
+                    painter.circle_stroke(to_screen(q[0], q[1]), if picked { 6.0 } else { 4.5 }, Stroke::new(1.5, Color32::BLACK));
+                }
+            }
+        }
         if self.stroke.len() > 1 {
             let pts: Vec<Pos2> = self.stroke.iter().map(|p| to_screen(p.x, p.y)).collect();
             painter.add(egui::Shape::line(pts, Stroke::new(3.0, EMERALD)));
@@ -1405,9 +2184,9 @@ impl HandRig {
             painter.line_segment([screen(from), to], Stroke::new(2.0, EMERALD));
             painter.circle_filled(screen(from), 4.0, EMERALD);
         }
-        if matches!(self.tool, Tool::Weights | Tool::Texture | Tool::Parts | Tool::Sculpt) {
+        if matches!(self.tool, Tool::Weights | Tool::Texture | Tool::Parts | Tool::Sculpt) || (self.tool == Tool::Faces && self.pick_mode == PickMode::Brush) {
             if let Some(at) = hover {
-                painter.circle_stroke(to_screen(at.x, at.y), if self.tool == Tool::Texture { self.tex_radius } else { self.radius }, Stroke::new(1.5, Color32::WHITE));
+                painter.circle_stroke(to_screen(at.x, at.y), if self.tool == Tool::Texture { self.kit.as_ref().map(|k| k.settings.size * self.tex_size_mul * 0.5).unwrap_or(self.tex_radius) } else { self.radius }, Stroke::new(1.5, Color32::WHITE));
             }
         }
         resp.on_hover_text(match self.tool {
@@ -1420,6 +2199,7 @@ impl HandRig {
             Tool::Parts => "Paint the part of the mesh that moves with the picked bone. Right button: turn the view. Wheel: zoom.",
             Tool::Lasso => "Draw a loop round a part: all of it moves with the picked bone. Right button: turn the view. Wheel: zoom.",
             Tool::Mesh => "Draw over the mesh: the stroke becomes hair, a rope, a strip or a spike. Right button: turn the view. Wheel: zoom.",
+            Tool::Faces => "Draw a loop (or paint) over what you want to pick. Shift adds, Ctrl takes away. Right button: turn the view. Wheel: zoom.",
             Tool::Attach => "Horns, wings, a tail or ears with numbers. Right button: turn the view. Wheel: zoom.",
             Tool::Sculpt => "Push, pull, smooth or grab the mesh. Ctrl: the other way. Right button: turn the view. Wheel: zoom.",
         });
@@ -1483,6 +2263,9 @@ impl HandRig {
                     self.picking = false;
                     return Grab::None;
                 }
+                if self.kit.is_some() && self.tex_begin(mesh, cam, at) {
+                    return Grab::Texture;
+                }
                 self.texture_checkpoint(mesh);
                 self.paint_texture(mesh, cam, at);
                 if let (true, Some(m)) = (self.mirror, self.mirror_pixel(mesh, cam, at)) {
@@ -1491,6 +2274,18 @@ impl HandRig {
                 Grab::Texture
             }
             Tool::Attach => Grab::None,
+            Tool::Faces => {
+                if self.selected.len() != mesh.verts.len() {
+                    self.selected = vec![false; mesh.verts.len()];
+                }
+                if self.pick_mode == PickMode::Loop {
+                    self.lasso = vec![at];
+                } else {
+                    let under: Vec<usize> = self.verts_under(mesh, cam, at, self.radius).into_iter().map(|p| p.0).collect();
+                    self.pick_points(mesh, cam, &under, if mods.command { 2 } else { 1 });
+                }
+                Grab::Faces
+            }
             Tool::Sculpt => {
                 self.sculpt_undo.push(mesh.verts.clone());
                 if self.sculpt_undo.len() > 6 {
@@ -1508,6 +2303,18 @@ impl HandRig {
                 }
                 Grab::Sculpt
             }
+            Tool::Mesh if self.tip_at(cam, at).is_some() => {
+                let i = self.tip_at(cam, at).unwrap_or(0);
+                self.strand_sel = Some(i);
+                Grab::StrandTip(i)
+            }
+            Tool::Mesh if self.strand_move => match self.strand_at(mesh, cam, at).or(self.strand_sel) {
+                Some(i) => {
+                    self.strand_sel = Some(i);
+                    Grab::StrandMove(i)
+                }
+                None => Grab::None,
+            },
             Tool::Mesh => {
                 if !self.ensure_strip(mesh) {
                     self.message = Some("This mesh has no texture, so the colours of a stroke have no place. Unwrap it first (the Edit page).".into());
@@ -1553,6 +2360,7 @@ impl HandRig {
                 (Tool::Draw, "Draw bones", "Drag in the picture to draw a bone. Start at the end of a bone to continue the chain"),
                 (Tool::Weights, "Paint weights", "Paint which bone moves which part of the mesh"),
                 (Tool::Texture, "Paint texture", "Redraw the colours of the mesh, with colours picked from its own texture"),
+                (Tool::Faces, "Select mesh", "Pick faces of the mesh with a loop or a brush, then delete, extrude, duplicate or change them, like in Blender"),
                 (Tool::Sculpt, "Sculpt", "Push, pull, smooth and grab the mesh, like the sculpt mode of Blender"),
                 (Tool::Attach, "Add parts", "Horns, wings, a tail, ears: with numbers you change"),
                 (Tool::Mesh, "Draw mesh", "Draw hair, ropes, strips and spikes on the mesh with brushes"),
@@ -1578,7 +2386,7 @@ impl HandRig {
                 self.redo();
             }
         });
-        if matches!(self.tool, Tool::Texture | Tool::Mesh | Tool::Weights | Tool::Parts | Tool::Lasso | Tool::Sculpt) {
+        if matches!(self.tool, Tool::Texture | Tool::Mesh | Tool::Weights | Tool::Parts | Tool::Lasso | Tool::Sculpt | Tool::Faces) {
             ui.checkbox(&mut self.mirror, "Mirror left and right").help("What you paint or draw on one side is done on the other side too, across the middle of the body. For the weights and the parts, the bone on the other side (Left and Right in the names) gets the mirror image. Both sides have to be seen in the picture.");
         }
         ui.add_space(6.0);
@@ -1651,6 +2459,119 @@ impl HandRig {
                 let loose = self.rig.unweighted();
                 ui.label(RichText::new(format!("{loose} points are moved by no bone")).size(11.5).color(if loose > 0 { GOLD } else { TEXT_DIM }));
             }
+            Tool::Faces => {
+                section_title(ui, "Select mesh");
+                ui.horizontal_wrapped(|ui| {
+                    for (m, label, tip) in [(PickMode::Loop, "Loop", "Draw a loop round what you want. Shift adds, Ctrl takes away"), (PickMode::Brush, "Brush", "Paint over what you want. Ctrl takes away")] {
+                        if widgets::chip(ui, label, self.pick_mode == m).help(tip).clicked() {
+                            self.pick_mode = m;
+                        }
+                    }
+                });
+                ui.checkbox(&mut self.through, "Also the back").help("Pick the points on the other side of the mesh too, not only the ones you see");
+                if self.pick_mode == PickMode::Brush {
+                    ui.add(egui::Slider::new(&mut self.radius, 5.0..=200.0).text("Size"));
+                }
+                if self.selected.len() != mesh.verts.len() {
+                    self.selected = vec![false; mesh.verts.len()];
+                }
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button(RichText::new("Select all mesh").strong()).clicked() {
+                        self.selected = vec![true; mesh.verts.len()];
+                        self.version += 1;
+                    }
+                    if ui.button("None").clicked() {
+                        self.selected = vec![false; mesh.verts.len()];
+                        self.version += 1;
+                    }
+                    if ui.button("Invert").clicked() {
+                        self.selected.iter_mut().for_each(|s| *s = !*s);
+                        self.version += 1;
+                    }
+                });
+                if self.near.is_none() {
+                    self.near = Some(neighbours(&mesh.verts, &mesh.tris));
+                }
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Wider").help("The points next to the picked ones are picked too").clicked() {
+                        let near = self.near.take().unwrap_or_default();
+                        self.selected = meshedit::grow(&self.selected, &near);
+                        self.near = Some(near);
+                        self.version += 1;
+                    }
+                    if ui.button("Narrower").help("The points at the border of what is picked are let go").clicked() {
+                        let near = self.near.take().unwrap_or_default();
+                        self.selected = meshedit::shrink(&self.selected, &near);
+                        self.near = Some(near);
+                        self.version += 1;
+                    }
+                });
+                let (points, faces) = (self.selected.iter().filter(|s| **s).count(), meshedit::selected_tris(mesh, &self.selected).iter().filter(|f| **f).count());
+                ui.label(RichText::new(format!("{points} points and {faces} faces are picked")).size(11.5).color(if points > 0 { GOLD } else { TEXT_DIM }));
+                ui.add_space(4.0);
+                section_title(ui, "Do something with them");
+                let any = faces > 0;
+                if ui.add_enabled(any, egui::Button::new("Delete picked")).help("The picked faces are taken away").clicked() {
+                    let sel = self.selected.clone();
+                    self.edit_mesh(mesh, |_, m| {
+                        let (new, map) = meshedit::delete_selected(m, &sel);
+                        *m = new;
+                        Some((map, Vec::new(), Vec::new()))
+                    });
+                }
+                ui.add(egui::Slider::new(&mut self.ext_dist, -0.2..=0.2).text("How far").suffix(" m")).help("For extrude: how far the faces are pushed out (in, when it is below 0)");
+                ui.horizontal_wrapped(|ui| {
+                    if ui.add_enabled(any, egui::Button::new("Extrude")).help("The picked faces are pushed out along the way they face, with walls round them").clicked() {
+                        let (sel, d) = (self.selected.clone(), self.ext_dist);
+                        self.edit_mesh(mesh, |_, m| {
+                            let made = meshedit::extrude(m, &sel, d)?;
+                            let map: Vec<Option<u32>> = (0..m.verts.len() as u32).map(Some).collect();
+                            *m = made.mesh;
+                            Some((map, made.copy_of, made.selection))
+                        });
+                    }
+                    if ui.add_enabled(any, egui::Button::new("Duplicate")).help("A copy of the picked faces, as new geometry next to them").clicked() {
+                        let (sel, d) = (self.selected.clone(), self.ext_dist);
+                        self.edit_mesh(mesh, |_, m| {
+                            let made = meshedit::duplicate(m, &sel, [d.max(0.02), 0.0, 0.0])?;
+                            let map: Vec<Option<u32>> = (0..m.verts.len() as u32).map(Some).collect();
+                            *m = made.mesh;
+                            Some((map, made.copy_of, made.selection))
+                        });
+                    }
+                });
+                ui.add(egui::Slider::new(&mut self.push_dist, -0.1..=0.1).text("Push").suffix(" m"));
+                ui.add(egui::Slider::new(&mut self.scale_by, 0.2..=3.0).text("Scale"));
+                ui.horizontal_wrapped(|ui| {
+                    if ui.add_enabled(points > 0, egui::Button::new("Push out")).help("The picked points move along the way the surface faces").clicked() {
+                        let (sel, d) = (self.selected.clone(), self.push_dist);
+                        self.edit_mesh(mesh, |_, m| {
+                            meshedit::push_along_normals(m, &sel, d);
+                            Some(((0..m.verts.len() as u32).map(Some).collect(), Vec::new(), sel))
+                        });
+                    }
+                    if ui.add_enabled(points > 0, egui::Button::new("Scale")).help("The picked points are scaled about their middle").clicked() {
+                        let (sel, k) = (self.selected.clone(), self.scale_by);
+                        self.edit_mesh(mesh, |_, m| {
+                            meshedit::scale_selected(m, &sel, k);
+                            Some(((0..m.verts.len() as u32).map(Some).collect(), Vec::new(), sel))
+                        });
+                    }
+                    if ui.add_enabled(points > 0, egui::Button::new("Smooth")).help("The picked points are made smoother").clicked() {
+                        let (sel, passes) = (self.selected.clone(), self.smooth_passes);
+                        let near = self.near.clone().unwrap_or_default();
+                        self.edit_mesh(mesh, |_, m| {
+                            meshedit::smooth_selected(m, &sel, &near, passes);
+                            Some(((0..m.verts.len() as u32).map(Some).collect(), Vec::new(), sel))
+                        });
+                    }
+                });
+                if ui.add_enabled(!self.cut_undo.is_empty(), egui::Button::new("Take the last change back")).clicked() {
+                    self.undo_cut(mesh);
+                    self.selected = vec![false; mesh.verts.len()];
+                }
+                ui.label(RichText::new("The orange dots are the picked points. The bones and the weights follow the points.").size(11.0).color(TEXT_DIM));
+            }
             Tool::Sculpt => {
                 section_title(ui, "Sculpt");
                 ui.horizontal_wrapped(|ui| {
@@ -1722,12 +2643,26 @@ impl HandRig {
             Tool::Mesh => {
                 section_title(ui, "Mesh brushes");
                 ui.horizontal_wrapped(|ui| {
+                    if widgets::chip(ui, "Hair line", self.hair).help("Draw one line for a strand of hair: the strand is made along it and its bones are made and rigged, so it swings like hair when the head moves").clicked() {
+                        self.hair = true;
+                        self.brush = self.brush.with_kind(BrushKind::Card);
+                        self.brush.width = 0.02;
+                        self.brush.taper = 0.75;
+                    }
                     for k in BrushKind::ALL {
-                        if widgets::chip(ui, k.label(), self.brush.kind == k).help(k.about()).clicked() {
+                        if widgets::chip(ui, k.label(), self.brush.kind == k && !self.hair).help(k.about()).clicked() {
+                            self.hair = false;
                             self.brush = self.brush.with_kind(k);
                         }
                     }
                 });
+                self.strands_ui(ui, mesh);
+                if self.hair && ui.button("Draw the hair picture...").help("Open the picture all the lines of hair look into (like the hair texture of VRoid) and draw it by hand").clicked() {
+                    self.open_hair_editor(mesh);
+                }
+                if self.hair {
+                    ui.label(RichText::new("One line is one strand: from the root outwards, the way the hair lies. The strand and the bones that make it swing come from the line. Put the bones of a person in first (the Bones and weights page), so the hair hangs from the head. Then play an animation on the Animate by hand page.").size(11.0).color(TEXT_DIM));
+                }
                 ui.add(egui::Slider::new(&mut self.brush.width, 0.002..=0.2).logarithmic(true).text("Width").suffix(" m")).help("How wide or thick the stroke is");
                 ui.add(egui::Slider::new(&mut self.brush.taper, 0.0..=1.0).text("Thinner to the end")).help("0: the same all along, 1: a point at the end");
                 ui.add(egui::Slider::new(&mut self.brush.lift, 0.0..=0.05).text("Off the surface").suffix(" m")).help("How far the stroke floats over the surface");
@@ -1777,13 +2712,20 @@ impl HandRig {
             Tool::Texture => {
                 section_title(ui, "Paint the texture");
                 ui.horizontal(|ui| {
-                    ui.color_edit_button_srgb(&mut self.color);
+                    if ui.color_edit_button_srgb(&mut self.color).changed() {
+                        self.color_dirty = true;
+                    }
                     if widgets::chip(ui, "Pick from the mesh", self.picking).help("Click the mesh to take its colour. Alt does the same while painting.").clicked() {
                         self.picking = !self.picking;
                     }
                 });
-                ui.add(egui::Slider::new(&mut self.tex_radius, 3.0..=120.0).text("Size")).help("The size of the brush in pixels");
-                ui.add(egui::Slider::new(&mut self.tex_opacity, 0.05..=1.0).text("Strength")).help("How much colour one touch puts on");
+                if self.kit.is_some() {
+                    ui.label(RichText::new("It paints with the brush you picked in the Draw tab: every brush, its size, shape, dynamics and texture, and the colour. The eraser and the smudge of the Draw tab work here too.").size(11.0).color(TEXT_DIM));
+                    ui.add(egui::Slider::new(&mut self.tex_size_mul, 0.2..=4.0).text("Brush size here")).help("How big the brush of the Draw tab is on the mesh (as a multiplier)");
+                } else {
+                    ui.add(egui::Slider::new(&mut self.tex_radius, 3.0..=120.0).text("Size")).help("The size of the brush in pixels");
+                    ui.add(egui::Slider::new(&mut self.tex_opacity, 0.05..=1.0).text("Strength")).help("How much colour one touch puts on");
+                }
                 ui.add_space(4.0);
                 ui.add(egui::Slider::new(&mut self.tolerance, 0.0..=120.0).text("Likeness")).help("How different a colour may be to count as the picked one");
                 if ui.add_enabled(mesh.texture.is_some(), egui::Button::new("Recolour the picked colour")).help("Every part of the texture that has about the colour you last picked from the mesh gets the new colour: the whole hair, the whole coat.").clicked() {
@@ -2013,6 +2955,18 @@ impl HandRig {
                 self.current_take().set_move(frame, off);
             }
         }
+        if self.has_hair() {
+            section_title(ui, "Hair");
+            if ui.checkbox(&mut self.hair_physics, "The hair moves").help("The strands of hair swing when the head moves, here and in the files (the motion goes in the keys of the animations)").changed() {
+                self.hair_sim = None;
+            }
+            ui.add(egui::Slider::new(&mut self.hair_params.stiffness, 0.0..=1.0).text("Stiff")).help("0: the hair hangs free, 1: it keeps its shape");
+            ui.add(egui::Slider::new(&mut self.hair_params.damping, 0.6..=0.99).text("Keeps swinging")).help("Higher: it swings for longer");
+            ui.add(egui::Slider::new(&mut self.hair_params.gravity, 0.0..=20.0).text("Falls"));
+            if ui.small_button("Reset the hair").clicked() {
+                self.hair_sim = None;
+            }
+        }
         self.library_ui(ui);
         section_title(ui, "View");
         ui.horizontal_wrapped(|ui| {
@@ -2163,6 +3117,46 @@ impl HandRig {
         self.show_frame();
     }
 
+    /// The strokes that were drawn: pick one, make it thicker or thinner, move it, and drag the handle at the end of its line to make it longer or shorter.
+    fn strands_ui(&mut self, ui: &mut Ui, mesh: &mut AssetMesh) {
+        if self.strands.is_empty() {
+            return;
+        }
+        section_title(ui, "What was drawn");
+        egui::ScrollArea::vertical().id_salt("mesh_strands").max_height(120.0).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for i in 0..self.strands.len() {
+                    if widgets::chip(ui, &self.strands[i].name.clone(), self.strand_sel == Some(i)).clicked() {
+                        self.strand_sel = Some(i);
+                    }
+                }
+            });
+        });
+        let Some(i) = self.strand_sel.filter(|i| *i < self.strands.len()) else {
+            ui.label(RichText::new("Pick one of them (or click it in the picture) to change it.").size(11.0).color(TEXT_DIM));
+            return;
+        };
+        if !self.strands[i].line.is_empty() {
+            let mut mul = self.strands[i].width_mul;
+            if ui.add(egui::Slider::new(&mut mul, 0.3..=4.0).text("Thickness")).help("How thick it is, as a multiplier of how it was drawn").changed() {
+                self.strand_thickness(mesh, i, mul);
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Move").size(12.0).color(TEXT_DIM));
+            for (k, axis) in ["x", "y", "z"].into_iter().enumerate() {
+                let mut d = 0.0f32;
+                if ui.add(egui::DragValue::new(&mut d).speed(0.002).prefix(format!("{axis} ")).suffix(" m")).help("Drag, or type how far (metres): right, up, towards the front").changed() {
+                    let mut v = [0.0; 3];
+                    v[k] = d;
+                    self.strand_translate(mesh, i, v);
+                }
+            }
+        });
+        ui.checkbox(&mut self.strand_move, "Drag it with the mouse").help("Dragging in the picture moves the picked line (instead of drawing a new one). The round handle at the end of a line always makes it longer or shorter.");
+        ui.label(RichText::new("Drag the round handle at the end of a line to make it longer or shorter, if it was drawn too short.").size(11.0).color(TEXT_DIM));
+    }
+
     fn bones_ui(&mut self, ui: &mut Ui, ask: &mut Ask) {
         section_title(ui, "Bones");
         if self.rig.bones.is_empty() {
@@ -2299,6 +3293,15 @@ impl SeviathApp {
         }
         let mut ask = Ask::None;
         let page = self.m3.page;
+        // the brush of the Draw tab is the brush of the texture here, and the colour goes both ways
+        if self.m3.hand.color_dirty {
+            let c = self.m3.hand.color;
+            self.draw.primary = Color32::from_rgb(c[0], c[1], c[2]);
+            self.m3.hand.color_dirty = false;
+        }
+        let (settings, color, erase) = self.draw.brush_snapshot();
+        self.m3.hand.color = [color.r(), color.g(), color.b()];
+        self.m3.hand.kit = Some(PaintKit { settings, color, erase });
         let dt = ui.input(|i| i.stable_dt).min(0.1);
         let MeshUi { hand, mesh, .. } = &mut self.m3;
         let mesh = mesh.as_mut().expect("there is a mesh");
@@ -2313,6 +3316,10 @@ impl SeviathApp {
             }
             if hand.playing {
                 hand.advance(dt);
+                ui.ctx().request_repaint();
+            }
+            if hand.has_hair() {
+                hand.apply_hair(dt);
                 ui.ctx().request_repaint();
             }
         } else {
@@ -2366,6 +3373,7 @@ impl SeviathApp {
             egui::Panel::bottom("mesh_timeline").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| hand.timeline_ui(ui));
         }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(14, 20, 18)).inner_margin(egui::Margin::same(6))).show(ui, |ui| hand.viewport(ui, &mut *mesh));
+        hand.hair_editor_ui(&ui.ctx().clone(), &mut *mesh);
         match ask {
             Ask::Open => self.mesh_open_glb(),
             Ask::Save => self.mesh_save_rigged(),
@@ -2393,7 +3401,7 @@ impl SeviathApp {
         if with_takes {
             all.extend(self.m3.hand.take_anims());
         }
-        all
+        self.m3.hand.with_hair(all)
     }
 
     /// A .glb is opened as the mesh (with its rig, when it has one).
@@ -2738,5 +3746,180 @@ mod tests {
         assert!(hand.attach.is_some() && mesh.verts.len() > 44);
         let high = mesh.texture.as_ref().unwrap().height() as f32;
         assert!(mesh.uvs[44..].iter().all(|q| q[1] >= v0 && q[1] <= 1.0), "the part looks into the strip of a texture that is taller than wide ({high})");
+    }
+
+    #[test]
+    fn the_brush_of_the_draw_tab_paints_the_texture_of_the_mesh_through_the_engine() {
+        let (mut mesh, mut hand, cam) = mirror_setup();
+        hand.mirror = false;
+        let mut settings = BrushSettings::default();
+        settings.size = 18.0;
+        settings.opacity = 1.0;
+        settings.stabilize = 0.0;
+        hand.kit = Some(PaintKit { settings, color: egui::Color32::from_rgb(20, 220, 40), erase: false });
+        let before = mesh.texture.clone().unwrap();
+        let a = cam.project([-0.05, 0.9, 0.1]);
+        let b = cam.project([0.05, 1.3, 0.1]);
+        assert!(hand.tex_begin(&mut mesh, &cam, Pos2::new(a[0], a[1])));
+        for i in 1..=10 {
+            let t = i as f32 / 10.0;
+            hand.tex_move(&mut mesh, &cam, Pos2::new(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t));
+        }
+        hand.tex_end(&mut mesh);
+        assert!(hand.tex_session.is_none());
+        let after = mesh.texture.as_ref().unwrap();
+        let green = after.pixels().filter(|p| p.0[1] > 180 && p.0[0] < 80).count();
+        assert!(green > 30, "the engine painted {green} green texels");
+        assert_ne!(&before, after);
+        // a stroke can be taken back like the others
+        hand.texture_undo(&mut mesh);
+        assert_eq!(mesh.texture.as_ref().unwrap(), &before);
+    }
+
+    #[test]
+    fn a_loop_picks_points_and_the_faces_can_be_extruded_with_their_weights_and_deleted() {
+        let (mut mesh, mut hand, cam) = sculpt_setup();
+        hand.rig.add_bone("a", None, [0.0; 3], [0.0, 1.0, 0.0]);
+        hand.rig.assign_nearest_parts(&mesh.verts);
+        // a loop round the middle of the grid
+        let c = centre_px(&cam);
+        hand.lasso = vec![Pos2::new(c.x - 30.0, c.y - 30.0), Pos2::new(c.x + 30.0, c.y - 30.0), Pos2::new(c.x + 30.0, c.y + 30.0), Pos2::new(c.x - 30.0, c.y + 30.0)];
+        hand.finish_faces(&mesh, &cam, egui::Modifiers::NONE);
+        let picked = hand.selected.iter().filter(|s| **s).count();
+        assert!(picked > 5 && picked < mesh.verts.len(), "{picked}");
+        // shift adds a second loop, ctrl takes it away
+        hand.lasso = vec![Pos2::new(c.x - 30.0, c.y - 30.0), Pos2::new(c.x + 30.0, c.y - 30.0), Pos2::new(c.x + 30.0, c.y + 30.0), Pos2::new(c.x - 30.0, c.y + 30.0)];
+        hand.finish_faces(&mesh, &cam, egui::Modifiers { command: true, ..Default::default() });
+        assert_eq!(hand.selected.iter().filter(|s| **s).count(), 0, "the same loop with ctrl takes it all away");
+        hand.selected = vec![true; mesh.verts.len()];
+        // extrude everything: the weights of the new points are those of the old ones
+        let (v0, sel) = (mesh.verts.len(), hand.selected.clone());
+        hand.edit_mesh(&mut mesh, |_, m| {
+            let made = meshedit::extrude(m, &sel, 0.05)?;
+            let map: Vec<Option<u32>> = (0..m.verts.len() as u32).map(Some).collect();
+            *m = made.mesh;
+            Some((map, made.copy_of, made.selection))
+        });
+        assert!(mesh.verts.len() > v0);
+        assert_eq!(hand.rig.weights.len(), mesh.verts.len());
+        assert!(hand.rig.weights.iter().all(|w| !w.is_empty()), "every point, new or old, has its bone");
+        assert_eq!(hand.selected.len(), mesh.verts.len());
+        // delete what is picked: only what is not picked is left
+        let sel = hand.selected.clone();
+        let before = mesh.verts.len();
+        hand.edit_mesh(&mut mesh, |_, m| {
+            let (new, map) = meshedit::delete_selected(m, &sel);
+            *m = new;
+            Some((map, Vec::new(), Vec::new()))
+        });
+        assert!(mesh.verts.len() < before);
+        assert_eq!(hand.rig.weights.len(), mesh.verts.len());
+        hand.undo_cut(&mut mesh);
+        assert_eq!(mesh.verts.len(), before);
+    }
+
+    /// A hair stroke drawn on the figure with the bones of a person in it.
+    fn hair_figure() -> (AssetMesh, HandRig, Camera) {
+        let (mut mesh, mut hand, cam) = mirror_setup();
+        hand.mirror = false;
+        let (lo, hi) = mesh.bounds();
+        hand.rig = Rig3::humanoid(mesh.verts.len(), lo, hi);
+        hand.rig.assign_nearest_parts(&mesh.verts);
+        hand.hair = true;
+        hand.brush = hand.brush.with_kind(BrushKind::Card);
+        hand.brush.width = 0.03;
+        let x = cam.project([0.0, 1.9, 0.1])[0];
+        hand.stroke = (0..20).map(|i| Pos2::new(x - 20.0 + i as f32 * 0.5, 40.0 + i as f32 * 8.0)).collect();
+        hand.finish_stroke(&mut mesh, &cam);
+        (mesh, hand, cam)
+    }
+
+    #[test]
+    fn one_line_of_hair_is_a_strand_with_a_chain_of_bones_that_it_is_skinned_to_and_it_goes_back_with_undo() {
+        let (mut mesh, mut hand, _cam) = hair_figure();
+        let hair: Vec<usize> = (0..hand.rig.bones.len()).filter(|i| hand.rig.bones[*i].name.starts_with("hair")).collect();
+        assert!(hair.len() >= 3, "a chain of bones: {}", hair.len());
+        assert!(hand.rig.bones[hair[0]].parent.is_some(), "it hangs from a bone of the body");
+        assert_eq!(hand.rig.bones[hair[1]].parent, Some(hair[0]));
+        assert_eq!(hand.strands.len(), 1);
+        // the points of the strand are moved by the chain and by nothing else
+        let (v0, v1) = (hand.strands[0].verts.0, hand.strands[0].verts.1);
+        assert!(v1 > v0);
+        for i in v0..v1 {
+            assert!(hand.rig.weights[i].iter().all(|w| hair.contains(&(w.0 as usize))), "point {i}: {:?}", hand.rig.weights[i]);
+            let sum: f32 = hand.rig.weights[i].iter().map(|w| w.1).sum();
+            assert!((sum - 1.0).abs() < 1e-4);
+        }
+        // the root follows the first bone and the end follows the last
+        assert!(hand.rig.weights[v0].iter().any(|w| w.0 as usize == hair[0]));
+        assert!(hand.rig.weights[v1 - 1].iter().any(|w| w.0 as usize == *hair.last().unwrap()));
+        // a stroke drawn again is another strand, and one step takes the last back with its bones
+        let bones = hand.rig.bones.len();
+        hand.undo_stroke(&mut mesh);
+        assert!(hand.rig.bones.len() < bones && hand.strands.is_empty());
+        assert!(!hand.has_hair());
+    }
+
+    #[test]
+    fn a_strand_is_moved_made_thicker_and_made_longer_by_its_end_with_its_bones() {
+        let (mut mesh, mut hand, _cam) = hair_figure();
+        let (v0, v1) = (hand.strands[0].verts.0, hand.strands[0].verts.1);
+        let first = hand.strands[0].bones.unwrap().0;
+        let (p0, b0) = (mesh.verts[v0], hand.rig.bones[first].head);
+        hand.strand_translate(&mut mesh, 0, [0.0, 0.05, 0.1]);
+        assert!((mesh.verts[v0][2] - p0[2] - 0.1).abs() < 1e-5 && (hand.rig.bones[first].head[2] - b0[2] - 0.1).abs() < 1e-5, "the points and the bones move together");
+        // thicker: the points are further from the line
+        let spread = |m: &AssetMesh, h: &HandRig| {
+            let line = &h.strands[0].line;
+            (v0..v1).map(|i| { let q = near_on_line(line, m.verts[i]); ((m.verts[i][0] - q[0]).powi(2) + (m.verts[i][1] - q[1]).powi(2) + (m.verts[i][2] - q[2]).powi(2)).sqrt() }).fold(0.0f32, f32::max)
+        };
+        let thin = spread(&mesh, &hand);
+        hand.strand_thickness(&mut mesh, 0, 2.0);
+        assert!((spread(&mesh, &hand) / thin - 2.0).abs() < 0.05, "{} {}", spread(&mesh, &hand), thin);
+        // longer: the end of the line goes further from the root, the thickness stays
+        let (root, tip) = (hand.strands[0].line[0], *hand.strands[0].line.last().unwrap());
+        let len = |a: [f32; 3], b: [f32; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+        let before = len(root, tip);
+        let thick = spread(&mesh, &hand);
+        hand.strand_set_tip(&mut mesh, 0, [root[0] + (tip[0] - root[0]) * 1.5, root[1] + (tip[1] - root[1]) * 1.5, root[2] + (tip[2] - root[2]) * 1.5]);
+        let (r2, t2) = (hand.strands[0].line[0], *hand.strands[0].line.last().unwrap());
+        assert!((len(r2, t2) / before - 1.5).abs() < 0.02, "{}", len(r2, t2) / before);
+        assert!((spread(&mesh, &hand) - thick).abs() < thick * 0.1, "the thickness stays");
+        let last = hand.strands[0].bones.unwrap();
+        let tail = hand.rig.bones[last.0 + last.1 - 1].tail;
+        assert!(len(tail, t2) < 0.02, "the bones follow the line");
+    }
+
+    #[test]
+    fn all_the_lines_of_hair_look_into_one_picture_that_is_not_a_cell_and_can_be_opened_to_draw() {
+        let (mut mesh, mut hand, cam) = hair_figure();
+        let tex = mesh.texture.as_ref().unwrap();
+        let (size, high) = tex.dimensions();
+        let y_start = (hand.strip_v0.unwrap() * high as f32).ceil() as u32;
+        let (rx, ry, rs) = HandRig::hair_region(size, high, y_start).expect("a place for the picture of the hair");
+        // the points of the strand look into the square of the picture of the hair
+        let (v0, v1) = (hand.strands[0].verts.0, hand.strands[0].verts.1);
+        for i in v0..v1 {
+            let (x, y) = (mesh.uvs[i][0] * size as f32, mesh.uvs[i][1] * high as f32);
+            assert!(x >= rx as f32 && x <= (rx + rs) as f32 && y >= ry as f32 && y <= (ry + rs) as f32, "point {i} looks at {x} {y}");
+        }
+        // no cell of the strip was used, and a second line uses the same picture
+        assert_eq!(hand.strip_next, 0);
+        let x = cam.project([0.0, 1.9, 0.1])[0];
+        hand.stroke = (0..20).map(|i| Pos2::new(x + 10.0 + i as f32 * 0.5, 40.0 + i as f32 * 8.0)).collect();
+        hand.finish_stroke(&mut mesh, &cam);
+        assert_eq!((hand.strands.len(), hand.strip_next), (2, 0));
+        // the cells of the strip leave out the square of the picture
+        let cells = HandRig::strip_cells(size, high, y_start, Some((rx, ry, rs)));
+        assert!(cells.iter().all(|(cx, cy)| !(cx + 32 > rx && *cx < rx + rs && cy + 32 > ry && *cy < ry + rs)));
+        assert!(!cells.is_empty());
+        // opened, it has the pixels of the texture
+        hand.open_hair_editor(&mut mesh);
+        let ed = hand.hair_editor.as_ref().expect("the editor is open");
+        assert_eq!(ed.region, (rx, ry, rs));
+        let first = ed.doc.flatten_tile((0, 0))[0];
+        let px = mesh.texture.as_ref().unwrap().get_pixel(rx, ry).0;
+        let c = crate::blend::from_px(first);
+        assert!((c.r() as i32 - px[0] as i32).abs() <= 2, "{c:?} {px:?}");
     }
 }

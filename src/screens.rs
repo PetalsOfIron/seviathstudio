@@ -4382,6 +4382,14 @@ fn bases_page_screens() {
         h.state_mut().test_mesh().hand.yaw = 140.0;
         h.run_steps(5);
         save(&mut h, "bases_5_horns_wings");
+        // the hair brush: one line is a rigged strand, and the picture of the hair can be drawn
+        h.state_mut().test_mesh_drop_part();
+        h.state_mut().test_mesh().hand.tool = crate::app::MeshTool::Mesh;
+        h.state_mut().test_mesh().hand.hair = true;
+        h.state_mut().test_mesh().hand.yaw = 0.0;
+        h.state_mut().test_open_hair_editor();
+        h.run_steps(5);
+        save(&mut h, "bases_6_hair_brush");
     }
 }
 
@@ -4433,6 +4441,9 @@ fn an_imported_mesh_is_turned_scaled_coloured_and_sculpted() {
     h.state_mut().test_mesh().hand.tool = crate::app::MeshTool::Sculpt;
     h.run_steps(4);
     save(&mut h, "edit_2_sculpt");
+    h.state_mut().test_mesh().hand.tool = crate::app::MeshTool::Faces;
+    h.run_steps(4);
+    save(&mut h, "edit_3_select_mesh");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

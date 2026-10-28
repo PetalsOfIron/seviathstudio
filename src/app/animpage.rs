@@ -233,6 +233,7 @@ impl SeviathApp {
         if with_takes {
             anims.extend(self.m3.hand.take_anims());
         }
+        let anims = self.m3.hand.with_hair(anims);
         Ok(crate::meshfile::write_glb_anims(mesh, Some(&self.m3.hand.rig), &anims))
     }
 
