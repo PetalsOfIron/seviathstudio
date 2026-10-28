@@ -13,10 +13,12 @@ pub enum Part {
     Wings,
     Tail,
     Ears,
+    /// A plume: feathers in a fan.
+    Feathers,
 }
 
 impl Part {
-    pub const ALL: [Part; 4] = [Part::Horns, Part::Wings, Part::Tail, Part::Ears];
+    pub const ALL: [Part; 5] = [Part::Horns, Part::Wings, Part::Tail, Part::Ears, Part::Feathers];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -24,6 +26,7 @@ impl Part {
             Part::Wings => "Wings",
             Part::Tail => "Tail",
             Part::Ears => "Ears",
+            Part::Feathers => "Feathers",
         }
     }
 
@@ -34,6 +37,7 @@ impl Part {
             Part::Wings => Params { count: 10, size: 1.0, thick: 1.0, curl: 0.2, spread: 35.0, up: 0.0, back: 0.0, apart: 1.0 },
             Part::Tail => Params { count: 1, size: 1.0, thick: 1.0, curl: 0.4, spread: 0.0, up: 0.0, back: 0.0, apart: 1.0 },
             Part::Ears => Params { count: 1, size: 1.0, thick: 1.0, curl: 0.0, spread: 55.0, up: 0.0, back: 0.0, apart: 1.0 },
+            Part::Feathers => Params { count: 7, size: 1.0, thick: 1.0, curl: 0.3, spread: 70.0, up: 0.0, back: 0.0, apart: 1.0 },
         }
     }
 }
@@ -205,6 +209,23 @@ pub fn build(part: Part, p: &Params, a: &Anchors) -> Option<Built> {
                 pieces.extend(stroke(Kind::Card, 0.03 * h * p.thick, 0.85, &spots, [0; 3], [0; 3]));
             }
         }
+        Part::Feathers => {
+            // a plume on the back of the head: the feathers fan out in the plane of sideways and up-and-back
+            let n = p.count.clamp(1, 24);
+            let v = unit([0.0, 1.0, -0.5]);
+            let u = [1.0f32, 0.0, 0.0];
+            let normal = unit(cross(u, v));
+            let root = [a.cx, a.head_top - 0.04 * h + p.up * h, a.head_z - 0.05 * h - p.back * h];
+            let fan = p.spread.to_radians();
+            for i in 0..n {
+                let t = if n == 1 { 0.5 } else { i as f32 / (n - 1) as f32 };
+                let phi = (t - 0.5) * fan;
+                let dir = add(mul(v, phi.cos()), mul(u, phi.sin()));
+                let len = 0.25 * h * p.size * (1.0 - 0.3 * (t - 0.5).abs() * 2.0);
+                let spots = arc(add(root, mul(u, (t - 0.5) * 0.04 * h * p.apart)), dir, len, normal, p.curl * 0.8 * (t - 0.5).signum(), 8);
+                pieces.extend(stroke(Kind::Feather, 0.05 * h * p.thick, 0.25, &spots, [0; 3], [0; 3]));
+            }
+        }
         Part::Tail => {
             let start = [a.cx, a.floor + 0.5 * h + p.up * h, a.back_hip_z + 0.01 * h - p.back * h];
             let spots = arc(start, [0.0, -0.35, -1.0], 0.5 * h * p.size, [1.0, 0.0, 0.0], p.curl * 2.2, 24);
@@ -305,5 +326,15 @@ mod tests {
         assert!(e.verts.iter().any(|v| v[0] > 0.05) && e.verts.iter().any(|v| v[0] < -0.05));
         assert!(e.tris.iter().flatten().all(|i| (*i as usize) < e.verts.len()));
         assert!(e.uvs.iter().all(|q| (0.0..=1.0).contains(&q[0]) && (0.0..=1.0).contains(&q[1])));
+    }
+
+    #[test]
+    fn a_plume_of_feathers_stands_on_the_head_and_more_feathers_are_more_geometry() {
+        let a = Anchors::of(&person());
+        let f = build(Part::Feathers, &Part::Feathers.defaults(), &a).unwrap();
+        assert!(f.verts.iter().all(|v| v[1] > 1.5), "on the head");
+        let few = build(Part::Feathers, &Params { count: 3, ..Part::Feathers.defaults() }, &a).unwrap();
+        assert!(few.verts.len() < f.verts.len());
+        assert!(f.verts.iter().any(|v| v[0] > 0.02) && f.verts.iter().any(|v| v[0] < -0.02), "a fan: both sides");
     }
 }

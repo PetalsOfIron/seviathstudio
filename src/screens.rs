@@ -4444,6 +4444,9 @@ fn an_imported_mesh_is_turned_scaled_coloured_and_sculpted() {
     h.state_mut().test_mesh().hand.tool = crate::app::MeshTool::Faces;
     h.run_steps(4);
     save(&mut h, "edit_3_select_mesh");
+    h.state_mut().test_mesh().hand.tool = crate::app::MeshTool::Mesh;
+    h.run_steps(4);
+    save(&mut h, "edit_4_mesh_brushes");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

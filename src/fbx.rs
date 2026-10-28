@@ -162,6 +162,11 @@ pub fn write_fbx(mesh: &AssetMesh, rig: Option<&Rig3>, clips: &[Clip], fps: f32,
 
 /// The same with animations that are already poses (the ready ones and the ones made by hand).
 pub fn write_fbx_anims(mesh: &AssetMesh, rig: Option<&Rig3>, anims: &[Anim], fps: f32, name: &str) -> Export {
+    write_fbx_polys(mesh, rig, anims, fps, name, None)
+}
+
+/// The same, with the faces as quads where triangles were paired (`quads`, and the triangles that were left): a file with fewer, bigger faces.
+pub fn write_fbx_polys(mesh: &AssetMesh, rig: Option<&Rig3>, anims: &[Anim], fps: f32, name: &str, quads: Option<(Vec<[u32; 4]>, Vec<[u32; 3]>)>) -> Export {
     let cm = 100.0f32;
     let mut next_id = 1_000_000i64;
     let mut id = || {
@@ -179,11 +184,16 @@ pub fn write_fbx_anims(mesh: &AssetMesh, rig: Option<&Rig3>, anims: &[Anim], fps
 
     // the geometry: triangles, with the last index of each one turned over (FBX's way of ending a polygon)
     let verts: Vec<f64> = mesh.verts.iter().flat_map(|v| [(v[0] * cm) as f64, (v[1] * cm) as f64, (v[2] * cm) as f64]).collect();
-    let poly: Vec<i32> = mesh.tris.iter().flat_map(|t| [t[0] as i32, t[1] as i32, -(t[2] as i32) - 1]).collect();
+    // the faces: quads and triangles, or only triangles
+    let polygons: Vec<Vec<u32>> = match &quads {
+        Some((q, t)) => q.iter().map(|q| q.to_vec()).chain(t.iter().map(|t| t.to_vec())).collect(),
+        None => mesh.tris.iter().map(|t| t.to_vec()).collect(),
+    };
+    let poly: Vec<i32> = polygons.iter().flat_map(|p| p.iter().enumerate().map(|(k, i)| if k + 1 == p.len() { -(*i as i32) - 1 } else { *i as i32 })).collect();
     let normals = crate::meshfile::vertex_normals(&mesh.verts, &mesh.tris);
-    let corner_normals: Vec<f64> = mesh.tris.iter().flat_map(|t| t.iter().flat_map(|i| normals[*i as usize].map(|x| x as f64)).collect::<Vec<_>>()).collect();
+    let corner_normals: Vec<f64> = polygons.iter().flat_map(|p| p.iter().flat_map(|i| normals[*i as usize].map(|x| x as f64)).collect::<Vec<_>>()).collect();
     let uvs: Vec<f64> = mesh.uvs.iter().flat_map(|t| [t[0] as f64, 1.0 - t[1] as f64]).collect();
-    let uv_index: Vec<i32> = mesh.tris.iter().flat_map(|t| t.map(|i| i as i32)).collect();
+    let uv_index: Vec<i32> = polygons.iter().flat_map(|p| p.iter().map(|i| *i as i32)).collect();
     objects.push(n(
         "Geometry",
         vec![P::L(geo_id), name_of(name, "Geometry"), s("Mesh")],
@@ -428,5 +438,19 @@ mod tests {
         std::fs::write(dir.join("sample.fbx"), &ex.fbx).unwrap();
         mesh.texture.as_ref().unwrap().save(dir.join("sample_color.png")).unwrap();
         std::fs::write(dir.join("sample.glb"), crate::meshfile::write_glb(&mesh, Some(&rig), &clips, 30.0)).unwrap();
+    }
+
+    #[test]
+    fn quads_make_a_smaller_file_that_reads_back_as_the_same_surface() {
+        let ball = crate::meshops::make(crate::meshops::Shape::Cube, &crate::meshops::ShapeParams { segments: 8, ..Default::default() });
+        let (q, left) = crate::meshops::pair_quads(&ball, 5.0);
+        assert!(!q.is_empty());
+        let plain = write_fbx_polys(&ball, None, &[], 30.0, "box", None);
+        let quad = write_fbx_polys(&ball, None, &[], 30.0, "box", Some((q, left)));
+        assert!(quad.fbx.len() < plain.fbx.len(), "{} {}", quad.fbx.len(), plain.fbx.len());
+        // it is read back as triangles again: the same number of them, the same points
+        let (a, b) = (crate::meshimport::load_fbx_for_test(&plain.fbx).unwrap(), crate::meshimport::load_fbx_for_test(&quad.fbx).unwrap());
+        assert_eq!(a.tris.len(), b.tris.len());
+        assert_eq!(a.verts.len(), b.verts.len());
     }
 }

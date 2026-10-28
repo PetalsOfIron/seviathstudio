@@ -16,10 +16,12 @@ pub enum Kind {
     Strip,
     /// A cone from the start of the stroke to its end, standing out of the surface.
     Spike,
+    /// A feather: a flat card that is wide in the middle and thin at both ends.
+    Feather,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 5] = [Kind::Strand, Kind::Card, Kind::Rope, Kind::Strip, Kind::Spike];
+    pub const ALL: [Kind; 6] = [Kind::Strand, Kind::Card, Kind::Rope, Kind::Strip, Kind::Spike, Kind::Feather];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -28,6 +30,7 @@ impl Kind {
             Kind::Rope => "Rope",
             Kind::Strip => "Strip",
             Kind::Spike => "Spike",
+            Kind::Feather => "Feather",
         }
     }
 
@@ -38,6 +41,7 @@ impl Kind {
             Kind::Rope => "A round rope of the same thickness all along: a braid, a tail, a tentacle",
             Kind::Strip => "A flat strip of the same width: cloth, a band, a ribbon",
             Kind::Spike => "A cone from where you start to where you end, standing out of the surface: a horn, a thorn",
+            Kind::Feather => "A feather: draw its quill from the root to the tip, it is wide in the middle and thin at both ends",
         }
     }
 }
@@ -73,6 +77,7 @@ impl Brush {
             Kind::Rope => (0.02, 0.0, 0.01, 0.0),
             Kind::Strip => (0.04, 0.0, 0.004, 0.0),
             Kind::Spike => (0.03, 1.0, 0.0, 0.0),
+            Kind::Feather => (0.05, 0.25, 0.004, 0.0),
         };
         (self.width, self.taper, self.lift, self.droop) = (width, taper, lift, droop);
         self
@@ -225,7 +230,12 @@ pub fn build(b: &Brush, stroke: &[Spot]) -> Option<Built> {
         }
         let side = unit(side);
         let up = unit(cross(side, tangent));
-        let half = b.width * 0.5 * (1.0 - taper * t).max(0.0);
+        let half = if b.kind == Kind::Feather {
+            // wide in the middle and thin at both ends, with a little less towards the tip
+            b.width * 0.5 * (std::f32::consts::PI * t.powf(0.85)).sin().max(0.06) * (1.0 - taper * t * t)
+        } else {
+            b.width * 0.5 * (1.0 - taper * t).max(0.0)
+        };
         for k in 0..ring {
             let (offset, u) = if round {
                 let a = k as f32 / ring as f32 * std::f32::consts::TAU;
@@ -332,5 +342,15 @@ mod tests {
     fn the_cell_runs_from_the_root_colour_to_the_tip_colour() {
         let img = cell_image(32, [0, 0, 0], [200, 200, 200], 1);
         assert!(img.get_pixel(16, 0).0[0] < 40 && img.get_pixel(16, 31).0[0] > 150);
+    }
+
+    #[test]
+    fn a_feather_is_wide_in_the_middle_and_thin_at_both_ends() {
+        let b = Brush::default().with_kind(Kind::Feather);
+        let m = build(&b, &line(12, 0.3)).unwrap();
+        let rows = m.verts.len() / 2;
+        let width = |i: usize| len(sub(m.verts[i * 2], m.verts[i * 2 + 1]));
+        assert!(width(rows / 2) > width(1) * 1.5 && width(rows / 2) > width(rows - 1) * 10.0, "{} {} {}", width(1), width(rows / 2), width(rows - 1));
+        assert!(Kind::ALL.contains(&Kind::Feather));
     }
 }

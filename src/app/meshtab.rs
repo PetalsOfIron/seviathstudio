@@ -746,7 +746,7 @@ impl SeviathApp {
         let Some(mesh) = &self.m3.mesh else { return };
         let name = self.m3.file_name();
         let Some(p) = rfd::FileDialog::new().set_title("Save the mesh").set_directory(self.settings.projects_folder()).set_file_name(format!("{name}.obj")).add_filter("OBJ model", &["obj"]).save_file() else { return };
-        let obj = obj_text(mesh, &name);
+        let obj = obj_text_polys(mesh, &name, self.m3.hand.quads_for_export(mesh));
         let res = std::fs::write(&p, obj).and_then(|_| {
             if let Some(t) = &mesh.texture {
                 t.save(p.with_extension("png")).map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -828,6 +828,11 @@ pub fn asset_file_name(a: &AssetLook) -> String {
 
 /// The mesh as a Wavefront .obj text (points, texture coordinates, triangles) that uses `<name>.mtl`.
 pub fn obj_text(m: &AssetMesh, name: &str) -> String {
+    obj_text_polys(m, name, None)
+}
+
+/// The same, with quads where triangles were paired (the quads, and the triangles that were left).
+pub fn obj_text_polys(m: &AssetMesh, name: &str, quads: Option<(Vec<[u32; 4]>, Vec<[u32; 3]>)>) -> String {
     let mut s = format!("mtllib {name}.mtl\nusemtl {name}\n");
     for v in &m.verts {
         s.push_str(&format!("v {} {} {}\n", v[0], v[1], v[2]));
@@ -835,8 +840,20 @@ pub fn obj_text(m: &AssetMesh, name: &str) -> String {
     for t in &m.uvs {
         s.push_str(&format!("vt {} {}\n", t[0], 1.0 - t[1]));
     }
-    for t in &m.tris {
-        s.push_str(&format!("f {0}/{0} {1}/{1} {2}/{2}\n", t[0] + 1, t[1] + 1, t[2] + 1));
+    match quads {
+        Some((q, tris)) => {
+            for q in &q {
+                s.push_str(&format!("f {0}/{0} {1}/{1} {2}/{2} {3}/{3}\n", q[0] + 1, q[1] + 1, q[2] + 1, q[3] + 1));
+            }
+            for t in &tris {
+                s.push_str(&format!("f {0}/{0} {1}/{1} {2}/{2}\n", t[0] + 1, t[1] + 1, t[2] + 1));
+            }
+        }
+        None => {
+            for t in &m.tris {
+                s.push_str(&format!("f {0}/{0} {1}/{1} {2}/{2}\n", t[0] + 1, t[1] + 1, t[2] + 1));
+            }
+        }
     }
     s
 }
@@ -865,5 +882,17 @@ mod tests {
         assert_eq!(t.lines().filter(|l| l.starts_with("v ")).count(), 3);
         assert_eq!(t.lines().filter(|l| l.starts_with("vt ")).count(), 3);
         assert!(t.contains("f 1/1 2/2 3/3") && t.contains("mtllib lamp.mtl"));
+    }
+
+    #[test]
+    fn an_obj_with_quads_has_fewer_faces_that_cover_the_same_triangles() {
+        let b = crate::meshops::make(crate::meshops::Shape::Cube, &crate::meshops::ShapeParams { segments: 8, ..Default::default() });
+        let (q, left) = crate::meshops::pair_quads(&b, 5.0);
+        let faces = |t: &str| t.lines().filter(|l| l.starts_with("f ")).count();
+        let (plain, quad) = (obj_text(&b, "x"), obj_text_polys(&b, "x", Some((q.clone(), left.clone()))));
+        assert_eq!(faces(&plain), b.tris.len());
+        assert_eq!(faces(&quad), q.len() + left.len());
+        assert!(faces(&quad) < faces(&plain));
+        assert!(quad.lines().any(|l| l.starts_with("f ") && l.split_whitespace().count() == 5), "a face with four corners");
     }
 }
