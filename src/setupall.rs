@@ -238,3 +238,30 @@ mod tests {
         assert!(c.ends_with("hub") || std::env::var("HF_HUB_CACHE").is_ok());
     }
 }
+
+/// The whole one-button install on an empty folder (about 45 GB, hours): `SEVIATH_AI_ROOT=<empty folder> HF_HOME=<empty folder> cargo test --release
+/// install_everything_on_a_clean_folder -- --ignored --nocapture`. It prints every step; at the end everything must be ready.
+#[test]
+#[ignore]
+fn install_everything_on_a_clean_folder() {
+    assert!(std::env::var("SEVIATH_AI_ROOT").is_ok(), "set SEVIATH_AI_ROOT to an empty folder first");
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let printer = std::thread::spawn(move || {
+        let mut last = String::new();
+        while let Ok(s) = rx.recv() {
+            if s != last && !s.contains('%') {
+                println!("[step] {s}");
+                last = s;
+            }
+        }
+    });
+    let result = install_everything(&tx);
+    drop(tx);
+    let _ = printer.join();
+    println!("{result:?}");
+    result.expect("the install");
+    let status = crate::aisetup::status();
+    assert!(status.ready(), "the base files: {:?}", status.missing());
+    assert!(status.charactergen, "CharacterGen");
+    assert!(picture_ready(), "the picture AI");
+}

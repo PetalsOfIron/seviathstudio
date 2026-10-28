@@ -337,8 +337,10 @@ impl SeviathApp {
             Some(page) => {
                 let python = self.rigs.game.ai_python.clone();
                 let (tx, rx) = std::sync::mpsc::channel();
+                // a test can ask for the shape of the last run again, to try the building without waiting for the AI
+                let reuse = cfg!(test) && std::env::var("SEVIATH_REUSE_SHAPE").is_ok();
                 std::thread::spawn(move || {
-                    let _ = tx.send(crate::ai::make_shape(&python, &page, model));
+                    let _ = tx.send(if reuse { std::fs::read(crate::ai::helper_folder().join("shape.glb")).map_err(|e| e.to_string()) } else { crate::ai::make_shape(&python, &page, model) });
                 });
                 self.rigs.game.shape_job = Some(rx);
                 self.rigs.game.message = Some("The AI is making the 3D shape. The first run downloads the model; after that it takes a minute or two.".into());
