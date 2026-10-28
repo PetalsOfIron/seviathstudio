@@ -23,6 +23,7 @@ use crate::widgets::{self, section_title};
 pub enum Page {
     #[default]
     Bases,
+    Edit,
     FromText,
     FromImage,
     Rig,
@@ -161,7 +162,7 @@ impl MeshUi {
 impl SeviathApp {
     pub(super) fn mesh_ui(&mut self, ui: &mut Ui) {
         egui::Panel::top("mesh_top").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.mesh_top(ui));
-        if matches!(self.m3.page, Page::Bases | Page::Rig | Page::Parts | Page::Animate) {
+        if matches!(self.m3.page, Page::Bases | Page::Edit | Page::Rig | Page::Parts | Page::Animate) {
             self.mesh_rig_ui(ui);
             return;
         }
@@ -197,6 +198,7 @@ impl SeviathApp {
             ui.add_space(8.0);
             for (p, label, tip) in [
                 (Page::Bases, "Bases", "The ready bases of the races: pick one, make the other sex, change its looks and paint it"),
+                (Page::Edit, "Redraw and sculpt", "Redraw, sculpt, cut and add parts to the mesh that is open (made from a text, a picture or a drawing, or a base), like in Blender"),
                 (Page::FromText, "From a text", "Write what you want: pictures are made, and the picture you pick becomes a 3D mesh"),
                 (Page::FromImage, "From a picture or drawing", "Your own picture, or your drawing from the Draw tab, becomes a 3D mesh"),
                 (Page::Rig, "Bones and weights", "Draw the bones in the mesh and paint how much each bone moves every part, by hand"),

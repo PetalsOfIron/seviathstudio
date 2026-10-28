@@ -1,0 +1,1 @@
+The animations that come with SeviathStudio. Every `.sevanim` file in this folder is put in the installer (`installer/seviathstudio.iss`) and is in the Library of the Animate page of the 3D tab after the install. The button *Put it in the installer* in that page saves an animation here when the app runs from the source.

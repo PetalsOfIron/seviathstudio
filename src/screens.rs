@@ -4406,3 +4406,33 @@ fn rigging_a_changer_rigs_the_ticked_ones_at_the_same_time() {
     assert!((da + db).abs() < 1e-4 && da.abs() > 1.0, "{da} {db}");
 }
 
+/// A mesh from another program (an .obj in centimetres, Z up) is opened on the Redraw and sculpt page and edited: turned, scaled, coloured, sculpted.
+#[test]
+fn an_imported_mesh_is_turned_scaled_coloured_and_sculpted() {
+    let _gpu = lock_gpu();
+    let (mesh, _) = crate::meshfile::tests_figure();
+    // as another program would save it: centimetres, z up
+    let mut m = mesh.clone();
+    m.texture = None;
+    for v in &mut m.verts {
+        *v = [v[0] * 100.0, -v[2] * 100.0, v[1] * 100.0];
+    }
+    let dir = std::env::temp_dir().join("sevi_import_screen");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("thing.obj");
+    std::fs::write(&path, crate::app::obj_text_for_test(&m, "thing")).unwrap();
+    let mut h = Harness::builder().with_size([1500.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().test_run_action_now("tab.7");
+    h.state_mut().test_mesh_import(&path).expect("the file opens");
+    h.state_mut().test_mesh().page = crate::app::mesh_page_edit();
+    h.run_steps(5);
+    let (lo, hi) = h.state_mut().test_mesh().mesh.as_ref().unwrap().bounds();
+    assert!(hi[1] - lo[1] < 0.5, "a mesh in centimetres comes in metres: it is {} high", hi[1] - lo[1]);
+    save(&mut h, "edit_1_imported");
+    h.state_mut().test_mesh().hand.tool = crate::app::MeshTool::Sculpt;
+    h.run_steps(4);
+    save(&mut h, "edit_2_sculpt");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+

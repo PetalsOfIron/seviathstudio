@@ -56,6 +56,16 @@ pub fn mesh_page_bases() -> meshtab::Page {
 }
 
 #[cfg(test)]
+pub fn obj_text_for_test(m: &crate::assetview::AssetMesh, name: &str) -> String {
+    meshtab::obj_text(m, name)
+}
+
+#[cfg(test)]
+pub fn mesh_page_edit() -> meshtab::Page {
+    meshtab::Page::Edit
+}
+
+#[cfg(test)]
 pub fn mesh_page_parts() -> meshtab::Page {
     meshtab::Page::Parts
 }

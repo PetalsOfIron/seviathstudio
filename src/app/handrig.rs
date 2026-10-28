@@ -41,6 +41,50 @@ pub enum Tool {
     Mesh,
     /// Put parts on the body with numbers: horns, wings, a tail, ears.
     Attach,
+    /// Push, pull, smooth and grab the mesh like the sculpt mode of Blender.
+    Sculpt,
+}
+
+/// The brushes of sculpting.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Sculpt {
+    /// Push out (or cut in), along the way the surface faces on average under the brush.
+    Draw,
+    /// Push out along the way each point faces: the surface swells.
+    Inflate,
+    Smooth,
+    /// Take hold and move.
+    Grab,
+    /// Press the surface flat.
+    Flatten,
+    /// Draw the points together.
+    Pinch,
+}
+
+impl Sculpt {
+    const ALL: [Sculpt; 6] = [Sculpt::Draw, Sculpt::Inflate, Sculpt::Smooth, Sculpt::Grab, Sculpt::Flatten, Sculpt::Pinch];
+
+    fn label(self) -> &'static str {
+        match self {
+            Sculpt::Draw => "Draw",
+            Sculpt::Inflate => "Inflate",
+            Sculpt::Smooth => "Smooth",
+            Sculpt::Grab => "Grab",
+            Sculpt::Flatten => "Flatten",
+            Sculpt::Pinch => "Pinch",
+        }
+    }
+
+    fn about(self) -> &'static str {
+        match self {
+            Sculpt::Draw => "Push the surface out. Ctrl: cut it in.",
+            Sculpt::Inflate => "Swell the surface along the way each point faces. Ctrl: shrink it.",
+            Sculpt::Smooth => "Make the surface smoother.",
+            Sculpt::Grab => "Take hold of a part of the surface and drag it.",
+            Sculpt::Flatten => "Press the surface flat.",
+            Sculpt::Pinch => "Draw the points together (sharper edges, creases). Ctrl: push them apart.",
+        }
+    }
 }
 
 /// Which tools a page has.
@@ -57,7 +101,7 @@ impl ToolSet {
         match self {
             ToolSet::Rig => matches!(t, Tool::Select | Tool::Draw | Tool::Weights | Tool::Texture | Tool::Pose | Tool::Turn),
             ToolSet::Parts => matches!(t, Tool::Select | Tool::Draw | Tool::Parts | Tool::Lasso | Tool::Turn),
-            ToolSet::Look => matches!(t, Tool::Texture | Tool::Mesh | Tool::Attach | Tool::Turn),
+            ToolSet::Look => matches!(t, Tool::Texture | Tool::Mesh | Tool::Attach | Tool::Sculpt | Tool::Turn),
         }
     }
 }
@@ -83,6 +127,7 @@ enum Grab {
     Parts,
     Lasso,
     Mesh,
+    Sculpt,
 }
 
 /// Which part of a bone is picked.
@@ -165,6 +210,17 @@ pub struct HandRig {
     /// Mirror mode: what is painted or drawn on one side is done on the other side too (across the middle of the body, x = `mirror_x`).
     pub mirror: bool,
     pub mirror_x: f32,
+    /// Sculpting: the brush, how strong it is, the shape of the mesh before each stroke (to take it back), the way every point faces, and what a grab holds.
+    pub sculpt: Sculpt,
+    pub sculpt_strength: f32,
+    sculpt_undo: Vec<Vec<[f32; 3]>>,
+    sculpt_normals: Vec<[f32; 3]>,
+    held: Vec<(Vec<(usize, f32)>, Vec<[f32; 3]>, f32, bool)>,
+    held_from: Pos2,
+    /// The animations of the library (and when they were looked for).
+    lib: Vec<crate::animlib::Entry>,
+    lib_seen: bool,
+    pub lib_message: Option<String>,
 }
 
 impl Default for HandRig {
@@ -224,6 +280,15 @@ impl Default for HandRig {
             attach: None,
             mirror: false,
             mirror_x: 0.0,
+            sculpt: Sculpt::Draw,
+            sculpt_strength: 0.5,
+            sculpt_undo: Vec::new(),
+            sculpt_normals: Vec::new(),
+            held: Vec::new(),
+            held_from: Pos2::ZERO,
+            lib: Vec::new(),
+            lib_seen: false,
+            lib_message: None,
         }
     }
 }
@@ -283,6 +348,42 @@ impl HandRig {
         let bounds = mesh.bounds();
         let mirror_x = attach::Anchors::of(mesh).cx;
         *self = HandRig { rig: Rig3::new(mesh.verts.len()), bounds, mirror_x, cut: Cut { axis: 2, limit: (bounds.0[2] + bounds.1[2]) / 2.0, above: false }, ..HandRig::default() };
+    }
+
+    /// The mesh and its bones are moved by a function of the place (turned, scaled): the picture fits it again.
+    pub fn transform(&mut self, mesh: &mut AssetMesh, f: impl Fn([f32; 3]) -> [f32; 3]) {
+        for v in &mut mesh.verts {
+            *v = f(*v);
+        }
+        for b in &mut self.rig.bones {
+            b.head = f(b.head);
+            b.tail = f(b.tail);
+        }
+        self.bounds = mesh.bounds();
+        self.mirror_x = attach::Anchors::of(mesh).cx;
+        self.painted = true;
+        self.near = None;
+        self.version += 1;
+    }
+
+    /// Every texel of the picture (not the strip for strokes) is this colour.
+    pub fn fill_color(&mut self, mesh: &mut AssetMesh, color: [u8; 3]) -> bool {
+        if mesh.texture.is_none() {
+            return false;
+        }
+        self.texture_checkpoint(mesh);
+        let strip = self.strip_v0;
+        if let Some(tex) = mesh.texture.as_mut() {
+            let limit = strip.map(|v| (v * tex.height() as f32) as u32).unwrap_or(tex.height());
+            for (_, y, p) in tex.enumerate_pixels_mut() {
+                if y < limit {
+                    *p = image::Rgba([color[0], color[1], color[2], 255]);
+                }
+            }
+        }
+        self.painted = true;
+        self.version += 1;
+        true
     }
 
     /// A rig that came with a file (it must be of this mesh).
@@ -429,6 +530,180 @@ impl HandRig {
         self.rig.assign_part(&points, b);
     }
 
+    /// A free strip of the texture for the colours of the strokes and of parts is made when the mesh has none (a mesh that was made from a text, a picture or a
+    /// drawing has its texture all used).
+    pub fn ensure_strip(&mut self, mesh: &mut AssetMesh) -> bool {
+        if self.strip_v0.is_some() && mesh.texture.is_some() {
+            return true;
+        }
+        match meshedit::add_strip(mesh, 0.125) {
+            Some(v0) => {
+                self.strip_v0 = Some(v0);
+                self.version += 1;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The strength of a touch of sculpting in metres: as much as the brush is wide, times the strength.
+    fn sculpt_reach(&self, cam: &Camera) -> f32 {
+        self.radius / cam.scale() * self.sculpt_strength * 0.25
+    }
+
+    /// One touch of a sculpting brush at a place of the picture (the mirror image of it is another touch).
+    fn sculpt_dab(&mut self, mesh: &mut AssetMesh, cam: &Camera, at: Pos2, opposite: bool) {
+        let under = self.verts_under(mesh, cam, at, self.radius);
+        if under.is_empty() || self.sculpt_normals.len() != mesh.verts.len() {
+            return;
+        }
+        let touched: Vec<(usize, f32)> = under.into_iter().map(|(i, u)| (i, u * u * (3.0 - 2.0 * u))).collect();
+        let sign = if opposite { -1.0 } else { 1.0 };
+        let reach = self.sculpt_reach(cam);
+        match self.sculpt {
+            Sculpt::Draw | Sculpt::Inflate => {
+                let mut avg = [0.0f32; 3];
+                for (i, f) in &touched {
+                    for k in 0..3 {
+                        avg[k] += self.sculpt_normals[*i][k] * f;
+                    }
+                }
+                let l = (avg[0] * avg[0] + avg[1] * avg[1] + avg[2] * avg[2]).sqrt().max(1e-9);
+                let avg = [avg[0] / l, avg[1] / l, avg[2] / l];
+                for (i, f) in touched {
+                    let n = if self.sculpt == Sculpt::Draw { avg } else { self.sculpt_normals[i] };
+                    for k in 0..3 {
+                        mesh.verts[i][k] += n[k] * reach * f * sign;
+                    }
+                }
+            }
+            Sculpt::Smooth => {
+                if self.near.is_none() {
+                    self.near = Some(neighbours(&mesh.verts, &mesh.tris));
+                }
+                let near = self.near.as_ref().unwrap();
+                let old: Vec<[f32; 3]> = touched.iter().map(|(i, _)| mesh.verts[*i]).collect();
+                for ((i, f), o) in touched.iter().zip(&old) {
+                    let nb = &near[*i];
+                    if nb.is_empty() {
+                        continue;
+                    }
+                    let mut avg = [0.0f32; 3];
+                    for j in nb {
+                        for k in 0..3 {
+                            avg[k] += mesh.verts[*j as usize][k] / nb.len() as f32;
+                        }
+                    }
+                    let a = (self.sculpt_strength * f * 0.7).clamp(0.0, 1.0);
+                    for k in 0..3 {
+                        mesh.verts[*i][k] = o[k] + (avg[k] - o[k]) * a;
+                    }
+                }
+            }
+            Sculpt::Flatten => {
+                let (mut c, mut n, mut w) = ([0.0f32; 3], [0.0f32; 3], 0.0f32);
+                for (i, f) in &touched {
+                    for k in 0..3 {
+                        c[k] += mesh.verts[*i][k] * f;
+                        n[k] += self.sculpt_normals[*i][k] * f;
+                    }
+                    w += f;
+                }
+                if w < 1e-6 {
+                    return;
+                }
+                let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-9);
+                let (c, n) = ([c[0] / w, c[1] / w, c[2] / w], [n[0] / l, n[1] / l, n[2] / l]);
+                for (i, f) in touched {
+                    let d = (0..3).map(|k| (mesh.verts[i][k] - c[k]) * n[k]).sum::<f32>();
+                    let a = (self.sculpt_strength * f * 0.6).clamp(0.0, 1.0) * sign.max(0.0);
+                    for k in 0..3 {
+                        mesh.verts[i][k] -= n[k] * d * a;
+                    }
+                }
+            }
+            Sculpt::Pinch => {
+                let (mut c, mut w) = ([0.0f32; 3], 0.0f32);
+                for (i, f) in &touched {
+                    for k in 0..3 {
+                        c[k] += mesh.verts[*i][k] * f;
+                    }
+                    w += f;
+                }
+                if w < 1e-6 {
+                    return;
+                }
+                let c = [c[0] / w, c[1] / w, c[2] / w];
+                for (i, f) in touched {
+                    let a = (self.sculpt_strength * f * 0.25).clamp(0.0, 1.0) * sign;
+                    for k in 0..3 {
+                        let d = c[k] - mesh.verts[i][k];
+                        mesh.verts[i][k] += d * a;
+                    }
+                }
+            }
+            Sculpt::Grab => {}
+        }
+        self.painted = true;
+        self.version += 1;
+    }
+
+    /// Take hold of the points under a circle of the picture (and, in mirror mode, of the ones on the other side) to drag them.
+    fn sculpt_hold(&mut self, mesh: &AssetMesh, cam: &Camera, at: Pos2) {
+        self.held.clear();
+        self.held_from = at;
+        let mut spots = vec![(at, false)];
+        if self.mirror {
+            if let Some(m) = self.mirror_pixel(mesh, cam, at) {
+                spots.push((m, true));
+            }
+        }
+        for (p, mirrored) in spots {
+            let under: Vec<(usize, f32)> = self.verts_under(mesh, cam, p, self.radius).into_iter().map(|(i, u)| (i, u * u * (3.0 - 2.0 * u))).collect();
+            if under.is_empty() {
+                continue;
+            }
+            let start: Vec<[f32; 3]> = under.iter().map(|(i, _)| mesh.verts[*i]).collect();
+            let depth = under.iter().map(|(i, _)| cam.project(mesh.verts[*i])[2]).sum::<f32>() / under.len() as f32;
+            self.held.push((under, start, depth, mirrored));
+        }
+    }
+
+    /// Drag what is held to the place of the pointer.
+    fn sculpt_drag(&mut self, mesh: &mut AssetMesh, cam: &Camera, now: Pos2) {
+        let held = std::mem::take(&mut self.held);
+        for (under, start, depth, mirrored) in &held {
+            // where the pointer started and is now, in space, at the depth of what is held
+            let (a, b) = (cam.unproject([self.held_from.x, self.held_from.y, *depth]), cam.unproject([now.x, now.y, *depth]));
+            let mut d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            if *mirrored {
+                // the other side is held where the mirror image of the start was, and moves as its mirror image
+                d[0] = -d[0];
+                let m = cam.unproject([self.held_from.x, self.held_from.y, *depth]);
+                let _ = m;
+            }
+            for ((i, f), s) in under.iter().zip(start) {
+                for k in 0..3 {
+                    mesh.verts[*i][k] = s[k] + d[k] * f * self.sculpt_strength.max(0.2);
+                }
+            }
+        }
+        self.held = held;
+        self.painted = true;
+        self.version += 1;
+    }
+
+    /// Take the last stroke of sculpting back.
+    fn undo_sculpt(&mut self, mesh: &mut AssetMesh) {
+        if let Some(v) = self.sculpt_undo.pop() {
+            if v.len() == mesh.verts.len() {
+                mesh.verts = v;
+                self.sculpt_normals.clear();
+                self.version += 1;
+            }
+        }
+    }
+
     /// The points that are seen under a circle of the picture, each with how near the middle it is (1 in the middle, 0 at the edge).
     fn verts_under(&self, mesh: &AssetMesh, cam: &Camera, at: Pos2, r: f32) -> Vec<(usize, f32)> {
         let w = cam.w as i32;
@@ -504,11 +779,11 @@ impl HandRig {
     fn finish_stroke(&mut self, mesh: &mut AssetMesh, cam: &Camera) {
         let pts = std::mem::take(&mut self.stroke);
         let Some(v0) = self.strip_v0 else { return };
-        let Some(size) = mesh.texture.as_ref().map(|t| t.width()) else { return };
+        let Some((size, high)) = mesh.texture.as_ref().map(|t| (t.width(), t.height())) else { return };
         let (cell, w) = (32u32, cam.w as usize);
         let cols = (size / cell) as usize;
-        let y_start = (v0 * size as f32).ceil() as u32;
-        let rows = ((size - y_start) / cell) as usize;
+        let y_start = (v0 * high as f32).ceil() as u32;
+        let rows = (high.saturating_sub(y_start) / cell) as usize;
         if self.strip_next >= cols * rows {
             self.message = Some("The strip of the texture for the colours of the strokes is full: take a stroke back, or use a bigger texture.".into());
             return;
@@ -572,11 +847,11 @@ impl HandRig {
     /// and its points move with what the point `from` of the mesh moves with.
     fn append_built(&mut self, mesh: &mut AssetMesh, built: &meshbrush::Built, k: usize, from: Option<usize>) -> bool {
         let Some(v0) = self.strip_v0 else { return false };
-        let Some(size) = mesh.texture.as_ref().map(|t| t.width()) else { return false };
+        let Some((size, high)) = mesh.texture.as_ref().map(|t| (t.width(), t.height())) else { return false };
         let cell = 32u32;
         let cols = (size / cell) as usize;
-        let y_start = (v0 * size as f32).ceil() as u32;
-        let rows = ((size - y_start) / cell) as usize;
+        let y_start = (v0 * high as f32).ceil() as u32;
+        let rows = (high.saturating_sub(y_start) / cell) as usize;
         if k >= cols * rows {
             self.message = Some("The strip of the texture for the colours of the strokes is full: take a stroke back, or use a bigger texture.".into());
             return false;
@@ -590,7 +865,7 @@ impl HandRig {
         let old_len = mesh.verts.len();
         for (v, uv) in built.verts.iter().zip(&built.uvs) {
             mesh.verts.push(*v);
-            mesh.uvs.push([(x0 as f32 + 2.0 + uv[0] * (cell - 4) as f32) / size as f32, (y0 as f32 + 1.0 + uv[1] * (cell - 2) as f32) / size as f32]);
+            mesh.uvs.push([(x0 as f32 + 2.0 + uv[0] * (cell - 4) as f32) / size as f32, (y0 as f32 + 1.0 + uv[1] * (cell - 2) as f32) / high as f32]);
         }
         mesh.tris.extend(built.tris.iter().map(|t| [t[0] + base, t[1] + base, t[2] + base]));
         if self.rig.weights.len() == old_len {
@@ -623,8 +898,8 @@ impl HandRig {
 
     /// Start a part (or change to another one): it is put on the mesh with its first numbers.
     pub fn attach_start(&mut self, mesh: &mut AssetMesh, part: attach::Part) {
-        if self.strip_v0.is_none() || mesh.texture.is_none() {
-            self.message = Some("Parts need the strip of the texture for their colours. Load a base on the Bases page: it has one.".into());
+        if !self.ensure_strip(mesh) {
+            self.message = Some("This mesh has no texture, so the colours of a part have no place. Unwrap it first (the Edit page).".into());
             return;
         }
         let (v0, t0) = match self.attach {
@@ -955,6 +1230,19 @@ impl HandRig {
                         self.version += 1;
                     }
                 }
+                Grab::Sculpt => {
+                    if let Some(now) = now {
+                        if self.sculpt == Sculpt::Grab {
+                            self.sculpt_drag(mesh, &cam, now);
+                        } else {
+                            let opposite = mods.command;
+                            self.sculpt_dab(mesh, &cam, now, opposite);
+                            if let (true, Some(m)) = (self.mirror, self.mirror_pixel(mesh, &cam, now)) {
+                                self.sculpt_dab(mesh, &cam, m, opposite);
+                            }
+                        }
+                    }
+                }
                 Grab::Mesh => {
                     if let Some(now) = now {
                         if self.stroke.last().is_none_or(|l| (*l - now).length() > 2.0) {
@@ -1004,6 +1292,10 @@ impl HandRig {
             if self.grab == Grab::Lasso {
                 self.finish_lasso(mesh, &cam);
             }
+            if self.grab == Grab::Sculpt {
+                self.held.clear();
+                self.sculpt_normals.clear();
+            }
             if self.grab == Grab::Mesh {
                 if let Some(now) = ui.input(|i| i.pointer.interact_pos()).map(local) {
                     self.stroke.push(now);
@@ -1033,6 +1325,8 @@ impl HandRig {
             if undo {
                 if self.tool == Tool::Texture {
                     self.texture_undo(mesh);
+                } else if self.tool == Tool::Sculpt {
+                    self.undo_sculpt(mesh);
                 } else {
                     self.undo();
                 }
@@ -1111,7 +1405,7 @@ impl HandRig {
             painter.line_segment([screen(from), to], Stroke::new(2.0, EMERALD));
             painter.circle_filled(screen(from), 4.0, EMERALD);
         }
-        if matches!(self.tool, Tool::Weights | Tool::Texture | Tool::Parts) {
+        if matches!(self.tool, Tool::Weights | Tool::Texture | Tool::Parts | Tool::Sculpt) {
             if let Some(at) = hover {
                 painter.circle_stroke(to_screen(at.x, at.y), if self.tool == Tool::Texture { self.tex_radius } else { self.radius }, Stroke::new(1.5, Color32::WHITE));
             }
@@ -1127,6 +1421,7 @@ impl HandRig {
             Tool::Lasso => "Draw a loop round a part: all of it moves with the picked bone. Right button: turn the view. Wheel: zoom.",
             Tool::Mesh => "Draw over the mesh: the stroke becomes hair, a rope, a strip or a spike. Right button: turn the view. Wheel: zoom.",
             Tool::Attach => "Horns, wings, a tail or ears with numbers. Right button: turn the view. Wheel: zoom.",
+            Tool::Sculpt => "Push, pull, smooth or grab the mesh. Ctrl: the other way. Right button: turn the view. Wheel: zoom.",
         });
     }
 
@@ -1196,9 +1491,26 @@ impl HandRig {
                 Grab::Texture
             }
             Tool::Attach => Grab::None,
+            Tool::Sculpt => {
+                self.sculpt_undo.push(mesh.verts.clone());
+                if self.sculpt_undo.len() > 6 {
+                    self.sculpt_undo.remove(0);
+                }
+                self.sculpt_normals = crate::meshfile::vertex_normals(&mesh.verts, &mesh.tris);
+                if self.sculpt == Sculpt::Grab {
+                    self.sculpt_hold(mesh, cam, at);
+                } else {
+                    let opposite = mods.command;
+                    self.sculpt_dab(mesh, cam, at, opposite);
+                    if let (true, Some(m)) = (self.mirror, self.mirror_pixel(mesh, cam, at)) {
+                        self.sculpt_dab(mesh, cam, m, opposite);
+                    }
+                }
+                Grab::Sculpt
+            }
             Tool::Mesh => {
-                if self.strip_v0.is_none() || mesh.texture.is_none() {
-                    self.message = Some("This mesh has no strip of texture for the colours of the strokes. Load a base on the Bases page: it has one.".into());
+                if !self.ensure_strip(mesh) {
+                    self.message = Some("This mesh has no texture, so the colours of a stroke have no place. Unwrap it first (the Edit page).".into());
                     return Grab::None;
                 }
                 self.stroke = vec![at];
@@ -1241,6 +1553,7 @@ impl HandRig {
                 (Tool::Draw, "Draw bones", "Drag in the picture to draw a bone. Start at the end of a bone to continue the chain"),
                 (Tool::Weights, "Paint weights", "Paint which bone moves which part of the mesh"),
                 (Tool::Texture, "Paint texture", "Redraw the colours of the mesh, with colours picked from its own texture"),
+                (Tool::Sculpt, "Sculpt", "Push, pull, smooth and grab the mesh, like the sculpt mode of Blender"),
                 (Tool::Attach, "Add parts", "Horns, wings, a tail, ears: with numbers you change"),
                 (Tool::Mesh, "Draw mesh", "Draw hair, ropes, strips and spikes on the mesh with brushes"),
                 (Tool::Parts, "Paint parts", "Paint which part of the mesh moves with the picked bone: the whole part, no weights"),
@@ -1265,7 +1578,7 @@ impl HandRig {
                 self.redo();
             }
         });
-        if matches!(self.tool, Tool::Texture | Tool::Mesh | Tool::Weights | Tool::Parts | Tool::Lasso) {
+        if matches!(self.tool, Tool::Texture | Tool::Mesh | Tool::Weights | Tool::Parts | Tool::Lasso | Tool::Sculpt) {
             ui.checkbox(&mut self.mirror, "Mirror left and right").help("What you paint or draw on one side is done on the other side too, across the middle of the body. For the weights and the parts, the bone on the other side (Left and Right in the names) gets the mirror image. Both sides have to be seen in the picture.");
         }
         ui.add_space(6.0);
@@ -1337,6 +1650,22 @@ impl HandRig {
                 }
                 let loose = self.rig.unweighted();
                 ui.label(RichText::new(format!("{loose} points are moved by no bone")).size(11.5).color(if loose > 0 { GOLD } else { TEXT_DIM }));
+            }
+            Tool::Sculpt => {
+                section_title(ui, "Sculpt");
+                ui.horizontal_wrapped(|ui| {
+                    for s in Sculpt::ALL {
+                        if widgets::chip(ui, s.label(), self.sculpt == s).help(s.about()).clicked() {
+                            self.sculpt = s;
+                        }
+                    }
+                });
+                ui.add(egui::Slider::new(&mut self.radius, 5.0..=250.0).text("Size")).help("The size of the brush in pixels");
+                ui.add(egui::Slider::new(&mut self.sculpt_strength, 0.05..=1.0).text("Strength"));
+                if ui.add_enabled(!self.sculpt_undo.is_empty(), egui::Button::new("Take the last stroke back")).help("Ctrl+Z").clicked() {
+                    self.undo_sculpt(mesh);
+                }
+                ui.label(RichText::new("It works on what is seen: turn the mesh to reach the other side. Ctrl while you draw does the other way. The bones and the weights stay as they are.").size(11.0).color(TEXT_DIM));
             }
             Tool::Attach => {
                 section_title(ui, "Parts with numbers");
@@ -1684,6 +2013,7 @@ impl HandRig {
                 self.current_take().set_move(frame, off);
             }
         }
+        self.library_ui(ui);
         section_title(ui, "View");
         ui.horizontal_wrapped(|ui| {
             for (label, to) in [("Front", (0.0, 0.0)), ("Side", (90.0, 0.0)), ("Back", (180.0, 0.0))] {
@@ -1694,6 +2024,82 @@ impl HandRig {
             }
         });
         ui.label(RichText::new("Every animation that has keys is saved in the files (.glb and .fbx) with the ready animations.").size(11.0).color(TEXT_DIM));
+    }
+
+    /// The library of animations: the ones that were saved, and the ones that came with the app. They fit any character with bones of the same names.
+    fn library_ui(&mut self, ui: &mut Ui) {
+        if !self.lib_seen {
+            self.lib = crate::animlib::all();
+            self.lib_seen = true;
+        }
+        section_title(ui, "Library");
+        ui.label(RichText::new("Animations are kept by the names of the bones, so one that was made for a character moves any other character that has bones with the same names.").size(11.0).color(TEXT_DIM));
+        let have_keys = self.takes.get(self.take).is_some_and(|t| t.key_count() > 0);
+        ui.horizontal_wrapped(|ui| {
+            if ui.add_enabled(have_keys, egui::Button::new("Save this in my library")).help("Keeps this animation in the folder of the app, for every project and every character").clicked() {
+                let file = crate::animlib::TakeFile::from_take(&self.takes[self.take], &self.rig);
+                self.lib_message = Some(match crate::animlib::save(&crate::animlib::user_folder(), &file) {
+                    Ok(p) => format!("Saved in {}.", p.display()),
+                    Err(e) => e,
+                });
+                self.lib_seen = false;
+            }
+            if let Some(src) = crate::animlib::source_folder() {
+                if ui.add_enabled(have_keys, egui::Button::new("Put it in the installer")).help("Saves it in the animations folder of the source of the app: the installer takes that folder, so everyone who installs the app has this animation").clicked() {
+                    let file = crate::animlib::TakeFile::from_take(&self.takes[self.take], &self.rig);
+                    self.lib_message = Some(match crate::animlib::save(&src, &file) {
+                        Ok(p) => format!("Saved in {}: the installer will have it.", p.display()),
+                        Err(e) => e,
+                    });
+                    self.lib_seen = false;
+                }
+            }
+            if ui.small_button("Look again").help("Look in the folders for new animations").clicked() {
+                self.lib_seen = false;
+            }
+        });
+        let mut use_it: Option<std::path::PathBuf> = None;
+        let mut delete: Option<std::path::PathBuf> = None;
+        for e in &self.lib {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{}  ({} frames{})", e.name, e.frames, if e.source == crate::animlib::Source::BuiltIn { ", built in" } else { "" })).size(12.0));
+                if ui.small_button("Use").help("Add it to this mesh as an animation you can play, change and save").clicked() {
+                    use_it = Some(e.path.clone());
+                }
+                if e.source == crate::animlib::Source::Mine && ui.small_button("Delete").help("Take it out of your library").clicked() {
+                    delete = Some(e.path.clone());
+                }
+            });
+        }
+        if self.lib.is_empty() {
+            ui.label(RichText::new("Nothing in the library yet.").size(11.5).color(TEXT_DIM));
+        }
+        if let Some(p) = use_it {
+            self.lib_message = Some(match crate::animlib::open(&p) {
+                Ok(f) => {
+                    let (take, found) = f.to_take(&self.rig);
+                    let total = f.tracks.len();
+                    if found == 0 && total > 0 {
+                        format!("None of the {total} bones of this animation is in this mesh (the names must be the same).")
+                    } else {
+                        self.takes.push(take);
+                        self.take = self.takes.len() - 1;
+                        self.frame = 0.0;
+                        self.show_frame();
+                        format!("{}: {found} of {total} bones found.", f.name)
+                    }
+                }
+                Err(e) => e,
+            });
+        }
+        if let Some(p) = delete {
+            let _ = std::fs::remove_file(p);
+            self.lib_seen = false;
+        }
+        if let Some(m) = &self.lib_message {
+            ui.label(RichText::new(m).size(11.0).color(TEXT_DIM));
+        }
+        ui.add_space(6.0);
     }
 
     /// The strip under the picture: the frames, the keys of the picked bone (gold) and of the others (grey), and the playhead. Click or drag to go to a frame.
@@ -1866,13 +2272,13 @@ impl HandRig {
 
 impl SeviathApp {
     pub(super) fn mesh_rig_ui(&mut self, ui: &mut Ui) {
-        if self.m3.page == Page::Bases {
+        if matches!(self.m3.page, Page::Bases | Page::Edit) {
             egui::Panel::left("mesh_bases_left").default_size(320.0).size_range(250.0..=480.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
-                egui::ScrollArea::vertical().id_salt("mesh_bases_scroll").show(ui, |ui| self.bases_panel(ui));
+                egui::ScrollArea::vertical().id_salt("mesh_bases_scroll").show(ui, |ui| if self.m3.page == Page::Edit { self.edit_panel(ui) } else { self.bases_panel(ui) });
             });
             if self.m3.mesh.is_none() {
                 egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(14, 20, 18)).inner_margin(egui::Margin::same(16))).show(ui, |ui| {
-                    ui.label(RichText::new("Pick a base on the left.").size(14.0).strong());
+                    ui.label(RichText::new(if self.m3.page == Page::Edit { "There is no mesh yet. Make one on the From a text or From a picture pages, or pick a base." } else { "Pick a base on the left." }).size(14.0).strong());
                     ui.label(RichText::new("It is unwrapped for painting, and its looks (skin, eyes, brows, mouth) are drawn on it. Everything else you paint by hand.").size(12.0).color(TEXT_DIM));
                 });
                 return;
@@ -1915,10 +2321,10 @@ impl SeviathApp {
         }
         let set = match page {
             Page::Parts => ToolSet::Parts,
-            Page::Bases => ToolSet::Look,
+            Page::Bases | Page::Edit => ToolSet::Look,
             _ => ToolSet::Rig,
         };
-        if page == Page::Bases && !set.allows(hand.tool) {
+        if matches!(page, Page::Bases | Page::Edit) && !set.allows(hand.tool) {
             hand.tool = Tool::Turn;
         }
         if page == Page::Parts && !set.allows(hand.tool) {
@@ -1927,7 +2333,7 @@ impl SeviathApp {
         if page == Page::Rig && !set.allows(hand.tool) {
             hand.tool = Tool::Select;
         }
-        if page != Page::Bases {
+        if !matches!(page, Page::Bases | Page::Edit) {
             egui::Panel::left("mesh_rig_left").default_size(300.0).size_range(240.0..=460.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
                 egui::ScrollArea::vertical().id_salt("mesh_rig_left_scroll").show(ui, |ui| {
                     if page == Page::Animate {
@@ -1940,7 +2346,7 @@ impl SeviathApp {
         }
         egui::Panel::right("mesh_rig_right").default_size(290.0).size_range(240.0..=460.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("mesh_rig_right_scroll").show(ui, |ui| {
-                if page == Page::Bases {
+                if matches!(page, Page::Bases | Page::Edit) {
                     hand.tools_ui(ui, &mut *mesh, set);
                     ui.add_space(8.0);
                     section_title(ui, "Save");
@@ -2230,5 +2636,107 @@ mod tests {
         assert!(xs.iter().any(|x| *x < -0.03) && xs.iter().any(|x| *x > 0.03), "strokes on both sides");
         hand.undo_stroke(&mut mesh);
         assert_eq!(mesh.verts.len(), v0, "one step takes both back");
+    }
+
+    /// A flat grid facing +z, seen from the front.
+    fn sculpt_setup() -> (AssetMesh, HandRig, Camera) {
+        let mut verts = Vec::new();
+        for y in 0..=20 {
+            for x in 0..=20 {
+                verts.push([x as f32 * 0.02 - 0.2, y as f32 * 0.02, 0.0]);
+            }
+        }
+        let mut tris = Vec::new();
+        for y in 0..20u32 {
+            for x in 0..20u32 {
+                let a = y * 21 + x;
+                tris.push([a, a + 1, a + 21]);
+                tris.push([a + 1, a + 22, a + 21]);
+            }
+        }
+        let mesh = AssetMesh { uvs: vec![[0.0; 2]; verts.len()], verts, tris, texture: None, normal: None };
+        let mut hand = HandRig::default();
+        hand.start_for(&mesh);
+        let cam = hand.camera(300, 300);
+        let (_, depth, ids) = mesh.render_full(&mesh.verts, &cam, false, crate::assetview::View::Textured, None);
+        hand.depth = depth;
+        hand.ids = ids;
+        hand.radius = 60.0;
+        hand.sculpt_strength = 1.0;
+        (mesh, hand, cam)
+    }
+
+    fn centre_px(cam: &Camera) -> Pos2 {
+        let p = cam.project([0.0, 0.2, 0.0]);
+        Pos2::new(p[0], p[1])
+    }
+
+    #[test]
+    fn the_sculpt_brushes_push_smooth_and_grab_the_surface_and_a_stroke_can_be_taken_back() {
+        let (mut mesh, mut hand, cam) = sculpt_setup();
+        let mid = mesh.verts.iter().position(|v| v[0].abs() < 1e-4 && (v[1] - 0.2).abs() < 1e-4).unwrap();
+        let z0: Vec<f32> = mesh.verts.iter().map(|v| v[2]).collect();
+        hand.sculpt_undo.push(mesh.verts.clone());
+        hand.sculpt_normals = crate::meshfile::vertex_normals(&mesh.verts, &mesh.tris);
+        // draw: the middle comes out of the surface (towards the viewer, +z or -z by the winding), the far corner does not move
+        hand.sculpt = Sculpt::Draw;
+        hand.sculpt_dab(&mut mesh, &cam, centre_px(&cam), false);
+        assert!(mesh.verts[mid][2].abs() > 0.005, "{}", mesh.verts[mid][2]);
+        assert_eq!(mesh.verts[0][2], z0[0]);
+        // the other way
+        let up = mesh.verts[mid][2];
+        hand.sculpt_dab(&mut mesh, &cam, centre_px(&cam), true);
+        assert!(mesh.verts[mid][2].abs() < up.abs(), "ctrl cuts in");
+        // smooth: a spike gets lower
+        mesh.verts[mid][2] = 0.1;
+        hand.sculpt = Sculpt::Smooth;
+        hand.sculpt_dab(&mut mesh, &cam, centre_px(&cam), false);
+        assert!(mesh.verts[mid][2] < 0.07, "{}", mesh.verts[mid][2]);
+        // grab: hold, drag to the right, the middle follows
+        hand.sculpt = Sculpt::Grab;
+        let x0 = mesh.verts[mid][0];
+        hand.sculpt_hold(&mesh, &cam, centre_px(&cam));
+        hand.sculpt_drag(&mut mesh, &cam, Pos2::new(centre_px(&cam).x + 30.0, centre_px(&cam).y));
+        assert!(mesh.verts[mid][0] > x0 + 0.02, "{} {}", mesh.verts[mid][0], x0);
+        // back
+        hand.undo_sculpt(&mut mesh);
+        assert_eq!(mesh.verts.iter().map(|v| v[2]).collect::<Vec<_>>(), z0);
+    }
+
+    #[test]
+    fn a_mirrored_sculpt_stroke_works_on_both_sides() {
+        let (mut mesh, mut hand, cam) = sculpt_setup();
+        hand.mirror = true;
+        hand.mirror_x = 0.0;
+        hand.sculpt_normals = crate::meshfile::vertex_normals(&mesh.verts, &mesh.tris);
+        hand.sculpt = Sculpt::Inflate;
+        hand.radius = 25.0;
+        let left = {
+            let p = cam.project([-0.1, 0.2, 0.0]);
+            Pos2::new(p[0], p[1])
+        };
+        hand.sculpt_dab(&mut mesh, &cam, left, false);
+        let m = hand.mirror_pixel(&mesh, &cam, left).unwrap();
+        hand.sculpt_dab(&mut mesh, &cam, m, false);
+        let moved = |side: f32| mesh.verts.iter().filter(|v| v[0] * side > 0.0 && v[2].abs() > 1e-4).count();
+        assert!(moved(-1.0) > 0 && moved(1.0) > 0, "{} {}", moved(-1.0), moved(1.0));
+    }
+
+    #[test]
+    fn a_generated_mesh_gets_a_free_strip_when_a_brush_needs_one() {
+        let (mut mesh, _) = crate::meshfile::tests_figure();
+        mesh.texture = Some(RgbaImage::from_pixel(256, 256, image::Rgba([200, 160, 140, 255])));
+        let mut hand = HandRig::default();
+        hand.start_for(&mesh);
+        assert!(hand.strip_v0.is_none());
+        assert!(hand.ensure_strip(&mut mesh));
+        let v0 = hand.strip_v0.unwrap();
+        assert!(v0 < 0.9 && v0 > 0.85, "{v0}");
+        assert!(mesh.uvs.iter().all(|q| q[1] <= v0 + 1e-4));
+        // a part can be put on it now
+        hand.attach_start(&mut mesh, attach::Part::Horns);
+        assert!(hand.attach.is_some() && mesh.verts.len() > 44);
+        let high = mesh.texture.as_ref().unwrap().height() as f32;
+        assert!(mesh.uvs[44..].iter().all(|q| q[1] >= v0 && q[1] <= 1.0), "the part looks into the strip of a texture that is taller than wide ({high})");
     }
 }
