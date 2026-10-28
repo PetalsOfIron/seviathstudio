@@ -318,7 +318,7 @@ fn compare_the_two_shapes() {
         let st = m.stats();
         println!("{name}: {} triangles, size {:?}", st.triangles, st.size);
         for (k, yaw) in [0.0f32, 45.0, 90.0, 180.0].into_iter().enumerate() {
-            for (r2, view) in [View::Normals, View::Depth].into_iter().enumerate() {
+            for (r2, view) in [View::Textured, View::Depth].into_iter().enumerate() {
                 let img = m.render_view(yaw, 0.0, 300, 440, false, view);
                 image::imageops::replace(&mut sheet, &img, (k as u32 * 300) as i64, ((row * 2 + r2) as u32 * 440) as i64);
             }

@@ -4538,6 +4538,31 @@ fn make_the_example_character() {
         sheet.save(dir.join("ExampleGirl_maps.png")).unwrap();
         h.state_mut().test_game().model = Some(model);
     }
+    // how much of what follows an arm, a hand or a leg is hair-coloured (it should be nothing: hair follows the head)
+    {
+        let model = h.state_mut().test_game().model.take().unwrap();
+        let pink = |p: [u8; 4]| p[3] > 128 && p[0] > 200 && p[0] as i32 - p[1] as i32 > 25 && p[2] as i32 > p[1] as i32 + 2 && (p[0] as i32 - p[2] as i32).abs() < 70;
+        let (mut by_part, mut total) = (std::collections::BTreeMap::<String, (usize, usize)>::new(), 0usize);
+        for part in model.parts.iter() {
+            for (i, uv) in part.uvs.iter().enumerate() {
+                let best = (0..4).max_by(|a, b| part.weights[i][*a].total_cmp(&part.weights[i][*b])).unwrap();
+                let name = model.bones[part.joints[i][best] as usize].name.clone();
+                let limb = crate::vrm::shape::limb_group_of(&name);
+                if limb == 0 {
+                    continue;
+                }
+                let (x, y) = (((uv[0] * part.image.width() as f32) as u32).min(part.image.width() - 1), ((uv[1] * part.image.height() as f32) as u32).min(part.image.height() - 1));
+                total += 1;
+                let e = by_part.entry(format!("{} / limb {}", part.name, limb)).or_default();
+                e.1 += 1;
+                if pink(part.image.get_pixel(x, y).0) {
+                    e.0 += 1;
+                }
+            }
+        }
+        println!("hair-coloured points that follow a limb (name: pink of all): {by_part:?} (of {total} limb points)");
+        h.state_mut().test_game().model = Some(model);
+    }
     // which bone each point follows: a map of the points coloured by the part of the body that moves them most
     {
         let model = h.state_mut().test_game().model.take().unwrap();

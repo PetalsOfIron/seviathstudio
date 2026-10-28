@@ -82,6 +82,8 @@ pub struct GenerateUi {
     /// Pictures, then the 3D model, one after the other without a click in between.
     auto: bool,
     pub stage: Stage,
+    /// What is installed (the base AI files, the picture AI, CharacterGen), and when it was looked at (the folders are not read every frame).
+    ready: Option<(f64, [bool; 3])>,
     /// The open project may be replaced by the character that is made (when it has unsaved changes).
     pub replace_ok: bool,
     /// Make the character's shape with the AI (otherwise the round card of the Rig tab).
@@ -138,6 +140,22 @@ impl SeviathApp {
                 ui.label(RichText::new(what).size(12.0).color(GOLD));
             } else if let Some(m) = &self.genr.message {
                 ui.label(RichText::new(m).size(12.0).color(TEXT_DIM));
+            }
+        });
+        // what is installed, and the way to get the rest with one button
+        let now = ui.input(|i| i.time);
+        if self.genr.ready.is_none_or(|(t, _)| now - t > 3.0) {
+            let st = crate::aisetup::status();
+            self.genr.ready = Some((now, [st.ready(), crate::setupall::picture_ready(), st.charactergen]));
+        }
+        let ready = self.genr.ready.map(|r| r.1).unwrap_or([false; 3]);
+        ui.horizontal_wrapped(|ui| {
+            for (ok, name, tip) in [(ready[0], "AI files", "Python, PyTorch and TripoSR (game assets and the first shape AI)."), (ready[1], "Picture AI", "Stable Diffusion XL and its pose model: they make the pictures from a text."), (ready[2], "CharacterGen", "The better shape AI for characters.")] {
+                let col = if ok { EMERALD } else { GOLD };
+                ui.label(RichText::new(format!("{} {name}", if ok { "Ready:" } else { "Missing:" })).size(11.5).color(col)).on_hover_text(tip);
+            }
+            if ready.iter().any(|r| !*r) && ui.small_button("Get everything").help("Opens the Downloads window: the first card there downloads and installs all of it with one button (about 45 GB, free). It also shows how much each part is.").clicked() {
+                self.open_downloads();
             }
         });
         self.ai_setup_ui(ui);

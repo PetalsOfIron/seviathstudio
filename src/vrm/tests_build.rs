@@ -689,7 +689,7 @@ fn a_character_is_built_on_an_ai_shape_with_texture_weights_and_face_shapes() {
         verts.extend(sv.iter().map(|v| [v[0] * 0.002 + 0.3, -v[1] * 0.002 + 1.1, z]));
         tris.extend(st.iter().map(|t| if side == 0 { [base + t[0], base + t[2], base + t[1]] } else { [base + t[0], base + t[1], base + t[2]] }));
     }
-    let shape = Shape { verts, tris };
+    let shape = Shape { verts, tris, colors: Vec::new() };
     let m = build_any(&d, &Options { name: "OnShape".into(), author: "Me".into(), shape: Some(std::sync::Arc::new(shape)), ..Default::default() }).unwrap();
     assert!(m.parts.iter().any(|p| p.name == "Mouth") && m.parts[0].name == "Body", "the body and the inside of the mouth");
     let body = &m.parts[0];
@@ -838,7 +838,7 @@ fn standin_shape(d: &Document) -> super::shape::Shape {
         verts.extend(sv.iter().map(|v| [v[0] * 0.002 + 0.3, -v[1] * 0.002 + 1.1, z]));
         tris.extend(st.iter().map(|t| if side == 0 { [base + t[0], base + t[2], base + t[1]] } else { [base + t[0], base + t[1], base + t[2]] }));
     }
-    super::shape::Shape { verts, tris }
+    super::shape::Shape { verts, tris, colors: Vec::new() }
 }
 
 #[test]
