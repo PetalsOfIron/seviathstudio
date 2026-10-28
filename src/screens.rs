@@ -4373,5 +4373,15 @@ fn bases_page_screens() {
         h.run_steps(5);
         save(&mut h, "bases_4_human_mesh_brush");
     }
+    // horns and wings with numbers on a real base
+    if h.state_mut().test_bases_load_named("Midlanderbasefemale") {
+        h.state_mut().test_mesh_add_part(crate::app::MeshPart::Horns);
+        h.state_mut().test_mesh_keep_part();
+        h.state_mut().test_mesh_add_part(crate::app::MeshPart::Wings);
+        h.state_mut().test_mesh().hand.tool = crate::app::MeshTool::Attach;
+        h.state_mut().test_mesh().hand.yaw = 140.0;
+        h.run_steps(5);
+        save(&mut h, "bases_5_horns_wings");
+    }
 }
 
