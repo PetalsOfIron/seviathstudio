@@ -696,6 +696,81 @@ impl Rig {
         pose
     }
 
+    /// Does a shape of a movement fit a changer (a turn fits a turning changer, the points of a warp fit a warp of the same grid...)?
+    fn form_fits(form: &Form, kind: &Kind, like: &Kind) -> bool {
+        match (form, kind) {
+            (Form::Rot { .. }, Kind::Rotation { .. }) => true,
+            (Form::Warp { offsets }, Kind::Warp { cols, rows, .. }) => offsets.len() == (*cols as usize + 1) * (*rows as usize + 1),
+            (Form::Line { offsets, .. }, Kind::Line { pts, .. }) => offsets.len() == pts.len(),
+            (Form::Soft { .. }, Kind::Soft { .. }) => true,
+            (Form::Pins { offsets }, Kind::Pins { pts }) => offsets.len() == pts.len(),
+            (Form::Paths { offsets, .. }, Kind::Paths { paths }) => offsets.len() == paths.len() && offsets.iter().zip(paths).all(|(o, p)| o.len() == p.pts.len()),
+            (Form::Vals { .. }, k) => std::mem::discriminant(k) == std::mem::discriminant(like) && matches!(k, Kind::Move | Kind::Scale { .. } | Kind::Flip { .. } | Kind::Fade | Kind::Order | Kind::Wave { .. }),
+            _ => false,
+        }
+    }
+
+    /// The other changers move the same way as this one, with the same sliders and the same keys: the movement of `from` is copied to every changer of `to`
+    /// that it fits (the same kind, the same number of points). With `mirror` the movement is turned to the other side (an arm on the other side turns the other way). What a
+    /// target did with these sliders before is replaced. Returns how many changers got it.
+    pub fn copy_movement(&mut self, from: Id, to: &[Id], mirror: bool) -> usize {
+        let Some(src) = self.changer(from).map(|c| c.kind.clone()) else { return 0 };
+        let sources: Vec<Binding> = self.bindings.iter().filter(|b| b.changer == from).cloned().collect();
+        if sources.is_empty() {
+            return 0;
+        }
+        let mut done = 0;
+        for &t in to.iter().filter(|t| **t != from) {
+            let Some(kind) = self.changer(t).map(|c| c.kind.clone()) else { continue };
+            if !sources.iter().all(|b| b.forms.iter().all(|f| Self::form_fits(f, &kind, &src))) {
+                continue;
+            }
+            for b in &sources {
+                self.bindings.retain(|x| !(x.changer == t && x.params == b.params));
+                let mut c = b.clone();
+                c.changer = t;
+                if mirror {
+                    for f in &mut c.forms {
+                        Self::mirror_form(f, &kind);
+                    }
+                }
+                self.bindings.push(c);
+            }
+            done += 1;
+        }
+        done
+    }
+
+    /// A shape of a movement turned to the other side (left and right swapped): what a changer on the other side does with the same slider.
+    fn mirror_form(f: &mut Form, kind: &Kind) {
+        match (f, kind) {
+            (Form::Rot { deg }, _) => *deg = -*deg,
+            (Form::Warp { offsets }, Kind::Warp { cols, rows, .. }) => {
+                let cols = *cols as usize;
+                let old = offsets.clone();
+                for r in 0..=*rows as usize {
+                    for col in 0..=cols {
+                        let o = old[r * (cols + 1) + (cols - col)];
+                        offsets[r * (cols + 1) + col] = [-o[0], o[1]];
+                    }
+                }
+            }
+            (Form::Line { offsets, turns }, _) => {
+                offsets.iter_mut().for_each(|o| o[0] = -o[0]);
+                turns.iter_mut().for_each(|t| *t = -*t);
+            }
+            (Form::Soft { offset, .. }, _) => offset[0] = -offset[0],
+            (Form::Pins { offsets }, _) => offsets.iter_mut().for_each(|o| o[0] = -o[0]),
+            (Form::Paths { offsets, turns }, _) => {
+                offsets.iter_mut().flatten().for_each(|o| o[0] = -o[0]);
+                turns.iter_mut().flatten().for_each(|t| *t = -*t);
+            }
+            (Form::Vals { v }, Kind::Move) => v[0] = -v[0],
+            (Form::Vals { v }, Kind::Wave { .. }) if v.len() > 3 => v[3] = 180.0 - v[3],
+            _ => {}
+        }
+    }
+
     /// A copy of a changer on the other side of the vertical line x = `axis_x`, moved by the same sliders
     /// (turns the other way, bends the other way). Returns its id.
     pub fn mirror_changer(&mut self, id: Id, axis_x: f32, name: &str) -> Option<Id> {
@@ -720,32 +795,7 @@ impl Rig {
         for mut b in copies {
             b.changer = new;
             for f in &mut b.forms {
-                match (f, &kind) {
-                    (Form::Rot { deg }, _) => *deg = -*deg,
-                    (Form::Warp { offsets }, Kind::Warp { cols, rows, .. }) => {
-                        let cols = *cols as usize;
-                        let old = offsets.clone();
-                        for r in 0..=*rows as usize {
-                            for col in 0..=cols {
-                                let o = old[r * (cols + 1) + (cols - col)];
-                                offsets[r * (cols + 1) + col] = [-o[0], o[1]];
-                            }
-                        }
-                    }
-                    (Form::Line { offsets, turns }, _) => {
-                        offsets.iter_mut().for_each(|o| o[0] = -o[0]);
-                        turns.iter_mut().for_each(|t| *t = -*t);
-                    }
-                    (Form::Soft { offset, .. }, _) => offset[0] = -offset[0],
-                    (Form::Pins { offsets }, _) => offsets.iter_mut().for_each(|o| o[0] = -o[0]),
-                    (Form::Paths { offsets, turns }, _) => {
-                        offsets.iter_mut().flatten().for_each(|o| o[0] = -o[0]);
-                        turns.iter_mut().flatten().for_each(|t| *t = -*t);
-                    }
-                    (Form::Vals { v }, Kind::Move) => v[0] = -v[0],
-                    (Form::Vals { v }, Kind::Wave { .. }) if v.len() > 3 => v[3] = 180.0 - v[3],
-                    _ => {}
-                }
+                Self::mirror_form(f, &kind);
             }
             self.bindings.push(b);
         }
@@ -1567,6 +1617,43 @@ mod tests {
         let mut bad = r.clone();
         bad.iks.push(Ik { upper, lower: 9999, root, joint, tip, px, py });
         assert_eq!(bad.sanitized().iks.len(), 1);
+    }
+
+    #[test]
+    fn the_movement_of_one_changer_is_copied_to_the_others_that_fit() {
+        let mut r = Rig::default();
+        let a = r.add_changer("Arm L", Kind::Rotation { pivot: [700.0, 300.0] }, None);
+        let b = r.add_changer("Arm R", Kind::Rotation { pivot: [300.0, 300.0] }, None);
+        let w = r.add_changer("Cheek", Kind::Warp { rect: [0.0, 0.0, 10.0, 10.0], cols: 1, rows: 1 }, None);
+        let p = r.add_param("Wave", -1.0, 1.0, 0.0);
+        r.bind_rotation(a, p, 40.0);
+        let n = r.copy_movement(a, &[b, w, a], false);
+        assert_eq!(n, 1, "the other rotation gets it, the warp does not fit, and a changer is not copied onto itself");
+        let mut v = Values::default();
+        v.set(p, 1.0);
+        let pose = r.pose(&v);
+        let (pa, pb) = (r.deform_point(&pose, Some(a), [800.0, 300.0]), r.deform_point(&pose, Some(b), [400.0, 300.0]));
+        // both turn the same way, by the same angle, each round its own pivot
+        assert!(((pa[0] - 700.0) - (pb[0] - 300.0)).abs() < 0.01 && (pa[1] - pb[1]).abs() < 0.01, "{pa:?} {pb:?}");
+        assert!(r.bindings.iter().all(|x| x.changer != w));
+        // doing it again does not add a second binding
+        r.copy_movement(a, &[b], false);
+        assert_eq!(r.bindings.iter().filter(|x| x.changer == b).count(), 1);
+    }
+
+    #[test]
+    fn mirrored_movement_turns_the_other_way() {
+        let mut r = Rig::default();
+        let a = r.add_changer("Arm L", Kind::Rotation { pivot: [700.0, 300.0] }, None);
+        let b = r.add_changer("Arm R", Kind::Rotation { pivot: [300.0, 300.0] }, None);
+        let p = r.add_param("Wave", -1.0, 1.0, 0.0);
+        r.bind_rotation(a, p, 40.0);
+        assert_eq!(r.copy_movement(a, &[b], true), 1);
+        let deg = |r: &Rig, c: Id| -> Option<f32> {
+            r.bindings.iter().find(|x| x.changer == c).and_then(|x| x.forms.iter().filter_map(|f| if let Form::Rot { deg } = f { Some(*deg) } else { None }).find(|d| d.abs() > 0.0))
+        };
+        let (da, db) = (deg(&r, a).unwrap(), deg(&r, b).unwrap());
+        assert!(da.abs() > 1.0 && (da + db).abs() < 1e-4, "{da} {db}: the other way round");
     }
 
     #[test]

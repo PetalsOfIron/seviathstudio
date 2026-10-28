@@ -24,6 +24,18 @@ pub struct Effect {
     pub blend: Blend,
 }
 
+/// What the face has to do for an expression to switch on by itself (a cheek puffed, a smile, a tongue out): one of the inputs of the tracking goes over (or
+/// under) a value. It goes off again when the input comes back a little past that value, so it does not flicker.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Trigger {
+    /// The name of an input of the tracking (`CheekPuff`, `MouthSmile`, `TongueOut`...).
+    pub input: String,
+    pub value: f32,
+    /// On when the input is under the value instead of over it.
+    #[serde(default)]
+    pub below: bool,
+}
+
 /// An expression as the engine uses it, whatever it came from.
 #[derive(Clone, PartialEq, Debug)]
 pub struct ExprDef {
@@ -35,6 +47,7 @@ pub struct ExprDef {
     /// Layers (props, accessories) that show while it is on, and layers that hide.
     pub show: Vec<u64>,
     pub hide: Vec<u64>,
+    pub trigger: Option<Trigger>,
 }
 
 /// An expression made in this program: sliders at values.
@@ -47,17 +60,19 @@ pub struct OwnExpr {
     pub fade_out: f32,
     pub show: Vec<u64>,
     pub hide: Vec<u64>,
+    /// The face switches it on by itself.
+    pub trigger: Option<Trigger>,
 }
 
 impl Default for OwnExpr {
     fn default() -> Self {
-        OwnExpr { name: String::new(), values: Vec::new(), fade_in: 0.25, fade_out: 0.25, show: Vec::new(), hide: Vec::new() }
+        OwnExpr { name: String::new(), values: Vec::new(), fade_in: 0.25, fade_out: 0.25, show: Vec::new(), hide: Vec::new(), trigger: None }
     }
 }
 
 /// Every expression of the rig: the own ones first, then the ones of a Live2D model (sliders found by their Live2D id).
 pub fn defs(rig: &Rig) -> Vec<ExprDef> {
-    let mut out: Vec<ExprDef> = rig.own_exprs.iter().map(|e| ExprDef { name: e.name.clone(), fade_in: e.fade_in, fade_out: e.fade_out, effects: e.values.iter().map(|(p, v)| Effect { param: *p, value: *v, blend: Blend::Overwrite }).collect(), own: true, show: e.show.clone(), hide: e.hide.clone() }).collect();
+    let mut out: Vec<ExprDef> = rig.own_exprs.iter().map(|e| ExprDef { name: e.name.clone(), fade_in: e.fade_in, fade_out: e.fade_out, effects: e.values.iter().map(|(p, v)| Effect { param: *p, value: *v, blend: Blend::Overwrite }).collect(), own: true, show: e.show.clone(), hide: e.hide.clone(), trigger: e.trigger.clone() }).collect();
     for e in &rig.expressions {
         let effects: Vec<Effect> = e
             .params
@@ -73,7 +88,7 @@ pub fn defs(rig: &Rig) -> Vec<ExprDef> {
             })
             .collect();
         if !effects.is_empty() && !out.iter().any(|o| o.name == e.name) {
-            out.push(ExprDef { name: e.name.clone(), fade_in: e.fade_in.max(0.0), fade_out: e.fade_out.max(0.0), effects, own: false, show: Vec::new(), hide: Vec::new() });
+            out.push(ExprDef { name: e.name.clone(), fade_in: e.fade_in.max(0.0), fade_out: e.fade_out.max(0.0), effects, own: false, show: Vec::new(), hide: Vec::new(), trigger: None });
         }
     }
     out
@@ -86,6 +101,8 @@ pub struct ExprState {
     level: HashMap<String, f32>,
     /// For every slider an expression changed: what it was before and what was written.
     applied: HashMap<Id, (f32, f32)>,
+    /// For every expression with a trigger: whether the face had it on at the last look (only a change switches it, so a key can still change it).
+    seen: HashMap<String, bool>,
 }
 
 impl ExprState {
@@ -95,6 +112,27 @@ impl ExprState {
 
     pub fn level(&self, name: &str) -> f32 {
         self.level.get(name).copied().unwrap_or(0.0)
+    }
+
+    /// The face switches expressions: an expression with a trigger goes on when its input passes the value and off when it goes back past it (with a gap of
+    /// a tenth of the range of the input). Only a change of the face switches it, so a key can still switch it by hand in between.
+    pub fn watch(&mut self, defs: &[ExprDef], inputs: &HashMap<&'static str, f32>) {
+        for d in defs {
+            let Some(t) = &d.trigger else { continue };
+            let Some(v) = inputs.get(t.input.as_str()).copied() else { continue };
+            let was = self.seen.get(&d.name).copied().unwrap_or(false);
+            let gap = 0.1 * (t.value.abs().max(0.2));
+            let now = match (t.below, was) {
+                (false, false) => v > t.value,
+                (false, true) => v > t.value - gap,
+                (true, false) => v < t.value,
+                (true, true) => v < t.value + gap,
+            };
+            if now != was {
+                self.seen.insert(d.name.clone(), now);
+                self.set(&d.name, now);
+            }
+        }
     }
 
     pub fn set(&mut self, name: &str, on: bool) {
@@ -340,5 +378,44 @@ mod pose_tests {
         let base = Values::default();
         assert_eq!(pose_with(&d[0], &r, &base).0[&a], 1.0);
         assert!(base.0.is_empty(), "the sliders given are not changed");
+    }
+
+    #[test]
+    fn the_face_switches_an_expression_on_and_off_and_a_key_can_still_change_it_between() {
+        let defs = vec![ExprDef { name: "Puffy".into(), fade_in: 0.0, fade_out: 0.0, effects: Vec::new(), own: true, show: Vec::new(), hide: Vec::new(), trigger: Some(Trigger { input: "CheekPuff".into(), value: 0.5, below: false }) }];
+        let mut st = ExprState::default();
+        let mut ch: HashMap<&'static str, f32> = HashMap::new();
+        ch.insert("CheekPuff", 0.2);
+        st.watch(&defs, &ch);
+        assert!(!st.is_on("Puffy"));
+        ch.insert("CheekPuff", 0.7);
+        st.watch(&defs, &ch);
+        assert!(st.is_on("Puffy"), "over the value: on");
+        // a key switches it off while the cheeks are still puffed: the face does not switch it on again until it changed
+        st.set("Puffy", false);
+        st.watch(&defs, &ch);
+        assert!(!st.is_on("Puffy"));
+        // a little under the value, but not past the gap: still counted as puffed
+        ch.insert("CheekPuff", 0.47);
+        st.watch(&defs, &ch);
+        assert!(!st.is_on("Puffy"));
+        ch.insert("CheekPuff", 0.1);
+        st.watch(&defs, &ch);
+        ch.insert("CheekPuff", 0.9);
+        st.watch(&defs, &ch);
+        assert!(st.is_on("Puffy"), "puffed again");
+    }
+
+    #[test]
+    fn an_expression_that_is_on_when_the_input_is_under_a_value_works_the_other_way() {
+        let defs = vec![ExprDef { name: "Squint".into(), fade_in: 0.0, fade_out: 0.0, effects: Vec::new(), own: true, show: Vec::new(), hide: Vec::new(), trigger: Some(Trigger { input: "EyeOpenLeft".into(), value: 0.3, below: true }) }];
+        let mut st = ExprState::default();
+        let mut ch: HashMap<&'static str, f32> = HashMap::new();
+        ch.insert("EyeOpenLeft", 0.9);
+        st.watch(&defs, &ch);
+        assert!(!st.is_on("Squint"));
+        ch.insert("EyeOpenLeft", 0.1);
+        st.watch(&defs, &ch);
+        assert!(st.is_on("Squint"));
     }
 }
