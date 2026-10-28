@@ -22,6 +22,7 @@ use crate::widgets::{self, section_title};
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum Page {
     #[default]
+    Bases,
     FromText,
     FromImage,
     Rig,
@@ -68,6 +69,7 @@ pub struct MeshUi {
     pub anim: super::animpage::AnimState,
     pub hand: super::handrig::HandRig,
     pub setup: super::aisetupui::AiSetup,
+    pub bases: super::basestab::BasesUi,
     pics: Vec<Pic>,
     pub picked: Option<usize>,
     pic_job: Option<PicJob>,
@@ -106,6 +108,7 @@ impl Default for MeshUi {
             anim: Default::default(),
             hand: Default::default(),
             setup: Default::default(),
+            bases: Default::default(),
             pics: Vec::new(),
             picked: None,
             pic_job: None,
@@ -158,7 +161,7 @@ impl MeshUi {
 impl SeviathApp {
     pub(super) fn mesh_ui(&mut self, ui: &mut Ui) {
         egui::Panel::top("mesh_top").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.mesh_top(ui));
-        if matches!(self.m3.page, Page::Rig | Page::Parts | Page::Animate) {
+        if matches!(self.m3.page, Page::Bases | Page::Rig | Page::Parts | Page::Animate) {
             self.mesh_rig_ui(ui);
             return;
         }
@@ -193,6 +196,7 @@ impl SeviathApp {
             ui.label(RichText::new("3D").size(16.0).strong());
             ui.add_space(8.0);
             for (p, label, tip) in [
+                (Page::Bases, "Bases", "The ready bases of the races: pick one, make the other sex, change its looks and paint it"),
                 (Page::FromText, "From a text", "Write what you want: pictures are made, and the picture you pick becomes a 3D mesh"),
                 (Page::FromImage, "From a picture or drawing", "Your own picture, or your drawing from the Draw tab, becomes a 3D mesh"),
                 (Page::Rig, "Bones and weights", "Draw the bones in the mesh and paint how much each bone moves every part, by hand"),
@@ -259,6 +263,7 @@ impl SeviathApp {
 
     /// Takes the answers of the AI jobs, whichever tab is open (so a job that was started is not left waiting when you look at another tab).
     pub(super) fn mesh_poll(&mut self, ctx: &egui::Context) {
+        self.bases_poll(ctx);
         let pics = self.m3.pic_job.as_ref().map(|rx| rx.try_recv());
         match pics {
             Some(Ok(Ok((imgs, seed)))) => {

@@ -4335,3 +4335,43 @@ fn a_mesh_is_rigged_in_parts_and_animated_by_hand() {
     assert_eq!(anims[0]["name"], "Take 1");
 }
 
+/// The Bases page with a real base of the user (when the bases are on this computer): the woman, and the man made from her.
+#[test]
+fn bases_page_screens() {
+    let _gpu = lock_gpu();
+    let mut h = Harness::builder().with_size([1500.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().test_run_action_now("tab.7");
+    h.state_mut().test_mesh().page = crate::app::mesh_page_bases();
+    h.run_steps(4);
+    save(&mut h, "bases_1_empty");
+    if !h.state_mut().test_bases_load("Midlanderbasefemale", false) {
+        return;
+    }
+    h.run_steps(5);
+    save(&mut h, "bases_2_woman");
+    {
+        let g = h.state_mut().test_mesh();
+        g.hand.zoom = 5.0;
+        g.hand.pan = [0.0, 1215.0];
+        g.hand.pitch = 0.0;
+        g.hand.start_rerender();
+    }
+    h.run_steps(4);
+    save(&mut h, "bases_2b_woman_face");
+    {
+        let g = h.state_mut().test_mesh();
+        g.hand.zoom = 1.0;
+        g.hand.pan = [0.0, 0.0];
+        g.hand.start_rerender();
+    }
+    assert!(h.state_mut().test_mesh_bases_load_other());
+    h.run_steps(5);
+    save(&mut h, "bases_3_man");
+    if h.state_mut().test_bases_load_named("Humanbasefemale") {
+        h.state_mut().test_mesh().hand.tool = crate::app::MeshTool::Mesh;
+        h.run_steps(5);
+        save(&mut h, "bases_4_human_mesh_brush");
+    }
+}
+

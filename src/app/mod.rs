@@ -30,6 +30,7 @@ mod partstab;
 mod aisetupui;
 mod animpage;
 mod meshtab;
+mod basestab;
 mod handrig;
 
 #[cfg(test)]
@@ -46,6 +47,11 @@ pub fn mesh_page_image() -> meshtab::Page {
 pub use handrig::Tool as MeshTool;
 #[cfg(test)]
 pub use meshtab::Kind as MeshKind;
+
+#[cfg(test)]
+pub fn mesh_page_bases() -> meshtab::Page {
+    meshtab::Page::Bases
+}
 
 #[cfg(test)]
 pub fn mesh_page_parts() -> meshtab::Page {
