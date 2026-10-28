@@ -179,6 +179,125 @@ pub fn hair_mask(page: &RgbaImage, head: [f32; 4]) -> Option<HairMask> {
     (mask.count() as f32 > 0.02 * (hh * hh)).then_some(mask)
 }
 
+/// Where the hair is on a shape that has its own colours (CharacterGen paints its mesh): the points that are hair on the drawing are the start (`seeds`),
+/// and the hair grows over the surface into every point of the colour of the hair that touches it, so the strands that hang beside an arm or a hand are
+/// found by what they are (hair), not by where they are in the picture of the front. A point of another colour (a sleeve, a hand) stops it.
+pub fn hair_from_colors(verts: &[[f32; 3]], tris: &[[u32; 3]], colors: &[[u8; 3]], seeds: &[bool]) -> Vec<bool> {
+    let n = verts.len();
+    if colors.len() != n || seeds.len() != n || n == 0 {
+        return vec![false; n];
+    }
+    // the colour of the hair: the middle of the colours of the start
+    let (mut sum, mut cnt) = ([0f64; 3], 0f64);
+    for i in 0..n {
+        if seeds[i] {
+            for c in 0..3 {
+                sum[c] += colors[i][c] as f64;
+            }
+            cnt += 1.0;
+        }
+    }
+    if cnt < 50.0 {
+        return vec![false; n];
+    }
+    let mean = [(sum[0] / cnt) as f32, (sum[1] / cnt) as f32, (sum[2] / cnt) as f32];
+    let lum = 0.3 * mean[0] + 0.59 * mean[1] + 0.11 * mean[2];
+    let tol = (80.0 - 0.25 * lum).clamp(40.0, 75.0);
+    let (mean_hue, mean_sat) = hue_sat(mean);
+    let by_hue = mean_sat > 0.12;
+    let like = |c: [u8; 3]| {
+        let f = [c[0] as f32, c[1] as f32, c[2] as f32];
+        let d = ((f[0] - mean[0]).powi(2) + (f[1] - mean[1]).powi(2) + (f[2] - mean[2]).powi(2)).sqrt();
+        if d < tol {
+            return true;
+        }
+        if by_hue {
+            let (h, s) = hue_sat(f);
+            let dh = (h - mean_hue).abs().min(360.0 - (h - mean_hue).abs());
+            return dh < 16.0 && s > mean_sat * 0.55;
+        }
+        false
+    };
+    // the points that are the same place (a seam of the picture on the shape has two) count as one when the hair grows
+    let key = |p: [f32; 3]| ((p[0] * 4000.0).round() as i32, (p[1] * 4000.0).round() as i32, (p[2] * 4000.0).round() as i32);
+    let mut id_of: std::collections::HashMap<(i32, i32, i32), usize> = std::collections::HashMap::new();
+    let ids: Vec<usize> = verts.iter().map(|p| { let k = key(*p); let next = id_of.len(); *id_of.entry(k).or_insert(next) }).collect();
+    let m = id_of.len();
+    let mut next_to: Vec<Vec<usize>> = vec![Vec::new(); m];
+    for t in tris {
+        for k in 0..3 {
+            let (a, b) = (ids[t[k] as usize], ids[t[(k + 1) % 3] as usize]);
+            if a != b {
+                next_to[a].push(b);
+                next_to[b].push(a);
+            }
+        }
+    }
+    // a place is hair-like when any of its points has the colour of the hair
+    let mut like_at = vec![false; m];
+    let mut seed_at = vec![false; m];
+    for i in 0..n {
+        if like(colors[i]) {
+            like_at[ids[i]] = true;
+        }
+        if seeds[i] {
+            seed_at[ids[i]] = true;
+        }
+    }
+    let mut hair = vec![false; m];
+    let mut stack: Vec<usize> = (0..m).filter(|i| seed_at[*i]).collect();
+    for &s in &stack {
+        hair[s] = true;
+    }
+    while let Some(a) = stack.pop() {
+        for &b in &next_to[a] {
+            if !hair[b] && like_at[b] {
+                hair[b] = true;
+                stack.push(b);
+            }
+        }
+    }
+    (0..n).map(|i| hair[ids[i]]).collect()
+}
+
+/// Which points of a shape are hair, found again by place: the nearest point of the shape (in the model's space) says it.
+pub struct HairPoints {
+    cell: f32,
+    grid: std::collections::HashMap<(i32, i32, i32), Vec<([f32; 3], bool)>>,
+}
+
+impl HairPoints {
+    pub fn new(points: &[[f32; 3]], flags: &[bool]) -> HairPoints {
+        let cell = 0.02;
+        let mut grid: std::collections::HashMap<(i32, i32, i32), Vec<([f32; 3], bool)>> = std::collections::HashMap::new();
+        for (p, f) in points.iter().zip(flags) {
+            grid.entry(((p[0] / cell).floor() as i32, (p[1] / cell).floor() as i32, (p[2] / cell).floor() as i32)).or_default().push((*p, *f));
+        }
+        HairPoints { cell, grid }
+    }
+
+    /// Is the nearest point of the shape (within a few centimetres) hair.
+    pub fn is_hair(&self, p: &[f32; 3]) -> bool {
+        let c = ((p[0] / self.cell).floor() as i32, (p[1] / self.cell).floor() as i32, (p[2] / self.cell).floor() as i32);
+        let mut best: Option<(f32, bool)> = None;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    if let Some(list) = self.grid.get(&(c.0 + dx, c.1 + dy, c.2 + dz)) {
+                        for (q, f) in list {
+                            let d = (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2) + (q[2] - p[2]).powi(2);
+                            if best.is_none_or(|b| d < b.0) {
+                                best = Some((d, *f));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        best.is_some_and(|b| b.1)
+    }
+}
+
 /// Hue (degrees) and saturation (0 to 1) of a colour.
 fn hue_sat(c: [f32; 3]) -> (f32, f32) {
     let (mx, mn) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
@@ -251,7 +370,7 @@ pub fn auto_chains(used: &[[f32; 3]], frame: (f32, f32, f32)) -> Vec<HairChain> 
 /// Make the hair of a model a part of its own with bone chains. `page_of` gives the place on the picture of a point of the body (page
 /// pixels). `edit` has the strands the user made (when it has none the app makes them, and they are returned in `model.hair_chains`
 /// for the user to start from). `frame` is (the middle of the figure on the page, its bottom, metres per pixel).
-pub fn add_hair(model: &mut Model3d, mask: &HairMask, page_of: impl Fn(&[f32; 3]) -> [f32; 2], edit: &HairEdit, frame: (f32, f32, f32)) -> bool {
+pub fn add_hair(model: &mut Model3d, mask: &HairMask, page_of: impl Fn(&[f32; 3]) -> [f32; 2], edit: &HairEdit, frame: (f32, f32, f32), by_colour: Option<&HairPoints>) -> bool {
     let Some(head) = model.bone("head") else { return false };
     // the points and triangles of the body and the face together (the face carries the blend shapes, the hair covers both)
     let (mut b_verts, mut b_normals, mut b_uvs, mut b_tris): (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<[u32; 3]>) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -263,7 +382,8 @@ pub fn add_hair(model: &mut Model3d, mask: &HairMask, page_of: impl Fn(&[f32; 3]
         b_uvs.extend(p.uvs.iter().copied());
         b_tris.extend(p.tris.iter().map(|t| [t[0] + base, t[1] + base, t[2] + base]));
     }
-    let is_hair: Vec<bool> = b_verts.iter().map(|v| { let p = page_of(v); mask.at(p[0], p[1]) }).collect();
+    // hair on the drawing, and hair by the colours of the shape itself (strands that hang beside an arm or a hand)
+    let is_hair: Vec<bool> = b_verts.iter().map(|v| { let p = page_of(v); mask.at(p[0], p[1]) || by_colour.is_some_and(|h| h.is_hair(v)) }).collect();
     if std::env::var("SEVIATH_DEBUG_HAIR").is_ok() {
         eprintln!("hair: {} of {} points are hair (mask {} pixels in {} x {})", is_hair.iter().filter(|h| **h).count(), is_hair.len(), mask.count(), mask.w, mask.h);
     }

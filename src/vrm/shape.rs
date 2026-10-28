@@ -59,6 +59,8 @@ pub fn align_back_view(view: &RgbaImage, mask: &[bool], w: u32, h: u32) -> Optio
 pub struct Shape {
     pub verts: Vec<[f32; 3]>,
     pub tris: Vec<[u32; 3]>,
+    /// The colour of every point, when the AI painted its shape (CharacterGen does); empty when it did not.
+    pub colors: Vec<[u8; 3]>,
 }
 
 impl Shape {
@@ -66,6 +68,8 @@ impl Shape {
     pub fn from_glb(bytes: &[u8]) -> Result<Shape, String> {
         let g = read_glb(bytes)?;
         let (mut verts, mut tris): (Vec<[f32; 3]>, Vec<[u32; 3]>) = (Vec::new(), Vec::new());
+        let mut colors: Vec<[u8; 3]> = Vec::new();
+        let mut all_painted = true;
         for m in g.json["meshes"].as_array().ok_or("The file has no meshes.")? {
             for p in m["primitives"].as_array().ok_or("A mesh has no primitives.")? {
                 let pos = g.vec3s(p["attributes"]["POSITION"].as_u64().ok_or("A mesh has no positions.")? as usize)?;
@@ -78,13 +82,34 @@ impl Shape {
                     return Err("A triangle points past the last point.".into());
                 }
                 tris.extend(idx.chunks_exact(3).map(|c| [base + c[0], base + c[1], base + c[2]]));
+                // its own colours: the picture of the material, read where the points of the shape say
+                let painted = (|| -> Option<Vec<[u8; 3]>> {
+                    let uv = g.vec2s(p["attributes"]["TEXCOORD_0"].as_u64()? as usize).ok()?;
+                    let mat = &g.json["materials"].get(p["material"].as_u64()? as usize)?["pbrMetallicRoughness"]["baseColorTexture"]["index"];
+                    let source = g.json["textures"].get(mat.as_u64()? as usize)?["source"].as_u64()?;
+                    let img = image::load_from_memory(g.image(source as usize).ok()?).ok()?.to_rgb8();
+                    if uv.len() != pos.len() {
+                        return None;
+                    }
+                    Some(uv.iter().map(|t| {
+                        let (x, y) = (((t[0].rem_euclid(1.0)) * (img.width() - 1) as f32) as u32, ((t[1].rem_euclid(1.0)) * (img.height() - 1) as f32) as u32);
+                        img.get_pixel(x, y).0
+                    }).collect())
+                })();
+                match painted {
+                    Some(c) => colors.extend(c),
+                    None => all_painted = false,
+                }
                 verts.extend(pos);
             }
         }
         if verts.len() < 100 || tris.is_empty() || verts.iter().any(|v| v.iter().any(|x| !x.is_finite())) {
             return Err("The shape is empty or has points that are not numbers.".into());
         }
-        Ok(Shape { verts, tris })
+        if !all_painted || colors.len() != verts.len() {
+            colors.clear();
+        }
+        Ok(Shape { verts, tris, colors })
     }
 }
 
@@ -637,7 +662,17 @@ pub fn build_from_shape(doc: &Document, shape: &Shape, opt: &Options) -> Option<
         if let Some(hb) = head_box(rig) {
             if let Some(mut mask) = super::hair::hair_mask(&page, hb) {
                 mask.apply_dabs(&sk.hair.dabs);
-                super::hair::add_hair(&mut model, &mask, |v| [v[0] / scale + xc, vb[3] - v[1] / scale], &sk.hair, (xc, vb[3], scale));
+                // the hair by the colours of the shape: it starts from what is hair on the drawing and grows over the surface of the shape
+                let by_colour = (shape.colors.len() == shape.verts.len()).then(|| {
+                    let n = shape.verts.len().min(model_pts.len());
+                    let seeds: Vec<bool> = (0..n).map(|i| { let v = model_pts[i]; mask.at(v[0] / scale + xc, vb[3] - v[1] / scale) }).collect();
+                    let flags = super::hair::hair_from_colors(&model_pts[..n], &shape.tris, &shape.colors[..n], &seeds);
+                    if std::env::var("SEVIATH_DEBUG_HAIR").is_ok() {
+                        eprintln!("hair by the colours of the shape: {} of {} points ({} start on the drawing)", flags.iter().filter(|f| **f).count(), n, seeds.iter().filter(|s| **s).count());
+                    }
+                    super::hair::HairPoints::new(&model_pts[..n], &flags)
+                });
+                super::hair::add_hair(&mut model, &mask, |v| [v[0] / scale + xc, vb[3] - v[1] / scale], &sk.hair, (xc, vb[3], scale), by_colour.as_ref());
             }
         }
     }
@@ -699,6 +734,11 @@ pub fn smooth_weights(tris: &[[u32; 3]], weights: Vec<Vec<(usize, f32)>>, rounds
 
 /// Separate the limbs that the AI joined (the left arm, the right arm, the left leg, the right leg) without a gap: returns how many triangles
 /// changed. The limb of a point is the one of the bone that moves it most.
+/// Which piece of the body a bone moves (see `limb_group`): for the tests.
+pub fn limb_group_of(name: &str) -> usize {
+    limb_group(name)
+}
+
 pub fn split_fused_limbs(part: &mut Part3d, bones: &[Bone]) -> usize {
     let limb_of = |part: &Part3d| -> Vec<usize> {
         (0..part.verts.len())
