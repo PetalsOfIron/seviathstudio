@@ -808,7 +808,7 @@ impl SeviathApp {
         ui.label(RichText::new("Move a slider to pose the character at this frame. With Auto key on (under the timeline) the move makes a key; otherwise use Key this slider.").size(11.5).color(TEXT_DIM));
         let params: Vec<(Id, String, f32, f32, f32)> = self.draw.doc.rig.params.iter().map(|p| (p.id, p.name.clone(), p.min, p.max, p.default)).collect();
         if params.is_empty() {
-            ui.label(RichText::new("The rig has no sliders yet. The Rig tab makes them (Auto-rig, or Rig the whole picture).").size(11.5).color(TEXT_DIM));
+            ui.label(RichText::new("The rig has no sliders yet. The Rig tab makes them (the button Add all the standard sliders, or add them by hand).").size(11.5).color(TEXT_DIM));
         }
         let frame = self.rigs.anim.frame.round();
         let autokey = self.rigs.anim.autokey;

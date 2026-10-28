@@ -315,6 +315,23 @@ impl SeviathApp {
         self.rigs.link_live = true;
     }
 
+    /// The automatic rig (the face from the tags, the body, the hair) is not on the screen any more: everything is rigged by hand. The code is still here as
+    /// what the tests of the rig start from.
+    #[cfg(test)]
+    pub fn test_auto_face(&mut self) {
+        self.this_is_a_face(0.0);
+    }
+
+    #[cfg(test)]
+    pub fn test_auto_body(&mut self) {
+        self.rig_the_body(0.0);
+    }
+
+    #[cfg(test)]
+    pub fn test_auto_hair(&mut self) {
+        self.rig_the_hair(0.0);
+    }
+
     #[cfg(test)]
     pub fn test_rig(&mut self) -> &mut RigState {
         &mut self.rigs
@@ -937,12 +954,12 @@ impl SeviathApp {
         });
     }
 
-    /// The right side: the automatic rig.
+    /// The right side: the look at the rig, quality, pose and views.
     fn rig_side(&mut self, ui: &mut Ui, now: f64) {
-        section_title(ui, "Automatic rig");
-        ui.label(RichText::new("Tags tell the automatic rig what each part is (Parts tab). Rigging by hand needs no tags: use the tools along the top.").size(11.5).color(TEXT_DIM));
+        section_title(ui, "Rig");
+        ui.label(RichText::new("Everything is rigged by hand with the tools along the top. The Parts tab names the parts (face, hair, body), which the Physics tab and the expressions use.").size(11.5).color(TEXT_DIM));
         ui.checkbox(&mut self.rigs.hq, "Sharp curves").help("Adds triangles where a part bends, so the picture stays sharp. Turn it off if the picture is slow to move.");
-        self.rig_auto_section(ui, now);
+        self.rig_check_section(ui, now);
         self.rig_quality_section(ui, now);
         self.rig_pose_section(ui, now);
         self.rig_views_section(ui, now);
@@ -1046,35 +1063,17 @@ impl SeviathApp {
         }
     }
 
-    /// Face rigging from the tags, in one click.
-    fn rig_auto_section(&mut self, ui: &mut Ui, now: f64) {
-        section_title(ui, "Auto-rig");
-        ui.label(RichText::new("Head turn, eyes, brows and a mouth that makes A I U E O, built from the Parts tags.").size(11.5).color(TEXT_DIM));
+    /// The checks of a rig that is made by hand: a test motion that moves every slider by itself, and the joints of a skeleton.
+    fn rig_check_section(&mut self, ui: &mut Ui, now: f64) {
+        section_title(ui, "Look at the rig");
+        ui.label(RichText::new("Everything here is rigged by hand: use the tools along the top. This moves every slider by itself, so you can see what the rig does.").size(11.5).color(TEXT_DIM));
         ui.horizontal_wrapped(|ui| {
-            if ui.button(RichText::new("This is a face").strong()).help("Tags the picked parts (or every layer) by their names, then rigs the face").clicked() {
-                self.this_is_a_face(now);
-            }
-            if ui.button("Rig the face from the tags").help("Replaces what the auto-rig made before, except what you locked").clicked() {
-                self.rig_the_face(now);
-            }
-            if ui.button(RichText::new("Rig the whole picture (uncut)").strong()).help("For one picture of a standing figure: finds the head, neck, arms, hips and legs from the outline, puts a skeleton there and gives the picture weights. Needs no cutting into parts.").clicked() {
-                self.rig_the_uncut(now);
-            }
             if ui.button(if self.rigs.play { "Stop the test motion" } else { "Test motion" }).help("Every slider moves by itself, so you can see what the rig does").clicked() {
                 self.rigs.play = !self.rigs.play;
                 if !self.rigs.play {
                     self.rigs.values = Values::default();
                 }
             }
-        });
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Rig the body").help("Torso tilt and breathing, arms and legs that swing, hands that reach. Do the face first so the head leans with the body.").clicked() {
-                self.rig_the_body(now);
-            }
-            if ui.button("Hair sway").help("Curves down the hair parts and one slider").clicked() {
-                self.rig_the_hair(now);
-            }
-            ui.checkbox(&mut self.rigs.body_opts.ik, "Hands reach (IK)");
         });
         if self.draw.doc.rig.skin.as_ref().is_some_and(|s| !s.bones.is_empty()) {
             ui.horizontal_wrapped(|ui| {
@@ -1091,50 +1090,8 @@ impl SeviathApp {
                 }
             });
         }
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-            use rig::uncut::Hold;
-            ui.label(RichText::new("Uncut: arms").size(12.0).color(TEXT_DIM));
-            for (h, name, tip) in [(Hold::Auto, "Auto", "Look at the outline"), (Hold::Out, "Out", "Held out to the sides (a T pose)"), (Hold::Down, "At the sides", "Hanging along the body")] {
-                if widgets::chip(ui, name, self.rigs.uncut_hints.arms == h).help(tip).clicked() {
-                    self.rigs.uncut_hints.arms = h;
-                }
-            }
-            ui.label(RichText::new("legs").size(12.0).color(TEXT_DIM));
-            for (h, name, tip) in [(Hold::Auto, "Auto", "Look at the outline"), (Hold::Out, "Apart", "Legs apart"), (Hold::Down, "Together", "Legs together")] {
-                if widgets::chip(ui, name, self.rigs.uncut_hints.legs == h).help(tip).clicked() {
-                    self.rigs.uncut_hints.legs = h;
-                }
-            }
-        });
-        let o = &mut self.rigs.face_opts;
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Head turn strength").size(12.0).color(TEXT_DIM));
-            ui.add(egui::Slider::new(&mut o.turn, 0.2..=2.5).show_value(false));
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut o.together_eyes, "Eyes together").help("Off: one slider for each eye (for a face that is not symmetrical)");
-            ui.checkbox(&mut o.together_brows, "Brows together");
-            ui.checkbox(&mut o.vowels, "Mouth A I U E O");
-        });
         if let Some(m) = &self.rigs.message {
             ui.label(RichText::new(m).size(11.5).color(TEXT_DIM));
-        }
-        // lock: the automation leaves a changer you made by hand alone
-        if let (Some(cid), Some(a)) = (self.rigs.sel_changer, self.draw.doc.rig.auto.as_ref()) {
-            if a.changers.contains(&cid) {
-                let mut locked = a.locked.contains(&cid);
-                if ui.checkbox(&mut locked, "Keep my edits of this changer (lock)").help("The next auto-rig leaves it as it is").changed() {
-                    self.rig_edit("Lock a changer", now, |r| {
-                        if let Some(a) = r.auto.as_mut() {
-                            a.locked.retain(|c| *c != cid);
-                            if locked {
-                                a.locked.push(cid);
-                            }
-                        }
-                    });
-                }
-            }
         }
     }
 
@@ -1154,7 +1111,7 @@ impl SeviathApp {
             }
         });
         let Some(t) = targets.get(self.rigs.gtarget.min(targets.len().saturating_sub(1))).cloned() else {
-            ui.label(RichText::new("The turn rings need the head or body sliders: use the auto-rig first.").size(11.5).color(TEXT_DIM));
+            ui.label(RichText::new("The turn rings need the head or body sliders: make the head or body sliders first (Add all the standard sliders).").size(11.5).color(TEXT_DIM));
             self.rig_pose_store(ui, now);
             return;
         };

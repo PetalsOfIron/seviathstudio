@@ -2539,7 +2539,7 @@ fn rig_tab_auto_face_screens() {
     h.state_mut().test_run_action_now("tab.3");
     h.run_steps(5);
     // beginner mode: only the automatic rig and the sliders are shown
-    h.get_by_label("This is a face").click();
+    h.state_mut().test_auto_face();
     h.run_steps(5);
     {
         let d = h.state().draw_mut_ref();
@@ -2617,11 +2617,11 @@ fn rig_tab_body_hair_and_checker_screens() {
     }
     h.state_mut().test_run_action_now("tab.3");
     h.run_steps(5);
-    h.get_by_label("This is a face").click();
+    h.state_mut().test_auto_face();
     h.run_steps(5);
-    h.get_by_label("Rig the body").click();
+    h.state_mut().test_auto_body();
     h.run_steps(5);
-    h.get_by_label("Hair sway").click();
+    h.state_mut().test_auto_hair();
     h.run_steps(5);
     let rig = h.state().draw_mut_ref().doc.rig.clone();
     for n in ["Angle X", "Eyes open", "Mouth open", "Body tilt", "Breath", "Arm L", "Arm R", "Hand L", "Leg L", "Leg R", "Hair sway", "Hand L reach X", "Hand L reach Y"] {
@@ -2694,7 +2694,7 @@ fn rig_tab_gizmo_screens() {
     }
     h.state_mut().test_run_action_now("tab.3");
     h.run_steps(5);
-    h.get_by_label("This is a face").click();
+    h.state_mut().test_auto_face();
     h.run_steps(6);
     let (ax, ay, az) = {
         let r = h.state().draw_mut_ref().doc.rig.clone();
@@ -2824,7 +2824,7 @@ fn rig_tab_joined_sliders_screens() {
     }
     h.state_mut().test_run_action_now("tab.3");
     h.run_steps(5);
-    h.get_by_label("This is a face").click();
+    h.state_mut().test_auto_face();
     h.run_steps(6);
     let rig = h.state().draw_mut_ref().doc.rig.clone();
     for n in ["Head", "Eyeballs", "Mouth"] {
@@ -2904,7 +2904,7 @@ fn physics_tab_screens() {
     }
     h.state_mut().test_run_action_now("tab.3");
     h.run_steps(5);
-    h.get_by_label("This is a face").click();
+    h.state_mut().test_auto_face();
     h.run_steps(5);
     h.state_mut().test_run_action_now("tab.4");
     h.run_steps(5);
@@ -3996,7 +3996,8 @@ fn the_rig_workbench_is_the_same_in_the_rig_physics_and_animate_tabs() {
     rig_tool(&mut h, "new:Warp");
     h.get_by_label("Make the Warp changer");
     h.get_by_label("Parameters");
-    h.get_by_label("Automatic rig");
+    h.get_by_label("Look at the rig");
+    assert!(h.query_by_label("Auto-rig").is_none(), "there is no automatic rig on the screen");
     save(&mut h, "workbench_1_rig");
     h.get_by_label("Make the Warp changer").click();
     h.run_steps(4);
