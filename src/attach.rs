@@ -30,14 +30,50 @@ impl Part {
         }
     }
 
+    /// Ready shapes of a part: a name and the numbers (change them afterwards like any others).
+    pub fn presets(self) -> Vec<(&'static str, Params)> {
+        let d = self.defaults();
+        match self {
+            Part::Horns => vec![
+                ("Small", Params { size: 0.55, curl: 0.2, spread: 18.0, ..d }),
+                ("Devil", Params { size: 1.0, curl: 0.6, spread: 30.0, thick: 1.2, ..d }),
+                ("Ram", Params { size: 1.3, curl: 1.0, spread: 65.0, thick: 1.6, apart: 1.2, ..d }),
+                ("Antlers", Params { count: 3, size: 1.5, curl: 0.3, spread: 22.0, thick: 0.6, ..d }),
+                ("Unicorn", Params { size: 1.6, curl: 0.0, spread: 0.0, thick: 1.0, middle: true, ..d }),
+                ("Long", Params { size: 1.8, curl: 0.1, spread: 12.0, thick: 0.9, ..d }),
+            ],
+            Part::Wings => vec![
+                ("Bird", Params { count: 12, size: 1.0, spread: 35.0, curl: 0.2, thick: 1.0, ..d }),
+                ("Angel", Params { count: 18, size: 1.5, spread: 55.0, curl: 0.15, thick: 1.1, ..d }),
+                ("Fairy", Params { count: 4, size: 0.7, spread: 60.0, curl: 0.3, thick: 2.6, ..d }),
+                ("Bat", Params { count: 5, size: 1.3, spread: 40.0, curl: -0.1, thick: 2.3, ..d }),
+                ("Small", Params { count: 8, size: 0.5, spread: 45.0, curl: 0.2, thick: 0.9, ..d }),
+            ],
+            Part::Tail => vec![
+                ("Cat", Params { size: 1.0, thick: 0.8, curl: 0.5, ..d }),
+                ("Fox", Params { size: 1.0, thick: 2.6, curl: 0.3, ..d }),
+                ("Lizard", Params { size: 1.3, thick: 1.1, curl: 0.15, ..d }),
+                ("Dragon", Params { size: 1.6, thick: 1.8, curl: 0.35, ..d }),
+                ("Bunny", Params { size: 0.12, thick: 2.6, curl: 0.0, ..d }),
+                ("Whip", Params { size: 1.5, thick: 0.5, curl: 0.9, ..d }),
+            ],
+            Part::Ears => vec![
+                ("Elf", Params { size: 1.0, spread: 70.0, ..d }),
+                ("Cat", Params { size: 0.6, spread: 15.0, thick: 2.0, ..d }),
+                ("Rabbit", Params { size: 2.0, spread: 8.0, thick: 1.3, curl: 0.3, ..d }),
+            ],
+            Part::Feathers => vec![("Plume", d), ("Wide fan", Params { count: 11, spread: 120.0, size: 0.8, ..d }), ("Single", Params { count: 1, size: 1.4, curl: 0.4, ..d })],
+        }
+    }
+
     /// The first numbers of a part.
     pub fn defaults(self) -> Params {
         match self {
-            Part::Horns => Params { count: 1, size: 1.0, thick: 1.0, curl: 0.5, spread: 25.0, up: 0.0, back: 0.0, apart: 1.0 },
-            Part::Wings => Params { count: 10, size: 1.0, thick: 1.0, curl: 0.2, spread: 35.0, up: 0.0, back: 0.0, apart: 1.0 },
-            Part::Tail => Params { count: 1, size: 1.0, thick: 1.0, curl: 0.4, spread: 0.0, up: 0.0, back: 0.0, apart: 1.0 },
-            Part::Ears => Params { count: 1, size: 1.0, thick: 1.0, curl: 0.0, spread: 55.0, up: 0.0, back: 0.0, apart: 1.0 },
-            Part::Feathers => Params { count: 7, size: 1.0, thick: 1.0, curl: 0.3, spread: 70.0, up: 0.0, back: 0.0, apart: 1.0 },
+            Part::Horns => Params { count: 1, size: 1.0, thick: 1.0, curl: 0.5, spread: 25.0, up: 0.0, back: 0.0, apart: 1.0, middle: false },
+            Part::Wings => Params { count: 10, size: 1.0, thick: 1.0, curl: 0.2, spread: 35.0, up: 0.0, back: 0.0, apart: 1.0, middle: false },
+            Part::Tail => Params { count: 1, size: 1.0, thick: 1.0, curl: 0.4, spread: 0.0, up: 0.0, back: 0.0, apart: 1.0, middle: false },
+            Part::Ears => Params { count: 1, size: 1.0, thick: 1.0, curl: 0.0, spread: 55.0, up: 0.0, back: 0.0, apart: 1.0, middle: false },
+            Part::Feathers => Params { count: 7, size: 1.0, thick: 1.0, curl: 0.3, spread: 70.0, up: 0.0, back: 0.0, apart: 1.0, middle: false },
         }
     }
 }
@@ -60,6 +96,8 @@ pub struct Params {
     pub back: f32,
     /// How far from the middle, as a multiplier.
     pub apart: f32,
+    /// One horn in the middle (a unicorn) instead of a pair.
+    pub middle: bool,
 }
 
 /// Where the parts go on a base, worked out from its size.
@@ -160,7 +198,7 @@ fn arc(start: V3, dir: V3, length: f32, axis: V3, bend: f32, steps: usize) -> Ve
 }
 
 fn stroke(kind: Kind, width: f32, taper: f32, spots: &[Spot], root: [u8; 3], tip: [u8; 3]) -> Option<Built> {
-    meshbrush::build(&Brush { kind, width, taper, lift: 0.0, droop: 0.0, root, tip }, spots)
+    meshbrush::build(&Brush { kind, width, taper, lift: 0.0, droop: 0.0, root, tip, ..Brush::default() }, spots)
 }
 
 fn join(parts: Vec<Built>) -> Built {
@@ -184,14 +222,14 @@ pub fn build(part: Part, p: &Params, a: &Anchors) -> Option<Built> {
     match part {
         Part::Horns => {
             let n = p.count.clamp(1, 4);
-            for s in side_signs {
+            for s in if p.middle { vec![0.0f32] } else { side_signs.to_vec() } {
                 for i in 0..n {
                     // the roots stand in a row on the top of the head, the outer ones lower and further out
                     let k = if n == 1 { 0.0 } else { i as f32 / (n - 1) as f32 };
-                    let x = a.cx + s * (0.03 + 0.03 * k) * h * p.apart;
+                    let x = a.cx + s * (0.03 + 0.03 * k) * h * p.apart * if p.middle { 0.0 } else { 1.0 };
                     let start = [x, a.head_top - (0.02 + 0.03 * k) * h + p.up * h, a.head_z - 0.02 * h - p.back * h];
                     let ang = p.spread.to_radians() * (1.0 + 0.4 * k);
-                    let dir = [s * ang.sin(), ang.cos(), -0.2];
+                    let dir = [s * ang.sin(), ang.cos(), if p.middle { 0.35 } else { -0.2 }];
                     let axis = [0.0, 0.0, 1.0f32];
                     // bending about z makes a horn curve in or out; the sign of the side makes both curve the same way
                     let len = 0.12 * h * p.size * (1.0 - 0.25 * k);
@@ -255,6 +293,42 @@ pub fn build(part: Part, p: &Params, a: &Anchors) -> Option<Built> {
     }
     let b = join(pieces);
     (!b.tris.is_empty()).then_some(b)
+}
+
+/// A chain of bones for a part: a name, and the joints from the root to the end.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RigChain {
+    pub name: String,
+    pub joints: Vec<[f32; 3]>,
+}
+
+/// The bones of a part that moves: a tail has a chain along it (it swings), a wing has a chain along its span on each side (it flaps and folds). Parts that stay
+/// still (horns, ears, feathers) have none.
+pub fn rigging(part: Part, p: &Params, a: &Anchors) -> Vec<RigChain> {
+    let h = a.height;
+    match part {
+        Part::Tail => {
+            let start = [a.cx, a.floor + 0.5 * h + p.up * h, a.back_hip_z + 0.01 * h - p.back * h];
+            let spots = arc(start, [0.0, -0.35, -1.0], 0.5 * h * p.size, [1.0, 0.0, 0.0], p.curl * 2.2, 24);
+            let pieces = 6;
+            let joints: Vec<[f32; 3]> = (0..=pieces).map(|k| spots[(k * (spots.len() - 1)) / pieces].p).collect();
+            vec![RigChain { name: "tail".into(), joints }]
+        }
+        Part::Wings => {
+            let span = 0.45 * h * p.size;
+            [("L", 1.0f32), ("R", -1.0)]
+                .into_iter()
+                .map(|(side, s)| {
+                    let root = [a.cx + s * 0.03 * h * p.apart, a.floor + 0.76 * h + p.up * h, a.back_shoulder_z - 0.01 * h - p.back * h];
+                    // along the span: out to the side, a little up and back
+                    let lift = p.spread.to_radians();
+                    let dir = unit([s * 1.0, lift.sin() * 0.3, -lift.cos().max(0.2) * 0.25]);
+                    RigChain { name: format!("wing_{side}"), joints: (0..=3).map(|k| add(root, mul(dir, span * k as f32 / 3.0))).collect() }
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -336,5 +410,37 @@ mod tests {
         let few = build(Part::Feathers, &Params { count: 3, ..Part::Feathers.defaults() }, &a).unwrap();
         assert!(few.verts.len() < f.verts.len());
         assert!(f.verts.iter().any(|v| v[0] > 0.02) && f.verts.iter().any(|v| v[0] < -0.02), "a fan: both sides");
+    }
+
+    #[test]
+    fn every_part_has_presets_that_build_and_a_unicorn_has_one_horn_in_the_middle() {
+        let a = Anchors::of(&person());
+        for part in Part::ALL {
+            let presets = part.presets();
+            assert!(presets.len() >= 3, "{part:?}");
+            for (name, p) in presets {
+                let m = build(part, &p, &a).unwrap_or_else(|| panic!("{part:?} {name} makes nothing"));
+                assert!(m.verts.iter().flatten().all(|x| x.is_finite()), "{part:?} {name}");
+            }
+        }
+        let unicorn = Part::Horns.presets().into_iter().find(|p| p.0 == "Unicorn").unwrap().1;
+        let m = build(Part::Horns, &unicorn, &a).unwrap();
+        let xs: Vec<f32> = m.verts.iter().map(|v| v[0]).collect();
+        assert!(xs.iter().all(|x| x.abs() < 0.06), "one horn in the middle");
+        let pair = build(Part::Horns, &Part::Horns.defaults(), &a).unwrap();
+        assert!(m.verts.len() < pair.verts.len(), "one horn, not two");
+    }
+
+    #[test]
+    fn a_tail_has_a_chain_of_bones_along_it_and_wings_one_along_each_span() {
+        let a = Anchors::of(&person());
+        let tail = rigging(Part::Tail, &Part::Tail.defaults(), &a);
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].joints.len(), 7);
+        assert!(tail[0].joints.iter().all(|j| j[2] < a.back_hip_z + 0.05), "behind the hips");
+        let wings = rigging(Part::Wings, &Part::Wings.defaults(), &a);
+        assert_eq!(wings.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(), vec!["wing_L", "wing_R"]);
+        assert!(wings[0].joints.last().unwrap()[0] > 0.2 && wings[1].joints.last().unwrap()[0] < -0.2, "one on each side");
+        assert!(rigging(Part::Horns, &Part::Horns.defaults(), &a).is_empty());
     }
 }

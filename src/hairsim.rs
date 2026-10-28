@@ -31,10 +31,13 @@ pub struct Chain {
     pub bones: Vec<usize>,
 }
 
-/// Bones whose name starts with `hair` are hair; a chain starts at a hair bone whose parent is not a hair bone and goes down (the first child) while the next one is a
+/// Bones whose name starts with `hair` are hair, and the ones of a tail (`tail...`) swing the same way; a chain starts at a hair bone whose parent is not a hair bone and goes down (the first child) while the next one is a
 /// hair bone too.
 pub fn chains(rig: &Rig3) -> Vec<Chain> {
-    let is_hair = |i: usize| rig.bones[i].name.to_lowercase().starts_with("hair");
+    let is_hair = |i: usize| {
+        let n = rig.bones[i].name.to_lowercase();
+        n.starts_with("hair") || n.starts_with("tail")
+    };
     let mut out = Vec::new();
     for i in 0..rig.bones.len() {
         if !is_hair(i) || rig.bones[i].parent.is_some_and(&is_hair) {
@@ -122,6 +125,9 @@ fn euler_of(m: &M3) -> [f32; 3] {
     [a.to_degrees(), b.to_degrees(), c.to_degrees()]
 }
 
+/// A part of the body the hair cannot go through: a bone and how wide the body is round it (a capsule along the bone).
+pub type Collider = (usize, f32);
+
 /// The state of the hair: where the joints of every chain are, and where they were.
 #[derive(Clone, Debug, Default)]
 pub struct HairSim {
@@ -130,11 +136,17 @@ pub struct HairSim {
     now: Vec<Vec<[f32; 3]>>,
     before: Vec<Vec<[f32; 3]>>,
     started: bool,
+    colliders: Vec<Collider>,
 }
 
 impl HairSim {
     pub fn new(rig: &Rig3) -> HairSim {
         HairSim { chains: chains(rig), ..Default::default() }
+    }
+
+    /// The hair does not go through these parts of the body (the head, the neck, the shoulders...).
+    pub fn with_colliders(rig: &Rig3, colliders: &[Collider]) -> HairSim {
+        HairSim { chains: chains(rig), colliders: colliders.to_vec(), ..Default::default() }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -182,12 +194,27 @@ impl HairSim {
                 p = add(p, scale(sub(joints[i], p), params.stiffness.clamp(0.0, 1.0)));
                 now[i] = p;
             }
-            // every piece keeps its length
+            // every piece keeps its length, and the hair is kept out of the body
             for _ in 0..4 {
                 for i in 1..now.len() {
                     let d = sub(now[i], now[i - 1]);
                     let l = len(d).max(1e-9);
                     now[i] = add(now[i - 1], scale(d, rest[i - 1] / l));
+                }
+                for i in 1..now.len() {
+                    for (bone, r) in &self.colliders {
+                        let (a, b) = stiff[*bone];
+                        let ab = sub(b, a);
+                        let l2 = (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]).max(1e-12);
+                        let t = (((now[i][0] - a[0]) * ab[0] + (now[i][1] - a[1]) * ab[1] + (now[i][2] - a[2]) * ab[2]) / l2).clamp(0.0, 1.0);
+                        let c = add(a, scale(ab, t));
+                        let d = sub(now[i], c);
+                        let dl = len(d);
+                        if dl < *r {
+                            let out = if dl < 1e-6 { [0.0, 0.0, 1.0] } else { scale(d, 1.0 / dl) };
+                            now[i] = add(c, scale(out, *r));
+                        }
+                    }
                 }
             }
             *before = old;
@@ -218,12 +245,12 @@ fn rig_lengths(rig: &Rig3, c: &Chain) -> Vec<f32> {
 
 /// The hair of a whole animation: the motion of the hair is worked out frame by frame and put in the poses (the animation is run twice so the hair is already
 /// moving when it starts, which matters for an animation that loops).
-pub fn bake(rig: &Rig3, anims: &mut [Anim], params: &HairParams) {
+pub fn bake(rig: &Rig3, anims: &mut [Anim], params: &HairParams, colliders: &[Collider]) {
     for a in anims.iter_mut() {
         if a.poses.is_empty() {
             continue;
         }
-        let mut sim = HairSim::new(rig);
+        let mut sim = HairSim::with_colliders(rig, colliders);
         if sim.is_empty() {
             return;
         }
@@ -353,14 +380,41 @@ mod tests {
         let r = rig();
         let poses: Vec<Pose> = (0..40).map(|i| Pose { rot: vec![[0.0; 3]; r.bones.len()], offset: [(i as f32 * 0.4).sin() * 0.1, 0.0, 0.0] }).collect();
         let mut anims = vec![Anim { name: "shake".into(), fps: 30.0, poses }];
-        bake(&r, &mut anims, &HairParams::default());
+        bake(&r, &mut anims, &HairParams::default(), &[]);
         let moved = anims[0].poses.iter().filter(|p| (1..5).any(|b| p.rot[b] != [0.0; 3])).count();
         assert!(moved > 20, "{moved} frames have hair motion");
         assert!(anims[0].poses.iter().all(|p| p.rot[0] == [0.0; 3]), "the head is left as it was");
         // a rig without hair is left alone
         let plain = Rig3::humanoid(0, [0.0; 3], [1.0, 2.0, 1.0]);
         let mut a2 = vec![Anim { name: "x".into(), fps: 30.0, poses: vec![Pose { rot: vec![[0.0; 3]; plain.bones.len()], offset: [0.0; 3] }; 3] }];
-        bake(&plain, &mut a2, &HairParams::default());
+        bake(&plain, &mut a2, &HairParams::default(), &[]);
         assert!(a2[0].poses.iter().all(|p| p.rot.iter().all(|r| *r == [0.0; 3])));
+    }
+
+    #[test]
+    fn the_hair_does_not_go_through_the_head() {
+        // a head bone that is a capsule of 0.12 round it, with a strand that hangs from its top and falls down over it
+        let mut r = Rig3::new(0);
+        let head = r.add_bone("head", None, [0.0, 1.6, 0.0], [0.0, 1.9, 0.0]);
+        let a = r.add_bone("hair_0_0", Some(head), [0.0, 1.9, 0.0], [0.15, 1.9, 0.0]);
+        r.add_bone("hair_0_1", Some(a), [0.15, 1.9, 0.0], [0.3, 1.9, 0.0]);
+        let still = || Pose { rot: vec![[0.0; 3]; 3], offset: [0.0; 3] };
+        let free_tip = {
+            let mut sim = HairSim::new(&r);
+            for _ in 0..300 {
+                sim.step(&r, &mut still(), &HairParams { stiffness: 0.0, ..Default::default() }, 1.0 / 60.0);
+            }
+            *sim.now[0].last().unwrap()
+        };
+        let held_tip = {
+            let mut sim = HairSim::with_colliders(&r, &[(0, 0.12)]);
+            for _ in 0..300 {
+                sim.step(&r, &mut still(), &HairParams { stiffness: 0.0, ..Default::default() }, 1.0 / 60.0);
+            }
+            *sim.now[0].last().unwrap()
+        };
+        let from_axis = |p: [f32; 3]| (p[0] * p[0] + p[2] * p[2]).sqrt();
+        assert!(from_axis(free_tip) < 0.1, "without the collider it falls through the head: {free_tip:?}");
+        assert!(from_axis(held_tip) > 0.11 || held_tip[1] < 1.58, "with it the hair stays out of the head: {held_tip:?}");
     }
 }

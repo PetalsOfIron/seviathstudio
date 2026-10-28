@@ -283,6 +283,26 @@ impl SeviathApp {
         }
     }
 
+    /// A part made from one of its presets and kept (with the bones of a person to hang from).
+    #[cfg(test)]
+    pub fn test_preset_part(&mut self, part: crate::attach::Part, preset: &str) {
+        if let Some(mut mesh) = self.m3.mesh.take() {
+            let (lo, hi) = mesh.bounds();
+            if self.m3.hand.rig.bones.is_empty() {
+                let mut r = crate::rig3d::Rig3::humanoid(mesh.verts.len(), lo, hi);
+                r.assign_nearest_parts(&mesh.verts);
+                self.m3.hand.use_rig(r);
+            }
+            self.m3.hand.attach_start(&mut mesh, part);
+            if let (Some((p, _, v0, t0)), Some(params)) = (self.m3.hand.attach, part.presets().into_iter().find(|x| x.0 == preset).map(|x| x.1)) {
+                self.m3.hand.attach = Some((p, params, v0, t0));
+                self.m3.hand.attach_apply(&mut mesh);
+            }
+            self.m3.hand.attach_keep(&mesh);
+            self.m3.mesh = Some(mesh);
+        }
+    }
+
     #[cfg(test)]
     pub fn test_open_hair_editor(&mut self) {
         if let Some(mut mesh) = self.m3.mesh.take() {

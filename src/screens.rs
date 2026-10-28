@@ -4391,6 +4391,15 @@ fn bases_page_screens() {
         h.state_mut().test_open_hair_editor();
         h.run_steps(5);
         save(&mut h, "bases_6_hair_brush");
+        // presets with bones: a fox tail, angel wings, ram horns, seen from behind
+        h.state_mut().test_mesh().hand.tool = crate::app::MeshTool::Turn;
+        h.state_mut().test_preset_part(crate::app::MeshPart::Tail, "Fox");
+        h.state_mut().test_preset_part(crate::app::MeshPart::Wings, "Angel");
+        h.state_mut().test_preset_part(crate::app::MeshPart::Horns, "Ram");
+        h.state_mut().test_mesh().hand.yaw = 150.0;
+        h.run_steps(5);
+        save(&mut h, "bases_7_tail_wings_horns");
+
     }
 }
 
