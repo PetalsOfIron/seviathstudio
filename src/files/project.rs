@@ -104,6 +104,8 @@ pub fn blend_name(b: Blend) -> &'static str {
         Blend::Color => "color",
         Blend::Luminosity => "luminosity",
         Blend::Add => "add",
+        Blend::DestIn => "dest-in",
+        Blend::DestOut => "dest-out",
     }
 }
 

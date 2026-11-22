@@ -127,6 +127,97 @@ impl Audio {
     }
 }
 
+/// The vowels, as the two lowest bands of energy a mouth makes for them (Hz): the first (how open the mouth is) and the second (how far forward the tongue is).
+pub const VOWELS: [(&str, f32, f32); 5] = [("A", 750.0, 1250.0), ("I", 300.0, 2300.0), ("U", 320.0, 850.0), ("E", 520.0, 1900.0), ("O", 500.0, 950.0)];
+
+/// How open the mouth is for each vowel (1 is wide open), and how stretched (+1) or round (-1) it is.
+const VOWEL_OPEN: [f32; 5] = [1.0, 0.35, 0.35, 0.6, 0.7];
+const VOWEL_FORM: [f32; 5] = [0.2, 1.0, -1.0, 0.6, -0.6];
+
+/// The power of one frequency in a piece of sound (Goertzel), with a Hann window.
+fn band_power(x: &[f32], rate: f32, hz: f32) -> f32 {
+    let n = x.len();
+    if n < 8 {
+        return 0.0;
+    }
+    let w = 2.0 * std::f32::consts::PI * hz / rate;
+    let c = 2.0 * w.cos();
+    let (mut s1, mut s2) = (0.0f32, 0.0f32);
+    for (i, v) in x.iter().enumerate() {
+        let hann = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / (n - 1) as f32).cos();
+        let s0 = v * hann + c * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    (s1 * s1 + s2 * s2 - c * s1 * s2).max(0.0) / (n * n) as f32
+}
+
+impl Audio {
+    /// How much of each vowel (A, I, U, E, O: they add up to 1, or to 0 for silence) the sound has at every frame of an animation at `fps`, from where the
+    /// energy sits: the loudest place between 250 and 900 Hz and between 900 and 2800 Hz are matched with the nearest vowels.
+    pub fn vowels(&self, fps: f32, offset: f32, frames: usize) -> Vec<[f32; 5]> {
+        let rate = self.rate as f32;
+        let loud = self.loudness(fps, offset, frames);
+        // the highest band can only be measured when the sound has it (half of the rate)
+        let top = (rate / 2.0 - 100.0).min(2800.0);
+        (0..frames)
+            .map(|f| {
+                if loud[f] < 0.1 {
+                    return [0.0; 5];
+                }
+                // a piece of 40 ms in the middle of the frame
+                let mid = ((f as f32 + 0.5 - offset) / fps) * rate;
+                let len = (0.04 * rate) as usize;
+                let a = (mid as isize - len as isize / 2).max(0) as usize;
+                let b = (a + len).min(self.frames());
+                if b <= a + 8 {
+                    return [0.0; 5];
+                }
+                let piece: Vec<f32> = (a..b).map(|i| self.mono(i)).collect();
+                let peak = |lo: f32, hi: f32, step: f32| -> f32 {
+                    let (mut best, mut at) = (-1.0f32, lo);
+                    let mut hz = lo;
+                    while hz <= hi.min(top) {
+                        let p = band_power(&piece, rate, hz);
+                        if p > best {
+                            (best, at) = (p, hz);
+                        }
+                        hz += step;
+                    }
+                    at
+                };
+                let f1 = peak(250.0, 900.0, 25.0);
+                let f2 = peak(f1 + 200.0, 2800.0, 50.0);
+                let mut w = [0.0f32; 5];
+                for (k, (_, v1, v2)) in VOWELS.iter().enumerate() {
+                    let d = (f1 / v1).ln().powi(2) + (f2 / v2).ln().powi(2);
+                    w[k] = (-d / 0.12).exp();
+                }
+                let sum: f32 = w.iter().sum();
+                if sum < 1e-6 {
+                    return [0.0; 5];
+                }
+                w.map(|x| x / sum)
+            })
+            .collect()
+    }
+
+    /// The mouth for every frame from the vowels: how open (0 to 1) and how stretched or round (-1 round, 1 stretched), moving smoothly.
+    pub fn mouth_shape(&self, fps: f32, offset: f32, frames: usize) -> Vec<(f32, f32)> {
+        let loud = self.mouth_open(fps, offset, frames);
+        let mut out = Vec::with_capacity(frames);
+        let (mut open, mut form) = (0.0f32, 0.0f32);
+        for (v, l) in self.vowels(fps, offset, frames).into_iter().zip(loud) {
+            let sum: f32 = v.iter().sum();
+            let (to_open, to_form) = if sum < 1e-6 { (0.0, 0.0) } else { ((0..5).map(|k| v[k] * VOWEL_OPEN[k]).sum::<f32>() * l.max(0.3), (0..5).map(|k| v[k] * VOWEL_FORM[k]).sum::<f32>()) };
+            open += (to_open - open) * if to_open > open { 0.7 } else { 0.45 };
+            form += (to_form - form) * 0.5;
+            out.push((if open < 0.04 { 0.0 } else { open }, form));
+        }
+        out
+    }
+}
+
 enum Cmd {
     Play(Audio, f32),
     Stop,
@@ -262,5 +353,36 @@ pub(crate) mod tests {
         let a = Audio::from_pcm(2, 100, s);
         assert!((a.seconds() - 1.0).abs() < 1e-3);
         assert!(a.peaks(0.0, 1.0, 1)[0].1.abs() < 1e-3, "the two channels cancel");
+    }
+
+    /// A sound made of two sines, the way a vowel has two bands, for `seconds`.
+    fn vowel_sound(f1: f32, f2: f32, seconds: f32, rate: u32) -> Vec<i16> {
+        (0..(seconds * rate as f32) as usize)
+            .map(|i| {
+                let t = i as f32 / rate as f32;
+                (((t * f1 * std::f32::consts::TAU).sin() + 0.7 * (t * f2 * std::f32::consts::TAU).sin()) * 9000.0) as i16
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_vowels_are_told_apart_by_where_the_energy_sits() {
+        let rate = 16000;
+        let mut s = vowel_sound(750.0, 1250.0, 0.5, rate);
+        s.extend(vowel_sound(300.0, 2300.0, 0.5, rate));
+        s.extend(vowel_sound(320.0, 850.0, 0.5, rate));
+        let a = Audio::from_pcm(1, rate, s);
+        let v = a.vowels(10.0, 0.0, 15);
+        let best = |f: usize| (0..5).max_by(|x, y| v[f][*x].total_cmp(&v[f][*y])).unwrap();
+        assert_eq!((best(2), best(7), best(12)), (0, 1, 2), "A, then I, then U: {:?} {:?} {:?}", v[2], v[7], v[12]);
+        assert!((v[2].iter().sum::<f32>() - 1.0).abs() < 1e-3);
+        // the mouth: wide open for the A, stretched for the I, round for the U
+        let m = a.mouth_shape(10.0, 0.0, 15);
+        assert!(m[3].0 > m[8].0, "A opens wider than I: {m:?}");
+        assert!(m[8].1 > 0.4 && m[13].1 < -0.4, "I is stretched, U is round: {m:?}");
+        // silence has no vowel
+        let quiet = Audio::from_pcm(1, rate, vec![0; 8000]);
+        assert!(quiet.vowels(10.0, 0.0, 5).iter().all(|v| *v == [0.0; 5]));
+        assert!(quiet.mouth_shape(10.0, 0.0, 5).iter().all(|m| *m == (0.0, 0.0)));
     }
 }

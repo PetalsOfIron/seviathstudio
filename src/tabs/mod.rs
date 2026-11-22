@@ -21,7 +21,9 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 7] = [Tab::Draw, Tab::Parts, Tab::Rig, Tab::Physics, Tab::Animate, Tab::Stream, Tab::Mesh3d];
+    /// The tabs on the bar. Animate, Physics and Parts are not on it any more (all of them are dropdowns of the Rig tab, where every layer is rigged): frame by frame animation is the timeline of the Draw tab, and the animation of a rig is
+    /// switched on in the Rig tab.
+    pub const ALL: [Tab; 4] = [Tab::Draw, Tab::Rig, Tab::Stream, Tab::Mesh3d];
 
     pub fn label(self) -> &'static str {
         match self {

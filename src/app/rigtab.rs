@@ -37,6 +37,8 @@ pub(super) enum Mode {
     DrawPath,
     /// A brush that pushes the points of the picked changer (warp, line, pins, paths, soft) at the slider value.
     Brush,
+    /// Pick, box-pick and move the points of the mesh of the picked part.
+    Points,
 }
 
 /// What dragging does in weight mode.
@@ -47,6 +49,15 @@ pub enum WTool {
     Lasso,
     /// Draw an outline: everything inside is taken from the bone.
     LassoRemove,
+}
+
+/// What the deform brush does to the points under it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BrushMode {
+    #[default]
+    Push,
+    Expand,
+    Pinch,
 }
 
 impl Default for WTool {
@@ -119,10 +130,15 @@ impl RigState {
     }
 }
 
+/// The movement of `src` goes to every ticked changer: as the mirror image for the ones in `mirrored`, exactly the same for the others.
+fn link_copy(rig: &mut Rig, src: Id, targets: &[Id], mirrored: &[Id]) {
+    let (mirror, same): (Vec<Id>, Vec<Id>) = targets.iter().partition(|t| mirrored.contains(t));
+    rig.copy_movement(src, &same, false);
+    rig.copy_movement(src, &mirror, true);
+}
+
 #[derive(Default)]
 pub struct RigState {
-    /// How the arms and legs of an uncut figure are held (for the automatic skeleton).
-    pub uncut_hints: rig::uncut::Hints,
     /// The turn at every point of the curve(s) being edited (curves after curve), next to `warp_edit`.
     pub(super) turn_edit: Option<Vec<f32>>,
     /// The joints of the skeleton are shown on the picture to be dragged, and the picture of the doc from before a drag.
@@ -163,6 +179,8 @@ pub struct RigState {
     pub soft_grow: f32,
     /// A second slider: the shape is then saved for the two sliders together (a grid).
     pub sel_param2: Option<Id>,
+    /// A third slider for the shape (only with a second one): the shape then depends on all three.
+    pub sel_param3: Option<Id>,
     pub(super) skin_detail: f32,
     pub heat: bool,
     pub(super) skin_tex: Option<(u64, Option<Arc<LayerTex>>)>,
@@ -172,7 +190,9 @@ pub struct RigState {
     pub(super) bone_from: Option<[f32; 2]>,
     pub(super) bone_chain: bool,
     pub wtool: WTool,
+    #[cfg(test)]
     pub face_opts: rig::autorig::FaceOptions,
+    #[cfg(test)]
     pub body_opts: rig::autorig::BodyOptions,
     pub gizmo: bool,
     pub gtarget: usize,
@@ -200,6 +220,8 @@ pub struct RigState {
     /// The brush that pushes the points of the picked changer: its size (page pixels) and strength.
     pub(super) brush_r: f32,
     pub(super) brush_s: f32,
+    /// What the brush does: pushes the points along with the drag, makes them bulge out (expansion) or pinch in.
+    pub(super) brush_mode: BrushMode,
     /// The workbench: the tool windows and what the top bar remembers (see rigbench.rs).
     pub bench: super::rigbench::Bench,
     pub(super) play: bool,
@@ -214,7 +236,41 @@ pub struct RigState {
     pub(super) link_targets: Vec<Id>,
     /// Linked rigging is on (the ticked changers follow what is done to the picked one), and whether they move the mirror way.
     pub(super) link_live: bool,
-    pub(super) link_mirror: bool,
+    /// A pose that is kept also keeps which layers are shown (a model state).
+    pub(super) pose_layers: bool,
+    /// Show the outlines of the click zones on the picture, and test them by clicking.
+    pub(super) hit_show: bool,
+    pub(super) hit_test: bool,
+    pub(super) hit_sel: Option<usize>,
+    /// Debug views on the picture: the rectangles of every layer's paint, and the stretch of the triangles (blue none, red much).
+    pub show_bounds: bool,
+    /// The swing: the chains drawn with arrows for how fast they go, and a weight that can be grabbed with the mouse.
+    pub show_swing: bool,
+    swing_grab: Option<(Id, usize, usize)>,
+    /// The island isolator: the size under which a bit of paint is a speck.
+    pub(super) speck_px: usize,
+    pub show_stress: bool,
+    /// The animation of the rig is on: the Rig tab shows the timeline, the tracks and the clips.
+    pub animate: bool,
+    /// The strip of tools along the top of the Rig tab is folded away.
+    pub hide_tools: bool,
+    /// The whole page of the physics is shown in place of the rig.
+    pub physics_page: bool,
+    /// The lit view: the picture lit by one light, with the layers named normal, emissive, rough and occlusion used as maps.
+    pub lit_on: bool,
+    pub lighting: rig::lit::Lighting,
+    /// The list of sliders: the words to find, and which ones to show (0 all, 1 with keys, 2 without).
+    pub(super) slider_find: String,
+    pub(super) slider_only: u8,
+    /// The Points tool: the picked points of the mesh, the box being drawn, how far the picked points are being dragged, mirror editing, and the numbers of the buttons.
+    pub(super) pt_sel: Vec<usize>,
+    pub(super) pt_box: Option<([f32; 2], [f32; 2])>,
+    pub(super) pt_drag: Option<[f32; 2]>,
+    pub(super) pt_sym: bool,
+    pub(super) pt_reach: f32,
+    pub(super) pt_relax: f32,
+    /// Which of the ticked changers move as the mirror image (the others do the very same).
+    pub(super) link_mirrored: Vec<Id>,
     pub mirror_to: Option<Id>,
     pub(super) tag_pick: Option<parts::Part>,
     pub(super) glue_reach: f32,
@@ -288,8 +344,8 @@ impl SeviathApp {
         // linked rigging: what was done to the changer that is being rigged is done to the ticked ones too, as it is done
         if let (true, Some(src)) = (self.rigs.link_live, self.rigs.sel_changer) {
             if !self.rigs.link_targets.is_empty() && !self.draw.doc.same_as(&before) {
-                let (targets, mirror) = (self.rigs.link_targets.clone(), self.rigs.link_mirror);
-                Arc::make_mut(&mut self.draw.doc.rig).copy_movement(src, &targets, mirror);
+                let (targets, mirrored) = (self.rigs.link_targets.clone(), self.rigs.link_mirrored.clone());
+                link_copy(Arc::make_mut(&mut self.draw.doc.rig), src, &targets, &mirrored);
             }
         }
         if self.draw.doc.same_as(&before) {
@@ -299,6 +355,19 @@ impl SeviathApp {
         self.log_step(label, now);
         let tab = if self.tab == Tab::Physics { Tab::Physics } else { Tab::Rig };
         self.history.push(label.to_owned(), tab, before, after, now);
+    }
+
+    /// Pick the points inside a box (page pixels) of the mesh of the picked part, as a box on the picture does.
+    #[cfg(test)]
+    pub fn test_points_pick(&mut self, a: [f32; 2], b: [f32; 2]) -> usize {
+        let Some(mi) = self.points_mesh() else { return 0 };
+        self.rigs.pt_sel = rig::meshtools::select_in_rect(&self.draw.doc.rig.meshes[mi], a, b);
+        self.rigs.pt_sel.len()
+    }
+
+    #[cfg(test)]
+    pub fn test_points_weld(&mut self) {
+        self.points_edit("Weld points", 0.0, |m, sel| format!("{} points joined.", rig::meshtools::weld_selected(m, sel)));
     }
 
     #[cfg(test)]
@@ -311,7 +380,7 @@ impl SeviathApp {
     pub fn test_link(&mut self, picked: Id, targets: Vec<Id>, mirror: bool) {
         self.rigs.sel_changer = Some(picked);
         self.rigs.link_targets = targets;
-        self.rigs.link_mirror = mirror;
+        self.rigs.link_mirrored = if mirror { self.rigs.link_targets.clone() } else { Vec::new() };
         self.rigs.link_live = true;
     }
 
@@ -448,6 +517,12 @@ impl SeviathApp {
         let rig = self.draw.doc.rig.clone();
         let painting = self.rigs.mode == Mode::Weight;
         let mut pose = if painting { rig.pose(&Values::default()) } else { rig.pose(&self.rigs.values) };
+        // shapes keyed by hand on the timeline (Form animation) are on in the Animate tab
+        if (self.tab == Tab::Animate || self.rigs.animate) && !rig.anim.forms.is_empty() {
+            for (id, form) in rig.anim.form_at(self.rigs.anim.frame) {
+                rig.apply_form(&mut pose, id, &form);
+            }
+        }
         // a Warp being edited shows the shape being dragged
         self.rigs.put_edit(&rig, &mut pose);
         self.rigs.put_vals(&mut pose);
@@ -579,6 +654,12 @@ impl SeviathApp {
         key.push((self.rigs.mode == Mode::Weight) as u64);
         key.push(self.rigs.hq as u64);
         key.push(self.settings.rig_quality as u64);
+        key.push(self.rigs.lit_on as u64);
+        if self.rigs.lit_on {
+            let l = &self.rigs.lighting;
+            key.extend([l.dir[0], l.dir[1], l.strength, l.ambient, l.rim, l.shine].map(|v| v.to_bits() as u64));
+            key.extend(l.rim_color.map(|v| v as u64));
+        }
         // zoomed in, the picture is made finer (in steps), so it stays sharp
         key.push(self.rig_sharp_px().to_bits() as u64);
         let mut el: Vec<(u64, bool, u32)> = self.rigs.expr_layers.iter().map(|(k, (s, l))| (*k, *s, l.to_bits())).collect();
@@ -621,11 +702,153 @@ impl SeviathApp {
         let (pw, ph) = (((w * scale) as usize).max(8), ((h * scale) as usize).max(8));
         let items = self.rig_items();
         let paper = Color32::from_rgb(244, 242, 236);
-        let px = self.draw_items(&items, pw, ph, scale, Some(paper));
+        let px = if self.rigs.lit_on { self.lit_pixels(&items, pw, ph, scale, paper) } else { self.draw_items(&items, pw, ph, scale, Some(paper)) };
         let img = egui::ColorImage::new([pw, ph], px);
         self.rigs.image = Some(ctx.load_texture("rig_preview", img, TextureOptions::LINEAR));
         self.rigs.scale = scale;
         self.rigs.rendered = Some(key);
+    }
+
+    /// Which map a layer is by its name: 0 normal, 1 emissive (or glow), 2 roughness, 3 occlusion. None: it is a picture layer.
+    pub fn map_kind(name: &str) -> Option<usize> {
+        let n = name.to_lowercase();
+        if n.contains("normal") {
+            Some(0)
+        } else if n.contains("emissive") || n.contains("glow map") {
+            Some(1)
+        } else if n.contains("rough") {
+            Some(2)
+        } else if n.contains("occlusion") || n.split(|c: char| !c.is_alphanumeric()).any(|w| w == "ao") {
+            Some(3)
+        } else {
+            None
+        }
+    }
+
+    /// The lit view: the layers that are maps are drawn through the same moved meshes as the picture (each kind into a picture of its own), and the picture is lit
+    /// by them. The paper goes behind it afterwards.
+    fn lit_pixels(&mut self, items: &[(LayerId, Arc<LayerTex>, Vec<[f32; 2]>, Vec<[f32; 2]>, Vec<[u32; 3]>, f32, crate::doc::Blend)], w: usize, h: usize, scale: f32, paper: Color32) -> Vec<Color32> {
+        let kind_of = |id: LayerId| self.draw.doc.layers.iter().find(|l| l.id == id).and_then(|l| Self::map_kind(&l.name));
+        let kinds: Vec<Option<usize>> = items.iter().map(|i| kind_of(i.0)).collect();
+        let subset = |want: Option<usize>| -> Vec<(LayerId, Arc<LayerTex>, Vec<[f32; 2]>, Vec<[f32; 2]>, Vec<[u32; 3]>, f32, crate::doc::Blend)> {
+            items.iter().zip(&kinds).filter(|(_, k)| **k == want).map(|(i, _)| i.clone()).collect()
+        };
+        let albedo = self.draw_items(&subset(None), w, h, scale, None);
+        let mut maps = rig::lit::Maps::default();
+        for k in 0..4 {
+            let part = subset(Some(k));
+            if part.is_empty() {
+                continue;
+            }
+            // a map covers the page: where it is clear it is flat (a normal map), black or white as the kind says
+            let flat = match k {
+                0 => Color32::from_rgb(128, 128, 255),
+                1 => Color32::BLACK,
+                2 => Color32::from_gray(153),
+                _ => Color32::WHITE,
+            };
+            let px = self.draw_items(&part, w, h, scale, Some(flat));
+            match k {
+                0 => maps.normal = Some(px),
+                1 => maps.emissive = Some(px),
+                2 => maps.roughness = Some(px),
+                _ => maps.occlusion = Some(px),
+            }
+        }
+        let lit = rig::lit::light(&albedo, &maps, w, h, &self.rigs.lighting);
+        // premultiplied over the paper
+        lit.iter()
+            .map(|c| {
+                let k = 255 - c.a() as u32;
+                let m = |s: u8, p: u8| (s as u32 + p as u32 * k / 255).min(255) as u8;
+                Color32::from_rgb(m(c.r(), paper.r()), m(c.g(), paper.g()), m(c.b(), paper.b()))
+            })
+            .collect()
+    }
+
+    /// (flat, lit) pictures of `px` pixels across, for the tests.
+    #[cfg(test)]
+    pub fn test_lit_pair(&mut self, px: usize) -> (Vec<Color32>, Vec<Color32>) {
+        let scale = px as f32 / self.draw.doc.w.max(self.draw.doc.h) as f32;
+        let (w, h) = (((self.draw.doc.w as f32 * scale) as usize).max(8), ((self.draw.doc.h as f32 * scale) as usize).max(8));
+        let items = self.rig_items();
+        let paper = Color32::from_rgb(244, 242, 236);
+        (self.draw_items(&items, w, h, scale, Some(paper)), self.lit_pixels(&items, w, h, scale, paper))
+    }
+    /// Mesh groups: one part carries other parts along as it bends.
+    pub(super) fn rig_group_section(&mut self, ui: &mut Ui, now: f64) {
+        let rig = self.draw.doc.rig.clone();
+        let layer_names: Vec<(LayerId, String)> = self.draw.doc.layers.iter().map(|l| (l.id, l.name.clone())).collect();
+        let name_of_mesh = |id: rig::Id| -> String {
+            rig.meshes.iter().find(|m| m.id == id).and_then(|m| layer_names.iter().find(|l| l.0 == m.layer)).map(|l| l.1.clone()).unwrap_or_else(|| "?".into())
+        };
+        egui::CollapsingHeader::new(RichText::new(format!("Mesh groups ({})", rig.groups.len())).size(13.0)).id_salt("rig_groups").show(ui, |ui| {
+            let mut strength: Vec<(usize, f32)> = Vec::new();
+            let mut drop: Option<usize> = None;
+            for (i, g) in rig.groups.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    let names: Vec<String> = g.members.iter().map(|m| name_of_mesh(*m)).collect();
+                    ui.label(RichText::new(format!("{} carries {}", name_of_mesh(g.driver), names.join(", "))).size(12.0));
+                    let mut s = g.strength;
+                    if ui.add(egui::Slider::new(&mut s, 0.0..=1.0).text("Carries")).changed() {
+                        strength.push((i, s));
+                    }
+                    if ui.small_button("x").clicked() {
+                        drop = Some(i);
+                    }
+                });
+            }
+            let picked: Vec<rig::Id> = rig.meshes.iter().filter(|m| self.rigs.selected.contains(&m.layer)).map(|m| m.id).collect();
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(format!("{} picked", picked.len())).size(12.0).color(TEXT_DIM));
+                for m in rig.meshes.iter() {
+                    if picked.len() < 2 && !picked.contains(&m.id) {
+                        continue;
+                    }
+                    if ui.small_button(format!("{} carries the others", name_of_mesh(m.id))).help("The other picked parts ride on this one").clicked() && picked.contains(&m.id) {
+                        let (driver, members) = (m.id, picked.clone());
+                        let label = name_of_mesh(driver);
+                        self.rig_edit("Mesh group", now, |r| {
+                            r.make_group(&label, driver, &members, 1.0);
+                        });
+                    }
+                }
+            });
+            if !strength.is_empty() || drop.is_some() {
+                self.rig_edit("Mesh group", now, |r| {
+                    for (i, s) in strength {
+                        if let Some(g) = r.groups.get_mut(i) {
+                            g.strength = s;
+                        }
+                    }
+                    if let Some(i) = drop {
+                        if i < r.groups.len() {
+                            r.groups.remove(i);
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    /// The lit view's switch and light.
+    pub(super) fn rig_lit_section(&mut self, ui: &mut Ui) {
+        egui::CollapsingHeader::new(RichText::new("Lit view").size(13.0)).id_salt("rig_lit").show(ui, |ui| {
+            ui.checkbox(&mut self.rigs.lit_on, "Lit view").help("Shows the picture lit by the light below instead of flat. Nothing in the layers is changed.");
+            let l = &mut self.rigs.lighting;
+            ui.horizontal(|ui| {
+                ui.label("Light");
+                ui.add(egui::DragValue::new(&mut l.dir[0]).speed(0.01).range(-1.0..=1.0).prefix("x "));
+                ui.add(egui::DragValue::new(&mut l.dir[1]).speed(0.01).range(-1.0..=1.0).prefix("y "));
+            });
+            ui.add(egui::Slider::new(&mut l.strength, 0.0..=2.0).text("Light strength"));
+            ui.add(egui::Slider::new(&mut l.ambient, 0.0..=1.0).text("Ambient"));
+            ui.add(egui::Slider::new(&mut l.rim, 0.0..=2.0).text("Rim light"));
+            ui.add(egui::Slider::new(&mut l.shine, 0.0..=1.0).text("Shine"));
+            if ui.button("Reset the light").help("Puts the light of the lit view back to how it was.").clicked() {
+                *l = rig::lit::Lighting::default();
+            }
+        });
     }
 
     pub(super) fn rig_select(&mut self, id: LayerId, ctrl: bool, shift: bool) {
@@ -692,32 +915,6 @@ impl SeviathApp {
         });
         self.rigs.skin_tex = None;
         self.rigs.message = Some(format!("One mesh with {nt} triangles over {} layers.", ids.len()));
-    }
-
-    /// The whole picture as one piece with a humanoid skeleton found from its outline: a mesh over the layers, bones
-    /// with their joints put where the arms, legs, neck and hips are, and weights from the bones.
-    pub fn rig_the_uncut(&mut self, now: f64) {
-        let ids: Vec<LayerId> = if self.rigs.selected.is_empty() { self.draw.doc.layers.iter().filter(|l| l.visible && parts::is_part_layer(l)).map(|l| l.id).collect() } else { self.rigs.selected.clone() };
-        let found = match rig::uncut::find(&self.draw.doc, &ids, self.rigs.skin_detail, self.rigs.uncut_hints) {
-            Ok(f) => f,
-            Err(e) => {
-                self.rigs.message = Some(e);
-                return;
-            }
-        };
-        let size = (self.draw.doc.w, self.draw.doc.h);
-        let ids2 = ids.clone();
-        let f2 = rig::uncut::Found { figure: found.figure.clone(), verts: found.verts, tris: found.tris };
-        self.rig_edit("Auto-rig the uncut picture", now, |r| rig::uncut::apply(r, size, &ids2, &f2));
-        self.rigs.skin_tex = None;
-        let fig = found.figure;
-        let mut msg = format!("A skeleton with {} bones found ({:.0}% sure).", fig.joints.len().min(rig::uncut::BONES.len()), fig.confidence * 100.0);
-        for n in &fig.notes {
-            msg.push(' ');
-            msg.push_str(n);
-        }
-        self.rigs.message = Some(msg);
-        self.rigs.sel_changer = None;
     }
 
     /// A new changer of this kind around the picked parts (they go inside it).
@@ -828,8 +1025,11 @@ impl SeviathApp {
             self.rigs.skin_detail = 0.6;
             self.rigs.bone_chain = true;
             self.rigs.wopts = rig::skin::BrushOpts::default();
-            self.rigs.face_opts = rig::autorig::FaceOptions::default();
-            self.rigs.body_opts = rig::autorig::BodyOptions::default();
+            #[cfg(test)]
+            {
+                self.rigs.face_opts = rig::autorig::FaceOptions::default();
+                self.rigs.body_opts = rig::autorig::BodyOptions::default();
+            }
             self.rigs.gizmo = true;
             self.rigs.feather = 60.0;
             self.rigs.mirror_axis = self.draw.doc.w as f32 / 2.0;
@@ -902,13 +1102,14 @@ impl SeviathApp {
 
         // the tools of rigging by hand along the top, the parts and the parameters on the left, the automatic rig on the right
         egui::Panel::top("rig_toolbar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.rig_toolbar(ui, false, false));
+        self.rig_tool_panel(ui, "rig_strip");
         egui::Panel::left("rig_layers").default_size(270.0).size_range(210.0..=440.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             picked = self.rig_left_panel(ui, &ctx, now, "rig", true, false);
         });
         egui::Panel::left("rig_params").default_size(250.0).size_range(190.0..=420.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             self.rig_params_column(ui, now, "rig");
         });
-        egui::Panel::right("rig_tools").default_size(330.0).size_range(280.0..=500.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
+        egui::Panel::right("rig_tools").default_size(190.0).size_range(150.0..=360.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("rig_right").show(ui, |ui| self.rig_side(ui, now));
         });
 
@@ -956,8 +1157,6 @@ impl SeviathApp {
 
     /// The right side: the look at the rig, quality, pose and views.
     fn rig_side(&mut self, ui: &mut Ui, now: f64) {
-        section_title(ui, "Rig");
-        ui.label(RichText::new("Everything is rigged by hand with the tools along the top. The Parts tab names the parts (face, hair, body), which the Physics tab and the expressions use.").size(11.5).color(TEXT_DIM));
         ui.checkbox(&mut self.rigs.hq, "Sharp curves").help("Adds triangles where a part bends, so the picture stays sharp. Turn it off if the picture is slow to move.");
         self.rig_check_section(ui, now);
         self.rig_quality_section(ui, now);
@@ -973,7 +1172,6 @@ impl SeviathApp {
     fn rig_views_body(&mut self, ui: &mut Ui, now: f64) {
         let rig = self.draw.doc.rig.clone();
         let v = rig.views.clone();
-        ui.label(RichText::new("Draw the character from more sides (front, side, back) as separate layers, put each layer in its view, and one slider (View) shows one view at a time, fading between them.").size(11.5).color(TEXT_DIM));
         let mut names = v.names.clone();
         let mut crossfade = v.crossfade;
         let mut remove: Option<usize> = None;
@@ -983,13 +1181,13 @@ impl SeviathApp {
                 ui.add(egui::TextEdit::singleline(n).desired_width(120.0));
                 let count = v.assign.iter().filter(|(_, x)| *x == i).count();
                 ui.label(RichText::new(format!("{count} layers")).size(11.0).color(TEXT_DIM));
-                if ui.small_button("Delete").clicked() {
+                if ui.small_button("Delete").help("Takes this away. You can undo it.").clicked() {
                     remove = Some(i);
                 }
             });
         }
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Add a view").clicked() {
+            if ui.button("Add a view").help("Saves the way the picture is looked at now (turn, zoom) as a view you can come back to.").clicked() {
                 let n = names.len();
                 names.push(crate::rig::views::Views::SUGGESTED.get(n).map(|s| s.to_string()).unwrap_or_else(|| format!("View {}", n + 1)));
             }
@@ -1052,7 +1250,7 @@ impl SeviathApp {
                 });
                 self.rigs.weight_gen += 1;
             }
-            if built && ui.button("Take the views away").clicked() {
+            if built && ui.button("Take the views away").help("Forgets every saved view.").clicked() {
                 self.rig_edit("Remove views", now, |r| r.clear_views());
                 self.rigs.weight_gen += 1;
                 self.rigs.views_message = Some("The drawings are as they were.".into());
@@ -1064,9 +1262,491 @@ impl SeviathApp {
     }
 
     /// The checks of a rig that is made by hand: a test motion that moves every slider by itself, and the joints of a skeleton.
+    /// The mesh the Points tool works on: the one of the first picked part.
+    pub(super) fn points_mesh(&self) -> Option<usize> {
+        self.draw.doc.rig.meshes.iter().position(|m| self.rigs.selected.contains(&m.layer))
+    }
+
+    /// Something done to the points of the mesh in one undo step. `f` gets the mesh and the picked points; the picked points are let go after (numbers change).
+    pub(super) fn points_edit(&mut self, label: &str, now: f64, f: impl FnOnce(&mut ArtMesh, &[usize]) -> String) {
+        let Some(mi) = self.points_mesh() else {
+            self.rigs.message = Some("Pick a part that has a mesh first.".into());
+            return;
+        };
+        let sel = self.rigs.pt_sel.clone();
+        let mut said = String::new();
+        self.rig_edit(label, now, |r| said = f(&mut r.meshes[mi], &sel));
+        self.rigs.pt_sel.clear();
+        if !said.is_empty() {
+            self.rigs.message = Some(said);
+        }
+    }
+
+    /// The picture while the Points tool is on: the points are drawn, a click or a box picks them, a drag moves the picked ones.
+    #[allow(clippy::too_many_arguments)]
+    fn points_input(&mut self, ui: &mut Ui, resp: &egui::Response, p: &egui::Painter, to_screen: &dyn Fn([f32; 2]) -> Pos2, to_page: &dyn Fn(Pos2) -> [f32; 2], sc: f32, now: f64) {
+        use rig::meshtools as mt;
+        let Some(mi) = self.points_mesh() else {
+            if resp.clicked() || resp.drag_started() {
+                self.rigs.message = Some("Pick a part that has a mesh first (click it in the list), then use this tool.".into());
+            }
+            return;
+        };
+        let mesh = self.draw.doc.rig.meshes[mi].clone();
+        let (axis, shift) = (self.rigs.mirror_axis, ui.input(|i| i.modifiers.shift));
+        self.rigs.pt_sel.retain(|i| *i < mesh.verts.len());
+        let d = self.rigs.pt_drag.unwrap_or([0.0, 0.0]);
+        // where each point is drawn: the picked ones are moved by the drag, and their mirror partners the other way
+        let mut at = mesh.verts.clone();
+        if self.rigs.pt_drag.is_some() {
+            for i in self.rigs.pt_sel.clone() {
+                at[i] = [at[i][0] + d[0], at[i][1] + d[1]];
+                if self.rigs.pt_sym {
+                    if let Some(j) = mt::mirror_partner(&mesh, i, axis, 3.0).filter(|j| !self.rigs.pt_sel.contains(j)) {
+                        at[j] = [at[j][0] - d[0], at[j][1] + d[1]];
+                    }
+                }
+            }
+        }
+        let wire = Stroke::new(1.0, Color32::from_rgba_unmultiplied(80, 220, 160, 150));
+        for t in &mesh.tris {
+            let pts = [to_screen(at[t[0] as usize]), to_screen(at[t[1] as usize]), to_screen(at[t[2] as usize])];
+            p.line_segment([pts[0], pts[1]], wire);
+            p.line_segment([pts[1], pts[2]], wire);
+            p.line_segment([pts[2], pts[0]], wire);
+        }
+        for (i, v) in at.iter().enumerate() {
+            let on = self.rigs.pt_sel.contains(&i);
+            p.circle_filled(to_screen(*v), if on { 4.5 } else { 3.0 }, if on { Color32::from_rgb(255, 200, 60) } else { Color32::from_rgb(240, 240, 240) });
+        }
+        if self.rigs.pt_sym {
+            let x = to_screen([axis, 0.0]).x;
+            let r = p.clip_rect();
+            p.line_segment([pos2(x, r.top()), pos2(x, r.bottom())], Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 120, 120, 120)));
+        }
+        let reach = 10.0 / sc;
+        let press = ui.input(|i| i.pointer.press_origin()).map(to_page);
+        if resp.drag_started_by(egui::PointerButton::Primary) {
+            if let Some(pg) = press {
+                match mt::nearest_vertex(&mesh, pg, reach) {
+                    Some(v) => {
+                        if !self.rigs.pt_sel.contains(&v) {
+                            if !shift {
+                                self.rigs.pt_sel.clear();
+                            }
+                            self.rigs.pt_sel.push(v);
+                        }
+                        self.rigs.pt_drag = Some([0.0, 0.0]);
+                    }
+                    None => self.rigs.pt_box = Some((pg, pg)),
+                }
+            }
+        }
+        if resp.dragged_by(egui::PointerButton::Primary) {
+            let delta = resp.drag_delta() / sc;
+            if let Some(dr) = self.rigs.pt_drag.as_mut() {
+                dr[0] += delta.x;
+                dr[1] += delta.y;
+            } else if let (Some(b), Some(pos)) = (self.rigs.pt_box.as_mut(), resp.interact_pointer_pos()) {
+                b.1 = to_page(pos);
+            }
+        }
+        if let Some((a, b)) = self.rigs.pt_box {
+            let r = Rect::from_two_pos(to_screen(a), to_screen(b));
+            p.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::from_rgb(120, 170, 255)), egui::StrokeKind::Inside);
+        }
+        if resp.drag_stopped() {
+            if let Some(dr) = self.rigs.pt_drag.take() {
+                let (sel, sym) = (self.rigs.pt_sel.clone(), self.rigs.pt_sym);
+                if dr[0].abs() + dr[1].abs() > 0.01 {
+                    let mut moves: Vec<(usize, [f32; 2])> = sel.iter().map(|i| (*i, dr)).collect();
+                    if sym {
+                        for i in &sel {
+                            if let Some(j) = mt::mirror_partner(&mesh, *i, axis, 3.0).filter(|j| !sel.contains(j)) {
+                                moves.push((j, [-dr[0], dr[1]]));
+                            }
+                        }
+                    }
+                    self.rig_edit("Move mesh points", now, |r| {
+                        for (i, m) in moves {
+                            if let Some(v) = r.meshes[mi].verts.get_mut(i) {
+                                *v = [v[0] + m[0], v[1] + m[1]];
+                            }
+                        }
+                    });
+                }
+            }
+            if let Some((a, b)) = self.rigs.pt_box.take() {
+                let inside = mt::select_in_rect(&mesh, a, b);
+                if !shift {
+                    self.rigs.pt_sel.clear();
+                }
+                for i in inside {
+                    if !self.rigs.pt_sel.contains(&i) {
+                        self.rigs.pt_sel.push(i);
+                    }
+                }
+            }
+        }
+        if resp.clicked_by(egui::PointerButton::Primary) {
+            if let Some(pg) = resp.interact_pointer_pos().map(to_page) {
+                match mt::nearest_vertex(&mesh, pg, reach) {
+                    Some(v) => {
+                        if shift {
+                            if let Some(k) = self.rigs.pt_sel.iter().position(|x| *x == v) {
+                                self.rigs.pt_sel.remove(k);
+                            } else {
+                                self.rigs.pt_sel.push(v);
+                            }
+                        } else {
+                            self.rigs.pt_sel = vec![v];
+                        }
+                    }
+                    None => self.rigs.pt_sel.clear(),
+                }
+            }
+        }
+    }
+
+    /// The Points tool window.
+    pub(super) fn rig_points_body(&mut self, ui: &mut Ui, now: f64) {
+        use rig::meshtools as mt;
+        let n = self.points_mesh().map(|m| self.draw.doc.rig.meshes[m].verts.len());
+        ui.label(RichText::new(match n {
+            Some(n) => format!("{} of {n} points picked", self.rigs.pt_sel.len()),
+            None => "No mesh picked yet".to_owned(),
+        }).size(12.0).color(if n.is_some() { TEXT } else { GOLD }));
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.rigs.pt_sym, "Mirror the move").help("Moving a point moves the point on the other side of the line the other way, as the mirror image. The line is the one in 'Copy to the other side' (x).");
+            ui.label(RichText::new("line at x").size(11.5).color(TEXT_DIM));
+            ui.add(egui::DragValue::new(&mut self.rigs.mirror_axis).speed(2.0));
+        });
+        if ui.button("Pick all").help("Picks every part.").clicked() {
+            if let Some(m) = self.points_mesh() {
+                self.rigs.pt_sel = (0..self.draw.doc.rig.meshes[m].verts.len()).collect();
+            }
+        }
+        section_title(ui, "Line up");
+        ui.horizontal_wrapped(|ui| {
+            for (how, label, tip) in [(mt::Align::Horizontal, "Across", "All picked points on one horizontal line"), (mt::Align::Vertical, "Up and down", "All picked points on one vertical line"), (mt::Align::Line, "On a line", "On the straight line between the two picked points that are farthest apart")] {
+                if ui.button(label).help(tip).clicked() {
+                    self.points_edit("Align points", now, |m, sel| {
+                        mt::align(m, sel, how);
+                        String::new()
+                    });
+                }
+            }
+        });
+        section_title(ui, "Relax");
+        ui.horizontal(|ui| {
+            ui.add(egui::Slider::new(&mut self.rigs.pt_relax, 0.1..=1.0).text("how much"));
+        });
+        ui.horizontal_wrapped(|ui| {
+            let amt = self.rigs.pt_relax;
+            if ui.button("Relax the picked").help("The picked points spread out evenly between their neighbours. The points on the edge of the mesh never move, so the outline stays.").clicked() {
+                self.points_edit("Relax points", now, |m, sel| {
+                    mt::relax(m, Some(sel), 4, amt);
+                    String::new()
+                });
+            }
+            if ui.button("Relax all").help("Smooths the mesh so the triangles are even.").clicked() {
+                self.points_edit("Relax points", now, |m, _| {
+                    mt::relax(m, None, 4, amt);
+                    String::new()
+                });
+            }
+        });
+        section_title(ui, "Join and clean");
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Weld the picked").help("The picked points become one point in the middle of them").clicked() {
+                self.points_edit("Weld points", now, |m, sel| format!("{} points joined.", mt::weld_selected(m, sel)));
+            }
+            if ui.button("Delete the picked").help("Takes the points and the triangles that use them away").clicked() {
+                self.points_edit("Delete points", now, |m, sel| format!("{} points removed.", mt::delete_points(m, sel)));
+            }
+            if ui.button("Purge loose points").help("Points that no triangle uses are taken out").clicked() {
+                self.points_edit("Purge points", now, |m, _| format!("{} loose points removed.", mt::remove_orphans(m)));
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.add(egui::Slider::new(&mut self.rigs.pt_reach, 0.5..=20.0).text("closer than").suffix(" px"));
+            let reach = self.rigs.pt_reach;
+            if ui.button("Weld near").help("The vertex welder: points closer to each other than this become one. It closes cracks.").clicked() {
+                self.points_edit("Weld near points", now, |m, _| format!("{} points joined.", mt::weld_near(m, reach)));
+            }
+        });
+        section_title(ui, "Triangles");
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Turn the edge").help("Pick exactly two points that are joined by an edge between two triangles: the edge is turned across the other two corners").clicked() {
+                self.points_edit("Turn an edge", now, |m, sel| match sel {
+                    [a, b] if mt::flip_edge(m, *a, *b) => "The edge is turned.".into(),
+                    _ => "Pick two points with an edge between two triangles (not on the border) that make a convex shape.".into(),
+                });
+            }
+            if ui.button("Split the edges between").help("Edge loop: pick a chain of points (round an eyelid, along a lip): a new point comes in the middle of every edge between them, to be dragged into the shape").clicked() {
+                self.points_edit("Split edges", now, |m, sel| format!("{} new points.", mt::split_edges(m, sel).len()));
+            }
+            if ui.button("Triangulate").help("Joins all the points into a clean net of triangles that do not overlap, inside the outline the mesh had").clicked() {
+                self.points_edit("Triangulate", now, |m, _| if mt::triangulate(m) { format!("{} triangles.", m.tris.len()) } else { "Too few or too many points to triangulate.".into() });
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Add a point in the middle of the picture").help("A point is put in the triangle at the middle of the page, if there is one: then drag it where you want it").clicked() {
+                let (w, h) = (self.draw.doc.w as f32, self.draw.doc.h as f32);
+                self.points_edit("Add a point", now, |m, _| match mt::add_point(m, [w / 2.0, h / 2.0]) {
+                    Some(_) => "A point was added.".into(),
+                    None => "The middle of the page is outside the mesh: use 'Add a point on the mesh' with a click instead.".into(),
+                });
+            }
+        });
+        if let Some(m) = &self.rigs.message {
+            ui.label(RichText::new(m).size(11.5).color(TEXT_DIM));
+        }
+    }
+
+    /// The click zones: boxes or ovals that take clicks in the program that shows the model, each can start an expression.
+    pub(super) fn rig_hit_section(&mut self, ui: &mut Ui, now: f64) {
+        let rig = self.draw.doc.rig.clone();
+        egui::CollapsingHeader::new(RichText::new(format!("Click zones ({})", rig.hit_areas.len())).size(13.0)).id_salt("hit_areas").show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut self.rigs.hit_show, "Show the zones").help("Draws the outlines of the zones on the picture");
+                ui.checkbox(&mut self.rigs.show_bounds, "Show the bounds of every layer").help("A rectangle round the paint of every layer, so forgotten, see-through leftovers show up without clicking each layer");
+                ui.checkbox(&mut self.rigs.show_swing, "Show the swing").help("Draws the chains of the physics as they swing, with arrows for how fast each weight is going. Drag a weight to yank it about and watch the hair or cloth flutter. Turn Physics on.");
+                ui.checkbox(&mut self.rigs.show_stress, "Show the stretch").help("Colors the triangles by how much they are stretched or squeezed from the way they are at rest: blue is none, red is a lot. Move the sliders to see where the picture is pulled too hard");
+                ui.checkbox(&mut self.rigs.hit_test, "Test: click the picture").help("A click on the picture says which zones it hit");
+            });
+            let mut zones = rig.hit_areas.clone();
+            let mut remove: Option<usize> = None;
+            let changers: Vec<(Id, String)> = rig.changers.iter().map(|c| (c.id, c.name.clone())).collect();
+            let names: Vec<String> = rig.expressions.iter().map(|e| e.name.clone()).chain(rig.clips.iter().map(|c| c.name.clone())).collect();
+            for (i, z) in zones.iter_mut().enumerate() {
+                let open = self.rigs.hit_sel == Some(i);
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut z.name).desired_width(110.0));
+                    if ui.small_button(if open { "Close" } else { "Edit" }).clicked() {
+                        self.rigs.hit_sel = if open { None } else { Some(i) };
+                    }
+                    if ui.small_button("Delete").help("Takes this away. You can undo it.").clicked() {
+                        remove = Some(i);
+                    }
+                });
+                if open {
+                    ui.horizontal_wrapped(|ui| {
+                        for (round, label) in [(false, "Box"), (true, "Oval")] {
+                            if widgets::chip(ui, label, z.round == round).clicked() {
+                                z.round = round;
+                            }
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        for (k, label) in ["Left", "Top", "Right", "Bottom"].iter().enumerate() {
+                            ui.label(RichText::new(*label).size(11.0).color(TEXT_DIM));
+                            ui.add(egui::DragValue::new(&mut z.rect[k]).speed(1.0));
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Follows").size(12.0).color(TEXT_DIM));
+                        let now_name = z.follow.and_then(|f| changers.iter().find(|c| c.0 == f)).map(|c| c.1.clone()).unwrap_or_else(|| "nothing (stays put)".into());
+                        egui::ComboBox::from_id_salt(("hit_follow", i)).selected_text(now_name).show_ui(ui, |ui| {
+                            if ui.selectable_label(z.follow.is_none(), "nothing (stays put)").clicked() {
+                                z.follow = None;
+                            }
+                            for (id, name) in &changers {
+                                if ui.selectable_label(z.follow == Some(*id), name).clicked() {
+                                    z.follow = Some(*id);
+                                }
+                            }
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Starts").size(12.0).color(TEXT_DIM));
+                        egui::ComboBox::from_id_salt(("hit_plays", i)).selected_text(if z.plays.is_empty() { "nothing".to_owned() } else { z.plays.clone() }).show_ui(ui, |ui| {
+                            if ui.selectable_label(z.plays.is_empty(), "nothing").clicked() {
+                                z.plays.clear();
+                            }
+                            for n in &names {
+                                if ui.selectable_label(&z.plays == n, n).clicked() {
+                                    z.plays = n.clone();
+                                }
+                            }
+                        });
+                    });
+                }
+            }
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Add a zone").help("A box on the picked parts, or in the middle of the page when none is picked").clicked() {
+                    let (w, h) = (self.draw.doc.w as f32, self.draw.doc.h as f32);
+                    let mut b: Option<[f32; 4]> = None;
+                    for m in rig.meshes.iter().filter(|m| self.rigs.selected.contains(&m.layer)) {
+                        for v in &m.verts {
+                            let c = b.get_or_insert([v[0], v[1], v[0], v[1]]);
+                            *c = [c[0].min(v[0]), c[1].min(v[1]), c[2].max(v[0]), c[3].max(v[1])];
+                        }
+                    }
+                    let rect = b.unwrap_or([w * 0.375, h * 0.375, w * 0.625, h * 0.625]);
+                    let n = zones.len() + 1;
+                    zones.push(rig::HitArea::new(&format!("Zone {n}"), rect));
+                    self.rigs.hit_sel = Some(zones.len() - 1);
+                    self.rigs.hit_show = true;
+                }
+            });
+            if let Some(i) = remove {
+                zones.remove(i);
+                self.rigs.hit_sel = None;
+            }
+            if zones != rig.hit_areas {
+                self.rig_edit("Click zones", now, |r| r.hit_areas = zones);
+            }
+        });
+    }
+
+    /// The memory the model needs when it is shown (the paint of every part, four bytes a pixel, and the points of the meshes), and a place for text that
+    /// the program that shows the model can read.
+    /// Anchors: temporary points on the picture (never put in an exported model) to measure from or to put a pivot on.
+    pub(super) fn rig_anchor_section(&mut self, ui: &mut Ui, now: f64) {
+        let rig = self.draw.doc.rig.clone();
+        egui::CollapsingHeader::new(RichText::new(format!("Anchors ({})", rig.anchors.len())).size(13.0)).id_salt("rig_anchors").show(ui, |ui| {
+            let mut list = rig.anchors.clone();
+            let mut drop: Option<usize> = None;
+            let mut pivot: Option<[f32; 2]> = None;
+            for (i, a) in list.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut a.name).desired_width(90.0).char_limit(30));
+                    ui.add(egui::DragValue::new(&mut a.pos[0]).speed(1.0).prefix("x "));
+                    ui.add(egui::DragValue::new(&mut a.pos[1]).speed(1.0).prefix("y "));
+                    if ui.small_button("Pivot here").help("The pivot of the picked turning changer goes to this anchor").clicked() {
+                        pivot = Some(a.pos);
+                    }
+                    if ui.small_button("x").clicked() {
+                        drop = Some(i);
+                    }
+                });
+            }
+            if ui.button("Add an anchor").help("In the middle of the picked parts, or of the page").clicked() {
+                let (w, h) = (self.draw.doc.w as f32, self.draw.doc.h as f32);
+                let mut b: Option<[f32; 4]> = None;
+                for m in rig.meshes.iter().filter(|m| self.rigs.selected.contains(&m.layer)) {
+                    for v in &m.verts {
+                        let c = b.get_or_insert([v[0], v[1], v[0], v[1]]);
+                        *c = [c[0].min(v[0]), c[1].min(v[1]), c[2].max(v[0]), c[3].max(v[1])];
+                    }
+                }
+                let pos = b.map(|b| [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0]).unwrap_or([w / 2.0, h / 2.0]);
+                list.push(rig::Anchor { name: format!("Anchor {}", list.len() + 1), pos });
+            }
+            if let Some(i) = drop {
+                list.remove(i);
+            }
+            if let (Some(pos), Some(cid)) = (pivot, self.rigs.sel_changer.filter(|c| !rig.locked.contains(c))) {
+                self.rig_edit("Pivot to an anchor", now, |r| {
+                    if let Some(c) = r.changers.iter_mut().find(|c| c.id == cid && matches!(c.kind, Kind::Rotation { .. })) {
+                        c.kind = Kind::Rotation { pivot: pos };
+                    }
+                });
+            }
+            if list != rig.anchors {
+                self.rig_edit("Anchors", now, |r| r.anchors = list);
+            }
+        });
+    }
+
+    pub(super) fn rig_memory_section(&mut self, ui: &mut Ui, now: f64) {
+        let rig = self.draw.doc.rig.clone();
+        let (dw, dh) = (self.draw.doc.w, self.draw.doc.h);
+        egui::CollapsingHeader::new(RichText::new("Memory and notes for the model").size(13.0)).id_salt("rig_memory").show(ui, |ui| {
+            let mut bytes = 0u64;
+            let mut biggest: Option<(u64, String)> = None;
+            for l in self.draw.doc.layers.iter().filter(|l| parts::is_part_layer(l)) {
+                if let Some((x0, y0, x1, y1)) = crate::files::layer_bounds(l, dw, dh) {
+                    let b = (x1 - x0).max(0) as u64 * (y1 - y0).max(0) as u64 * 4;
+                    bytes += b;
+                    if biggest.as_ref().is_none_or(|g| g.0 < b) {
+                        biggest = Some((b, l.name.clone()));
+                    }
+                }
+            }
+            let points: usize = rig.meshes.iter().map(|m| m.verts.len()).sum();
+            // a mesh keeps its points and, while the model moves, the points as they are now: two numbers of two floats
+            let mesh_bytes = points as u64 * 16;
+            ui.label(RichText::new(format!("Paint of the parts: {:.1} MB. Meshes: {points} points ({:.2} MB).", bytes as f64 / 1.0e6, mesh_bytes as f64 / 1.0e6)).size(12.0));
+            if let Some((b, name)) = biggest {
+                ui.label(RichText::new(format!("The biggest part is {name} ({:.1} MB).", b as f64 / 1.0e6)).size(11.5).color(TEXT_DIM));
+            }
+            // stray bits of paint left over from cutting a picture: found by size, shown, rubbed out
+            ui.horizontal_wrapped(|ui| {
+                if self.rigs.speck_px == 0 {
+                    self.rigs.speck_px = 6;
+                }
+                ui.label(RichText::new("Specks smaller than").size(12.0).color(TEXT_DIM));
+                ui.add(egui::DragValue::new(&mut self.rigs.speck_px).range(1..=500).suffix(" px"));
+                let picked = !self.rigs.selected.is_empty();
+                if ui.button("Count").help("How many bits of paint under that size every part has: stray, see-through leftovers of a cut picture that waste memory").clicked() {
+                    let (mut bits, mut px, mut on) = (0, 0, 0);
+                    for l in self.draw.doc.layers.clone().iter_mut().filter(|l| parts::is_part_layer(l)) {
+                        let (b, p) = crate::files::specks(l, dw, dh, self.rigs.speck_px, false);
+                        if b > 0 {
+                            on += 1;
+                        }
+                        bits += b;
+                        px += p;
+                    }
+                    self.rigs.message = Some(format!("{bits} specks ({px} pixels) on {on} parts."));
+                }
+                if ui.add_enabled(picked, egui::Button::new("Rub out on the picked parts")).help("Takes the specks off the picked parts").clicked() {
+                    let before = self.draw.doc.snapshot();
+                    let (min, sel) = (self.rigs.speck_px, self.rigs.selected.clone());
+                    let mut bits = 0;
+                    for l in self.draw.doc.layers.iter_mut().filter(|l| sel.contains(&l.id)) {
+                        bits += crate::files::specks(l, dw, dh, min, true).0;
+                    }
+                    if bits > 0 {
+                        self.draw.doc.mark_all_dirty();
+                        let after = self.draw.doc.snapshot();
+                        self.history.push("Rub out specks".to_owned(), Tab::Rig, before, after, now);
+                    }
+                    self.rigs.message = Some(format!("{bits} specks rubbed out."));
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Save the rig as text...").help("Writes the whole rig as readable text (JSON): put it in a folder under Git to see what changed and to merge work").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().set_title("The rig as text").set_file_name("rig.json").add_filter("JSON text", &["json"]).save_file() {
+                        self.rigs.message = Some(match std::fs::write(&path, rig.to_text()) {
+                            Ok(()) => format!("Written to {}.", path.display()),
+                            Err(e) => format!("Could not write: {e}"),
+                        });
+                    }
+                }
+                if ui.button("Load a rig from text...").help("Replaces the rig with one that was saved as text. One undo step.").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().set_title("A rig as text").add_filter("JSON text", &["json"]).pick_file() {
+                        match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|s| Rig::from_text(&s)) {
+                            Ok(r) => {
+                                self.rig_edit("Load the rig from text", now, |x| *x = r);
+                                self.rigs.message = Some("The rig was loaded.".into());
+                            }
+                            Err(e) => self.rigs.message = Some(e),
+                        }
+                    }
+                }
+            });
+            if let Some(m) = &self.rigs.message {
+                ui.label(RichText::new(m).size(11.5).color(TEXT_DIM));
+            }
+            let mut text = rig.metadata.clone();
+            ui.add(egui::TextEdit::multiline(&mut text).desired_rows(4).desired_width(f32::INFINITY).code_editor());
+            if !text.trim().is_empty() {
+                match serde_json::from_str::<serde_json::Value>(&text) {
+                    Ok(_) => ui.label(RichText::new("Valid JSON.").size(11.0).color(TEXT_DIM)),
+                    Err(e) => ui.label(RichText::new(format!("Not JSON yet: {e}")).size(11.0).color(GOLD)),
+                };
+            }
+            if text != rig.metadata {
+                text.truncate(20_000);
+                self.rig_edit("Notes for the model", now, |r| r.metadata = text);
+            }
+        });
+    }
+
     fn rig_check_section(&mut self, ui: &mut Ui, now: f64) {
-        section_title(ui, "Look at the rig");
-        ui.label(RichText::new("Everything here is rigged by hand: use the tools along the top. This moves every slider by itself, so you can see what the rig does.").size(11.5).color(TEXT_DIM));
         ui.horizontal_wrapped(|ui| {
             if ui.button(if self.rigs.play { "Stop the test motion" } else { "Test motion" }).help("Every slider moves by itself, so you can see what the rig does").clicked() {
                 self.rigs.play = !self.rigs.play;
@@ -1111,7 +1791,7 @@ impl SeviathApp {
             }
         });
         let Some(t) = targets.get(self.rigs.gtarget.min(targets.len().saturating_sub(1))).cloned() else {
-            ui.label(RichText::new("The turn rings need the head or body sliders: make the head or body sliders first (Add all the standard sliders).").size(11.5).color(TEXT_DIM));
+            ui.label(RichText::new("Make the head or body sliders first.").size(11.5).color(TEXT_DIM));
             self.rig_pose_store(ui, now);
             return;
         };
@@ -1166,7 +1846,8 @@ impl SeviathApp {
         let rig = self.draw.doc.rig.clone();
         let kept = rig.values_to_keep(&self.rigs.values);
         let n = rig.poses.len() + 1;
-        self.rig_edit("Key this pose", now, |r| r.poses.push(rig::SavedPose { name: format!("Pose {n}"), values: kept }));
+        let layers: Vec<(u64, bool)> = if self.rigs.pose_layers { self.draw.doc.layers.iter().filter(|l| parts::is_part_layer(l)).map(|l| (l.id, l.visible)).collect() } else { Vec::new() };
+        self.rig_edit("Key this pose", now, |r| r.poses.push(rig::SavedPose { name: format!("Pose {n}"), values: kept, layers }));
         self.rigs.message = Some(format!("Pose {n} kept."));
     }
 
@@ -1181,6 +1862,7 @@ impl SeviathApp {
             if ui.button("Key this pose (K)").help("Keeps the sliders as they are now").clicked() {
                 self.rig_key_pose(now);
             }
+            ui.checkbox(&mut self.rigs.pose_layers, "With the layers shown").help("A pose that is kept now also keeps which layers are shown and which are hidden (one state for working on the eyes, another for the clothes). Going to it shows and hides them again.");
             let rec = self.rigs.recording.is_some();
             if ui.button(if rec { "Stop recording" } else { "Record while posing" }).help("Records the sliders as you move them, to use in the Animate tab").clicked() {
                 if rec {
@@ -1205,16 +1887,25 @@ impl SeviathApp {
         for (i, p) in rig.poses.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&p.name).size(12.5));
-                if ui.small_button("Go to").clicked() {
+                if ui.small_button("Go to").help("Goes to this place on the picture.").clicked() {
                     recall = Some(i);
                 }
-                if ui.small_button("Delete").clicked() {
+                if ui.small_button("Delete").help("Takes this away. You can undo it.").clicked() {
                     del_pose = Some(i);
                 }
             });
         }
         if let Some(i) = recall {
             self.rigs.values = rig.values_from(&rig.poses[i].values);
+            let shown = rig.poses[i].layers.clone();
+            if !shown.is_empty() {
+                for l in self.draw.doc.layers.iter_mut() {
+                    if let Some((_, on)) = shown.iter().find(|(id, _)| *id == l.id) {
+                        l.visible = *on;
+                    }
+                }
+                self.draw.doc.mark_all_dirty();
+            }
             self.refresh_warnings();
         }
         if let Some(i) = del_pose {
@@ -1233,7 +1924,7 @@ impl SeviathApp {
                 if ui.small_button(if on { "Stop" } else { "Play" }).clicked() {
                     play = Some(if on { usize::MAX } else { i });
                 }
-                if ui.small_button("Delete").clicked() {
+                if ui.small_button("Delete").help("Takes this away. You can undo it.").clicked() {
                     del_clip = Some(i);
                 }
             });
@@ -1266,7 +1957,7 @@ impl SeviathApp {
             }
         });
         let issues = self.rigs.issues.clone();
-        if issues.iter().filter(|i| i.fix.is_some()).count() > 1 && ui.button("Fix everything that can be fixed").clicked() {
+        if issues.iter().filter(|i| i.fix.is_some()).count() > 1 && ui.button("Fix everything that can be fixed").help("Fixes every problem the check found that has a safe fix.").clicked() {
             let (layers, w, h) = (self.draw.doc.layers.clone(), self.draw.doc.w, self.draw.doc.h);
             self.rig_edit("Fix the rig problems", now, |r| {
                 for i in issues.iter().filter(|i| i.fix.is_some()) {
@@ -1308,6 +1999,7 @@ impl SeviathApp {
         self.rigs.issues.len()
     }
 
+    #[cfg(test)]
     fn rig_the_body(&mut self, now: f64) {
         let (layers, w, h, o) = (self.draw.doc.layers.clone(), self.draw.doc.w, self.draw.doc.h, self.rigs.body_opts);
         let mut result: Option<Result<rig::autorig::Report, String>> = None;
@@ -1327,6 +2019,7 @@ impl SeviathApp {
         });
     }
 
+    #[cfg(test)]
     fn rig_the_hair(&mut self, now: f64) {
         let (layers, w, h) = (self.draw.doc.layers.clone(), self.draw.doc.w, self.draw.doc.h);
         let mut result: Option<Result<rig::autorig::Report, String>> = None;
@@ -1355,6 +2048,7 @@ impl SeviathApp {
         self.rig_the_hair(0.0);
     }
 
+    #[cfg(test)]
     fn rig_the_face(&mut self, now: f64) {
         let (layers, w, h, o) = (self.draw.doc.layers.clone(), self.draw.doc.w, self.draw.doc.h, self.rigs.face_opts);
         let mut result: Option<Result<rig::autorig::Report, String>> = None;
@@ -1379,6 +2073,7 @@ impl SeviathApp {
     }
 
     /// Tag the picked parts (or every layer) by their names, then rig the face.
+    #[cfg(test)]
     fn this_is_a_face(&mut self, now: f64) {
         let ids: Vec<LayerId> = if self.rigs.selected.is_empty() { self.draw.doc.layers.iter().map(|l| l.id).collect() } else { self.rigs.selected.clone() };
         let layers: Vec<crate::doc::Layer> = self.draw.doc.layers.iter().filter(|l| ids.contains(&l.id)).cloned().collect();
@@ -1419,10 +2114,6 @@ impl SeviathApp {
                 let ids: Vec<LayerId> = self.draw.doc.layers.iter().filter(|l| parts::is_part_layer(l) && !l.tiles.is_empty()).map(|l| l.id).collect();
                 self.make_meshes(ids, now);
             }
-            if ui.button("Mesh all tagged parts").clicked() {
-                let ids: Vec<LayerId> = self.draw.doc.layers.iter().filter(|l| parts::is_part_layer(l) && l.part.is_some()).map(|l| l.id).collect();
-                self.make_meshes(ids, now);
-            }
         });
         ui.horizontal(|ui| {
             if ui.add_enabled(!sel.is_empty(), egui::Button::new("Remove mesh")).clicked() {
@@ -1440,7 +2131,6 @@ impl SeviathApp {
     /// The uncut skin, its bones and weights (the Skin and bones tool).
     pub(super) fn rig_skin_body(&mut self, ui: &mut Ui, now: f64) {
         let sel = self.rigs.selected.clone();
-        ui.label(RichText::new("No cutting: one mesh over the drawing, bones on top, and weights say how much each part follows each bone.").size(11.5).color(TEXT_DIM));
         ui.horizontal(|ui| {
             ui.label(RichText::new("Detail").size(12.0).color(TEXT_DIM));
             ui.add(egui::Slider::new(&mut self.rigs.skin_detail, 0.0..=1.0).show_value(false));
@@ -1456,7 +2146,7 @@ impl SeviathApp {
                 };
                 self.make_skin(ids, now);
             }
-            if has_skin && ui.button("Remove the skin").clicked() {
+            if has_skin && ui.button("Remove the skin").help("Takes the skin mesh and its weights away; the bones stay.").clicked() {
                 self.rig_edit("Remove the skin", now, |r| r.skin = None);
                 self.rigs.skin_tex = None;
             }
@@ -1516,6 +2206,14 @@ impl SeviathApp {
                     }
                 }
             });
+            let mut dual = self.draw.doc.rig.skin.as_ref().is_some_and(|s| s.dual);
+            if ui.checkbox(&mut dual, "Keep the volume at twisting joints").help("Blends the bones as whole movements (turn and shift together, dual quaternion skinning) instead of blending the places each one sends a point to. An elbow or a wrist that twists keeps its thickness instead of pinching. Off is the simple blend.").changed() {
+                self.rig_edit("Skinning blend", now, |r| {
+                    if let Some(s) = r.skin.as_mut() {
+                        s.dual = dual;
+                    }
+                });
+            }
             ui.checkbox(&mut self.rigs.heat, "Show the picked bone's weights (blue little, red a lot)");
             self.rig_weight_tools(ui, now, picked_bone, &bones);
         }
@@ -1530,9 +2228,20 @@ impl SeviathApp {
         for (id, name, is_rot, parent) in &changers {
             let on = self.rigs.sel_changer == Some(*id);
             ui.horizontal(|ui| {
-                if widgets::chip(ui, &format!("{name} ({})", kind_word(&self.draw.doc.rig, *id, *is_rot)), on).clicked() {
+                let chip = widgets::chip(ui, &format!("{name} ({})", kind_word(&self.draw.doc.rig, *id, *is_rot)), on).interact(egui::Sense::click_and_drag());
+                if chip.clicked() {
                     self.rigs.sel_changer = Some(*id);
                     self.rigs.warp_edit = None;
+                }
+                // drag a changer onto another one to put it inside
+                chip.dnd_set_drag_payload(*id);
+                if let Some(dragged) = chip.dnd_release_payload::<Id>() {
+                    if *dragged != *id {
+                        set_parent = Some((*dragged, Some(*id)));
+                    }
+                }
+                if chip.dnd_hover_payload::<Id>().is_some_and(|d| *d != *id) {
+                    ui.painter().rect_stroke(chip.rect, 11.0, egui::Stroke::new(2.0, Color32::from_rgb(120, 255, 200)), egui::StrokeKind::Outside);
                 }
                 if on {
                     egui::ComboBox::from_id_salt("changer_parent").selected_text(match parent {
@@ -1548,9 +2257,19 @@ impl SeviathApp {
                             }
                         }
                     });
-                    if ui.small_button("Delete").clicked() {
+                    if ui.small_button("Delete").help("Takes this away. You can undo it.").clicked() {
                         delete = Some(*id);
                     }
+                }
+                let mut locked = self.draw.doc.rig.locked.contains(id);
+                if ui.checkbox(&mut locked, "Lock").help("A locked changer cannot have its pivot or its shapes edited by accident. It still moves with its sliders.").changed() {
+                    let cid = *id;
+                    self.rig_edit("Lock a changer", now, |r| {
+                        r.locked.retain(|x| *x != cid);
+                        if locked {
+                            r.locked.push(cid);
+                        }
+                    });
                 }
             });
         }
@@ -1607,28 +2326,49 @@ impl SeviathApp {
             });
             // linked rigging: tick the other changers first, then rig this one: they get every step as it is done
             egui::CollapsingHeader::new(RichText::new("Rig other parts at the same time").size(12.0)).id_salt("link_changers").show(ui, |ui| {
-                ui.label(RichText::new("Tick the changers that should do what this one does, then switch it on and rig this one: every shape you save for a slider is done on the ticked ones too, at the same moment. A changer that does not fit (another kind, another number of points) is left alone.").size(11.0).color(TEXT_DIM));
                 for (oid, oname, ..) in changers.iter().filter(|c| c.0 != cid) {
                     let mut on = self.rigs.link_targets.contains(oid);
-                    if ui.checkbox(&mut on, oname).changed() {
-                        self.rigs.link_targets.retain(|x| x != oid);
-                        if on {
-                            self.rigs.link_targets.push(*oid);
+                    ui.horizontal(|ui| {
+                        if ui.checkbox(&mut on, oname).changed() {
+                            self.rigs.link_targets.retain(|x| x != oid);
+                            if on {
+                                self.rigs.link_targets.push(*oid);
+                            }
                         }
-                    }
+                        if on {
+                            let mut mirrored = self.rigs.link_mirrored.contains(oid);
+                            if ui.checkbox(&mut mirrored, "Mirror").help("Off (the start): this part does the very same. On, for a part that is the same on the other side (an eye, an arm, a leg, a wing...): it moves as the mirror image, the other way round. Leave it off when that side is drawn differently.").changed() {
+                                self.rigs.link_mirrored.retain(|x| x != oid);
+                                if mirrored {
+                                    self.rigs.link_mirrored.push(*oid);
+                                }
+                            }
+                        }
+                    });
                 }
-                ui.checkbox(&mut self.rigs.link_mirror, "Mirror mode: the other way round").help("The ticked parts move as the mirror image: an arm on the other side turns the other way, a cheek on the other side bends the other way.");
                 if widgets::chip(ui, if self.rigs.link_live { "Rigging them together" } else { "Rig them together" }, self.rigs.link_live).help("While this is on, everything you do to the picked changer is done to the ticked ones too.").clicked() {
                     self.rigs.link_live = !self.rigs.link_live;
                     if self.rigs.link_live && !self.rigs.link_targets.is_empty() {
                         // start from the same: they get what this one has now
-                        let (targets, mirror) = (self.rigs.link_targets.clone(), self.rigs.link_mirror);
+                        let (targets, mirrored) = (self.rigs.link_targets.clone(), self.rigs.link_mirrored.clone());
                         self.rig_edit("Link changers", now, |r| {
-                            r.copy_movement(cid, &targets, mirror);
+                            link_copy(r, cid, &targets, &mirrored);
                         });
                     }
                 }
             });
+            if ui.button("Give its movement to what is inside").help("Tidying up before export: every changer and part inside this one gets the movement written into its own shapes, and this changer goes. The picture moves the same. A part that sat directly in it gets a fine warp of its own. It cannot be done when a turning changer sits inside.").clicked() {
+                let mut res: Option<Result<usize, String>> = None;
+                self.rig_edit("Give the movement to what is inside", now, |r| res = Some(r.apply_to_children(cid)));
+                match res {
+                    Some(Ok(n)) => {
+                        self.rigs.message = Some(format!("{n} parts or changers took the movement; the changer is gone."));
+                        self.rigs.sel_changer = None;
+                    }
+                    Some(Err(e)) => self.rigs.message = Some(e),
+                    None => {}
+                }
+            }
             if ui.add_enabled(!sel.is_empty(), egui::Button::new("Put the picked parts into this changer")).clicked() {
                 let selc = sel.clone();
                 self.rig_edit("Parts into changer", now, |r| {
@@ -1675,7 +2415,7 @@ impl SeviathApp {
                 if ui.add(egui::Slider::new(&mut v, 0.0..=1.0).show_value(false)).drag_stopped() {
                     new_weight = Some((*i, v));
                 }
-                if ui.small_button("Delete").clicked() {
+                if ui.small_button("Delete").help("Takes this away. You can undo it.").clicked() {
                     del_glue = Some(*i);
                 }
             });
@@ -1788,7 +2528,7 @@ impl SeviathApp {
             ui.add(egui::TextEdit::singleline(&mut self.rigs.new_param.0).desired_width(110.0).char_limit(40));
             ui.add(egui::DragValue::new(&mut self.rigs.new_param.1).speed(0.5).prefix("from "));
             ui.add(egui::DragValue::new(&mut self.rigs.new_param.2).speed(0.5).prefix("to "));
-            if ui.button("Add slider").clicked() && self.rigs.new_param.1 < self.rigs.new_param.2 {
+            if ui.button("Add slider").help("Adds a new slider to the rig. Give it its range, then bind changers to it in the Shapes tool.").clicked() && self.rigs.new_param.1 < self.rigs.new_param.2 {
                 let (name, lo, hi) = self.rigs.new_param.clone();
                 let mid = if lo < 0.0 && hi > 0.0 { 0.0 } else { lo };
                 let mut new_id = 0;
@@ -1796,14 +2536,50 @@ impl SeviathApp {
                 self.rigs.sel_param = Some(new_id);
             }
         });
-        if ui.button("Add all the standard sliders").help("The usual Live2D sliders (angles, eyes, brows, mouth, body, hair), so none is missing: the ones that are not made yet are listed grey under each group").clicked() {
+        if ui.button("Add all the standard sliders").help("The usual sliders (angles, eyes, brows, mouth, body, hair), so none is missing: the ones that are not made yet are listed grey under each group").clicked() {
             self.rig_edit("Standard sliders", now, |r| add_standard_params(r, &(0..STANDARD_PARAMS.len()).collect::<Vec<_>>()));
         }
-        let params: Vec<(Id, String, f32, f32, f32)> = rig.params.iter().map(|p| (p.id, p.name.clone(), p.min, p.max, p.default)).collect();
+        // find sliders: by words in the name (in any language they have), only the ones with keys, or only the ones nothing moves yet
+        ui.horizontal_wrapped(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.rigs.slider_find).hint_text("Find a slider").desired_width(120.0));
+            for (k, label, tip) in [(0u8, "All", "Every slider"), (1, "With keys", "Only the sliders that move something"), (2, "Unmapped", "Only the sliders that nothing moves yet")] {
+                if widgets::chip(ui, label, self.rigs.slider_only == k).help(tip).clicked() {
+                    self.rigs.slider_only = k;
+                }
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Names in").size(12.0).color(TEXT_DIM));
+            let mut lang = rig.language.clone();
+            ui.add(egui::TextEdit::singleline(&mut lang).hint_text("language, like ja").desired_width(90.0).char_limit(12)).help("The language the names of the sliders are shown in. Add the names in other languages under the picked slider. The code of a slider (what other programs read) never changes.");
+            if lang != rig.language {
+                self.rig_edit("Language of the names", now, |r| r.language = lang);
+            }
+            if ui.small_button("Sort").help("Puts the sliders in the usual order: groups first, then the usual order").clicked() {
+                self.rig_edit("Sort the sliders", now, |r| {
+                    r.params.sort_by_key(|p| {
+                        let g = SLIDER_GROUPS.iter().position(|g| g.0 == slider_group(&p.name)).unwrap_or(99);
+                        (g, STANDARD_PARAMS.iter().position(|s| s.1 == p.name).unwrap_or(999))
+                    });
+                });
+            }
+        });
+        let find = self.rigs.slider_find.to_lowercase();
+        let only = self.rigs.slider_only;
+        let filtering = !find.is_empty() || only != 0;
+        let params: Vec<(Id, String, f32, f32, f32)> = rig
+            .params
+            .iter()
+            .filter(|p| {
+                let has_keys = rig.bindings.iter().any(|b| b.params.contains(&p.id));
+                (only == 0 || (only == 1) == has_keys) && (find.is_empty() || p.name.to_lowercase().contains(&find) || p.names.iter().any(|(_, n)| n.to_lowercase().contains(&find)))
+            })
+            .map(|p| (p.id, p.name.clone(), p.min, p.max, p.default))
+            .collect();
         let mut del_param: Option<Id> = None;
         let mut add_standard: Vec<usize> = Vec::new();
         for (g, col) in SLIDER_GROUPS {
-            let missing: Vec<usize> = STANDARD_PARAMS.iter().enumerate().filter(|(_, sp)| sp.0 == g && !has_standard(&params, sp.1)).map(|(i, _)| i).collect();
+            let missing: Vec<usize> = if filtering { Vec::new() } else { STANDARD_PARAMS.iter().enumerate().filter(|(_, sp)| sp.0 == g && !has_standard(&params, sp.1)).map(|(i, _)| i).collect() };
             let mine: Vec<&(Id, String, f32, f32, f32)> = params.iter().filter(|p| slider_group(&p.1) == g).collect();
             if mine.is_empty() && missing.is_empty() {
                 continue;
@@ -1815,7 +2591,8 @@ impl SeviathApp {
                     let keys = rig.display_points(*id);
                     let set: Vec<f32> = keys.iter().copied().filter(|k| rig.key_is_set(*id, *k)).collect();
                     ui.horizontal(|ui| {
-                        if widgets::chip(ui, name, on).clicked() {
+                        let shown = rig.param(*id).map(|p| p.shown(&rig.language).to_owned()).unwrap_or_else(|| name.clone());
+                        if widgets::chip(ui, &shown, on).clicked() {
                             self.rigs.sel_param = Some(*id);
                         }
                         if key_slider(ui, &mut v, *lo, *hi, *def, &keys, &set, 150.0) {
@@ -1831,10 +2608,41 @@ impl SeviathApp {
                         if ui.small_button("Original").help("Back to the original drawing (the filled mark)").clicked() {
                             self.rigs.values.set(*id, *def);
                         }
-                        if on && ui.small_button("Delete").clicked() {
+                        if on && ui.small_button("Delete").help("Takes this away. You can undo it.").clicked() {
                             del_param = Some(*id);
                         }
                     });
+                    if on {
+                        // the names of the picked slider in other languages (the code stays what it is)
+                        let mut names = rig.param(*id).map(|p| p.names.clone()).unwrap_or_default();
+                        let before = names.clone();
+                        let mut drop: Option<usize> = None;
+                        egui::CollapsingHeader::new(RichText::new(format!("Names in other languages ({})", names.len())).size(11.5)).id_salt(("param_names", *id)).show(ui, |ui| {
+                            for (i, (l, n)) in names.iter_mut().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::TextEdit::singleline(l).desired_width(40.0).char_limit(12));
+                                    ui.add(egui::TextEdit::singleline(n).desired_width(150.0).char_limit(40));
+                                    if ui.small_button("x").clicked() {
+                                        drop = Some(i);
+                                    }
+                                });
+                            }
+                            if ui.small_button("Add a name").help("Adds the name to the list.").clicked() {
+                                names.push((String::new(), String::new()));
+                            }
+                        });
+                        if let Some(i) = drop {
+                            names.remove(i);
+                        }
+                        if names != before {
+                            let pid = *id;
+                            self.rig_edit("Names of a slider", now, |r| {
+                                if let Some(p) = r.params.iter_mut().find(|p| p.id == pid) {
+                                    p.names = names;
+                                }
+                            });
+                        }
+                    }
 
                 }
                 for i in missing {
@@ -1842,7 +2650,7 @@ impl SeviathApp {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(sp.1).size(12.0).color(Color32::from_gray(110)));
                         ui.label(RichText::new(format!("{} to {}, not made yet", sp.2, sp.3)).size(11.0).color(Color32::from_gray(100)));
-                        if ui.small_button("Add").clicked() {
+                        if ui.small_button("Add").help("Adds it to the list.").clicked() {
                             add_standard.push(i);
                         }
                     });
@@ -1908,7 +2716,7 @@ impl SeviathApp {
                 if ui.button("Put this key point back to the original drawing").help("The shape saved at this key point is cleared").clicked() {
                     self.rig_edit("Original drawing at a key point", now, |r| r.reset_key(pid, k));
                 }
-                if !at(k) && ui.button("Remove this key point").clicked() {
+                if !at(k) && ui.button("Remove this key point").help("Takes this key point away from the slider.").clicked() {
                     self.rig_edit("Remove a key point", now, |r| r.remove_key(pid, k));
                 }
             });
@@ -2010,7 +2818,7 @@ impl SeviathApp {
                 });
                 self.rigs.weight_gen += 1;
             }
-            if ui.button("Clear this bone").clicked() {
+            if ui.button("Clear this bone").help("Takes all the weight of this bone away.").clicked() {
                 if let Some(bi) = b_idx {
                     self.rig_edit("Clear weights", now, |r| {
                         if let Some(s) = r.skin.as_mut() {
@@ -2138,14 +2946,13 @@ impl SeviathApp {
                     t.iter_mut().for_each(|x| *x += deg);
                 }
             }
-            if matches!(kind, Kind::Line { .. } | Kind::Paths { .. }) && ui.button("Reset the turns").clicked() {
+            if matches!(kind, Kind::Line { .. } | Kind::Paths { .. }) && ui.button("Reset the turns").help("Puts every turn ring back to zero.").clicked() {
                 if let Some(t) = self.rigs.turn_edit.as_mut() {
                     t.iter_mut().for_each(|x| *x = 0.0);
                 }
             }
         });
         if matches!(kind, Kind::Line { .. } | Kind::Paths { .. }) {
-            ui.label(RichText::new("The small circle by each point turns the picture at that point: drag it round.").size(11.5).color(TEXT_DIM));
         }
     }
 
@@ -2181,7 +2988,7 @@ impl SeviathApp {
                         let flows = rig.physics.iter().position(|p| p.changer == cid && p.path == k);
                         match flows {
                             Some(i) => {
-                                if ui.small_button("Stop flowing").clicked() {
+                                if ui.small_button("Stop flowing").help("Takes the physics off this path again.").clicked() {
                                     self.rig_edit("Stop path physics", now, |r| {
                                         if i < r.physics.len() {
                                             r.physics.remove(i);
@@ -2201,7 +3008,7 @@ impl SeviathApp {
                                 }
                             }
                         }
-                        if paths.len() > 1 && ui.small_button("Delete").clicked() {
+                        if paths.len() > 1 && ui.small_button("Delete").help("Takes this away. You can undo it.").clicked() {
                             self.rig_edit("Delete a path", now, |r| {
                                 r.remove_path(cid, k);
                             });
@@ -2234,6 +3041,18 @@ impl SeviathApp {
         }
     }
 
+    /// The sliders the shape being made depends on: the picked one, the one it is joined with, and a third.
+    fn shape_sliders(&self, rig: &Rig, pid: Id) -> Vec<Id> {
+        let mut v = vec![pid];
+        if let Some(q) = self.rigs.sel_param2.filter(|q| *q != pid && rig.param(*q).is_some()) {
+            v.push(q);
+            if let Some(r) = self.rigs.sel_param3.filter(|r| !v.contains(r) && rig.param(*r).is_some()) {
+                v.push(r);
+            }
+        }
+        v
+    }
+
     fn rig_keyforms(&mut self, ui: &mut Ui, now: f64, cid: Id, pid: Id) {
         let rig = self.draw.doc.rig.clone();
         let (Some(c), Some(p)) = (rig.changer(cid).cloned(), rig.param(pid).cloned()) else { return };
@@ -2253,16 +3072,36 @@ impl SeviathApp {
                 }
             });
         });
-        let value = rig.value(&self.rigs.values, pid);
-        let value2 = second.as_ref().map(|q| rig.value(&self.rigs.values, q.id));
-        let pid2 = second.as_ref().map(|q| q.id);
+        // a third slider: the shape depends on three (the head turn, the head up, and the mouth open)
+        if second.is_some() {
+            let third = self.rigs.sel_param3.filter(|r| *r != pid && Some(*r) != second.as_ref().map(|s| s.id)).and_then(|r| rig.param(r).cloned());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("And a third slider").size(12.0).color(TEXT_DIM));
+                egui::ComboBox::from_id_salt("third_param").selected_text(third.as_ref().map(|q| q.name.clone()).unwrap_or_else(|| "none".into())).show_ui(ui, |ui| {
+                    if ui.selectable_label(third.is_none(), "none").clicked() {
+                        self.rigs.sel_param3 = None;
+                    }
+                    for q in rig.params.iter().filter(|q| q.id != pid && Some(q.id) != second.as_ref().map(|s| s.id)) {
+                        if ui.selectable_label(third.as_ref().map(|s| s.id) == Some(q.id), &q.name).clicked() {
+                            self.rigs.sel_param3 = Some(q.id);
+                        }
+                    }
+                });
+            });
+        }
+        let sliders = self.shape_sliders(&rig, pid);
+        let values: Vec<f32> = sliders.iter().map(|s| rig.value(&self.rigs.values, *s)).collect();
+        let (value, pid2, value2) = (values[0], sliders.get(1).copied(), values.get(1).copied());
         // saving a shape at the current slider value(s)
         let save = |this: &mut Self, label: &str, form: Form| {
-            this.rig_edit(label, now, |r| match (pid2, value2) {
-                (Some(q), Some(v2)) => r.set_keyform2(cid, pid, q, value, v2, form),
-                _ => r.set_keyform(cid, pid, value, form),
+            let (sliders, values) = (sliders.clone(), values.clone());
+            this.rig_edit(label, now, |r| match sliders.len() {
+                1 => r.set_keyform(cid, pid, value, form),
+                2 => r.set_keyform2(cid, pid, sliders[1], value, values[1], form),
+                _ => r.set_keyform_n(cid, &sliders, &values, form),
             });
         };
+        let _ = (pid2, value2);
         match c.kind.clone() {
             Kind::Rotation { .. } => {
                 ui.horizontal(|ui| {
@@ -2281,6 +3120,18 @@ impl SeviathApp {
                     let deg = self.rigs.turn_deg;
                     save(self, "Rotation keyform", Form::Rot { deg });
                 }
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Pivot on the other side of the line at").size(12.0).color(TEXT_DIM));
+                    ui.add(egui::DragValue::new(&mut self.rigs.mirror_axis).speed(2.0));
+                    for (across, label, tip) in [(false, "Left-right", "The pivot goes to the other side of the vertical line, as far from it as it is now"), (true, "Up-down", "The pivot goes to the other side of the horizontal line")] {
+                        if ui.small_button(label).help(tip).clicked() {
+                            let axis = self.rigs.mirror_axis;
+                            self.rig_edit("Flip the pivot", now, |r| {
+                                r.flip_pivot(cid, across, axis, false);
+                            });
+                        }
+                    }
+                });
             }
             Kind::Move | Kind::Scale { .. } | Kind::Flip { .. } | Kind::Fade | Kind::Order | Kind::Wave { .. } => {
                 let names = rig::changers::val_names(&c.kind);
@@ -2352,7 +3203,7 @@ impl SeviathApp {
                 }
                 ui.horizontal(|ui| {
                     if !editing {
-                        if ui.button("Edit the shape").clicked() {
+                        if ui.button("Edit the shape").help("Moves the points of the shape of this changer on the picture.").clicked() {
                             self.begin_shape_edit(cid, false);
                         }
                     } else {
@@ -2372,7 +3223,7 @@ impl SeviathApp {
                                 self.rigs.turn_edit = None;
                             }
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button("Cancel").help("Leaves without changing anything.").clicked() {
                             self.rigs.warp_edit = None;
                             self.rigs.turn_edit = None;
                         }
@@ -2382,10 +3233,7 @@ impl SeviathApp {
                 self.rig_turn_tools(ui, cid);
             }
         }
-        let keys_for: Vec<Id> = match pid2 {
-            Some(q) => vec![pid, q],
-            None => vec![pid],
-        };
+        let keys_for: Vec<Id> = sliders.clone();
         if let Some(b) = rig.bindings.iter().find(|b| b.changer == cid && b.params == keys_for) {
             let label: Vec<String> = b.keys.iter().map(|k| k.iter().map(|v| format!("{v:.0}")).collect::<Vec<_>>().join(", ")).collect();
             ui.label(RichText::new(format!("Keyforms at: {}", label.join("  by  "))).size(11.5).color(TEXT_DIM));
@@ -2402,10 +3250,59 @@ impl SeviathApp {
                     }
                 }
             });
-            if ui.small_button("Remove these keyforms").clicked() {
+            if keys_for.len() == 2 && ui.small_button("Fill the corners").help("The diagonal shapes (both sliders away from the middle) are made from the shapes on the edges: head left plus head up gives head left and up. Corners you made are replaced.").clicked() {
+                let (a, b) = (keys_for[0], keys_for[1]);
+                self.rig_edit("Fill the corners", now, |r| {
+                    r.synthesize_corners(cid, a, b);
+                });
+            }
+            if ui.small_button("Remove these keyforms").help("Takes the saved shapes of this slider away.").clicked() {
                 let ks = keys_for.clone();
                 self.rig_edit("Remove keyforms", now, |r| r.bindings.retain(|x| !(x.changer == cid && x.params == ks)));
             }
+            // rigged on the wrong slider, or on the wrong part (mirrored onto the same slider, and the other eye has its own)
+            egui::CollapsingHeader::new(RichText::new("Change the slider or the part").size(12.0)).id_salt("retarget_keyforms").show(ui, |ui| {
+                for (at, q) in keys_for.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(if keys_for.len() > 1 { format!("Slider {}", at + 1) } else { "Slider".to_owned() }).size(12.0).color(TEXT_DIM));
+                        egui::ComboBox::from_id_salt(("retarget_param", at)).selected_text(rig.param(*q).map(|p| p.name.clone()).unwrap_or_default()).show_ui(ui, |ui| {
+                            for other in rig.params.iter().filter(|o| !keys_for.contains(&o.id)) {
+                                if ui.selectable_label(false, &other.name).clicked() {
+                                    let (ks, to) = (keys_for.clone(), other.id);
+                                    self.rig_edit("Change slider", now, |r| {
+                                        r.retarget_param(cid, &ks, at, to);
+                                    });
+                                    if at == 0 {
+                                        self.rigs.sel_param = Some(to);
+                                    } else {
+                                        self.rigs.sel_param2 = Some(to);
+                                    }
+                                }
+                            }
+                        });
+                    });
+                }
+                let fits = rig.changers_that_fit(cid, &keys_for);
+                if fits.is_empty() {
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Part").size(12.0).color(TEXT_DIM));
+                        egui::ComboBox::from_id_salt("retarget_changer").selected_text(&c.name).show_ui(ui, |ui| {
+                            for other in fits.iter().filter_map(|o| rig.changer(*o)) {
+                                for (mirror, suffix) in [(false, ""), (true, " (mirrored)")] {
+                                    if ui.selectable_label(false, format!("{}{suffix}", other.name)).clicked() {
+                                        let (ks, to) = (keys_for.clone(), other.id);
+                                        self.rig_edit("Change part", now, |r| {
+                                            r.move_movement(cid, &ks, to, mirror);
+                                        });
+                                        self.rigs.sel_changer = Some(to);
+                                    }
+                                }
+                            }
+                        });
+                    });
+                }
+            });
         }
     }
 
@@ -2415,10 +3312,13 @@ impl SeviathApp {
         let rig = self.draw.doc.rig.clone();
         let Some(c) = rig.changer(cid).cloned() else { return };
         let Some(pid) = self.rigs.sel_param else { return };
-        let pid2 = self.rigs.sel_param2.filter(|q| *q != pid && rig.param(*q).is_some());
-                // show only this slider (and the one it is joined with), so the saved shape is just its own
+        if rig.locked.contains(&cid) {
+            self.rigs.message = Some(format!("{} is locked: untick Lock in the Changers tool to edit it.", c.name));
+            return;
+        }
+                // show only this slider (and the ones it is joined with), so the saved shape is just its own
                 let mut only = Values::default();
-                for id in std::iter::once(pid).chain(pid2) {
+                for id in self.shape_sliders(&rig, pid) {
                     only.set(id, rig.value(&self.rigs.values, id));
                 }
                 self.rigs.values = only;
@@ -2449,9 +3349,9 @@ impl SeviathApp {
         let Some((cid, off)) = self.rigs.warp_edit.take() else { return };
         let Some(c) = rig.changer(cid).cloned() else { return };
         let Some(pid) = self.rigs.sel_param else { return };
-        let pid2 = self.rigs.sel_param2.filter(|q| *q != pid && rig.param(*q).is_some());
-        let value = rig.value(&self.rigs.values, pid);
-        let value2 = pid2.map(|q| rig.value(&self.rigs.values, q));
+        let sliders = self.shape_sliders(&rig, pid);
+        let values: Vec<f32> = sliders.iter().map(|s| rig.value(&self.rigs.values, *s)).collect();
+        let value = values[0];
         let form = match &c.kind {
             Kind::Warp { .. } => Form::Warp { offsets: off },
             Kind::Line { .. } => Form::Line { offsets: off, turns: self.rigs.turn_edit.clone().filter(|t| t.iter().any(|x| *x != 0.0)).unwrap_or_default() },
@@ -2462,9 +3362,10 @@ impl SeviathApp {
             }
             _ => Form::Soft { offset: off.first().copied().unwrap_or([0.0, 0.0]), grow: self.rigs.soft_grow },
         };
-        self.rig_edit("Keyform", now, |r| match (pid2, value2) {
-            (Some(q), Some(v2)) => r.set_keyform2(cid, pid, q, value, v2, form),
-            _ => r.set_keyform(cid, pid, value, form),
+        self.rig_edit("Keyform", now, |r| match sliders.len() {
+            1 => r.set_keyform(cid, pid, value, form),
+            2 => r.set_keyform2(cid, pid, sliders[1], value, values[1], form),
+            _ => r.set_keyform_n(cid, &sliders, &values, form),
         });
         self.rigs.turn_edit = None;
         self.rigs.auto_edit = false;
@@ -2472,6 +3373,7 @@ impl SeviathApp {
 
     /// The brush pushes the points of a changer that are under it (page pixels): the nearer the middle of the brush, the more they follow.
     fn brush_push(&mut self, rig: &Rig, cid: Id, at: [f32; 2], delta: [f32; 2]) {
+        let mode = self.rigs.brush_mode;
         let (r, strength) = (self.rigs.brush_r.max(1.0), self.rigs.brush_s.clamp(0.0, 1.0));
         let Some(c) = rig.changer(cid) else { return };
         let rest: Vec<[f32; 2]> = match &c.kind {
@@ -2483,6 +3385,10 @@ impl SeviathApp {
             _ => return,
         };
         let Some((_, off)) = self.rigs.warp_edit.as_mut() else { return };
+        if mode != BrushMode::Push {
+            rig::refine::radial_brush(&rest, off, at, r, strength, mode == BrushMode::Expand);
+            return;
+        }
         for (i, o) in off.iter_mut().enumerate() {
             let Some(base) = rest.get(i) else { continue };
             let d = (base[0] + o[0] - at[0]).hypot(base[1] + o[1] - at[1]);
@@ -2532,6 +3438,102 @@ impl SeviathApp {
         self.rigs.put_vals(&mut pose);
         self.rigs.add_phys(&rig, &mut pose);
         let all = rig.deformed_all(&pose);
+        // the points of the mesh of the picked part
+        if self.rigs.mode == Mode::Points {
+            self.points_input(ui, &resp, &p, &to_screen, &to_page, sc, now);
+        }
+        // the outline of every layer's paint, to find leftovers that are forgotten and see-through
+        if self.rigs.show_bounds {
+            for l in self.draw.doc.layers.iter().filter(|l| parts::is_part_layer(l)) {
+                if let Some((x0, y0, x1, y1)) = crate::files::layer_bounds(l, self.draw.doc.w, self.draw.doc.h).map(|b| (b.0 as f32, b.1 as f32, b.2 as f32, b.3 as f32)) {
+                    let r = Rect::from_min_max(to_screen([x0, y0]), to_screen([x1, y1]));
+                    let picked = self.rigs.selected.contains(&l.id);
+                    p.rect_stroke(r, 0.0, Stroke::new(if picked { 2.0 } else { 1.0 }, if picked { Color32::from_rgb(255, 200, 60) } else { Color32::from_rgba_unmultiplied(255, 120, 200, 140) }), egui::StrokeKind::Inside);
+                    if !l.visible || l.opacity < 1.0 {
+                        p.text(r.left_top(), egui::Align2::LEFT_TOP, &l.name, egui::FontId::proportional(10.0), Color32::from_rgb(255, 150, 210));
+                    }
+                }
+            }
+        }
+        // the chains of the physics, the way they swing now, with arrows for the speed; a weight can be grabbed and yanked
+        if self.rigs.show_swing {
+            let reach = 14.0 / sc;
+            let press = ui.input(|i| i.pointer.press_origin()).map(to_page);
+            let mut nearest: Option<(f32, (Id, usize, usize))> = None;
+            for c in rig.physics.iter().filter(|c| c.enabled) {
+                let Some(pos) = self.rigs.phys.sim.world_positions(c.changer, c.path) else { continue };
+                let vel = self.rigs.phys.sim.velocities(c.changer, c.path).unwrap_or_default();
+                let line: Vec<Pos2> = pos.iter().map(|q| to_screen(*q)).collect();
+                p.add(egui::Shape::line(line.clone(), Stroke::new(2.0, Color32::from_rgb(255, 150, 60))));
+                for (i, q) in pos.iter().enumerate() {
+                    p.circle_filled(line[i], 4.0, Color32::from_rgb(255, 220, 120));
+                    if let Some(v) = vel.get(i).filter(|v| v[0].hypot(v[1]) > 0.3) {
+                        // the arrow shows where the weight is going in the next few steps
+                        let tip = to_screen([q[0] + v[0] * 6.0, q[1] + v[1] * 6.0]);
+                        p.arrow(line[i], tip - line[i], Stroke::new(1.5, Color32::from_rgb(120, 220, 255)));
+                    }
+                    if let Some(pg) = press {
+                        let d = (q[0] - pg[0]).hypot(q[1] - pg[1]);
+                        if d < reach && nearest.is_none_or(|n| d < n.0) {
+                            nearest = Some((d, (c.changer, c.path, i)));
+                        }
+                    }
+                }
+            }
+            if resp.drag_started_by(egui::PointerButton::Primary) {
+                self.rigs.swing_grab = nearest.map(|n| n.1);
+            }
+            if let (Some((c, path, i)), true, Some(pos)) = (self.rigs.swing_grab, resp.dragged_by(egui::PointerButton::Primary), resp.interact_pointer_pos()) {
+                self.rigs.phys.sim.grab(c, path, i, to_page(pos));
+            }
+            if resp.drag_stopped() {
+                self.rigs.swing_grab = None;
+            }
+        }
+        // the stretch of the triangles: how much bigger or smaller than at rest each one is (blue as at rest, red much changed)
+        if self.rigs.show_stress {
+            for (mi, m) in rig.meshes.iter().enumerate() {
+                for t in &m.tris {
+                    let (a, b, c) = (m.verts[t[0] as usize], m.verts[t[1] as usize], m.verts[t[2] as usize]);
+                    let (na, nb, nc) = (all[mi][t[0] as usize], all[mi][t[1] as usize], all[mi][t[2] as usize]);
+                    let rest = ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs().max(1e-3);
+                    let now_a = ((nb[0] - na[0]) * (nc[1] - na[1]) - (nb[1] - na[1]) * (nc[0] - na[0])).abs();
+                    let k = rig::stress(rest, now_a);
+                    let col = stress_color(k);
+                    p.add(egui::Shape::convex_polygon(vec![to_screen(na), to_screen(nb), to_screen(nc)], Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 150), Stroke::NONE));
+                }
+            }
+        }
+        // the anchors: small crosses with their names
+        for a in &rig.anchors {
+            let c = to_screen(a.pos);
+            let col = Color32::from_rgb(120, 255, 200);
+            p.line_segment([c - vec2(6.0, 0.0), c + vec2(6.0, 0.0)], Stroke::new(1.5, col));
+            p.line_segment([c - vec2(0.0, 6.0), c + vec2(0.0, 6.0)], Stroke::new(1.5, col));
+            p.text(c + vec2(8.0, -2.0), egui::Align2::LEFT_BOTTOM, &a.name, egui::FontId::proportional(10.5), col);
+        }
+        // the click zones
+        if self.rigs.hit_show || self.rigs.hit_test {
+            for i in 0..rig.hit_areas.len() {
+                let outline: Vec<Pos2> = rig.hit_outline(&pose, i).into_iter().map(to_screen).collect();
+                let chosen = self.rigs.hit_sel == Some(i);
+                let col = if chosen { Color32::from_rgb(255, 200, 60) } else { Color32::from_rgb(120, 200, 255) };
+                p.add(egui::Shape::closed_line(outline.clone(), Stroke::new(if chosen { 2.5 } else { 1.5 }, col)));
+                if let Some(first) = outline.first() {
+                    p.text(*first, egui::Align2::LEFT_BOTTOM, &rig.hit_areas[i].name, egui::FontId::proportional(11.0), col);
+                }
+            }
+        }
+        if self.rigs.hit_test && resp.clicked_by(egui::PointerButton::Primary) {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                let hits = rig.hit_test(&pose, to_page(pos));
+                self.rigs.message = Some(match hits.first().and_then(|i| rig.hit_areas.get(*i)) {
+                    Some(z) if z.plays.is_empty() => format!("Clicked the zone {}.", z.name),
+                    Some(z) => format!("Clicked the zone {}: it starts {}.", z.name, z.plays),
+                    None => "No zone there.".to_owned(),
+                });
+            }
+        }
         // triangles of the picked parts
         if self.rigs.wire {
             for (mi, m) in rig.meshes.iter().enumerate() {
@@ -2688,7 +3690,22 @@ impl SeviathApp {
             }
         }
         if grab.blocked {
-            self.rigs.message = Some("Pick a slider on the left first: the shape is saved at the value of the slider.".into());
+            let own = self.rigs.sel_changer.and_then(|c| rig.bindings.iter().find(|b| b.changer == c).and_then(|b| b.params.first().copied()));
+            match own {
+                Some(pid) => {
+                    self.rigs.sel_param = Some(pid);
+                    let name = rig.param(pid).map(|p| p.name.clone()).unwrap_or_default();
+                    self.rigs.message = Some(format!("The slider {name} is picked for this changer: drag the point again."));
+                }
+                None => self.rigs.message = Some("Pick a slider on the left first: the shape is saved at the value of the slider.".into()),
+            }
+        }
+        if let Some(m) = self.rigs.message.clone() {
+            egui::Area::new(egui::Id::new("rig_msg")).fixed_pos(rect.min + vec2(10.0, 34.0)).order(egui::Order::Middle).show(ui.ctx(), |ui| {
+                egui::Frame::new().fill(PANEL.gamma_multiply(0.92)).corner_radius(6).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+                    ui.label(RichText::new(m).size(12.0).color(GOLD));
+                });
+            });
         }
         if grab.start && self.rigs.warp_edit.is_none() {
             if let Some(cid) = self.rigs.sel_changer {
@@ -2879,11 +3896,11 @@ impl SeviathApp {
             }
         }
         // click: place the pivot, or pick the part under the pointer
-        if resp.clicked_by(egui::PointerButton::Primary) && self.rigs.mode != Mode::AddPin {
+        if resp.clicked_by(egui::PointerButton::Primary) && self.rigs.mode != Mode::AddPin && self.rigs.mode != Mode::Points {
             if let Some(pos) = resp.interact_pointer_pos().filter(|q| page.contains(*q)) {
                 let pg = to_page(pos);
                 if self.rigs.mode == Mode::Pivot {
-                    if let Some(cid) = self.rigs.sel_changer {
+                    if let Some(cid) = self.rigs.sel_changer.filter(|c| !self.draw.doc.rig.locked.contains(c)) {
                         // the point on the rest picture that is under the pointer (undo the changer's own pose)
                         self.rig_edit("Move the pivot", now, |r| {
                             if let Some(c) = r.changers.iter_mut().find(|c| c.id == cid) {
@@ -2898,16 +3915,19 @@ impl SeviathApp {
                 }
             }
         }
-        egui::Area::new(egui::Id::new("rig_bar")).fixed_pos(rect.min + vec2(10.0, 8.0)).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+        egui::Area::new(egui::Id::new("rig_bar")).fixed_pos(rect.min + vec2(10.0, 8.0)).order(egui::Order::Middle).show(ui.ctx(), |ui| {
             ui.horizontal(|ui| {
-                if ui.small_button("Fit").clicked() {
+                if ui.small_button("Fit").help("Fits it to the page.").clicked() {
                     self.rigs.zoom = 1.0;
                     self.rigs.pan = Vec2::ZERO;
                 }
-                if ui.small_button("All sliders to the middle").clicked() {
+                if ui.small_button("All sliders to the middle").help("Puts every slider back to its middle value so the picture is as it was drawn.").clicked() {
                     self.rigs.values = Values::default();
                 }
-                ui.label(RichText::new("Wheel: zoom. Right drag: move. Blend modes are not shown here.").size(11.0).color(TEXT_DIM));
+                if ui.small_button("Random pose").help("Puts the sliders somewhere at random, to see how the rig holds up. Press it again for another one. Turn Physics on to see the hair and cloth follow.").clicked() {
+                    let seed = ui.input(|i| (i.time * 1e6) as u64) ^ self.rigs.values.0.len() as u64;
+                    self.rigs.values = self.draw.doc.rig.random_pose(seed, 0.8);
+                }
             });
         });
     }
@@ -3348,6 +4368,8 @@ const STANDARD_PARAMS: &[(&str, &str, f32, f32, f32)] = &[
     ("Eyeballs", "Eyeball X", -1.0, 1.0, 0.0),
     ("Eyeballs", "Eyeball Y", -1.0, 1.0, 0.0),
     ("Eyeballs", "Iris Size", -1.0, 1.0, 0.0),
+    ("Eyeballs", "Tear", 0.0, 1.0, 0.0),
+    ("Eyeballs", "Flash", 0.0, 1.0, 0.0),
     ("Brows", "Brow L Y", -1.0, 1.0, 0.0),
     ("Brows", "Brow R Y", -1.0, 1.0, 0.0),
     ("Brows", "Brow L X", -1.0, 1.0, 0.0),
@@ -3366,6 +4388,10 @@ const STANDARD_PARAMS: &[(&str, &str, f32, f32, f32)] = &[
     ("Hair", "Hair Sway Y", -1.0, 1.0, 0.0),
     ("Arms and legs", "Arm L", -1.0, 1.0, 0.0),
     ("Arms and legs", "Arm R", -1.0, 1.0, 0.0),
+    ("Arms and legs", "Arm L B", -1.0, 1.0, 0.0),
+    ("Arms and legs", "Arm R B", -1.0, 1.0, 0.0),
+    ("Arms and legs", "Hand L", -1.0, 1.0, 0.0),
+    ("Arms and legs", "Hand R", -1.0, 1.0, 0.0),
 ];
 
 /// Names the automatic rig uses for what a standard slider also covers.
@@ -3399,11 +4425,23 @@ fn add_standard_params(r: &mut Rig, which: &[usize]) {
     }
 }
 
+/// Blue (no change) through green and yellow to red (the triangle is much bigger or smaller than at rest): 0 to 1.
+fn stress_color(k: f32) -> Color32 {
+    let k = k.clamp(0.0, 1.0);
+    if k < 0.5 {
+        let u = k / 0.5;
+        Color32::from_rgb((60.0 + 170.0 * u) as u8, (110.0 + 120.0 * u) as u8, (240.0 - 190.0 * u) as u8)
+    } else {
+        let u = (k - 0.5) / 0.5;
+        Color32::from_rgb(230, (230.0 - 190.0 * u) as u8, (50.0 - 10.0 * u) as u8)
+    }
+}
+
 fn slider_group(name: &str) -> &'static str {
     let n = name.to_lowercase();
     if name.starts_with("3D ") {
         "3D bones"
-    } else if n.starts_with("eyeball") || n.starts_with("iris") {
+    } else if n.starts_with("eyeball") || n.starts_with("iris") || n.starts_with("tear") || n.starts_with("flash") {
         "Eyeballs"
     } else if n.starts_with("eye") {
         "Eyes open and close"
@@ -3419,5 +4457,18 @@ fn slider_group(name: &str) -> &'static str {
         "Hair"
     } else {
         "Other"
+    }
+}
+
+#[cfg(test)]
+impl RigState {
+    /// The message shown over the picture (for the tests).
+    pub fn test_message(&self) -> Option<String> {
+        self.message.clone()
+    }
+
+    /// Close the tool window (for the tests).
+    pub fn test_close_tool(&mut self) {
+        self.bench.open = None;
     }
 }

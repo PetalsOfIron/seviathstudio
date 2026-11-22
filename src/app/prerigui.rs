@@ -178,14 +178,13 @@ impl SeviathApp {
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
                 ui.set_width(780.0);
-                ui.label(RichText::new("Looks for things that go wrong when a part is deformed. Nothing changes until you press Fix, and every fix can be undone.").size(11.5).color(TEXT_DIM));
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("Sensitivity").size(12.0).color(TEXT_DIM));
                     let r = ui.add(egui::Slider::new(&mut self.prerig.sens, 0.0..=1.0).show_value(false)).help("Low: only the obvious. High: also small details like freckles");
                     ui.label(RichText::new(if self.prerig.sens < 0.3 { "only the obvious" } else if self.prerig.sens < 0.7 { "normal" } else { "small details too" }).size(11.5).color(TEXT_DIM));
                     ui.checkbox(&mut self.prerig.only_tagged, "Only tagged layers");
-                    if ui.button("Check the drawing").clicked() || r.drag_stopped() {
+                    if ui.button("Check the drawing").help("Looks for stray pixels, tiny holes, nearly invisible pixels and light or dark edges. Nothing changes until you say so.").clicked() || r.drag_stopped() {
                         check = true;
                     }
                 });
@@ -229,10 +228,10 @@ impl SeviathApp {
                     }
                 });
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Previous").clicked() {
+                    if ui.button("Previous").help("Goes to the one before.").clicked() {
                         step = -1;
                     }
-                    if ui.button("Next").clicked() {
+                    if ui.button("Next").help("Goes to the next one.").clicked() {
                         step = 1;
                     }
                     ui.separator();
@@ -249,7 +248,7 @@ impl SeviathApp {
                     if ui.button(format!("Fix all “{}” here", prob.kind.label().to_lowercase())).clicked() {
                         fix_layer_kind = true;
                     }
-                    if ui.button("Fix everything").clicked() {
+                    if ui.button("Fix everything").help("Fixes everything that can be fixed in one go.").clicked() {
                         fix_all = true;
                     }
                 });

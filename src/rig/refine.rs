@@ -73,6 +73,31 @@ pub fn pull_warp(rect: [f32; 4], cols: u32, rows: u32, off: &mut [[f32; 2]], at:
     }
 }
 
+/// The expansion brush: the points under a circle of radius `r` at `at` go away from its middle (`grow`) or toward it, the nearer the middle the more, like a
+/// fisheye bulge or a pinch. `strength` (0 to 1) is how far the nearest point goes in one step, as a share of the radius.
+pub fn radial_brush(rest: &[[f32; 2]], off: &mut [[f32; 2]], at: [f32; 2], r: f32, strength: f32, grow: bool) {
+    let step = r * 0.05 * strength.clamp(0.0, 1.0) * if grow { 1.0 } else { -1.0 };
+    for (o, b) in off.iter_mut().zip(rest) {
+        let (x, y) = (b[0] + o[0] - at[0], b[1] + o[1] - at[1]);
+        let d = x.hypot(y);
+        if d >= r {
+            continue;
+        }
+        let t = 1.0 - (d / r) * (d / r);
+        let w = t * t * step;
+        // a point right at the middle has no way to go
+        if d > 1e-3 {
+            o[0] += x / d * w;
+            o[1] += y / d * w;
+        }
+        // a pinch does not carry a point past the middle
+        if !grow && d < w.abs() {
+            o[0] -= x;
+            o[1] -= y;
+        }
+    }
+}
+
 /// Cut the triangles at the new points on their edges (`cut`: edge to the new point), so neighbours stay joined.
 pub fn split_tris(tris: &[[u32; 3]], cut: &HashMap<(u32, u32), u32>) -> Vec<[u32; 3]> {
         let mut out: Vec<[u32; 3]> = Vec::with_capacity(tris.len() * 2);
@@ -449,5 +474,24 @@ mod tests {
         let mut bad = r.clone();
         bad.smooth.extend([w, 9999]);
         assert_eq!(bad.sanitized().smooth, vec![w]);
+    }
+
+    #[test]
+    fn the_expansion_brush_pushes_points_away_and_the_pinch_pulls_them_in() {
+        let rest = vec![[100.0, 100.0], [140.0, 100.0], [100.0, 400.0]];
+        let mut grow = vec![[0.0, 0.0]; 3];
+        radial_brush(&rest, &mut grow, [100.0, 100.0], 100.0, 1.0, true);
+        assert!(grow[0] == [0.0, 0.0], "the middle stays");
+        assert!(grow[1][0] > 0.5 && grow[1][1].abs() < 1e-4, "a point to the right goes right: {:?}", grow[1]);
+        assert_eq!(grow[2], [0.0, 0.0], "a point outside the brush is not touched");
+        let mut pinch = vec![[0.0, 0.0]; 3];
+        radial_brush(&rest, &mut pinch, [100.0, 100.0], 100.0, 1.0, false);
+        assert!(pinch[1][0] < -0.5, "{:?}", pinch[1]);
+        // a pinch never carries a point past the middle, however long the brush is held
+        let mut held = vec![[0.0, 0.0]; 3];
+        for _ in 0..500 {
+            radial_brush(&rest, &mut held, [100.0, 100.0], 100.0, 1.0, false);
+        }
+        assert!(rest[1][0] + held[1][0] >= 100.0 - 1e-3, "{:?}", held[1]);
     }
 }

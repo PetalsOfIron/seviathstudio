@@ -200,7 +200,7 @@ mod tests {
         v.set(r.params[1].id, 0.0); // at its default: not kept
         let kept = r.values_to_keep(&v);
         assert_eq!(kept, vec![(x, 20.0)]);
-        r.poses.push(crate::rig::SavedPose { name: "Looking left".into(), values: kept.clone() });
+        r.poses.push(crate::rig::SavedPose { name: "Looking left".into(), values: kept.clone(), layers: Vec::new() });
         let back = r.values_from(&kept);
         assert_eq!(back.0[&x], 20.0);
         // a value outside the slider's range comes back inside it
@@ -214,7 +214,7 @@ mod tests {
         assert_eq!(back, r);
         // bad data: a pose that names a slider that is gone, NaN values, an absurd frame rate
         let mut bad = r.clone();
-        bad.poses.push(crate::rig::SavedPose { name: "x".into(), values: vec![(9999, 1.0), (x, f32::NAN)] });
+        bad.poses.push(crate::rig::SavedPose { name: "x".into(), values: vec![(9999, 1.0), (x, f32::NAN)], layers: Vec::new() });
         bad.clips[0].fps = f32::NAN;
         let ok = bad.sanitized();
         assert!(ok.poses.last().unwrap().values.is_empty());

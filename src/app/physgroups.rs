@@ -87,7 +87,6 @@ impl SeviathApp {
     pub(super) fn physics_groups_body(&mut self, ui: &mut Ui, now: f64) {
         let rig = self.draw.doc.rig.clone();
         let mut pp: ParamPhysics = rig.param_physics.clone();
-        ui.label(RichText::new("Each group is a chain that swings. Its inputs are the sliders that push it (the head turning, the body moving), its outputs are the sliders it moves (the angle of a strand of hair, the sway of a skirt). Make as many groups as you like: they all work together.").size(11.5).color(TEXT_DIM));
         let n = pp.settings.len();
         let mut sel = self.rigs.phys.groups.sel.min(n.saturating_sub(1));
         // -- the groups
@@ -187,7 +186,6 @@ impl SeviathApp {
                     range_row(ui, "Position", &mut g.position);
                 }
                 Tab::Pendulum => {
-                    ui.label(RichText::new("The weights of the chain, from the top. The first one is fixed to the inputs.").size(11.5).color(TEXT_DIM));
                     let mut remove: Option<usize> = None;
                     let mut dup: Option<usize> = None;
                     egui::Grid::new("phys_pendulum").num_columns(6).spacing([8.0, 4.0]).show(ui, |ui| {

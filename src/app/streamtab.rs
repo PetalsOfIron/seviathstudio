@@ -35,6 +35,8 @@ pub struct StreamUi {
     /// The inputs as they are now, for the meters.
     pub inputs: Vec<(&'static str, f32)>,
     pub tracked: bool,
+    /// When the face was lost (seconds of the clock), if a tracker is on and sends nothing: the part named tracking_lost of the animation plays from then.
+    pub lost_since: Option<f64>,
     pub server: Option<BrowserSource>,
     pub server_port: u16,
     pub server_side: u32,
@@ -108,6 +110,7 @@ impl Default for StreamUi {
             state: TrackState::default(),
             inputs: Vec::new(),
             tracked: false,
+            lost_since: None,
             server: None,
             server_port: 8765,
             server_side: 720,
@@ -236,6 +239,23 @@ impl SeviathApp {
         self.rigs.stream.expr.undo(&mut self.rigs.values);
         if !map.maps.is_empty() {
             state.apply(map, &ch, &rig, &mut self.rigs.values, dt);
+        }
+        // a tracker is on but the face is gone for a second: the part of the animation named tracking_lost plays, as the model was built to
+        let tracker_on = self.rigs.stream.sources.iter().any(|s| s.enabled);
+        if tracker_on && !self.rigs.stream.tracked {
+            let since = *self.rigs.stream.lost_since.get_or_insert(now);
+            if now - since >= 1.0 {
+                if let Some(frame) = rig.anim.lost_frame((now - since - 1.0) as f32) {
+                    for (t, v) in rig.anim.sample(frame) {
+                        if let crate::anim::Target::Param(id) = t {
+                            self.rigs.values.set(id, v);
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+            }
+        } else {
+            self.rigs.stream.lost_since = None;
         }
         self.rigs.stream.state = state;
         // keys, pad buttons and MIDI notes switch expressions
@@ -1095,18 +1115,12 @@ impl SeviathApp {
             if ui.button("Forget the calibration").help("Forget the neutral face, so the next one is set again.").clicked() {
                 m.neutral.clear();
             }
-            if ui.button("Make the mapping").help("From the names of the sliders (or from the VTube Studio settings of a Live2D model)").clicked() {
-                let keep = (m.auto_blink, m.breathing, m.look_at_mouse, m.neutral.clone());
-                m = TrackMapping::auto(&rig);
-                (m.auto_blink, m.breathing, m.look_at_mouse, m.neutral) = keep;
-                self.rigs.stream.message = Some(format!("{} sliders are moved by the face now.", m.maps.len()));
-            }
         });
         self.stream_tracker_picker(ui);
         egui::CollapsingHeader::new(RichText::new("Advanced: which slider follows what").size(13.0).strong()).id_salt("stream_mapping_adv").default_open(false).show(ui, |ui| {
-        ui.label(RichText::new("Make the mapping does this for you. Here you can change it: every line says which slider moves with which part of your face.").size(11.5).color(TEXT_DIM));
+        ui.label(RichText::new("Every line says which slider moves with which part of your face.").size(11.5).color(TEXT_DIM));
         if m.maps.is_empty() {
-            ui.label(RichText::new("None yet. Press Make the mapping, or add one below.").size(11.5).color(TEXT_DIM));
+            ui.label(RichText::new("None yet. Add one below.").size(11.5).color(TEXT_DIM));
         }
         let mut remove: Option<usize> = None;
         let device_inputs: Vec<(String, f32)> = self.rigs.stream.hub.as_ref().map(|h| h.axis_values()).unwrap_or_default();

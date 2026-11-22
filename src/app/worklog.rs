@@ -6,7 +6,7 @@ use eframe::egui::{self, Align2, RichText};
 use super::SeviathApp;
 use crate::processlog::{self, MAX_GAP_SECS, duration_text};
 use crate::theme::*;
-use crate::widgets::section_title;
+use crate::widgets::{HelpExt, section_title};
 
 #[derive(Default)]
 pub struct WorkClock {
@@ -134,7 +134,7 @@ impl SeviathApp {
                     section_title(ui, "AI tools used");
                     ui.label(RichText::new(if s.ai.is_empty() { "None".to_owned() } else { s.ai.join(", ") }).color(TEXT_DIM));
                     ui.add_space(6.0);
-                    if ui.button("Copy this as text").clicked() {
+                    if ui.button("Copy this as text").help("Copies the list as text, to paste somewhere.").clicked() {
                         copy = true;
                     }
                 }

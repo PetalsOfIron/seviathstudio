@@ -107,7 +107,7 @@ impl SeviathApp {
         self.draw.doc.mark_all_dirty();
         self.recorder_step(&after);
         self.log_step(label, now);
-        self.history.push(label.to_owned(), Tab::Parts, before, after, now);
+        self.history.push(label.to_owned(), Tab::Rig, before, after, now);
     }
 
     fn tag_selected(&mut self, part: Option<Part>, now: f64) {
@@ -251,50 +251,6 @@ impl SeviathApp {
     }
 
     fn parts_side(&mut self, ui: &mut Ui, now: f64, act_tag: &mut Option<Part>, act_clear: &mut bool, picked: &mut Option<(LayerId, bool, bool)>) {
-        // 0. the easy way
-        section_title(ui, "Don't want to do it by hand?");
-        ui.horizontal_wrapped(|ui| {
-            if ui.add(egui::Button::new(RichText::new("Tag everything for me").strong())).help("Uses your name rules, then what the layer names say. You can undo it and change any tag.").clicked() {
-                let min = if self.parts.auto_guesses { 0.3 } else { 0.7 };
-                let found = parts::suggest_with(&self.draw.doc.layers, self.draw.doc.w, self.draw.doc.h, false, &self.parts.rules);
-                let take: Vec<Suggestion> = found.iter().filter(|s| s.confidence >= min).cloned().collect();
-                let left = found.len() - take.len();
-                if take.is_empty() {
-                    self.parts.message = Some("Nothing could be tagged from the names. Try the guesses, or add a name rule below.".into());
-                } else {
-                    let n = take.len();
-                    self.parts_edit(&format!("Tag {n} layers automatically"), now, |d| {
-                        for s in &take {
-                            if let Some(l) = d.layers.iter_mut().find(|l| l.id == s.layer) {
-                                l.part = Some(s.part);
-                            }
-                        }
-                    });
-                    self.parts.suggestions = found.into_iter().filter(|s| s.confidence < min).collect();
-                    let untagged = self.draw.doc.layers.iter().filter(|l| parts::is_part_layer(l) && !l.tiles.is_empty() && l.part.is_none()).count();
-                    self.parts.message = Some(format!("{n} layers tagged. {untagged} still have no tag{}.", if left > 0 { " (the rest are in Suggestions)" } else { "" }));
-                }
-            }
-            ui.checkbox(&mut self.parts.auto_guesses, "Also use guesses from shape and place");
-        });
-        ui.horizontal_wrapped(|ui| {
-            for (label, merge, tip) in [
-                ("Tidy for rigging", false, "For a finished drawing with many layers for every part: tags every layer from its name and the folders around it. The order of your layers, the folders, the blend modes and the opacity are not changed. A layer that is clipped to another is tagged like its base and it stays clipped, as in the file. One step in the history."),
-                ("Also put each part together", true, "Tags the layers like Tidy for rigging, and then puts the layers of one part together into one layer, but only where no other part lies between them in the stack (so the picture does not change). A smaller model for a game. One step in the history."),
-            ] {
-                if ui.add(egui::Button::new(if merge { RichText::new(label) } else { RichText::new(label).strong() })).help(tip).clicked() {
-                    let rules = self.parts.rules.clone();
-                    let mut report = None;
-                    self.parts_edit(label, now, |d| report = Some(crate::prepare::tidy(d, &rules, merge)));
-                    if let Some(r) = report {
-                        let left = if r.left_alone.is_empty() { String::new() } else { format!(" {} layers have no part (for example {}).", r.left_alone.len(), r.left_alone.iter().take(3).cloned().collect::<Vec<_>>().join(", ")) };
-                        let baked = if r.clips_baked > 0 { format!(" {} clipped layers were baked.", r.clips_baked) } else { String::new() };
-                        self.parts.message = Some(if merge { format!("{} parts; {} layers were put together.{baked}{left}", r.parts, r.layers_put_together) } else { format!("{} layers tagged, {} kinds of part.{baked}{left}", r.tagged, r.parts) });
-                    }
-                }
-            }
-        });
-
         // 1. tags
         section_title(ui, "Tag the selected layers");
         let n = self.parts.selected.len();
@@ -313,63 +269,6 @@ impl SeviathApp {
         }
         if ui.add_enabled(n > 0, egui::Button::new("Clear the tag")).clicked() {
             *act_clear = true;
-        }
-
-        // 2. suggestions
-        section_title(ui, "Suggestions");
-        ui.horizontal(|ui| {
-            if ui.button("Suggest tags").help("From the layer names, their shape and where they are on the page").clicked() {
-                let again = self.parts.redo_tagged;
-                self.parts.suggestions = parts::suggest_with(&self.draw.doc.layers, self.draw.doc.w, self.draw.doc.h, again, &self.parts.rules);
-                self.parts.message = Some(if self.parts.suggestions.is_empty() { "Nothing to suggest.".into() } else { format!("{} suggestions.", self.parts.suggestions.len()) });
-            }
-            ui.checkbox(&mut self.parts.redo_tagged, "Also tagged ones");
-        });
-        if let Some(m) = &self.parts.message {
-            ui.label(RichText::new(m).size(11.5).color(TEXT_DIM));
-        }
-        let mut accept: Vec<Suggestion> = Vec::new();
-        let mut dismiss: Option<usize> = None;
-        for (i, s) in self.parts.suggestions.iter().enumerate() {
-            let name = self.draw.doc.layers.iter().find(|l| l.id == s.layer).map(|l| l.name.clone()).unwrap_or_default();
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(if s.confidence >= 0.7 { "sure" } else { "maybe" }).size(11.0).color(if s.confidence >= 0.7 { VENOM } else { TEXT_DIM }));
-                let r = ui.label(format!("{name}: {}", s.part.label()));
-                r.help(&s.reason);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("No").clicked() {
-                        dismiss = Some(i);
-                    }
-                    if ui.small_button("Yes").clicked() {
-                        accept.push(s.clone());
-                    }
-                });
-            });
-        }
-        if !self.parts.suggestions.is_empty() {
-            ui.horizontal(|ui| {
-                if ui.button("Accept the sure ones").clicked() {
-                    accept = self.parts.suggestions.iter().filter(|s| s.confidence >= 0.7).cloned().collect();
-                }
-                if ui.button("Accept all").clicked() {
-                    accept = self.parts.suggestions.clone();
-                }
-            });
-        }
-        if let Some(i) = dismiss {
-            self.parts.suggestions.remove(i);
-        }
-        if !accept.is_empty() {
-            let n = accept.len();
-            self.parts_edit(&format!("Tag {n} layers (suggested)"), now, |d| {
-                for s in &accept {
-                    if let Some(l) = d.layers.iter_mut().find(|l| l.id == s.layer) {
-                        l.part = Some(s.part);
-                    }
-                }
-            });
-            let done: Vec<LayerId> = accept.iter().map(|s| s.layer).collect();
-            self.parts.suggestions.retain(|s| !done.contains(&s.layer));
         }
 
         // 3. pairs
@@ -422,7 +321,6 @@ impl SeviathApp {
 
         // 4b. your name rules
         section_title(ui, "Name rules");
-        ui.label(RichText::new("Your own words for your layers. * stands for any letters: eye*L fits Eye_big_L.").size(11.5).color(TEXT_DIM));
         let mut del_rule: Option<usize> = None;
         let mut rules_changed = false;
         for (i, r) in self.parts.rules.iter_mut().enumerate() {
@@ -435,7 +333,7 @@ impl SeviathApp {
                         }
                     }
                 });
-                if ui.small_button("Delete").clicked() {
+                if ui.small_button("Delete").help("Takes this away. You can undo it.").clicked() {
                     del_rule = Some(i);
                 }
             });
@@ -454,7 +352,7 @@ impl SeviathApp {
                     }
                 }
             });
-            if ui.button("Add rule").clicked() && !self.parts.new_rule.0.trim().is_empty() && self.parts.rules.len() < 200 {
+            if ui.button("Add rule").help("Keeps this name rule: layers whose name matches it get this tag.").clicked() && !self.parts.new_rule.0.trim().is_empty() && self.parts.rules.len() < 200 {
                 let pattern = self.parts.new_rule.0.trim().to_owned();
                 self.parts.rules.push(parts::NameRule { pattern, part });
                 self.parts.new_rule = (String::new(), None);
@@ -486,7 +384,7 @@ impl SeviathApp {
             ui.horizontal(|ui| {
                 ui.label(format!("{} ({} tags)", t.name, t.tags.len()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("Delete").clicked() {
+                    if ui.small_button("Delete").help("Takes this away. You can undo it.").clicked() {
                         delete = Some(t.name.clone());
                     }
                     if ui.small_button("Use").help("Tags the layers that have the same names").clicked() {
@@ -546,7 +444,6 @@ impl SeviathApp {
         });
         // clipping: cut layers to the shape of a part
         section_title(ui, "Clip the selected layers");
-        ui.label(RichText::new("Cuts them to the shape of a part, so they never go outside it (a skin patch on the face).").size(11.5).color(TEXT_DIM));
         let to = self.parts.clip_choice.unwrap_or(Part::Face);
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("clip_to_part").selected_text(to.label()).width(130.0).show_ui(ui, |ui| {
@@ -664,7 +561,7 @@ impl SeviathApp {
         egui::Area::new(egui::Id::new("parts_bar")).fixed_pos(rect.min + vec2(10.0, 8.0)).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
             ui.horizontal(|ui| {
                 ui.checkbox(&mut self.parts.codes, "Color codes");
-                if ui.small_button("Fit").clicked() {
+                if ui.small_button("Fit").help("Fits it to the page.").clicked() {
                     self.parts.zoom = 1.0;
                     self.parts.pan = Vec2::ZERO;
                 }

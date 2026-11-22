@@ -247,14 +247,14 @@ impl SeviathApp {
         let picked = rfd::FileDialog::new()
             .set_title("Open")
             .set_directory(&dir)
-            .add_filter("Everything SeviathStudio opens", &["seviath", "psd", "clip", "ora", "kra", "cmo3", "moc3", "json", "png", "jpg", "jpeg", "webp", "bmp", "gif"])
+            .add_filter("Everything SeviathStudio opens", &["seviath", "psd", "clip", "ora", "kra", "cmo3", "moc3", "json", "png", "jpg", "jpeg", "webp", "bmp", "gif", "tga"])
             .add_filter("SeviathStudio project", &["seviath"])
             .add_filter("Photoshop", &["psd"])
             .add_filter("Clip Studio Paint", &["clip"])
             .add_filter("Krita", &["kra"])
             .add_filter("Live2D Cubism model", &["cmo3", "moc3", "json"])
             .add_filter("OpenRaster (Krita, GIMP, MyPaint)", &["ora"])
-            .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "bmp", "gif"])
+            .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tga"])
             .pick_file();
         if let Some(p) = picked {
             self.request(Pending::Open(p));
@@ -310,6 +310,7 @@ impl SeviathApp {
             .add_filter("PNG picture", &["png"])
             .add_filter("JPEG picture", &["jpg", "jpeg"])
             .add_filter("WebP picture", &["webp"])
+            .add_filter("Targa picture (with alpha)", &["tga"])
             .add_filter("Photoshop (layers)", &["psd"])
             .add_filter("OpenRaster (layers)", &["ora"])
             .save_file();
@@ -330,6 +331,7 @@ impl SeviathApp {
             match kind_of(&path).as_str() {
                 "jpg" | "jpeg" => files::export_flat(&doc, &path, Flat::Jpeg, q, credit)?,
                 "webp" => files::export_flat(&doc, &path, Flat::Webp, q, credit)?,
+                "tga" => files::export_flat(&doc, &path, Flat::Tga, q, credit)?,
                 "psd" => std::fs::write(&path, psd::write(&files::bake(doc))).map_err(|e| e.to_string())?,
                 "ora" => ora::write(&files::bake(doc), &path)?,
                 _ => {
@@ -345,7 +347,7 @@ impl SeviathApp {
     pub(super) fn import_picture_dialog(&mut self, now: f64) {
         let picked = rfd::FileDialog::new()
             .set_title("Picture as a new layer")
-            .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "bmp", "gif"])
+            .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tga"])
             .pick_file();
         let Some(p) = picked else { return };
         match files::read_picture(&p) {
@@ -559,7 +561,7 @@ impl SeviathApp {
                     if ui.button(RichText::new("+ New project").strong()).clicked() {
                         self.open_new_project();
                     }
-                    if ui.button("Open a file…").clicked() {
+                    if ui.button("Open a file…").help("Opens a file from your computer.").clicked() {
                         self.open_dialog();
                     }
                     ui.add_space(12.0);
@@ -667,19 +669,19 @@ impl SeviathApp {
                                 action = Some((0, path.clone()));
                             }
                             resp.context_menu(|ui| {
-                                if ui.button("Open").clicked() {
+                                if ui.button("Open").help("Opens it.").clicked() {
                                     action = Some((0, path.clone()));
                                     ui.close();
                                 }
-                                if ui.button("Rename…").clicked() {
+                                if ui.button("Rename…").help("Changes the name.").clicked() {
                                     action = Some((4, path.clone()));
                                     ui.close();
                                 }
-                                if ui.button("Duplicate").clicked() {
+                                if ui.button("Duplicate").help("Makes a copy next to it.").clicked() {
                                     action = Some((1, path.clone()));
                                     ui.close();
                                 }
-                                if ui.button("Show in folder").clicked() {
+                                if ui.button("Show in folder").help("Shows the file in its folder.").clicked() {
                                     action = Some((3, path.clone()));
                                     ui.close();
                                 }
@@ -747,10 +749,10 @@ impl SeviathApp {
             let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(280.0).char_limit(120));
             r.request_focus();
             ui.horizontal(|ui| {
-                if ui.button("Rename").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                if ui.button("Rename").help("Changes the name.").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     done = Some(true);
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button("Cancel").help("Leaves without changing anything.").clicked() {
                     done = Some(false);
                 }
             });
@@ -779,8 +781,13 @@ impl SeviathApp {
 
     /// The File menu in the top bar.
     pub(super) fn file_menu(&mut self, ui: &mut Ui) {
+        self.hover_menu(ui, "File", false, |s, ui| s.file_items(ui));
+    }
+
+    /// What the File menu lists: opening, saving, exporting and the windows of the project.
+    fn file_items(&mut self, ui: &mut Ui) {
         let now = ui.input(|i| i.time);
-        ui.menu_button(RichText::new("File").color(TEXT), |ui| {
+        {
             ui.set_min_width(230.0);
             let item = |ui: &mut Ui, label: &str, keys: &str| {
                 ui.add(egui::Button::new(label).shortcut_text(keys)).clicked()
@@ -856,7 +863,7 @@ impl SeviathApp {
                 ui.close();
                 self.import_picture_dialog(now);
             }
-        });
+        }
     }
 }
 

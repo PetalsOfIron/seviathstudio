@@ -36,6 +36,16 @@ impl Ease {
     }
 
     /// The share of the change (0..1) at `t` (0..1) of the time between two keys.
+    /// The same movement played backward: slow at the start becomes slow at the end.
+    pub fn reversed(&self) -> Ease {
+        match self {
+            Ease::In => Ease::Out,
+            Ease::Out => Ease::In,
+            Ease::Bezier([x1, y1, x2, y2]) => Ease::Bezier([1.0 - x2, 1.0 - y2, 1.0 - x1, 1.0 - y1]),
+            e => *e,
+        }
+    }
+
     pub fn at(&self, t: f32) -> f32 {
         let t = t.clamp(0.0, 1.0);
         match self {
@@ -126,6 +136,50 @@ impl Track {
         self.keys.iter().position(|k| (k.frame - frame).abs() < 0.001).unwrap_or(0)
     }
 
+    /// The keys from `a` to `b` played backward (a loop that goes there and back, or a movement undone): the first key is where the last one was.
+    pub fn reverse_range(&mut self, a: f32, b: f32) {
+        let inside: Vec<usize> = (0..self.keys.len()).filter(|i| self.keys[*i].frame >= a - 0.001 && self.keys[*i].frame <= b + 0.001).collect();
+        if inside.len() < 2 {
+            return;
+        }
+        let old: Vec<Key> = inside.iter().map(|i| self.keys[*i]).collect();
+        let n = old.len();
+        for (m, i) in inside.iter().enumerate() {
+            let from = old[n - 1 - m];
+            // the way from this key to the next is the way the old one before it came, backward
+            let ease = if m + 1 < n { old[n - 2 - m].ease.reversed() } else { from.ease };
+            self.keys[*i] = Key { frame: a + b - from.frame, value: from.value, ease };
+        }
+        self.keys.sort_by(|p, q| p.frame.total_cmp(&q.frame));
+    }
+
+    /// The way between the keys from `a` to `b` is smoothed: straight stretches become S curves (slow in, slow out), so a movement does not start and stop
+    /// with a jolt. Keys that hold (Step) or have a curve of their own are left. Returns how many keys changed.
+    pub fn smooth_range(&mut self, a: f32, b: f32) -> usize {
+        let mut n = 0;
+        let last = self.keys.len().saturating_sub(1);
+        for (i, k) in self.keys.iter_mut().enumerate() {
+            if i < last && k.frame >= a - 0.001 && k.frame <= b + 0.001 && k.ease == Ease::Linear {
+                k.ease = Ease::InOut;
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// The keys from `a` to `b`, with their frames counted from `a` (to paste somewhere else).
+    pub fn copy_range(&self, a: f32, b: f32) -> Vec<Key> {
+        self.keys.iter().filter(|k| k.frame >= a - 0.001 && k.frame <= b + 0.001).map(|k| Key { frame: k.frame - a, ..*k }).collect()
+    }
+
+    /// Keys copied with `copy_range`, put so the first is at `at` (keys already there are replaced).
+    pub fn put_keys(&mut self, keys: &[Key], at: f32) {
+        for k in keys {
+            let i = self.set_key((at + k.frame).max(0.0), k.value, k.ease);
+            self.keys[i].ease = k.ease;
+        }
+    }
+
     pub fn key_at(&self, frame: f32) -> Option<usize> {
         self.keys.iter().position(|k| (k.frame - frame).abs() < 0.5)
     }
@@ -143,6 +197,21 @@ impl Track {
         self.keys.sort_by(|a, b| a.frame.total_cmp(&b.frame));
         self.keys.iter().position(|o| (o.frame - k.frame).abs() < 0.001).unwrap_or(0)
     }
+}
+
+/// A shape of a changer at one frame, put by hand on the timeline (Form Animation): it is the whole shape of the changer at that frame.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct FormKey {
+    pub frame: f32,
+    pub form: crate::rig::Form,
+}
+
+/// The shapes of one changer over the frames, set by hand: between two keys the shape goes from one to the other, before the first key and after the last the
+/// sliders decide again. This is for a look that happens once (a squeeze of the eyes, a gust in the hair) and is not worth a slider.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct FormTrack {
+    pub changer: Id,
+    pub keys: Vec<FormKey>,
 }
 
 /// From this frame on a track shows this drawing (a layer) until the next exposure; None shows nothing (a blank frame).
@@ -269,10 +338,14 @@ pub struct Animation {
     pub looping: bool,
     /// When looping, go back and forth instead of jumping back.
     pub ping_pong: bool,
+    /// Limited animation: the picture only changes every this many frames (1 is every frame, 2 "on twos", 3 "on threes").
+    pub step: u32,
     pub tracks: Vec<Track>,
     pub markers: Vec<Marker>,
     pub audio: Option<AudioRef>,
     pub cel_tracks: Vec<CelTrack>,
+    /// Shapes of changers keyed by hand on the timeline.
+    pub forms: Vec<FormTrack>,
     pub onion: Onion,
     pub shake: crate::camera::Shake,
     next_id: u32,
@@ -280,7 +353,7 @@ pub struct Animation {
 
 impl Default for Animation {
     fn default() -> Self {
-        Animation { fps: 24.0, length: 120, range: None, looping: true, ping_pong: false, tracks: Vec::new(), markers: Vec::new(), audio: None, cel_tracks: Vec::new(), onion: Onion::default(), shake: crate::camera::Shake::default(), next_id: 1 }
+        Animation { fps: 24.0, length: 120, range: None, looping: true, ping_pong: false, step: 1, tracks: Vec::new(), markers: Vec::new(), audio: None, cel_tracks: Vec::new(), forms: Vec::new(), onion: Onion::default(), shake: crate::camera::Shake::default(), next_id: 1 }
     }
 }
 
@@ -347,6 +420,20 @@ impl Animation {
         Some([m.frame, end.max(m.frame + 1).min(self.length.saturating_sub(1).max(m.frame + 1))])
     }
 
+    /// The part (a marker and what follows it) that is named `tracking_lost`: it is built into the model, and the program that shows the model plays it by
+    /// itself when the tracker loses the face.
+    pub fn lost_part(&self) -> Option<[u32; 2]> {
+        let i = self.markers.iter().position(|m| m.name.trim().eq_ignore_ascii_case("tracking_lost"))?;
+        self.marker_range(i)
+    }
+
+    /// The frame of the `tracking_lost` part after `seconds` of the face being lost: it plays from its start and goes round and round. None when there is none.
+    pub fn lost_frame(&self, seconds: f32) -> Option<f32> {
+        let [a, b] = self.lost_part()?;
+        let span = (b - a + 1) as f32;
+        Some(a as f32 + (seconds.max(0.0) * self.fps.max(1.0)).rem_euclid(span))
+    }
+
     /// Make (or remake) the track of a slider from a value in 0 to 1 for every frame (the mouth from the loudness of a sound): the keys
     /// that matter, scaled to the range of the slider. Returns how many keys the track has.
     pub fn set_from_curve(&mut self, param: Id, name: &str, values: &[f32], lo: f32, hi: f32) -> usize {
@@ -358,6 +445,20 @@ impl Animation {
             self.tracks[t].set_key(f, v, Ease::Linear);
         }
         self.tracks[t].keys.len()
+    }
+
+    /// The track of a slider gets the keys that matter of `samples` (frame, value) inside the frames they cover: what was keyed there is replaced, the keys
+    /// before and after are kept. Used to bake things that move a slider by themselves (the swinging of hair) into keys. Returns how many keys the span has.
+    pub fn set_from_samples(&mut self, param: Id, name: &str, samples: &[(f32, f32)], tolerance: f32) -> usize {
+        let (Some(first), Some(last)) = (samples.first(), samples.last()) else { return 0 };
+        let (a, b) = (first.0, last.0);
+        let t = self.track_for(Target::Param(param), name);
+        self.tracks[t].keys.retain(|k| k.frame < a - 0.001 || k.frame > b + 0.001);
+        let keys = simplify(samples, tolerance.max(1e-5));
+        for (f, v) in &keys {
+            self.tracks[t].set_key(*f, *v, Ease::Linear);
+        }
+        keys.len()
     }
 
     /// A new frame by frame track on a folder with its first drawing, shown from frame 0. Returns its index.
@@ -420,7 +521,63 @@ impl Animation {
 
     /// What every track that is on says at `frame`.
     pub fn sample(&self, frame: f32) -> Vec<(Target, f32)> {
+        let frame = self.stepped(frame);
         self.tracks.iter().filter(|t| !t.muted).filter_map(|t| t.value_at(frame).map(|v| (t.target, v))).collect()
+    }
+
+    /// A shape of a changer is kept at `frame` (one that is there is replaced).
+    pub fn set_form_key(&mut self, changer: Id, frame: f32, form: crate::rig::Form) {
+        let i = match self.forms.iter().position(|t| t.changer == changer) {
+            Some(i) => i,
+            None => {
+                self.forms.push(FormTrack { changer, keys: Vec::new() });
+                self.forms.len() - 1
+            }
+        };
+        let keys = &mut self.forms[i].keys;
+        keys.retain(|k| (k.frame - frame).abs() > 0.001);
+        keys.push(FormKey { frame, form });
+        keys.sort_by(|a, b| a.frame.total_cmp(&b.frame));
+    }
+
+    /// The key of a changer at `frame` goes; the track goes with its last key. Returns whether there was one.
+    pub fn remove_form_key(&mut self, changer: Id, frame: f32) -> bool {
+        let Some(i) = self.forms.iter().position(|t| t.changer == changer) else { return false };
+        let before = self.forms[i].keys.len();
+        self.forms[i].keys.retain(|k| (k.frame - frame).abs() > 0.5);
+        let gone = self.forms[i].keys.len() < before;
+        if self.forms[i].keys.is_empty() {
+            self.forms.remove(i);
+        }
+        gone
+    }
+
+    /// The shapes keyed by hand that are on at `frame`: between the first and last key of a changer, mixed between the two keys around the frame.
+    pub fn form_at(&self, frame: f32) -> Vec<(Id, crate::rig::Form)> {
+        let frame = self.stepped(frame);
+        self.forms
+            .iter()
+            .filter_map(|t| {
+                let (first, last) = (t.keys.first()?, t.keys.last()?);
+                if frame < first.frame - 0.001 || frame > last.frame + 0.001 {
+                    return None;
+                }
+                let i = t.keys.partition_point(|k| k.frame <= frame).saturating_sub(1);
+                let (a, b) = (&t.keys[i], t.keys.get(i + 1).unwrap_or(&t.keys[i]));
+                let span = (b.frame - a.frame).max(1e-6);
+                let share = ((frame - a.frame) / span).clamp(0.0, 1.0);
+                Some((t.changer, crate::rig::lerp_form(&a.form, &b.form, share)))
+            })
+            .collect()
+    }
+
+    /// The frame that is shown at `frame` when the picture changes only every `step` frames.
+    pub fn stepped(&self, frame: f32) -> f32 {
+        if self.step <= 1 {
+            frame
+        } else {
+            (frame / self.step as f32).floor() * self.step as f32
+        }
     }
 
     /// The last frame with a key (the animation can be cut to this).
@@ -702,5 +859,83 @@ mod tests {
         b.add_clip(&clip, 0.0, &|_| String::new(), &|_| 10.0);
         let s = &b.tracks[0];
         assert!((s.keys.last().unwrap().frame - 58.0).abs() < 1.1, "{:?}", s.keys.last());
+    }
+
+    #[test]
+    fn keys_can_be_reversed_copied_and_pasted_and_the_picture_can_change_on_twos() {
+        let mut tr = Track { id: 1, name: "t".into(), target: Target::CameraX, keys: Vec::new(), muted: false };
+        tr.set_key(0.0, 0.0, Ease::In);
+        tr.set_key(10.0, 5.0, Ease::Linear);
+        tr.set_key(20.0, 20.0, Ease::Linear);
+        tr.set_key(40.0, 99.0, Ease::Linear);
+        tr.reverse_range(0.0, 20.0);
+        let frames: Vec<(f32, f32)> = tr.keys.iter().map(|k| (k.frame, k.value)).collect();
+        assert_eq!(frames, vec![(0.0, 20.0), (10.0, 5.0), (20.0, 0.0), (40.0, 99.0)], "the part is backward, the key outside is not touched");
+        assert_eq!(tr.keys[1].ease, Ease::Out, "slow at the start of the way there is slow at the end of the way back");
+        assert_eq!(Ease::Bezier([0.1, 0.2, 0.3, 0.4]).reversed(), Ease::Bezier([0.7, 0.6, 0.9, 0.8]));
+        // copy a part and paste it later
+        let part = tr.copy_range(0.0, 20.0);
+        assert_eq!(part.len(), 3);
+        let mut other = Track { id: 2, name: "o".into(), target: Target::CameraY, keys: Vec::new(), muted: false };
+        other.put_keys(&part, 30.0);
+        assert_eq!(other.keys.iter().map(|k| k.frame).collect::<Vec<_>>(), vec![30.0, 40.0, 50.0]);
+        assert_eq!(other.keys[1].ease, tr.keys[1].ease);
+        // on twos: frames 4 and 5 show the same
+        let mut a = Animation { length: 50, ..Default::default() };
+        let ti = a.track_for(Target::CameraX, "x");
+        a.tracks[ti].set_key(0.0, 0.0, Ease::Linear);
+        a.tracks[ti].set_key(10.0, 10.0, Ease::Linear);
+        a.step = 2;
+        assert_eq!(a.sample(5.0), a.sample(4.0));
+        assert_ne!(a.sample(6.0), a.sample(4.0));
+        a.step = 1;
+        assert_ne!(a.sample(5.0), a.sample(4.0));
+    }
+
+    #[test]
+    fn shapes_keyed_by_hand_mix_between_keys_and_are_off_outside_them() {
+        use crate::rig::Form;
+        let mut a = Animation::default();
+        a.set_form_key(5, 10.0, Form::Rot { deg: 0.0 });
+        a.set_form_key(5, 20.0, Form::Rot { deg: 40.0 });
+        assert!(a.form_at(5.0).is_empty(), "before the first key the sliders decide");
+        assert!(a.form_at(25.0).is_empty(), "after the last too");
+        assert_eq!(a.form_at(15.0), vec![(5, Form::Rot { deg: 20.0 })]);
+        assert_eq!(a.form_at(20.0), vec![(5, Form::Rot { deg: 40.0 })]);
+        a.set_form_key(5, 20.0, Form::Rot { deg: 10.0 });
+        assert_eq!(a.forms[0].keys.len(), 2, "a key at the same frame is replaced");
+        assert!(a.remove_form_key(5, 10.0) && a.remove_form_key(5, 20.0));
+        assert!(a.forms.is_empty(), "the track goes with its last key");
+        assert!(!a.remove_form_key(5, 20.0));
+    }
+
+    #[test]
+    fn straight_stretches_become_s_curves_and_curves_of_their_own_are_kept() {
+        let mut tr = Track { id: 1, name: "t".into(), target: Target::CameraX, keys: Vec::new(), muted: false };
+        tr.set_key(0.0, 0.0, Ease::Linear);
+        tr.set_key(10.0, 5.0, Ease::Step);
+        tr.set_key(20.0, 9.0, Ease::Linear);
+        tr.set_key(30.0, 9.0, Ease::Linear);
+        tr.set_key(40.0, 1.0, Ease::Linear);
+        assert_eq!(tr.smooth_range(0.0, 30.0), 3, "the keys at 0, 20 and 30; the step stays, and the last key has no way after it");
+        assert_eq!(tr.keys[0].ease, Ease::InOut);
+        assert_eq!(tr.keys[1].ease, Ease::Step);
+        assert_eq!(tr.keys[4].ease, Ease::Linear, "outside the range");
+        assert!(tr.value_at(2.0).unwrap() < 2.0 * 0.5, "slow at the start");
+    }
+
+    #[test]
+    fn the_part_named_tracking_lost_plays_round_and_round_when_the_face_is_lost() {
+        let mut a = Animation { length: 100, fps: 10.0, ..Default::default() };
+        assert_eq!(a.lost_part(), None);
+        assert_eq!(a.lost_frame(1.0), None);
+        a.set_marker(0, "Idle");
+        a.set_marker(40, " Tracking_Lost ");
+        a.set_marker(60, "Wave");
+        assert_eq!(a.lost_part(), Some([40, 59]), "up to the next marker");
+        assert_eq!(a.lost_frame(0.0), Some(40.0));
+        assert_eq!(a.lost_frame(0.5), Some(45.0));
+        assert_eq!(a.lost_frame(2.0), Some(40.0), "20 frames long: it is back at its start");
+        assert_eq!(a.lost_frame(2.3), Some(43.0));
     }
 }

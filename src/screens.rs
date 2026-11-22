@@ -1860,69 +1860,6 @@ fn panel_and_workspace_screens() {
 }
 
 #[test]
-fn parts_tab_screens() {
-    use crate::doc::LayerKind;
-    use crate::parts::Part;
-    use egui_kittest::kittest::Queryable;
-    let _gpu = lock_gpu();
-    let mut h = Harness::builder().with_size([1440.0, 1500.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
-    h.run_steps(4);
-    // a small character sheet: named layers with paint in the right places (the page is 3000 x 4000)
-    {
-        let d = h.state_mut().draw_mut();
-        let (w, h2) = (d.doc.w, d.doc.h);
-        let mut add = |name: &str, x: i32, y: i32, bw: u32, bh: u32, c: [u8; 3]| {
-            let img = image::RgbaImage::from_pixel(bw, bh, image::Rgba([c[0], c[1], c[2], 255]));
-            let mut l = d.doc.new_layer(name, LayerKind::Raster);
-            l.tiles = crate::files::tiles_from_rgba(&img, x, y, w, h2);
-            l.rev += 1;
-            d.doc.layers.insert(0, l);
-        };
-        add("Face", 900, 700, 1200, 1500, [240, 210, 190]);
-        add("Eye L", 1560, 1250, 300, 140, [40, 60, 120]);
-        add("Eye R", 1140, 1250, 300, 140, [40, 60, 120]);
-        add("Mouth", 1350, 1700, 300, 90, [190, 70, 80]);
-        add("Hair front", 800, 500, 1400, 450, [120, 60, 160]);
-        add("Layer 9", 100, 3000, 400, 400, [90, 90, 90]);
-        d.doc.mark_all_dirty();
-    }
-    h.state_mut().test_run_action_now("tab.2");
-    h.run_steps(5);
-    h.get_by_label("Suggest tags").click();
-    h.run_steps(3);
-    let n = h.state_mut().test_parts().suggestions.len();
-    assert!(n >= 5, "names are understood: {n} suggestions");
-    h.get_by_label("Accept the sure ones").click();
-    h.run_steps(4);
-    {
-        let d = h.state().draw_mut_ref();
-        let tag = |n: &str| d.doc.layers.iter().find(|l| l.name == n).and_then(|l| l.part);
-        assert_eq!(tag("Eye L"), Some(Part::EyeL));
-        assert_eq!(tag("Eye R"), Some(Part::EyeR));
-        assert_eq!(tag("Mouth"), Some(Part::Mouth));
-        assert_eq!(tag("Hair front"), Some(Part::HairFront));
-        assert_eq!(tag("Face"), Some(Part::Face));
-        assert_eq!(tag("Layer 9"), None, "an unnamed blob is not tagged by itself");
-    }
-    assert!(h.state().history().entries.last().unwrap().label.contains("suggested"));
-    assert_eq!(h.state().history().entries.last().unwrap().tab, crate::tabs::Tab::Parts);
-    save(&mut h, "parts_01_tagged");
-    // not ready while a layer has no tag
-    assert!(!h.state().draw_mut_ref().doc.meta.parts_ready);
-    let blob = h.state().draw_mut_ref().doc.layers.iter().find(|l| l.name == "Layer 9").unwrap().id;
-    h.state_mut().test_tag(&[blob], Some(Part::Accessory));
-    h.run_steps(4);
-    h.get_by_label("Mark as ready to rig").click();
-    h.run_steps(3);
-    assert!(h.state().draw_mut_ref().doc.meta.parts_ready, "ready to rig");
-    // undo takes the last step back (undo in this tab)
-    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
-    h.run_steps(3);
-    assert!(!h.state().draw_mut_ref().doc.meta.parts_ready);
-    save(&mut h, "parts_02_checklist");
-}
-
-#[test]
 fn prerig_screens() {
     use crate::doc::LayerKind;
     use egui_kittest::kittest::Queryable;
@@ -1960,9 +1897,7 @@ fn prerig_screens() {
         d.doc.layers.insert(0, l);
         d.doc.mark_all_dirty();
     }
-    h.state_mut().test_run_action_now("tab.2");
-    h.run_steps(3);
-    h.get_by_label("Pre-rig improver").click();
+    h.state_mut().test_run_action_now("win.prerig");
     h.run_steps(5);
     {
         let n = h.state_mut().test_prerig().problems.len();
@@ -2036,7 +1971,7 @@ fn rig_tab_screens() {
     h.run_steps(5);
     // meshes for everything that is tagged
     rig_tool(&mut h, "meshes");
-    h.get_by_label("Mesh all tagged parts").click();
+    h.get_by_label("Mesh all parts").click();
     h.run_steps(4);
     {
         let rig = h.state().draw_mut_ref().doc.rig.clone();
@@ -2102,58 +2037,6 @@ fn rig_tab_screens() {
     assert!(h.state_mut().test_moved(arm) < 1.0, "and is straight again in the middle");
     save(&mut h, "rig_03_warp");
     let _ = warp;
-}
-
-#[test]
-fn parts_one_click_button() {
-    use crate::doc::LayerKind;
-    use crate::parts::Part;
-    use egui_kittest::kittest::Queryable;
-    let _gpu = lock_gpu();
-    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
-    h.run_steps(4);
-    {
-        let d = h.state_mut().draw_mut();
-        let (w, h2) = (d.doc.w, d.doc.h);
-        let mut add = |name: &str, x: i32, y: i32, bw: u32, bh: u32| {
-            let img = image::RgbaImage::from_pixel(bw, bh, image::Rgba([120, 120, 200, 255]));
-            let mut l = d.doc.new_layer(name, LayerKind::Raster);
-            l.tiles = crate::files::tiles_from_rgba(&img, x, y, w, h2);
-            l.rev += 1;
-            d.doc.layers.insert(0, l);
-        };
-        add("Eye L", 1560, 1250, 300, 140);
-        add("Mouth", 1350, 1700, 300, 90);
-        add("sparkle 3", 100, 3000, 200, 200);
-        add("Layer 9", 2400, 3500, 200, 200);
-        d.doc.mark_all_dirty();
-    }
-    h.state_mut().test_run_action_now("tab.2");
-    h.run_steps(4);
-    // a rule of my own for "sparkle"
-    h.state_mut().test_parts().new_rule = ("sparkle*".into(), Some(Part::Accessory));
-    h.run_steps(2);
-    h.get_by_label("Add rule").click();
-    h.run_steps(3);
-    assert_eq!(h.state_mut().test_parts().rules.len(), 1);
-    h.get_by_label("Tag everything for me").click();
-    h.run_steps(4);
-    {
-        let d = h.state().draw_mut_ref();
-        let tag = |n: &str| d.doc.layers.iter().find(|l| l.name == n).and_then(|l| l.part);
-        assert_eq!(tag("Eye L"), Some(Part::EyeL));
-        assert_eq!(tag("Mouth"), Some(Part::Mouth));
-        assert_eq!(tag("Layer 9"), None, "an unnamed layer is left alone without guesses");
-    }
-    assert!(h.state().history().entries.last().unwrap().label.contains("automatically"));
-    save(&mut h, "parts_03_auto");
-    // undo puts it all back in one step
-    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
-    h.run_steps(3);
-    assert!(h.state().draw_mut_ref().doc.layers.iter().all(|l| l.part.is_none()));
-    // a rule that is typed stays in the file for next time
-    assert_eq!(crate::parts::load_rules().len(), 1);
-    let _ = std::fs::remove_file(std::env::temp_dir().join(format!("seviath_name_rules_{}.json", std::process::id())));
 }
 
 #[test]
@@ -2906,7 +2789,7 @@ fn physics_tab_screens() {
     h.run_steps(5);
     h.state_mut().test_auto_face();
     h.run_steps(5);
-    h.state_mut().test_run_action_now("tab.4");
+    h.state_mut().test_run_action_now("tab.physics");
     h.run_steps(5);
     let layer = |h: &Harness<'_, SeviathApp>, n: &str| h.state().draw_mut_ref().doc.layers.iter().find(|l| l.name == n).unwrap().id;
     let (back, ring) = (layer(&h, "hair back"), layer(&h, "earring"));
@@ -3246,7 +3129,7 @@ fn live2d_runtime_physics_screens() {
         r.param_physics = crate::import::runtime::parse_physics3(phys).unwrap();
         r.expressions = vec![crate::import::runtime::parse_exp3("tilt", br#"{"Parameters":[{"Id":"ParamAngleX","Value":10,"Blend":"Add"}]}"#).unwrap()];
     });
-    h.state_mut().test_run_action_now("tab.4");
+    h.state_mut().test_run_action_now("tab.physics");
     h.run_steps(4);
     save(&mut h, "physics_live2d_files");
     // the head turns: the hair swings and gives values to its slider; the values the user set are not changed
@@ -3292,7 +3175,7 @@ fn animate_tab_screens() {
         layer = r.meshes.first().map(|m| m.layer).unwrap_or(0);
     });
     let _ = layer;
-    h.state_mut().test_run_action_now("tab.5");
+    h.state_mut().test_run_action_now("tab.animate");
     h.run_steps(5);
     // at frame 0 and at frame 12 the character looks different
     h.state_mut().test_anim().frame = 0.0;
@@ -3345,7 +3228,7 @@ fn animate_tab_keys_autokey_and_undo() {
     h.state_mut().test_rig_edit(|r| {
         r.anim.track_for(Target::Param(id), &name);
     });
-    h.state_mut().test_run_action_now("tab.5");
+    h.state_mut().test_run_action_now("tab.animate");
     h.run_steps(4);
     // K puts a key on the picked track at the playhead, with the value of the slider
     h.state_mut().test_anim().sel_track = Some(0);
@@ -3398,7 +3281,7 @@ fn animation_is_saved_as_gif_and_mp4() {
         r.anim.tracks[t].set_key(0.0, lo, Ease::Linear);
         r.anim.tracks[t].set_key(9.0, hi, Ease::Linear);
     });
-    h.state_mut().test_run_action_now("tab.5");
+    h.state_mut().test_run_action_now("tab.animate");
     h.run_steps(4);
     let dir = std::env::temp_dir().join(format!("seviath_anim_vid_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -3441,7 +3324,7 @@ fn stream_tab_follows_a_sent_face_and_serves_the_picture() {
         r.tracking.maps.push(crate::track::Map { param: id, input: "MouthOpen".into(), in_lo: 0.0, in_hi: 1.0, out_lo: lo, out_hi: hi, clamp: true, smoothing: 0.0, invert: false });
         r.tracking.auto_blink = false;
     });
-    h.state_mut().test_run_action_now("tab.6");
+    h.state_mut().test_run_action_now("tab.4");
     h.run_steps(3);
     h.state_mut().test_stream().sources[1].port = 48_555;
     h.state_mut().test_stream_source(1, true);
@@ -3619,7 +3502,7 @@ fn animate_tab_sound_waveform_and_mouth() {
         r.anim.fps = 24.0;
         r.anim.audio = Some(crate::anim::AudioRef { path: p2, offset: 0.0 });
     });
-    h.state_mut().test_run_action_now("tab.5");
+    h.state_mut().test_run_action_now("tab.animate");
     h.run_steps(6);
     assert!(h.state_mut().test_anim().audio.is_some(), "the sound was read: {:?}", h.state_mut().test_anim().message);
     // the mouth from the sound: open in the loud first second (24 frames), shut in the quiet second
@@ -3656,7 +3539,7 @@ fn animate_tab_cels_show_by_frame_and_save() {
     let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     h.state_mut().draw_mut().replace_document(Document::new(400, 300));
-    h.state_mut().test_run_action_now("tab.5");
+    h.state_mut().test_run_action_now("tab.animate");
     h.run_steps(3);
     h.state_mut().test_rig_edit(|r| {
         r.anim.length = 6;
@@ -3697,7 +3580,7 @@ fn animate_tab_cels_show_by_frame_and_save() {
     h.run_steps(4);
     assert_eq!(h.state().draw_mut_ref().onion.len(), 1, "one ghost: the red drawing of frame 3");
     save(&mut h, "animate_4_onion_in_draw");
-    h.state_mut().test_run_action_now("tab.5");
+    h.state_mut().test_run_action_now("tab.animate");
     h.run_steps(3);
     // the pictures put together: red at frame 1, blue at frame 4, see-through around
     let ctx = h.ctx.clone();
@@ -3791,7 +3674,7 @@ fn animate_tab_pictures_become_drawings() {
     let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     h.state_mut().draw_mut().replace_document(Document::new(400, 300));
-    h.state_mut().test_run_action_now("tab.5");
+    h.state_mut().test_run_action_now("tab.animate");
     h.run_steps(3);
     // a GIF of three frames, read back as three pictures
     let path = std::env::temp_dir().join(format!("seviath_frames_{}.gif", std::process::id()));
@@ -3894,7 +3777,7 @@ fn animate_tab_rig_and_cels_together() {
     let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     h.state_mut().draw_mut().replace_document(doc);
-    h.state_mut().test_run_action_now("tab.5");
+    h.state_mut().test_run_action_now("tab.animate");
     h.run_steps(3);
     h.state_mut().test_rig_edit(|r| r.anim.length = 2);
     h.state_mut().test_cel_new_track();
@@ -3944,7 +3827,7 @@ fn small_window_screens_of_the_new_tabs() {
         r.anim.set_marker(0, "Idle");
         r.own_exprs.push(crate::expressions::OwnExpr { name: "Happy".into(), ..Default::default() });
     });
-    for (action, name) in [("tab.5", "small_animate"), ("tab.6", "small_stream"), ("tab.3", "small_rig")] {
+    for (action, name) in [("tab.animate", "small_animate"), ("tab.4", "small_stream"), ("tab.3", "small_rig")] {
         h.state_mut().test_run_action_now(action);
         h.run_steps(5);
         save(&mut h, name);
@@ -3996,21 +3879,21 @@ fn the_rig_workbench_is_the_same_in_the_rig_physics_and_animate_tabs() {
     rig_tool(&mut h, "new:Warp");
     h.get_by_label("Make the Warp changer");
     h.get_by_label("Parameters");
-    h.get_by_label("Look at the rig");
+    h.get_by_label("Test motion");
     assert!(h.query_by_label("Auto-rig").is_none(), "there is no automatic rig on the screen");
     save(&mut h, "workbench_1_rig");
     h.get_by_label("Make the Warp changer").click();
     h.run_steps(4);
     assert!(h.state().draw_mut_ref().doc.rig.changers.iter().any(|c| matches!(c.kind, crate::rig::Kind::Warp { .. })), "the warp changer is made by the window");
     // the Physics tab has the same tools and the physics window
-    h.state_mut().test_run_action_now("tab.4");
+    h.state_mut().test_run_action_now("tab.physics");
     h.run_steps(5);
     rig_tool(&mut h, "check");
     h.get_by_label("Check the physics");
     h.get_by_label("Parameters");
     save(&mut h, "workbench_2_physics");
     // the Animate tab too, and the rig can be edited on the picture there
-    h.state_mut().test_run_action_now("tab.5");
+    h.state_mut().test_run_action_now("tab.animate");
     h.run_steps(5);
     h.state_mut().test_open_tool("changers");
     h.state_mut().test_rig().bench.edit_here = true;
@@ -4108,7 +3991,7 @@ fn a_physics_group_made_by_hand_moves_its_output_slider() {
     let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
     h.state_mut().draw_mut().replace_document(doc);
-    h.state_mut().test_run_action_now("tab.4");
+    h.state_mut().test_run_action_now("tab.physics");
     h.run_steps(5);
     h.state_mut().test_add_physics_group(0);
     rig_tool(&mut h, "groups");
@@ -4223,7 +4106,7 @@ fn mesh_tab_screens() {
     let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1500.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
-    h.state_mut().test_run_action_now("tab.7");
+    h.state_mut().test_run_action_now("tab.5");
     h.run_steps(4);
     {
         let g = h.state_mut().test_mesh();
@@ -4261,7 +4144,7 @@ fn a_mesh_is_rigged_by_hand_and_saved_with_its_bones_weights_and_animations() {
     let glb = crate::meshfile::write_glb(&mesh, None, &[], 30.0);
     let mut h = Harness::builder().with_size([1500.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
-    h.state_mut().test_run_action_now("tab.7");
+    h.state_mut().test_run_action_now("tab.5");
     h.state_mut().test_mesh_show(glb);
     h.state_mut().test_mesh().page = crate::app::mesh_page_rig();
     h.run_steps(5);
@@ -4297,7 +4180,7 @@ fn a_mesh_is_rigged_in_parts_and_animated_by_hand() {
     let glb = crate::meshfile::write_glb(&mesh, None, &[], 30.0);
     let mut h = Harness::builder().with_size([1500.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
-    h.state_mut().test_run_action_now("tab.7");
+    h.state_mut().test_run_action_now("tab.5");
     h.state_mut().test_mesh_show(glb);
     h.state_mut().test_mesh().page = crate::app::mesh_page_parts();
     h.run_steps(4);
@@ -4342,7 +4225,7 @@ fn bases_page_screens() {
     let _gpu = lock_gpu();
     let mut h = Harness::builder().with_size([1500.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
-    h.state_mut().test_run_action_now("tab.7");
+    h.state_mut().test_run_action_now("tab.5");
     h.state_mut().test_mesh().page = crate::app::mesh_page_bases();
     h.run_steps(4);
     save(&mut h, "bases_1_empty");
@@ -4441,7 +4324,7 @@ fn an_imported_mesh_is_turned_scaled_coloured_and_sculpted() {
     std::fs::write(&path, crate::app::obj_text_for_test(&m, "thing")).unwrap();
     let mut h = Harness::builder().with_size([1500.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
     h.run_steps(4);
-    h.state_mut().test_run_action_now("tab.7");
+    h.state_mut().test_run_action_now("tab.5");
     h.state_mut().test_mesh_import(&path).expect("the file opens");
     h.state_mut().test_mesh().page = crate::app::mesh_page_edit();
     h.run_steps(5);
@@ -4460,3 +4343,274 @@ fn an_imported_mesh_is_turned_scaled_coloured_and_sculpted() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn the_animation_rows_can_be_reversed_copied_and_pasted() {
+    use crate::anim::{Ease, Target};
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    let params: Vec<(u32, String)> = h.state().draw_mut_ref().doc.rig.params.iter().map(|p| (p.id, p.name.clone())).collect();
+    assert!(params.len() >= 2);
+    h.state_mut().test_rig_edit(|r| {
+        r.anim.length = 40;
+        for (id, name) in params.iter().take(2) {
+            let t = r.anim.track_for(Target::Param(*id), name);
+            r.anim.tracks[t].set_key(0.0, 0.0, Ease::Linear);
+            r.anim.tracks[t].set_key(10.0, 1.0, Ease::Linear);
+            r.anim.tracks[t].set_key(20.0, 3.0, Ease::Linear);
+        }
+        r.anim.range = Some([0, 20]);
+    });
+    let first_values = |h: &Harness<'_, SeviathApp>, row: usize| -> Vec<f32> { h.state().draw_mut_ref().doc.rig.anim.tracks[row].keys.iter().map(|k| k.value).collect() };
+    // nothing is picked or ticked: every row is reversed, inside the part that plays
+    h.state_mut().test_keys("reverse", false);
+    assert_eq!(first_values(&h, 0), vec![3.0, 1.0, 0.0]);
+    assert_eq!(first_values(&h, 1), vec![3.0, 1.0, 0.0]);
+    // copy both rows, paste at frame 20: they go on their own tracks, and the animation grows to hold them
+    h.state_mut().test_keys("copy", false);
+    assert_eq!(h.state().test_anim_clip_len(), 2);
+    h.state_mut().test_anim().frame = 30.0;
+    h.state_mut().test_keys("paste", false);
+    let (frames, length) = {
+        let a = &h.state().draw_mut_ref().doc.rig.anim;
+        (a.tracks[0].keys.iter().map(|k| k.frame).collect::<Vec<_>>(), a.length)
+    };
+    assert_eq!(frames, vec![0.0, 10.0, 20.0, 30.0, 40.0, 50.0]);
+    assert!(length >= 51, "{length}");
+    // the second row is ticked: a paste to the ticked rows puts the first copied track there
+    let id = h.state().draw_mut_ref().doc.rig.anim.tracks[1].id;
+    h.state_mut().test_anim().rows = vec![id];
+    h.state_mut().test_anim().frame = 0.0;
+    h.state_mut().test_keys("paste", true);
+    assert_eq!(first_values(&h, 1).len(), 6, "the keys that were there at frame 0..20 are replaced, the pasted ones from frame 30 stay");
+}
+
+#[test]
+fn the_swinging_of_the_sliders_can_be_baked_into_keys() {
+    use crate::anim::{Ease, Target};
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    h.state_mut().test_run_action_now("tab.physics");
+    h.run_steps(5);
+    h.state_mut().test_add_physics_group(0);
+    let rig = h.state().draw_mut_ref().doc.rig.clone();
+    let ax = rig.params.iter().find(|p| p.name == "Angle X").map(|p| p.id).unwrap();
+    h.state_mut().test_rig_edit(|r| {
+        r.anim.length = 30;
+        r.anim.fps = 24.0;
+        let t = r.anim.track_for(Target::Param(ax), "Angle X");
+        r.anim.tracks[t].set_key(0.0, 0.0, Ease::Linear);
+        r.anim.tracks[t].set_key(8.0, 28.0, Ease::Linear);
+        r.anim.tracks[t].set_key(16.0, -28.0, Ease::Linear);
+        r.anim.tracks[t].set_key(29.0, 0.0, Ease::Linear);
+    });
+    let n = h.state_mut().bake_physics(0.0);
+    assert!(n >= 3, "the swing is written as keys: {n}");
+    let a = h.state().draw_mut_ref().doc.rig.anim.clone();
+    let sway = a.tracks.iter().find(|t| t.name == "Hair sway").expect("a track for the output slider");
+    assert!(sway.keys.iter().any(|k| k.value.abs() > 0.01), "the hair moved: {:?}", sway.keys);
+    assert!(!h.state_mut().test_phys().on, "the preview is off, so the swing is not added twice");
+}
+
+#[test]
+fn the_points_tool_picks_welds_and_shows_the_points() {
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 900.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    let first = h.state().draw_mut_ref().doc.layers.iter().find(|l| l.kind == crate::doc::LayerKind::Raster && !l.tiles.is_empty()).map(|l| l.id).unwrap();
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    h.state_mut().test_rig().selected = vec![first];
+    rig_tool(&mut h, "meshes");
+    h.get_by_label("Make mesh for the picked parts").click();
+    h.run_steps(4);
+    let (n, nt) = {
+        let m = h.state().draw_mut_ref().doc.rig.meshes.iter().find(|m| m.layer == first).cloned().expect("a mesh");
+        (m.verts.len(), m.tris.len())
+    };
+    assert!(n > 4);
+    rig_tool(&mut h, "points");
+    h.run_steps(4);
+    h.get_by_label("Weld the picked");
+    save(&mut h, "rig_points_tool");
+    // pick the points in a corner of the page and weld them
+    let all = h.state().draw_mut_ref().doc.rig.meshes.iter().find(|m| m.layer == first).cloned().unwrap();
+    let v0 = all.verts[0];
+    let near = all.verts.iter().skip(1).map(|v| (v[0] - v0[0]).hypot(v[1] - v0[1])).fold(f32::MAX, f32::min) + 1.0;
+    let picked = h.state_mut().test_points_pick([v0[0] - near, v0[1] - near], [v0[0] + near, v0[1] + near]);
+    assert!(picked >= 2, "the corner has points to weld: {picked}");
+    h.state_mut().test_points_weld();
+    let after = h.state().draw_mut_ref().doc.rig.meshes.iter().find(|m| m.layer == first).cloned().unwrap();
+    assert_eq!(after.verts.len(), n - (picked - 1), "{picked} points became one");
+    assert!(after.tris.len() <= nt);
+    assert!(after.tris.iter().all(|t| t.iter().all(|k| (*k as usize) < after.verts.len())));
+    // undo brings the old mesh back
+    h.state_mut().test_run_action_now("edit.undo");
+    h.run_steps(3);
+    let undone = h.state().draw_mut_ref().doc.rig.meshes.iter().find(|m| m.layer == first).cloned().unwrap();
+    assert_eq!(undone.verts.len(), n);
+}
+
+#[test]
+fn a_shape_keyed_by_hand_changes_the_picture_at_its_frame_only() {
+    use crate::rig::{Form, Kind};
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    h.state_mut().test_run_action_now("tab.animate");
+    h.run_steps(5);
+    // a warp over the face, and a squeezed shape of it keyed at frame 10, normal at 0 and 20
+    let face = h.state().draw_mut_ref().doc.layers.iter().find(|l| l.name == "Face").map(|l| l.id).expect("a face layer");
+    let mut warp = 0;
+    h.state_mut().test_rig_edit(|r| {
+        let m = r.meshes.iter().find(|m| m.layer == face).cloned().expect("the face has a mesh");
+        let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+        for v in &m.verts {
+            for k in 0..2 {
+                lo[k] = lo[k].min(v[k]);
+                hi[k] = hi[k].max(v[k]);
+            }
+        }
+        warp = r.add_changer("Squeeze", Kind::Warp { rect: [lo[0], lo[1], hi[0], hi[1]], cols: 2, rows: 2 }, None);
+        if let Some(mm) = r.meshes.iter_mut().find(|x| x.layer == face) {
+            mm.parent = Some(warp);
+        }
+        r.anim.length = 30;
+        let rest = r.rest_form(warp).unwrap();
+        let mut squeezed = vec![[0.0f32, 0.0]; 9];
+        for (i, o) in squeezed.iter_mut().enumerate() {
+            o[0] = if i % 3 == 0 { 8.0 } else if i % 3 == 2 { -8.0 } else { 0.0 };
+        }
+        r.anim.set_form_key(warp, 0.0, rest.clone());
+        r.anim.set_form_key(warp, 10.0, Form::Warp { offsets: squeezed });
+        r.anim.set_form_key(warp, 20.0, rest);
+    });
+    h.state_mut().test_anim().frame = 0.0;
+    h.run_steps(3);
+    let a = h.state_mut().test_still(300).expect("a picture");
+    h.state_mut().test_anim().frame = 10.0;
+    h.run_steps(3);
+    let b = h.state_mut().test_still(300).expect("a picture");
+    h.state_mut().test_anim().frame = 20.0;
+    h.run_steps(3);
+    let c = h.state_mut().test_still(300).expect("a picture");
+    assert_ne!(a.as_raw(), b.as_raw(), "the keyed shape shows at frame 10");
+    assert_eq!(a.as_raw(), c.as_raw(), "and goes back to normal at 20");
+    save(&mut h, "animate_form_animation");
+}
+
+#[test]
+fn the_debug_views_and_notes_of_the_rig_show_on_the_picture() {
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    h.state_mut().test_rig().show_bounds = true;
+    h.state_mut().test_rig().show_stress = true;
+    h.state_mut().test_rig_edit(|r| {
+        r.metadata = "{\"hit\": \"head\"}".into();
+    });
+    h.run_steps(4);
+   save(&mut h, "rig_debug_views");
+    assert!(h.state().draw_mut_ref().doc.rig.metadata.contains("hit"));
+}
+
+#[test]
+fn the_lit_view_lights_the_rig_picture() {
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    h.state_mut().test_rig().lit_on = true;
+    h.state_mut().test_rig().lighting.rim = 1.0;
+    h.run_steps(6);
+    let (flat, lit) = h.state_mut().test_lit_pair(300);
+    assert_eq!(flat.len(), lit.len());
+    assert!(flat.iter().zip(&lit).filter(|(a, b)| a != b).count() > 200, "the lit picture is not the flat one");
+   save(&mut h, "rig_lit_view");
+}
+
+#[test]
+fn the_draw_timeline_makes_a_frame_of_every_layer_and_plays_them() {
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let mut doc = crate::doc::Document::new(200, 200);
+    for i in 0..4 {
+        let l = doc.new_layer(&format!("Drawing {i}"), crate::doc::LayerKind::Raster);
+        let top = doc.layers.first().map(|l| l.id).unwrap_or(0);
+        doc.insert_layer(l, top);
+    }
+    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    h.run_steps(3);
+    h.state_mut().test_anim().timeline = true;
+    h.run_steps(3);
+    h.get_by_label("Frames from the layers").click();
+    h.run_steps(4);
+    let anim = h.state().draw_mut_ref().doc.rig.anim.clone();
+    assert_eq!(anim.cel_tracks.len(), 1);
+    let frames = anim.cel_tracks[0].exposures.len();
+    assert!(frames >= 4, "a frame for every layer: {frames}");
+    assert_eq!(anim.length as usize, frames);
+    h.get_by_label("Longer").click();
+    h.run_steps(3);
+    assert_eq!(h.state().draw_mut_ref().doc.rig.anim.length as usize, frames + 1, "holding a frame longer makes the animation longer");
+    save(&mut h, "draw_timeline");
+}
+
+#[test]
+fn dragging_a_point_without_a_slider_says_so_on_the_picture_and_with_one_it_moves() {
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    let layer = h.state().draw_mut_ref().doc.rig.meshes[0].layer;
+    h.state_mut().test_rig().selected = vec![layer];
+    h.run_steps(2);
+    rig_tool(&mut h, "new:Warp");
+    save(&mut h, "rig_tool_window_over_bar");
+    h.get_by_label("Make the Warp changer").click();
+    h.run_steps(3);
+    h.state_mut().test_rig().test_close_tool();
+    h.state_mut().test_rig().sel_param = None;
+    h.run_steps(4);
+    let spot = h.state_mut().test_rig().test_spots().first().copied().expect("the handles of the warp are on the picture");
+    stroke(&mut h, &[spot, spot + vec2(20.0, 0.0), spot + vec2(40.0, 0.0)]);
+    h.run_steps(2);
+    let said = h.state_mut().test_rig().test_message().unwrap_or_default();
+    assert!(said.contains("slider"), "it says what to do: {said:?}");
+    // with a slider picked the point moves
+    let pid = h.state().draw_mut_ref().doc.rig.params[0].id;
+    h.state_mut().test_rig().sel_param = Some(pid);
+    h.run_steps(3);
+    let spot = h.state_mut().test_rig().test_spots().first().copied().unwrap();
+    stroke(&mut h, &[spot, spot + vec2(20.0, 0.0), spot + vec2(40.0, 10.0)]);
+    h.run_steps(2);
+    // letting go saves the shape: the changer is bound to the slider now
+    let moved = h.state().draw_mut_ref().doc.rig.bindings.iter().any(|b| b.params.contains(&pid) && b.forms.iter().any(|f| matches!(f, crate::rig::Form::Warp { offsets } if offsets.iter().any(|o| o[0].abs() > 0.5 || o[1].abs() > 0.5))));
+    assert!(moved, "the point followed the pointer");
+    save(&mut h, "rig_drag_point");
+}

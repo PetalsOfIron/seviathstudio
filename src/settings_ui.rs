@@ -96,8 +96,20 @@ pub fn page(ui: &mut Ui, page: Page, s: &mut Settings, pen: &mut PenMonitor) {
             ui.checkbox(&mut s.high_contrast, "High contrast (brighter text and outlines)").help("Brighter text and outlines, easier to read.");
             ui.checkbox(&mut s.reduced_motion, "Reduce motion (no sliding or fading)").help("Panels appear at once, without moving.");
             ui.checkbox(&mut s.show_tooltips, "Show help when hovering buttons").help("A small text appears when the mouse rests on a button.");
-            ui.add_enabled(s.show_tooltips, egui::Checkbox::new(&mut s.help_marks, "A small ! on every button that has a help text"));
             ui.checkbox(&mut s.left_handed, "Left-handed layout (tools on the right, layers on the left)").help("Swap the sides of the panels.");
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Font for the interface").size(12.0).color(TEXT_DIM));
+                let shown = if s.interface_font.is_empty() { "the built-in one".to_owned() } else { std::path::Path::new(&s.interface_font).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() };
+                ui.label(RichText::new(shown).size(12.0));
+                if ui.button("Choose a font...").help("A .ttf or .otf file with the letters you need (Japanese, Chinese, Korean, Cyrillic and others). The built-in font fills in what it does not have.").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().set_title("A font for the interface").add_filter("Fonts", &["ttf", "otf"]).pick_file() {
+                        s.interface_font = p.to_string_lossy().into_owned();
+                    }
+                }
+                if !s.interface_font.is_empty() && ui.button("Built-in").clicked() {
+                    s.interface_font.clear();
+                }
+            });
             ui.add_space(6.0);
             section_title(ui, "Drawing the character");
             row(ui, "Quality", |ui| {
@@ -119,8 +131,8 @@ pub fn page(ui: &mut Ui, page: Page, s: &mut Settings, pen: &mut PenMonitor) {
                 s.high_contrast = d.high_contrast;
                 s.reduced_motion = d.reduced_motion;
                 s.show_tooltips = d.show_tooltips;
-                s.help_marks = d.help_marks;
                 s.left_handed = d.left_handed;
+                s.interface_font = d.interface_font.clone();
             }
         }
         Page::Canvas => {

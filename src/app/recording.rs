@@ -178,7 +178,7 @@ impl SeviathApp {
                             if ui.button(RichText::new("Stop and save…").strong()).clicked() {
                                 stop = true;
                             }
-                            if ui.button("Throw away").clicked() {
+                            if ui.button("Throw away").help("Throws the recording away without saving.").clicked() {
                                 discard = true;
                             }
                         });

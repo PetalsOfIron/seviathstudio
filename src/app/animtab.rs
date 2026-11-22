@@ -50,6 +50,10 @@ pub struct AnimUi {
     pub(super) applied: Option<f32>,
     pub sel: Option<(usize, usize)>,
     pub sel_track: Option<usize>,
+    /// The rows that are ticked (Shift or Ctrl and a click on a row): the ids of their tracks. The row buttons work on these.
+    pub rows: Vec<u32>,
+    /// Keys that were copied: for every track its target, its name and its keys counted from the start of the part that plays.
+    pub clip: Vec<(Target, String, Vec<crate::anim::Key>)>,
     pub zoom: f32,
     pub scroll: f32,
     pub autokey: bool,
@@ -81,6 +85,8 @@ pub struct AnimUi {
     /// The X-sheet (a table of frames and drawings) instead of the tracks, and the picked cell (cel track, frame).
     pub xsheet: bool,
     pub sel_x: Option<(usize, u32)>,
+    /// The timeline at the bottom of the Draw tab is open.
+    pub timeline: bool,
 }
 
 impl Default for AnimUi {
@@ -92,6 +98,8 @@ impl Default for AnimUi {
             applied: None,
             sel: None,
             sel_track: None,
+            rows: Vec::new(),
+            clip: Vec::new(),
             zoom: 9.0,
             scroll: 0.0,
             autokey: false,
@@ -117,6 +125,7 @@ impl Default for AnimUi {
             sel_cel: None,
             xsheet: false,
             sel_x: None,
+            timeline: false,
         }
     }
 }
@@ -170,14 +179,14 @@ impl SeviathApp {
         &mut std::sync::Arc::make_mut(&mut self.draw.doc.rig).anim
     }
 
-    fn anim_flush(&mut self, ctx: &egui::Context) {
+    pub(super) fn anim_flush(&mut self, ctx: &egui::Context) {
         if self.rigs.anim.pending.is_some() && !ctx.input(|i| i.pointer.any_down()) {
             if let Some((label, before)) = self.rigs.anim.pending.take() {
                 if !self.draw.doc.same_as(&before) {
                     let after = self.draw.doc.snapshot();
                     let now = ctx.input(|i| i.time);
                     self.log_step(&label, now);
-                    self.history.push(label, super::Tab::Animate, before, after, now);
+                    self.history.push(label, self.tab, before, after, now);
                 }
             }
         }
@@ -262,6 +271,7 @@ impl SeviathApp {
 
         let mut picked: Option<(crate::doc::LayerId, bool, bool)> = None;
         egui::Panel::top("anim_toolbar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.rig_toolbar(ui, false, true));
+        self.rig_tool_panel(ui, "anim_strip");
         egui::Panel::left("anim_parts").default_size(270.0).size_range(210.0..=440.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             picked = self.rig_left_panel(ui, &ctx, now, "anim", true, false);
         });
@@ -389,6 +399,75 @@ impl SeviathApp {
         self.rigs.anim.applied = None;
     }
 
+    /// The tracks the row buttons work on: the ticked rows, else the picked row, else every row.
+    pub(super) fn anim_rows(&self) -> Vec<usize> {
+        let a = &self.draw.doc.rig.anim;
+        let ticked: Vec<usize> = (0..a.tracks.len()).filter(|i| self.rigs.anim.rows.contains(&a.tracks[*i].id)).collect();
+        if !ticked.is_empty() {
+            ticked
+        } else if let Some(i) = self.rigs.anim.sel_track.filter(|i| *i < a.tracks.len()) {
+            vec![i]
+        } else {
+            (0..a.tracks.len()).collect()
+        }
+    }
+
+    /// The keys of the rows that play backward, within the part that plays.
+    pub(super) fn anim_reverse(&mut self) {
+        let rows = self.anim_rows();
+        let (a, b) = self.draw.doc.rig.anim.play_range();
+        let an = self.anim_mut("Reverse keys");
+        for i in rows {
+            an.tracks[i].reverse_range(a as f32, b as f32);
+        }
+        self.rigs.anim.sel = None;
+    }
+
+    pub(super) fn anim_smooth(&mut self) {
+        let rows = self.anim_rows();
+        let (a, b) = self.draw.doc.rig.anim.play_range();
+        let an = self.anim_mut("Smooth the keys");
+        let n: usize = rows.into_iter().map(|i| an.tracks[i].smooth_range(a as f32, b as f32)).sum();
+        self.rigs.anim.message = Some(format!("{n} keys smoothed."));
+    }
+
+    pub(super) fn anim_copy(&mut self) {
+        let rows = self.anim_rows();
+        let an = &self.draw.doc.rig.anim;
+        let (a, b) = an.play_range();
+        let clip: Vec<_> = rows.iter().map(|i| (an.tracks[*i].target, an.tracks[*i].name.clone(), an.tracks[*i].copy_range(a as f32, b as f32))).filter(|c| !c.2.is_empty()).collect();
+        self.rigs.anim.message = Some(format!("{} tracks copied.", clip.len()));
+        self.rigs.anim.clip = clip;
+    }
+
+    /// The copied keys go in at the playhead: on their own tracks, or on the ticked rows.
+    pub(super) fn anim_paste(&mut self, to_rows: bool) {
+        let clip = self.rigs.anim.clip.clone();
+        if clip.is_empty() {
+            return;
+        }
+        let at = self.rigs.anim.frame.round().max(0.0);
+        let rows: Vec<usize> = if to_rows { self.anim_rows() } else { Vec::new() };
+        let an = self.anim_mut("Paste keys");
+        if to_rows {
+            for (n, i) in rows.iter().enumerate() {
+                let keys = if clip.len() == 1 { Some(&clip[0].2) } else { clip.get(n).map(|c| &c.2) };
+                if let Some(keys) = keys {
+                    an.tracks[*i].put_keys(keys, at);
+                }
+            }
+        } else {
+            for (target, name, keys) in &clip {
+                let i = an.track_for(*target, name);
+                an.tracks[i].put_keys(keys, at);
+            }
+        }
+        let end = an.tracks.iter().flat_map(|t| t.keys.iter()).map(|k| k.frame.ceil() as u32 + 1).max().unwrap_or(0);
+        if end > an.length {
+            an.length = end;
+        }
+    }
+
     /// A key on the picked track at the playhead, with the value the slider has now.
     fn anim_key_selected(&mut self) {
         let Some(ti) = self.rigs.anim.sel_track else { return };
@@ -509,6 +588,29 @@ impl SeviathApp {
                 let name = format!("Part {n}");
                 self.anim_mut("Add marker").set_marker(here, &name);
             }
+            ui.separator();
+            if ui.button("Add the tracking_lost part").help("A marker named tracking_lost at the playhead. The part from there to the next marker plays by itself, round and round, when a tracker is on and loses the face for a second (a wave, a sleepy idle). It is built into the model.").clicked() {
+                let here = self.rigs.anim.frame.round().max(0.0) as u32;
+                self.anim_mut("Add the tracking_lost part").set_marker(here, "tracking_lost");
+            }
+            let ticked = self.rigs.anim.rows.len();
+            ui.label(RichText::new(if ticked > 0 { format!("{ticked} rows ticked") } else { "Rows: the picked one".to_owned() }).size(12.0).color(TEXT_DIM)).on_hover_text("Shift or Ctrl and a click on a row ticks it. The buttons work on the ticked rows, or on the picked row when none is ticked, or on every row when none is picked. They use the part that plays (Start here, End here).");
+            if ui.button("Reverse keys").help("The keys of the part that plays go backward: a movement is undone, or a loop goes there and back").clicked() {
+                self.anim_reverse();
+            }
+            if ui.button("Smooth the keys").help("The straight stretches between keys of the part that plays become S curves (slow in, slow out), so a movement does not jolt. Do this before baking the physics").clicked() {
+                self.anim_smooth();
+            }
+            if ui.button("Copy keys").help("Keeps the keys of the part that plays").clicked() {
+                self.anim_copy();
+            }
+            if ui.add_enabled(!self.rigs.anim.clip.is_empty(), egui::Button::new("Paste")).help("Puts the copied keys at the playhead, on their own tracks").clicked() {
+                self.anim_paste(false);
+            }
+            if ui.add_enabled(!self.rigs.anim.clip.is_empty() && ticked > 0, egui::Button::new("Paste to the ticked rows")).help("Puts the copied keys at the playhead on the ticked rows instead (one copied track goes to every ticked row, several go one to one, in order)").clicked() {
+                self.anim_paste(true);
+            }
+            ui.separator();
             let mut a = self.draw.doc.rig.anim.clone();
             ui.checkbox(&mut a.looping, "Loop").help("Play again from the start when it ends.");
             ui.add_enabled(a.looping, egui::Checkbox::new(&mut a.ping_pong, "Back and forth"));
@@ -516,6 +618,8 @@ impl SeviathApp {
             ui.add(egui::DragValue::new(&mut a.fps).range(1.0..=120.0).speed(0.2));
             ui.label(RichText::new("Length").size(12.0).color(TEXT_DIM));
             ui.add(egui::DragValue::new(&mut a.length).range(2..=100_000).speed(0.5).suffix(" frames"));
+            ui.label(RichText::new("Change the picture every").size(12.0).color(TEXT_DIM));
+            ui.add(egui::DragValue::new(&mut a.step).range(1..=12).suffix(" frames")).help("1 changes it every frame. 2 is \"on twos\", 3 \"on threes\": the held look of drawn animation.");
             let here = self.rigs.anim.frame.round() as u32;
             if ui.small_button("Start here").help("The part that plays starts at the playhead").clicked() {
                 let end = a.play_range().1.max(here + 1);
@@ -625,7 +729,9 @@ impl SeviathApp {
                 break;
             }
             let row = Rect::from_min_max(pos2(area.left(), y), pos2(area.right(), y + ROW));
-            if selected_track == Some(ti) {
+            if self.rigs.anim.rows.contains(&t.id) {
+                painter.rect_filled(row, 0.0, Color32::from_rgba_unmultiplied(120, 170, 255, 40));
+            } else if selected_track == Some(ti) {
                 painter.rect_filled(row, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 14));
             } else if ti % 2 == 1 {
                 painter.rect_filled(row, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 5));
@@ -737,6 +843,15 @@ impl SeviathApp {
                     self.rigs.anim.playing = false;
                 } else if let Some(ci) = self.cel_row_at(pos, rows_top).filter(|_| pos.x >= key_left) {
                     self.cel_row_click(ci, frame_at(pos.x));
+                } else if let (true, Some((ti, _))) = (ui.input(|i| i.modifiers.shift || i.modifiers.command), at(pos)) {
+                    // Shift or Ctrl: the row is ticked or unticked
+                    let id = a.tracks[ti].id;
+                    if let Some(i) = self.rigs.anim.rows.iter().position(|r| *r == id) {
+                        self.rigs.anim.rows.remove(i);
+                    } else {
+                        self.rigs.anim.rows.push(id);
+                    }
+                    self.rigs.anim.sel_track = Some(ti);
                 } else if let Some((ti, k)) = at(pos) {
                     self.rigs.anim.sel_track = Some(ti);
                     self.rigs.anim.sel = k.map(|ki| (ti, ki));
@@ -801,14 +916,104 @@ impl SeviathApp {
 
     // ---- the right side ----
 
+    /// Form animation: the shape of a changer is set by hand at a frame, without making a slider for it.
+    fn form_animation_ui(&mut self, ui: &mut Ui, now: f64) {
+        use crate::rig::{Form, Kind};
+        let rig = self.draw.doc.rig.clone();
+        let frame = self.rigs.anim.frame.round();
+        egui::CollapsingHeader::new(RichText::new(format!("Form animation ({})", rig.anim.forms.len())).size(13.0)).id_salt("form_animation").show(ui, |ui| {
+            let cid = self.rigs.sel_changer.filter(|c| matches!(rig.changer(*c).map(|c| &c.kind), Some(Kind::Warp { .. } | Kind::Line { .. } | Kind::Pins { .. } | Kind::Paths { .. } | Kind::Soft { .. })));
+            let Some(cid) = cid else {
+                ui.label(RichText::new("No changer with points is picked.").size(11.5).color(GOLD));
+                return;
+            };
+            let name = rig.changer(cid).map(|c| c.name.clone()).unwrap_or_default();
+            ui.label(RichText::new(format!("Changer: {name}.  Frame {}", frame as i32)).size(12.0));
+            let sliders_only = rig.pose(&self.rigs.effective_values());
+            let mut shown = sliders_only.clone();
+            for (id, f) in rig.anim.form_at(frame) {
+                rig.apply_form(&mut shown, id, &f);
+            }
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Edit the shape").help("The points of the shape as it is now come on the picture to be dragged").clicked() {
+                    if let Some(form) = rig.form_in_pose(&shown, cid) {
+                        let (off, grow) = match &form {
+                            Form::Warp { offsets } | Form::Line { offsets, .. } | Form::Pins { offsets } => (offsets.clone(), None),
+                            Form::Paths { offsets, .. } => (offsets.iter().flatten().copied().collect(), None),
+                            Form::Soft { offset, grow } => (vec![*offset], Some(*grow)),
+                            _ => (Vec::new(), None),
+                        };
+                        if let Some(g) = grow {
+                            self.rigs.soft_grow = g;
+                        }
+                        self.rigs.turn_edit = match &form {
+                            Form::Line { turns, .. } if !turns.is_empty() => Some(turns.clone()),
+                            _ => None,
+                        };
+                        self.rigs.warp_edit = Some((cid, off));
+                        self.rigs.bench.edit_here = true;
+                    }
+                }
+                let editing = self.rigs.warp_edit.as_ref().is_some_and(|w| w.0 == cid);
+                if ui.add_enabled(editing, egui::Button::new("Key this shape here")).help("Keeps the shape you made at this frame").clicked() {
+                    if let Some((_, off)) = self.rigs.warp_edit.take() {
+                        let turns = self.rigs.turn_edit.take().filter(|t| t.iter().any(|x| *x != 0.0)).unwrap_or_default();
+                        let form = match rig.changer(cid).map(|c| &c.kind) {
+                            Some(Kind::Warp { .. }) => Some(Form::Warp { offsets: off }),
+                            Some(Kind::Line { .. }) => Some(Form::Line { offsets: off, turns }),
+                            Some(Kind::Pins { .. }) => Some(Form::Pins { offsets: off }),
+                            Some(Kind::Paths { paths }) => Some(Form::Paths { offsets: crate::rig::changers::unflatten(paths, &off), turns: if turns.is_empty() { Vec::new() } else { crate::rig::changers::unflatten_turns(paths, &turns) } }),
+                            Some(Kind::Soft { .. }) => Some(Form::Soft { offset: off.first().copied().unwrap_or([0.0, 0.0]), grow: self.rigs.soft_grow }),
+                            _ => None,
+                        };
+                        if let Some(f) = form {
+                            self.anim_mut("Key a shape").set_form_key(cid, frame, f);
+                        }
+                    }
+                }
+                if editing && ui.button("Cancel").help("Leaves without changing anything.").clicked() {
+                    self.rigs.warp_edit = None;
+                    self.rigs.turn_edit = None;
+                }
+                if ui.button("Key the normal shape here").help("Keeps the shape the sliders give at this frame, so the shape goes back to normal here").clicked() {
+                    if let Some(f) = rig.form_in_pose(&sliders_only, cid) {
+                        self.anim_mut("Key the normal shape").set_form_key(cid, frame, f);
+                    }
+                }
+            });
+            let mut remove: Option<(Id, bool)> = None;
+            for t in &rig.anim.forms {
+                let n = rig.changer(t.changer).map(|c| c.name.clone()).unwrap_or_else(|| "(gone)".into());
+                let here = t.keys.iter().any(|k| (k.frame - frame).abs() < 0.5);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{n}: {} keys, frames {} to {}", t.keys.len(), t.keys.first().map(|k| k.frame as i32).unwrap_or(0), t.keys.last().map(|k| k.frame as i32).unwrap_or(0))).size(11.5));
+                    if ui.add_enabled(here, egui::Button::new("Remove the key here").small()).clicked() {
+                        remove = Some((t.changer, false));
+                    }
+                    if ui.small_button("Remove all").help("Takes every one of them away.").clicked() {
+                        remove = Some((t.changer, true));
+                    }
+                });
+            }
+            if let Some((c, all)) = remove {
+                let a = self.anim_mut("Remove a shape key");
+                if all {
+                    a.forms.retain(|t| t.changer != c);
+                } else {
+                    a.remove_form_key(c, frame);
+                }
+            }
+        });
+        let _ = now;
+    }
+
     fn anim_side_ui(&mut self, ui: &mut Ui, now: f64) {
         let _ = now;
         self.cel_side_ui(ui);
+        self.form_animation_ui(ui, now);
         section_title(ui, "Sliders at the playhead");
-        ui.label(RichText::new("Move a slider to pose the character at this frame. With Auto key on (under the timeline) the move makes a key; otherwise use Key this slider.").size(11.5).color(TEXT_DIM));
         let params: Vec<(Id, String, f32, f32, f32)> = self.draw.doc.rig.params.iter().map(|p| (p.id, p.name.clone(), p.min, p.max, p.default)).collect();
         if params.is_empty() {
-            ui.label(RichText::new("The rig has no sliders yet. The Rig tab makes them (the button Add all the standard sliders, or add them by hand).").size(11.5).color(TEXT_DIM));
         }
         let frame = self.rigs.anim.frame.round();
         let autokey = self.rigs.anim.autokey;
@@ -961,7 +1166,6 @@ impl SeviathApp {
         let clips: Vec<(usize, String, f32)> = self.draw.doc.rig.clips.iter().enumerate().map(|(i, c)| (i, c.name.clone(), c.seconds())).collect();
         if !clips.is_empty() {
             section_title(ui, "Clips");
-            ui.label(RichText::new("Recorded poses and motions that came with a model. Add one at the playhead: it becomes tracks with only the keys that matter.").size(11.5).color(TEXT_DIM));
             for (i, name, secs) in clips {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("{name} ({secs:.1} s)")).size(12.0));
@@ -1003,7 +1207,6 @@ impl SeviathApp {
     /// The camera and its shake.
     fn anim_camera_ui(&mut self, ui: &mut Ui) {
         section_title(ui, "Camera");
-        ui.label(RichText::new("The camera looks at the finished picture: add tracks to move, zoom and turn it (Add a camera track), and a shake for hits and blasts.").size(11.5).color(TEXT_DIM));
         let mut s = self.draw.doc.rig.anim.shake;
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut s.on, "Shake").help("Add a camera shake.");
@@ -1063,7 +1266,6 @@ impl SeviathApp {
         section_title(ui, "Sound");
         let a = self.draw.doc.rig.anim.clone();
         let Some(r) = a.audio.clone() else {
-            ui.label(RichText::new("Add a voice or music: it plays with the timeline, is drawn above the tracks, and the mouth can be made from it.").size(11.5).color(TEXT_DIM));
             if ui.button("Add a sound...").help("WAV, MP3, OGG, FLAC or AAC").clicked() {
                 if let Some(p) = rfd::FileDialog::new().set_title("A sound").set_directory(self.settings.projects_folder()).add_filter("Sound", &["wav", "mp3", "ogg", "flac", "aac", "m4a"]).pick_file() {
                     self.anim_mut("Add a sound").audio = Some(crate::anim::AudioRef { path: p.to_string_lossy().to_string(), offset: 0.0 });
@@ -1119,6 +1321,22 @@ impl SeviathApp {
                     self.rigs.anim.message = Some(format!("The track {pname} has {keys} keys from the sound."));
                 }
             }
+            if ui.button("Make the mouth shape from the vowels too").help("Listens for A, I, U, E and O: the Mouth open slider (picked above) follows how wide the vowel opens the mouth, and the Mouth form slider stretches for I and E and goes round for U and O").clicked() {
+                let form = params.iter().find(|p| p.1.to_lowercase().contains("mouth") && p.1.to_lowercase().contains("form")).cloned();
+                match (self.rigs.anim.audio.clone(), params.iter().find(|p| p.0 == sel).cloned(), form) {
+                    (Some((_, au)), Some((id, pname, lo, hi)), Some((fid, fname, flo, fhi))) => {
+                        let shape = au.mouth_shape(a.fps.max(1.0), r.offset, a.length as usize);
+                        let open: Vec<f32> = shape.iter().map(|s| s.0).collect();
+                        let wide: Vec<f32> = shape.iter().map(|s| (s.1 + 1.0) / 2.0).collect();
+                        let an = self.anim_mut("Mouth shape from the vowels");
+                        let k1 = an.set_from_curve(id, &pname, &open, lo, hi);
+                        let k2 = an.set_from_curve(fid, &fname, &wide, flo, fhi);
+                        self.rigs.anim.message = Some(format!("{pname}: {k1} keys, {fname}: {k2} keys, from the vowels of the sound."));
+                    }
+                    (_, _, None) => self.rigs.anim.message = Some("The rig has no slider called Mouth form: add the standard sliders in the Rig tab first.".into()),
+                    _ => self.rigs.anim.message = Some("Add a sound first, and pick the slider for the mouth.".into()),
+                }
+            }
         }
     }
 
@@ -1128,7 +1346,6 @@ impl SeviathApp {
             return;
         }
         section_title(ui, "Markers");
-        ui.label(RichText::new("A marker begins a part that goes on until the next marker. Play only a part, or save a sprite sheet of it and the .json lists all parts.").size(11.5).color(TEXT_DIM));
         let mut edited = a.markers.clone();
         let mut remove: Option<usize> = None;
         let mut go: Option<u32> = None;
@@ -1384,6 +1601,20 @@ impl SeviathApp {
     }
 
     #[cfg(test)]
+    pub fn test_keys(&mut self, what: &str, to_rows: bool) {
+        match what {
+            "reverse" => self.anim_reverse(),
+            "copy" => self.anim_copy(),
+            _ => self.anim_paste(to_rows),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn test_anim_clip_len(&self) -> usize {
+        self.rigs.anim.clip.len()
+    }
+
+    #[cfg(test)]
     pub fn test_anim(&mut self) -> &mut AnimUi {
         &mut self.rigs.anim
     }

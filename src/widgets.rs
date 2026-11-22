@@ -8,23 +8,13 @@ use eframe::egui::{
 use crate::icons::{self, Icon};
 use crate::theme::*;
 
-/// A hover help text on a widget, and (when the setting is on) a small ! at its corner so people can see where help is. Use this instead of
-/// `on_hover_text` on anything that is clicked or dragged.
+/// A hover help text on a widget (nothing is drawn on the widget itself). Use this instead of `on_hover_text` on anything that is clicked or dragged.
 pub trait HelpExt {
     fn help(self, text: impl Into<egui::WidgetText>) -> Self;
 }
 
 impl HelpExt for Response {
     fn help(self, text: impl Into<egui::WidgetText>) -> Self {
-        if self.ctx.data(|d| d.get_temp::<bool>(egui::Id::new("help_marks"))).unwrap_or(true) && (self.sense.senses_click() || self.sense.senses_drag()) {
-            let rc = self.interact_rect;
-            if rc.is_positive() && rc.width() >= 24.0 && rc.height() >= 14.0 {
-                let c = pos2(rc.right() - 2.0, rc.top() + 2.0);
-                let p = self.ctx.layer_painter(self.layer_id);
-                p.circle_filled(c, 4.3, Color32::from_rgba_unmultiplied(214, 168, 76, 215));
-                p.text(c + vec2(0.0, 0.3), Align2::CENTER_CENTER, "!", FontId::proportional(8.0), Color32::from_rgb(20, 18, 10));
-            }
-        }
         self.on_hover_text(text)
     }
 }

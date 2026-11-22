@@ -31,7 +31,9 @@ fn blend_key(b: Blend) -> &'static [u8; 4] {
         Blend::Saturation => b"sat ",
         Blend::Color => b"colr",
         Blend::Luminosity => b"lum ",
+        // Photoshop has no such blend modes: the layer is kept as a normal one
         Blend::Add => b"lddg",
+        Blend::DestIn | Blend::DestOut => b"norm",
     }
 }
 

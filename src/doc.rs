@@ -55,11 +55,15 @@ pub enum Blend {
     Color,
     Luminosity,
     Add,
+    /// Keeps what is below only where this layer has paint (Destination In): a mask by the paint of this layer.
+    DestIn,
+    /// Cuts this layer's paint out of what is below (Destination Out, Slice from Lower): a hole.
+    DestOut,
 }
 
 impl Blend {
     /// Modes for normal layers (folders also get Pass through).
-    pub const ALL: [Blend; 17] = [
+    pub const ALL: [Blend; 19] = [
         Blend::Normal,
         Blend::Multiply,
         Blend::Screen,
@@ -77,6 +81,8 @@ impl Blend {
         Blend::Color,
         Blend::Luminosity,
         Blend::Add,
+        Blend::DestIn,
+        Blend::DestOut,
     ];
 
     pub fn name(self) -> &'static str {
@@ -99,6 +105,8 @@ impl Blend {
             Blend::Color => "Color",
             Blend::Luminosity => "Luminosity",
             Blend::Add => "Add (glow)",
+            Blend::DestIn => "Keep only here (destination in)",
+            Blend::DestOut => "Cut out (destination out)",
         }
     }
 
@@ -122,6 +130,8 @@ impl Blend {
             Blend::Color => "Hue and saturation: recolors, keeps shading.",
             Blend::Luminosity => "Takes only the brightness of this layer.",
             Blend::Add => "Adds light: the brightest glow.",
+            Blend::DestIn => "Only what is below this layer's paint stays; the rest goes. A mask made of the paint, with no mask layer to name.",
+            Blend::DestOut => "This layer's paint is cut out of what is below, like a hole punched through (slice from lower).",
         }
     }
 }

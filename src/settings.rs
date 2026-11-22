@@ -32,9 +32,9 @@ pub struct Settings {
     pub high_contrast: bool,
     pub reduced_motion: bool,
     pub show_tooltips: bool,
-    /// A small ! on every button, slider and switch that has a help text (hover it to read what it does).
-    pub help_marks: bool,
     pub left_handed: bool,
+    /// A font file (.ttf or .otf) for the text of the interface, for letters the built-in font does not have (Japanese, Chinese, Korean, Cyrillic...). Empty: the built-in one.
+    pub interface_font: String,
     /// How sharp the character is drawn in the Rig, Physics, Animate and Stream tabs: 0 Potato to 4 Max (see `preview_px`).
     pub rig_quality: u8,
     /// How many pictures a second the Stream tab sends to the browser source (OBS).
@@ -105,8 +105,8 @@ impl Default for Settings {
             high_contrast: false,
             reduced_motion: false,
             show_tooltips: true,
-            help_marks: true,
             left_handed: false,
+            interface_font: String::new(),
             rig_quality: 2,
             stream_fps: 30,
             ai_providers: Vec::new(),
@@ -185,6 +185,7 @@ impl Settings {
     /// Keep every value in a safe range (hand-edited or older files).
     pub fn sanitized(mut self) -> Self {
         self.ui_scale = self.ui_scale.clamp(0.6, 2.5);
+        self.interface_font = self.interface_font.chars().filter(|c| !c.is_control()).take(500).collect();
         self.rig_quality = self.rig_quality.min(4);
         self.stream_fps = self.stream_fps.clamp(1, 120);
         self.zoom_speed = self.zoom_speed.clamp(0.2, 4.0);

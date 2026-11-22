@@ -84,7 +84,38 @@ pub fn apply(ctx: &egui::Context) {
 }
 
 /// Interface preferences from Settings: high contrast, motion, tooltips, scale.
+/// The font definitions for the interface: the ones that come with egui, and when `path` is a font file, that font first, so its letters are used and the
+/// built-in font fills in what it has not got. Returns what went wrong when the file cannot be used (the built-in fonts are then kept).
+pub fn font_definitions(path: &str) -> (egui::FontDefinitions, Option<String>) {
+    let mut defs = egui::FontDefinitions::default();
+    if path.trim().is_empty() {
+        return (defs, None);
+    }
+    let bytes = match std::fs::metadata(path) {
+        Ok(m) if m.len() as usize > crate::fonts::MAX_FONT_BYTES => return (defs, Some("This font file is too big.".into())),
+        Ok(_) => std::fs::read(path),
+        Err(e) => Err(e),
+    };
+    match bytes {
+        Ok(b) if is_font_file(&b) => {
+            defs.font_data.insert("UserInterfaceFont".into(), std::sync::Arc::new(egui::FontData::from_owned(b)));
+            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                defs.families.entry(family).or_default().insert(0, "UserInterfaceFont".into());
+            }
+            (defs, None)
+        }
+        Ok(_) => (defs, Some("This is not a font file I can read (.ttf or .otf).".into())),
+        Err(e) => (defs, Some(format!("Could not read the font: {e}"))),
+    }
+}
+
+/// Is this a font file (a TrueType or OpenType header)?
+fn is_font_file(b: &[u8]) -> bool {
+    matches!(b.get(..4), Some([0, 1, 0, 0]) | Some(b"OTTO") | Some(b"true") | Some(b"ttcf"))
+}
+
 pub fn apply_prefs(ctx: &egui::Context, set: &crate::settings::Settings) {
+    ctx.set_fonts(font_definitions(&set.interface_font).0);
     apply(ctx);
     if set.high_contrast {
         ctx.style_mut_of(Theme::Dark, |s| {
@@ -105,7 +136,6 @@ pub fn apply_prefs(ctx: &egui::Context, set: &crate::settings::Settings) {
         s.animation_time = if set.reduced_motion { 0.0 } else { 1.0 / 12.0 };
         s.interaction.tooltip_delay = if set.show_tooltips { 0.5 } else { 1.0e9 };
     });
-    ctx.data_mut(|d| d.insert_temp(egui::Id::new("help_marks"), set.help_marks && set.show_tooltips));
     ctx.set_zoom_factor(set.ui_scale);
 }
 
@@ -116,4 +146,32 @@ pub fn card() -> egui::Frame {
         .stroke(Stroke::new(1.0, LINE))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::same(10))
+}
+
+#[cfg(test)]
+mod font_tests {
+    use super::*;
+
+    #[test]
+    fn a_font_file_goes_first_and_a_bad_one_changes_nothing() {
+        let (plain, err) = font_definitions("");
+        assert!(err.is_none() && !plain.font_data.contains_key("UserInterfaceFont"));
+        let (_, err) = font_definitions("C:/does/not/exist.ttf");
+        assert!(err.unwrap().contains("Could not read"));
+        let dir = std::env::temp_dir().join(format!("seviath_font_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let junk = dir.join("junk.ttf");
+        std::fs::write(&junk, b"not a font at all").unwrap();
+        let (defs, err) = font_definitions(junk.to_str().unwrap());
+        assert!(err.unwrap().contains("not a font file") && !defs.font_data.contains_key("UserInterfaceFont"));
+        // a real font: the one that comes with egui, written out as a file
+        let bundled = egui::FontDefinitions::default().font_data.get("Ubuntu-Light").map(|d| d.font.to_vec()).unwrap();
+        let ok = dir.join("ok.ttf");
+        std::fs::write(&ok, bundled).unwrap();
+        let (defs, err) = font_definitions(ok.to_str().unwrap());
+        assert!(err.is_none());
+        assert_eq!(defs.families[&egui::FontFamily::Proportional][0], "UserInterfaceFont", "it is used first, the built-in ones fill in");
+        assert!(defs.families[&egui::FontFamily::Proportional].len() > 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

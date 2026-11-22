@@ -163,7 +163,7 @@ impl SeviathApp {
                         }
                     }
                     ui.add(egui::TextEdit::singleline(&mut m.extra).hint_text("add letters").desired_width(90.0).char_limit(40));
-                    if ui.small_button("Add").clicked() {
+                    if ui.small_button("Add").help("Adds it to the list.").clicked() {
                         changed = true;
                     }
                     if changed {
@@ -180,17 +180,17 @@ impl SeviathApp {
                 });
                 pad(ui, m, ctx, mouse_p);
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Back").clicked() {
+                    if ui.button("Back").help("Goes back to the step before.").clicked() {
                         m.step(-1);
                     }
-                    if ui.button("Skip").clicked() {
+                    if ui.button("Skip").help("Leaves this one and goes on.").clicked() {
                         m.step(1);
                     }
                     if ui.button(RichText::new("Next letter").strong()).help("Goes to the next letter you have not drawn yet").clicked() {
                         m.next_empty();
                     }
                     ui.separator();
-                    if ui.button("Undo line").clicked() {
+                    if ui.button("Undo line").help("Takes the last line you drew away.").clicked() {
                         if let Some(c) = m.current() {
                             if let Some(g) = m.font.glyphs.get_mut(&c) {
                                 g.pop();
@@ -198,7 +198,7 @@ impl SeviathApp {
                             handfont::save_draft(&m.font);
                         }
                     }
-                    if ui.button("Clear letter").clicked() {
+                    if ui.button("Clear letter").help("Wipes the drawing of this letter so you can draw it again.").clicked() {
                         if let Some(c) = m.current() {
                             m.font.glyphs.remove(&c);
                             handfont::save_draft(&m.font);

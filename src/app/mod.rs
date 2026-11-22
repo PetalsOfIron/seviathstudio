@@ -20,6 +20,8 @@ mod rigbench;
 mod downloadsui;
 mod animtab;
 mod celtab;
+mod drawtimeline;
+mod menus;
 mod streamtab;
 mod commands;
 mod files;
@@ -337,9 +339,12 @@ impl SeviathApp {
             ui.add_space(-8.0);
             ui.label(RichText::new("Studio").size(17.0).color(EMERALD));
             ui.add_space(10.0);
-            self.file_menu(ui);
-            self.filter_menu(ui);
-            self.layout_menu(ui);
+            // on the Draw and Rig tabs these are in the bar of dropdowns of the tab
+            if self.workspace == Workspace::Design || !matches!(self.tab, Tab::Draw | Tab::Rig) {
+                self.file_menu(ui);
+                self.filter_menu(ui);
+                self.layout_menu(ui);
+            }
             ui.add_space(10.0);
 
             segmented(ui, &mut self.workspace, &[(Workspace::Character, "Character"), (Workspace::Design, "Design")]);
@@ -385,8 +390,12 @@ impl SeviathApp {
     }
 
     /// The Filter menu: every filter and color adjustment, opened in its window.
-    fn filter_menu(&mut self, ui: &mut Ui) {
-        ui.menu_button(RichText::new("Filter").color(TEXT), |ui| {
+    pub(super) fn filter_menu(&mut self, ui: &mut Ui) {
+        self.hover_menu(ui, "Filter", false, |s, ui| s.filter_items(ui));
+    }
+
+    fn filter_items(&mut self, ui: &mut Ui) {
+        {
             ui.set_min_width(220.0);
             for (group, label) in crate::filters::Group::ALL {
                 ui.menu_button(label, |ui| {
@@ -400,7 +409,7 @@ impl SeviathApp {
                     }
                 });
             }
-        });
+        }
     }
 
     fn status_bar(&mut self, ui: &mut Ui) {
@@ -561,7 +570,7 @@ impl SeviathApp {
                 if ui.button("Undo only this one").help("Keep the other tabs' changes").clicked() {
                     choice = Some(2);
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button("Cancel").help("Leaves without changing anything.").clicked() {
                     choice = Some(0);
                 }
             });
@@ -695,10 +704,16 @@ impl eframe::App for SeviathApp {
             (Workspace::Design, _) => self.design_workspace(ui),
             (_, Tab::Draw) => {
                 self.cel_onion_for_draw(ui.ctx());
+                self.draw_menu_bar(ui);
+                self.draw_timeline(ui);
                 self.draw.ui(ui);
-                self.cel_frame_bar(ui.ctx());
+                if !self.rigs.anim.timeline {
+                    self.cel_frame_bar(ui.ctx());
+                }
             }
             (_, Tab::Parts) => self.parts_ui(ui),
+            (_, Tab::Rig) if self.rigs.animate => self.anim_ui(ui),
+            (_, Tab::Rig) if self.rigs.physics_page => self.physics_ui(ui),
             (_, Tab::Rig) => self.rig_ui(ui),
             (_, Tab::Physics) => self.physics_ui(ui),
             (_, Tab::Animate) => self.anim_ui(ui),

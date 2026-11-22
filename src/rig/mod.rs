@@ -4,11 +4,15 @@
 // `pose` turns slider values into changer shapes, `deformed` moves a mesh by its changers. The renderer
 // (raster.rs) draws the layers through the moved meshes.
 
+// the automatic rigging of the flat picture is not in the program any more (every layer is rigged by hand); it only builds the characters the tests start from
+#[cfg(test)]
 pub mod autorig;
 pub mod changers;
 pub mod check;
 pub mod gizmo;
+pub mod lit;
 pub mod mesh;
+pub mod meshtools;
 pub mod paramphys;
 pub mod physics;
 pub mod refine;
@@ -88,6 +92,20 @@ pub struct Param {
     /// The Live2D id of the slider ("ParamAngleX"), for the files of a Live2D model; empty when it has none.
     #[serde(default)]
     pub cid: String,
+    /// The name of the slider in other languages (language, name): a program that shows the sliders reads the code (`cid`), a person reads the name in their
+    /// own language.
+    #[serde(default)]
+    pub names: Vec<(String, String)>,
+}
+
+impl Param {
+    /// The name to show for a language (the name the slider has when it has none in that language).
+    pub fn shown(&self, language: &str) -> &str {
+        if language.is_empty() {
+            return &self.name;
+        }
+        self.names.iter().find(|(l, n)| l.eq_ignore_ascii_case(language) && !n.is_empty()).map(|(_, n)| n.as_str()).unwrap_or(&self.name)
+    }
 }
 
 /// The shape of a changer: degrees for a Rotation, the offsets of the control points for a Warp.
@@ -219,6 +237,9 @@ pub struct SavedPose {
     pub name: String,
     /// (slider, value); sliders not listed are at their default.
     pub values: Vec<(Id, f32)>,
+    /// A model state: which layers were shown (layer, shown) when the pose was kept. Empty: the pose does not touch the layers.
+    #[serde(default)]
+    pub layers: Vec<(u64, bool)>,
 }
 
 /// A recording of slider values over time: one entry per frame, `fps` frames a second.
@@ -253,6 +274,45 @@ pub struct Pad {
     pub y: Id,
 }
 
+/// What the automatic rigging made (older projects have it; nothing in the program makes it any more). Things in `locked` are left alone when it runs again.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoGroup {
+    pub name: String,
+    pub changers: Vec<Id>,
+    pub params: Vec<Id>,
+}
+
+/// Everything the automation made (all groups together), the groups it came in, and what you locked.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoRig {
+    pub changers: Vec<Id>,
+    pub params: Vec<Id>,
+    pub locked: Vec<Id>,
+    pub groups: Vec<AutoGroup>,
+}
+
+impl AutoRig {
+    pub(crate) fn refresh(&mut self) {
+        self.changers = self.groups.iter().flat_map(|g| g.changers.clone()).collect();
+        self.params = self.groups.iter().flat_map(|g| g.params.clone()).collect();
+    }
+}
+
+/// A mesh group: the picture of one part (the driver, a face) carries the pictures of other parts (a mole, a blush, brows) as it bends: each point of a member
+/// moves by what the driver moves at that place, on top of what the member does itself.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct MeshGroup {
+    pub name: String,
+    /// The mesh that carries.
+    pub driver: Id,
+    /// The meshes that ride on it.
+    pub members: Vec<Id>,
+    /// 0 = not carried, 1 = moves exactly with the driver.
+    pub strength: f32,
+}
+
 /// A seam: vertices of two meshes that sit together at rest are pulled together when the meshes move apart.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Glue {
@@ -264,6 +324,47 @@ pub struct Glue {
     pub weight: f32,
 }
 
+/// A temporary point on the picture to measure from or to put a pivot on. It is kept in the project, but it is never put in an exported model.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Anchor {
+    pub name: String,
+    pub pos: [f32; 2],
+}
+
+/// A zone of the picture that takes clicks (a head to pat, a cheek to poke): a box or an oval of the page, in front of everything, that can follow a changer
+/// (so it moves with the head), and the expression or the clip that should start when it is clicked. Nothing of it is drawn into the picture.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct HitArea {
+    pub name: String,
+    /// Left, top, right, bottom on the page, when everything is at rest.
+    pub rect: [f32; 4],
+    pub round: bool,
+    pub follow: Option<Id>,
+    /// The name of an expression or a clip to play when it is clicked (empty: nothing starts by itself, the program that shows the model decides).
+    #[serde(default)]
+    pub plays: String,
+}
+
+impl HitArea {
+    pub fn new(name: &str, rect: [f32; 4]) -> HitArea {
+        HitArea { name: name.to_owned(), rect, round: false, follow: None, plays: String::new() }
+    }
+}
+
+/// Is the point inside the polygon?
+pub fn inside_polygon(poly: &[[f32; 2]], p: [f32; 2]) -> bool {
+    let mut inside = false;
+    let mut j = poly.len().wrapping_sub(1);
+    for i in 0..poly.len() {
+        let (a, b) = (poly[i], poly[j]);
+        if (a[1] > p[1]) != (b[1] > p[1]) && p[0] < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1]) + a[0] {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Rig {
@@ -272,6 +373,8 @@ pub struct Rig {
     pub params: Vec<Param>,
     pub bindings: Vec<Binding>,
     pub glues: Vec<Glue>,
+    /// Meshes that carry other meshes.
+    pub groups: Vec<MeshGroup>,
     pub iks: Vec<Ik>,
     pub pads: Vec<Pad>,
     pub poses: Vec<SavedPose>,
@@ -279,7 +382,7 @@ pub struct Rig {
     /// The uncut mode: one mesh over a group of layers, moved by bones with painted weights.
     pub skin: Option<skin::Skin>,
     /// What the automatic rigging made (and what you locked).
-    pub auto: Option<autorig::AutoRig>,
+    pub auto: Option<AutoRig>,
     /// Things that swing and lag (hair, cloth, chains), each moving one Line changer.
     pub physics: Vec<physics::PhysChain>,
     pub colliders: Vec<physics::Collider>,
@@ -289,6 +392,17 @@ pub struct Rig {
     /// Live2D style physics that moves sliders (from a model's physics file), and what else came with the runtime files of a model:
     /// its expressions, its motions as they were, and the settings VTube Studio saved for it.
     pub param_physics: paramphys::ParamPhysics,
+    /// The zones that take clicks.
+    pub hit_areas: Vec<HitArea>,
+    /// The language the names of the sliders are shown in (empty: the names they have).
+    pub language: String,
+    /// Temporary points (not exported).
+    pub anchors: Vec<Anchor>,
+    /// Changers that are locked: their pivot and their shapes cannot be edited by accident (they still move with their sliders).
+    pub locked: Vec<Id>,
+    /// Text the program that shows the model can read (JSON is best): which chat command starts which expression, the hand bounds, a game event. The model
+    /// carries it; this program does nothing with it.
+    pub metadata: String,
     pub expressions: Vec<crate::import::runtime::Expression>,
     pub live_motions: Vec<crate::import::runtime::Motion>,
     pub vtube: Option<crate::import::runtime::Vtube>,
@@ -357,7 +471,27 @@ fn lerp_turns(a: &[f32], b: &[f32], n: usize, t: f32) -> Vec<f32> {
     }).collect()
 }
 
-fn lerp_form(a: &Form, b: &Form, t: f32) -> Form {
+/// How much a triangle is stretched or squeezed: 0 when its area is what it was at rest, going to 1 as it becomes twice as big, or half, or more.
+pub fn stress(rest_area: f32, now_area: f32) -> f32 {
+    let ratio = (now_area.max(1e-4) / rest_area.max(1e-4)).max(1e-4);
+    (ratio.ln().abs() / std::f32::consts::LN_2).clamp(0.0, 1.0)
+}
+
+/// The keys with `extra` more between every two of them.
+fn densify(keys: &[f32], extra: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(keys.len() * (extra + 1));
+    for w in keys.windows(2) {
+        for k in 0..=extra {
+            out.push(w[0] + (w[1] - w[0]) * k as f32 / (extra + 1) as f32);
+        }
+    }
+    if let Some(l) = keys.last() {
+        out.push(*l);
+    }
+    out
+}
+
+pub(crate) fn lerp_form(a: &Form, b: &Form, t: f32) -> Form {
     match (a, b) {
         (Form::Rot { deg: x }, Form::Rot { deg: y }) => Form::Rot { deg: x + (y - x) * t },
         (Form::Warp { offsets: x }, Form::Warp { offsets: y }) if x.len() == y.len() => Form::Warp { offsets: x.iter().zip(y).map(|(p, q)| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]).collect() },
@@ -482,7 +616,7 @@ impl Rig {
 
     pub fn add_param(&mut self, name: &str, min: f32, max: f32, default: f32) -> Id {
         let id = self.fresh_id();
-        self.params.push(Param { id, name: name.chars().filter(|c| !c.is_control()).take(40).collect(), min, max, default: default.clamp(min, max), cid: String::new() });
+        self.params.push(Param { id, name: name.chars().filter(|c| !c.is_control()).take(40).collect(), min, max, default: default.clamp(min, max), cid: String::new(), names: Vec::new() });
         id
     }
 
@@ -606,6 +740,28 @@ impl Rig {
                 let top = lerp_form(at(x0, y0)?, at(x1, y0)?, tx);
                 let bottom = lerp_form(at(x0, y1)?, at(x1, y1)?, tx);
                 Some(lerp_form(&top, &bottom, ty))
+            }
+            n if n <= 6 && b.keys.len() == n => {
+                // three or more sliders: the shapes at the 2^n corners of the cell the values are in, mixed one slider at a time
+                let mut stride = vec![1usize; n];
+                for k in 1..n {
+                    stride[k] = stride[k - 1] * b.keys[k - 1].len();
+                }
+                let axes: Vec<(usize, usize, f32)> = (0..n)
+                    .map(|k| {
+                        let (i0, i1, t) = axis_weights(&b.keys[k], self.value(vals, b.params[k]));
+                        (i0, i1, b.ease.apply(t))
+                    })
+                    .collect();
+                let mut cur: Vec<Form> = Vec::with_capacity(1 << n);
+                for mask in 0..(1usize << n) {
+                    let flat: usize = (0..n).map(|k| if mask >> k & 1 == 1 { axes[k].1 } else { axes[k].0 } * stride[k]).sum();
+                    cur.push(b.forms.get(flat)?.clone());
+                }
+                for k in 0..n {
+                    cur = cur.chunks(2).map(|c| lerp_form(&c[0], &c[1], axes[k].2)).collect();
+                }
+                cur.into_iter().next()
             }
             _ => None,
         }
@@ -739,6 +895,296 @@ impl Rig {
             done += 1;
         }
         done
+    }
+
+    /// The keyforms of a changer made for one slider are moved to another slider (rigged on the wrong one, or mirrored onto the same slider and the other eye has its
+    /// own): `params` says which keyforms, `at` which of its sliders changes. The keys are stretched from the range of the old slider to the range of the new one.
+    /// What the changer already did with the new sliders is replaced. Returns whether anything moved.
+    pub fn retarget_param(&mut self, changer: Id, params: &[Id], at: usize, to: Id) -> bool {
+        let (Some(old), Some(new)) = (params.get(at).and_then(|p| self.param(*p)).cloned(), self.param(to).cloned()) else { return false };
+        if old.id == new.id || params.contains(&to) {
+            return false;
+        }
+        let Some(i) = self.bindings.iter().position(|b| b.changer == changer && b.params == params) else { return false };
+        let mut b = self.bindings.remove(i);
+        b.params[at] = to;
+        let (from_span, to_span) = ((old.max - old.min).max(1e-6), new.max - new.min);
+        for k in &mut b.keys[at] {
+            *k = new.min + (*k - old.min) / from_span * to_span;
+        }
+        self.bindings.retain(|x| !(x.changer == changer && x.params == b.params));
+        self.bindings.push(b);
+        true
+    }
+
+    /// The keyforms of one slider (or pair) are moved from a changer to another one that fits (rigged on the wrong eye): the first one is left without them.
+    /// With `mirror` they are turned to the other side on the way. What the other one did with these sliders is replaced. Returns whether anything moved.
+    pub fn move_movement(&mut self, from: Id, params: &[Id], to: Id, mirror: bool) -> bool {
+        if from == to {
+            return false;
+        }
+        let (Some(src), Some(kind)) = (self.changer(from).map(|c| c.kind.clone()), self.changer(to).map(|c| c.kind.clone())) else { return false };
+        let Some(i) = self.bindings.iter().position(|b| b.changer == from && b.params == params) else { return false };
+        if !self.bindings[i].forms.iter().all(|f| Self::form_fits(f, &kind, &src)) {
+            return false;
+        }
+        let mut b = self.bindings.remove(i);
+        b.changer = to;
+        if mirror {
+            for f in &mut b.forms {
+                Self::mirror_form(f, &kind);
+            }
+        }
+        self.bindings.retain(|x| !(x.changer == to && x.params == b.params));
+        self.bindings.push(b);
+        true
+    }
+
+    /// The changers the keyforms of `from` for these sliders would fit on.
+    pub fn changers_that_fit(&self, from: Id, params: &[Id]) -> Vec<Id> {
+        let (Some(src), Some(b)) = (self.changer(from).map(|c| c.kind.clone()), self.bindings.iter().find(|b| b.changer == from && b.params == params)) else { return Vec::new() };
+        self.changers.iter().filter(|c| c.id != from && b.forms.iter().all(|f| Self::form_fits(f, &c.kind, &src))).map(|c| c.id).collect()
+    }
+
+    /// The corners of a grid of keyforms (two sliders) are made from the edges: where both sliders are away from their middle, the shape is the shape of the
+    /// first slider alone plus the shape of the second alone (head left-right and up-down give the diagonals). Corners are replaced. Returns how many were made.
+    pub fn synthesize_corners(&mut self, changer: Id, px: Id, py: Id) -> usize {
+        let Some(rest) = self.rest_form(changer) else { return 0 };
+        let (Some(a), Some(b)) = (self.param(px).map(|p| p.default), self.param(py).map(|p| p.default)) else { return 0 };
+        let Some(bi) = self.bindings.iter().position(|x| x.changer == changer && x.params == [px, py]) else { return 0 };
+        let bd = &mut self.bindings[bi];
+        let at = |keys: &[f32], v: f32| keys.iter().position(|k| (k - v).abs() < 1e-4);
+        let (Some(mx), Some(my)) = (at(&bd.keys[0], a), at(&bd.keys[1], b)) else { return 0 };
+        let nx = bd.keys[0].len();
+        let mut made = 0;
+        for iy in (0..bd.keys[1].len()).filter(|i| *i != my) {
+            for ix in (0..nx).filter(|i| *i != mx) {
+                let (Some(fx), Some(fy)) = (bd.forms.get(my * nx + ix).cloned(), bd.forms.get(iy * nx + mx).cloned()) else { continue };
+                // rest + (fx - rest) + (fy - rest) = rest + 2 * (the middle of fx and fy - rest)
+                let corner = lerp_form(&rest, &lerp_form(&fx, &fy, 0.5), 2.0);
+                if let Some(slot) = bd.forms.get_mut(iy * nx + ix) {
+                    *slot = corner;
+                    made += 1;
+                }
+            }
+        }
+        made
+    }
+
+    /// The pivot of a turning changer is put on the other side of a line: x = `axis` (or y = `axis` with `across`), the way a pivot on the wrong side is put right.
+    /// With `turns` the turns of its keyforms go the other way too, so it still moves like the same part seen in a mirror.
+    pub fn flip_pivot(&mut self, changer: Id, across: bool, axis: f32, turns: bool) -> bool {
+        let Some(c) = self.changers.iter_mut().find(|c| c.id == changer) else { return false };
+        let Kind::Rotation { pivot } = &mut c.kind else { return false };
+        if across {
+            pivot[1] = 2.0 * axis - pivot[1];
+        } else {
+            pivot[0] = 2.0 * axis - pivot[0];
+        }
+        if turns {
+            for b in self.bindings.iter_mut().filter(|b| b.changer == changer) {
+                for f in &mut b.forms {
+                    if let Form::Rot { deg } = f {
+                        *deg = -*deg;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// A pose picked at random, to see how the rig holds: every slider goes somewhere between its middle and `amount` (0 to 1) of the way to an end.
+    pub fn random_pose(&self, seed: u64, amount: f32) -> Values {
+        let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407) | 1;
+        let mut next = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let mut v = Values::default();
+        for p in &self.params {
+            let toward = if next() < 0.5 { p.min } else { p.max };
+            v.set(p.id, p.default + (toward - p.default) * next() * amount.clamp(0.0, 1.0));
+        }
+        v
+    }
+
+    /// What a changer does is given to what is inside it, and the changer goes (tidying up before export: fewer changers, the movement is in the shapes
+    /// themselves). Every changer inside gets, for the keys of the changer's sliders, a shape that is its own movement followed by the changer's. A part
+    /// that sat directly in the changer gets a fine warp of its own (8 by 8) that carries the movement (a turn or a slant is exact, a bend is close).
+    /// Turning changers inside cannot take it (a turn round a moved pivot is no turn round a fixed one): then nothing is changed and the reason is returned.
+    /// Returns how many changers or parts took the movement.
+    pub fn apply_to_children(&mut self, parent: Id) -> Result<usize, String> {
+        let Some(par) = self.changer(parent).cloned() else { return Err("There is no such changer.".into()) };
+        if self.iks.iter().any(|k| k.upper == parent || k.lower == parent) || self.physics.iter().any(|c| c.changer == parent) || self.hit_areas.iter().any(|h| h.follow == Some(parent)) {
+            return Err("An IK, a physics chain or a click zone uses this changer: take it off first.".into());
+        }
+        let kids: Vec<Id> = self.changers.iter().filter(|c| c.parent == Some(parent)).map(|c| c.id).collect();
+        let turning = kids.iter().filter(|k| matches!(self.changer(**k).map(|c| &c.kind), Some(Kind::Rotation { .. }) | Some(Kind::Move | Kind::Scale { .. } | Kind::Flip { .. } | Kind::Fade | Kind::Order | Kind::Wave { .. }))).count();
+        if turning > 0 {
+            return Err(format!("{turning} changers inside it turn or move as a whole: a turn round a pivot that moves cannot be written into them. Nothing was changed."));
+        }
+        let own: Vec<Binding> = self.bindings.iter().filter(|b| b.changer == parent).cloned().collect();
+        // the targets: the changers inside, and a fine warp for every part that sits directly in the changer
+        let mut targets: Vec<Id> = kids.clone();
+        let loose: Vec<usize> = (0..self.meshes.len()).filter(|i| self.meshes[*i].parent == Some(parent)).collect();
+        for i in loose {
+            let v = &self.meshes[i].verts;
+            let Some(first) = v.first() else { continue };
+            let mut r = [first[0], first[1], first[0], first[1]];
+            for p in v {
+                r = [r[0].min(p[0]), r[1].min(p[1]), r[2].max(p[0]), r[3].max(p[1])];
+            }
+            let rect = [r[0] - 2.0, r[1] - 2.0, (r[2] + 2.0).max(r[0] + 1.0), (r[3] + 2.0).max(r[1] + 1.0)];
+            let id = self.add_changer(&format!("{} (moves)", par.name), Kind::Warp { rect, cols: 8, rows: 8 }, par.parent);
+            self.meshes[i].parent = Some(id);
+            targets.push(id);
+        }
+        let done = targets.len();
+        for t in targets {
+            let Some(kind) = self.changer(t).map(|c| c.kind.clone()) else { continue };
+            let pts: Vec<[f32; 2]> = match &kind {
+                Kind::Warp { rect, cols, rows } => Rig::warp_rest(*rect, *cols, *rows),
+                Kind::Line { pts, .. } | Kind::Pins { pts } => pts.clone(),
+                Kind::Paths { paths } => paths.iter().flat_map(|sp| sp.pts.iter().copied()).collect(),
+                Kind::Soft { center, .. } => vec![*center],
+                _ => continue,
+            };
+            let is_kid = kids.contains(&t);
+            for b in &own {
+                // more keys between the keys, because the shapes between two keys are mixed straight, and a turn is not a straight mix of two shapes
+                let extra = if b.params.len() > 1 { 2 } else { 5 };
+                let keys: Vec<Vec<f32>> = b.keys.iter().map(|k| densify(k, extra)).collect();
+                let (nx, ny) = (keys[0].len(), keys.get(1).map(|k| k.len()).unwrap_or(1));
+                let mut forms = Vec::with_capacity(nx * ny);
+                for iy in 0..ny {
+                    for ix in 0..nx {
+                        let mut vals = Values::default();
+                        vals.set(b.params[0], keys[0][ix]);
+                        if b.params.len() > 1 {
+                            vals.set(b.params[1], keys[1][iy]);
+                        }
+                        let pose = self.pose(&vals);
+                        let off: Vec<[f32; 2]> = pts
+                            .iter()
+                            .map(|p| {
+                                let mid = if is_kid { self.changer(t).map(|c| self.apply_one(c, &pose, *p)).unwrap_or(*p) } else { *p };
+                                let q = self.apply_one(&par, &pose, mid);
+                                [q[0] - p[0], q[1] - p[1]]
+                            })
+                            .collect();
+                        forms.push(match &kind {
+                            Kind::Warp { .. } => Form::Warp { offsets: off },
+                            Kind::Line { .. } => Form::Line { offsets: off, turns: Vec::new() },
+                            Kind::Pins { .. } => Form::Pins { offsets: off },
+                            Kind::Paths { paths } => Form::Paths { offsets: changers::unflatten(paths, &off), turns: Vec::new() },
+                            _ => Form::Soft { offset: off.first().copied().unwrap_or([0.0, 0.0]), grow: 0.0 },
+                        });
+                    }
+                }
+                self.bindings.retain(|x| !(x.changer == t && x.params == b.params));
+                self.bindings.push(Binding { changer: t, params: b.params.clone(), keys, forms, ease: b.ease });
+            }
+            if is_kid {
+                if let Some(c) = self.changers.iter_mut().find(|c| c.id == t) {
+                    c.parent = par.parent;
+                }
+            }
+        }
+        self.bindings.retain(|b| b.changer != parent);
+        self.changers.retain(|c| c.id != parent);
+        self.smooth.retain(|x| *x != parent);
+        Ok(done)
+    }
+
+    /// The whole rig as readable text (JSON): sliders, changers, keyforms, meshes, physics, animation. Put it in a folder under Git and it shows what changed
+    /// between two days, and two people can merge their work.
+    pub fn to_text(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_default()
+    }
+
+    /// A rig from the text `to_text` made (cleaned, like any project file that comes from outside).
+    pub fn from_text(text: &str) -> Result<Rig, String> {
+        serde_json::from_str::<Rig>(text).map(Rig::sanitized).map_err(|e| format!("This is not a rig written by this program: {e}"))
+    }
+
+    /// A shape (a form) is put into a pose as it is, instead of what the sliders gave for that changer. Form animation uses it.
+    pub fn apply_form(&self, pose: &mut Pose, id: Id, form: &Form) {
+        match form {
+            Form::Rot { deg } => {
+                pose.rot.insert(id, *deg);
+            }
+            Form::Warp { offsets } => {
+                pose.warp.insert(id, offsets.clone());
+            }
+            Form::Line { offsets, turns } => {
+                pose.line.insert(id, offsets.clone());
+                if turns.is_empty() {
+                    pose.line_turns.remove(&id);
+                } else {
+                    pose.line_turns.insert(id, turns.clone());
+                }
+            }
+            Form::Soft { offset, grow } => {
+                pose.soft.insert(id, (*offset, *grow));
+            }
+            Form::Vals { v } => {
+                pose.vals.insert(id, v.clone());
+            }
+            Form::Pins { offsets } => {
+                pose.pins.insert(id, offsets.clone());
+            }
+            Form::Paths { offsets, turns } => {
+                pose.paths.insert(id, offsets.clone());
+                if turns.is_empty() {
+                    pose.path_turns.remove(&id);
+                } else {
+                    pose.path_turns.insert(id, turns.clone());
+                }
+            }
+        }
+    }
+
+    /// The shape a changer has in a pose, as a form (what the sliders make of it now).
+    pub fn form_in_pose(&self, pose: &Pose, id: Id) -> Option<Form> {
+        let rest = self.rest_form(id)?;
+        Some(match rest {
+            Form::Rot { .. } => Form::Rot { deg: pose.rot.get(&id).copied().unwrap_or(0.0) },
+            Form::Warp { offsets } => Form::Warp { offsets: pose.warp.get(&id).filter(|o| o.len() == offsets.len()).cloned().unwrap_or(offsets) },
+            Form::Line { offsets, .. } => Form::Line { offsets: pose.line.get(&id).filter(|o| o.len() == offsets.len()).cloned().unwrap_or(offsets), turns: pose.line_turns.get(&id).cloned().unwrap_or_default() },
+            Form::Soft { offset, grow } => {
+                let (o, g) = pose.soft.get(&id).copied().unwrap_or((offset, grow));
+                Form::Soft { offset: o, grow: g }
+            }
+            Form::Vals { v } => Form::Vals { v: pose.vals.get(&id).filter(|x| x.len() == v.len()).cloned().unwrap_or(v) },
+            Form::Pins { offsets } => Form::Pins { offsets: pose.pins.get(&id).filter(|o| o.len() == offsets.len()).cloned().unwrap_or(offsets) },
+            Form::Paths { offsets, .. } => {
+                let now = pose.paths.get(&id).filter(|o| o.len() == offsets.len() && o.iter().zip(&offsets).all(|(a, b)| a.len() == b.len())).cloned().unwrap_or(offsets);
+                Form::Paths { offsets: now, turns: pose.path_turns.get(&id).cloned().unwrap_or_default() }
+            }
+        })
+    }
+
+    /// The outline of a click zone as it is in the pose: a box or an oval, moved by the changer it follows.
+    pub fn hit_outline(&self, pose: &Pose, i: usize) -> Vec<[f32; 2]> {
+        let Some(h) = self.hit_areas.get(i) else { return Vec::new() };
+        let [x0, y0, x1, y1] = h.rect;
+        let pts: Vec<[f32; 2]> = if h.round {
+            let (cx, cy, rx, ry) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0, (x1 - x0).abs() / 2.0, (y1 - y0).abs() / 2.0);
+            (0..32).map(|k| {
+                let a = k as f32 / 32.0 * std::f32::consts::TAU;
+                [cx + rx * a.cos(), cy + ry * a.sin()]
+            }).collect()
+        } else {
+            vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+        };
+        pts.into_iter().map(|p| self.deform_point(pose, h.follow, p)).collect()
+    }
+
+    /// The click zones that a point of the page is in, the one in front (the last in the list) first.
+    pub fn hit_test(&self, pose: &Pose, p: [f32; 2]) -> Vec<usize> {
+        (0..self.hit_areas.len()).rev().filter(|i| inside_polygon(&self.hit_outline(pose, *i), p)).collect()
     }
 
     /// A shape of a movement turned to the other side (left and right swapped): what a changer on the other side does with the same slider.
@@ -970,7 +1416,44 @@ impl Rig {
                 }
             }
         }
+        self.carry_groups(&mut all);
         all
+    }
+
+    /// Move the members of every mesh group by what their driver is doing where they sit (looked up in the driver's triangles at rest, then followed to where
+    /// they are now). The drivers are read as they were before any group moved anything, so the order of the groups does not matter.
+    fn carry_groups(&self, all: &mut [Vec<[f32; 2]>]) {
+        if self.groups.is_empty() {
+            return;
+        }
+        let before: Vec<Vec<[f32; 2]>> = all.to_vec();
+        for g in &self.groups {
+            let Some(di) = self.meshes.iter().position(|m| m.id == g.driver) else { continue };
+            let driver = &self.meshes[di];
+            let k = g.strength.clamp(0.0, 1.0);
+            for mid in &g.members {
+                let Some(mi) = self.meshes.iter().position(|m| m.id == *mid) else { continue };
+                if mi == di {
+                    continue;
+                }
+                for (vi, v) in self.meshes[mi].verts.iter().enumerate() {
+                    let Some(d) = carried_by(driver, &before[di], *v) else { continue };
+                    all[mi][vi][0] += d[0] * k;
+                    all[mi][vi][1] += d[1] * k;
+                }
+            }
+        }
+    }
+
+    /// Make `members` ride on `driver`. Returns false when there is nothing to do (the driver is the only member, or a mesh is missing).
+    pub fn make_group(&mut self, name: &str, driver: Id, members: &[Id], strength: f32) -> bool {
+        let members: Vec<Id> = members.iter().copied().filter(|m| *m != driver && self.meshes.iter().any(|x| x.id == *m)).collect();
+        if members.is_empty() || !self.meshes.iter().any(|m| m.id == driver) {
+            return false;
+        }
+        self.groups.retain(|g| g.driver != driver);
+        self.groups.push(MeshGroup { name: name.chars().take(40).collect(), driver, members, strength: strength.clamp(0.0, 1.0) });
+        true
     }
 
     /// Glue two meshes along the places where their vertices are within `reach` of each other at rest.
@@ -999,30 +1482,75 @@ impl Rig {
         if b.keys[axis].iter().any(|k| (k - v).abs() < 1e-4) {
             return;
         }
-        let nx = b.keys[0].len();
-        let ny = if b.keys.len() > 1 { b.keys[1].len() } else { 1 };
+        // the grid of shapes has one axis for every slider: the first slider counts fastest
+        let n = b.keys.len();
+        let dims: Vec<usize> = b.keys.iter().map(|k| k.len()).collect();
+        let mut stride = vec![1usize; n];
+        for k in 1..n {
+            stride[k] = stride[k - 1] * dims[k - 1];
+        }
         let (i0, i1, t) = axis_weights(&b.keys[axis], v);
         let at = if v <= b.keys[axis][0] { 0 } else if v >= *b.keys[axis].last().unwrap() { b.keys[axis].len() } else { i1 };
-        let get = |forms: &[Form], x: usize, y: usize| forms[y * nx + x].clone();
-        let mut out: Vec<Form> = Vec::new();
-        let (nnx, nny) = if axis == 0 { (nx + 1, ny) } else { (nx, ny + 1) };
-        for y in 0..nny {
-            for x in 0..nnx {
-                let (sx, sy) = (x, y);
-                let cell = if axis == 0 {
-                    if x < at { get(&b.forms, sx, sy) } else if x == at { lerp_form(&get(&b.forms, i0.min(nx - 1), sy), &get(&b.forms, i1.min(nx - 1), sy), t) } else { get(&b.forms, sx - 1, sy) }
-                } else if y < at {
-                    get(&b.forms, sx, sy)
-                } else if y == at {
-                    lerp_form(&get(&b.forms, sx, i0.min(ny - 1)), &get(&b.forms, sx, i1.min(ny - 1)), t)
-                } else {
-                    get(&b.forms, sx, sy - 1)
-                };
-                out.push(cell);
+        let mut new_dims = dims.clone();
+        new_dims[axis] += 1;
+        let total: usize = new_dims.iter().product();
+        let mut out: Vec<Form> = Vec::with_capacity(total);
+        for flat in 0..total {
+            let (mut idx, mut r) = (vec![0usize; n], flat);
+            for k in 0..n {
+                idx[k] = r % new_dims[k];
+                r /= new_dims[k];
             }
+            // the shape the old grid has with this number along the new axis
+            let old = |along: usize| -> Form {
+                let mut o = 0;
+                for k in 0..n {
+                    let ik = if k == axis { along } else { idx[k] };
+                    o += ik.min(dims[k] - 1) * stride[k];
+                }
+                b.forms[o].clone()
+            };
+            let ax = idx[axis];
+            out.push(if ax < at {
+                old(ax)
+            } else if ax == at {
+                lerp_form(&old(i0.min(dims[axis] - 1)), &old(i1.min(dims[axis] - 1)), t)
+            } else {
+                old(ax - 1)
+            });
         }
         b.keys[axis].insert(at, v);
         b.forms = out;
+    }
+
+    /// The shape of a changer when any number of sliders (up to six) have these values: a grid of shapes with an axis for every slider, mixed between
+    /// the nearest corners. Two sliders can use `set_keyform2`; this does the same for any number.
+    pub fn set_keyform_n(&mut self, changer: Id, params: &[Id], values: &[f32], form: Form) {
+        if params.is_empty() || params.len() != values.len() || params.len() > 6 || (0..params.len()).any(|i| params[..i].contains(&params[i])) {
+            return;
+        }
+        let Some(defaults): Option<Vec<f32>> = params.iter().map(|p| self.param(*p).map(|q| q.default)).collect() else { return };
+        let Some(rest) = self.rest_form(changer) else { return };
+        let bi = match self.bindings.iter().position(|x| x.changer == changer && x.params == params) {
+            Some(i) => i,
+            None => {
+                self.bindings.push(Binding { changer, params: params.to_vec(), keys: defaults.iter().map(|d| vec![*d]).collect(), forms: vec![rest], ease: Ease::Linear });
+                self.bindings.len() - 1
+            }
+        };
+        for (axis, v) in values.iter().enumerate() {
+            self.insert_axis_key(bi, axis, *v);
+        }
+        let bd = &mut self.bindings[bi];
+        let mut flat = 0;
+        let mut stride = 1;
+        for (axis, v) in values.iter().enumerate() {
+            flat += bd.keys[axis].iter().position(|k| (k - v).abs() < 1e-4).unwrap_or(0) * stride;
+            stride *= bd.keys[axis].len();
+        }
+        if let Some(slot) = bd.forms.get_mut(flat) {
+            *slot = form;
+        }
     }
 
     /// The shape of a changer when two sliders have these values (a grid of shapes, like head left-right by up-down).
@@ -1048,6 +1576,15 @@ impl Rig {
     /// Project files come from outside: drop what points nowhere and bound every size.
     pub fn sanitized(mut self) -> Self {
         let fin = |v: f32| v.is_finite();
+        self.anchors.truncate(200);
+        self.anchors.retain(|a| a.pos.iter().all(|v| fin(*v)));
+        self.locked.retain(|l| self.changers.iter().any(|c| c.id == *l));
+        self.hit_areas.truncate(200);
+        self.hit_areas.retain(|h| h.rect.iter().all(|v| fin(*v)));
+        for h in &mut self.hit_areas {
+            h.name = h.name.chars().filter(|c| !c.is_control()).take(40).collect();
+            h.plays = h.plays.chars().filter(|c| !c.is_control()).take(80).collect();
+        }
         self.meshes.truncate(2000);
         self.changers.truncate(2000);
         self.params.truncate(2000);
@@ -1168,6 +1705,14 @@ impl Rig {
             sk
         });
         let counts: HashMap<Id, usize> = self.meshes.iter().map(|m| (m.id, m.verts.len())).collect();
+        self.groups.truncate(200);
+        self.groups.retain_mut(|g| {
+            g.strength = if g.strength.is_finite() { g.strength.clamp(0.0, 1.0) } else { 1.0 };
+            let driver = g.driver;
+            g.members.retain(|m| *m != driver && counts.contains_key(m));
+            g.members.truncate(500);
+            counts.contains_key(&g.driver) && !g.members.is_empty()
+        });
         self.glues.truncate(2000);
         self.glues.retain_mut(|g| {
             let (Some(na), Some(nb)) = (counts.get(&g.a).copied(), counts.get(&g.b).copied()) else { return false };
@@ -1468,6 +2013,33 @@ mod tests {
     }
 
     #[test]
+    fn a_mesh_group_carries_its_members_with_the_driver() {
+        let mut r = Rig::default();
+        let sq = |id, layer, x0: f32, y0: f32, s: f32| ArtMesh { id, layer, verts: vec![[x0, y0], [x0 + s, y0], [x0 + s, y0 + s], [x0, y0 + s]], tris: vec![[0, 1, 2], [0, 2, 3]], parent: None };
+        r.meshes.push(sq(1, 1, 0.0, 0.0, 100.0)); // the face
+        r.meshes.push(sq(2, 2, 40.0, 40.0, 10.0)); // a mole inside it
+        r.meshes.push(sq(3, 3, 300.0, 300.0, 10.0)); // far away from it
+        let c = r.add_changer("Slide", Kind::Move, None);
+        r.meshes[0].parent = Some(c);
+        let p = r.add_param("Slide", 0.0, 1.0, 0.0);
+        r.set_keyform(c, p, 1.0, Form::Vals { v: vec![20.0, 0.0] });
+        let mut v = Values::default();
+        v.set(p, 1.0);
+        let pose = r.pose(&v);
+        let mole = |r: &Rig| r.deformed_all(&pose)[1][0];
+        assert_eq!(mole(&r), [40.0, 40.0], "alone it stays");
+        assert!(!r.make_group("Face", 1, &[1], 1.0), "the driver cannot carry itself");
+        assert!(r.make_group("Face", 1, &[2, 3], 1.0));
+        assert!((mole(&r)[0] - 60.0).abs() < 1e-3 && (mole(&r)[1] - 40.0).abs() < 1e-3, "it moves with the face: {:?}", mole(&r));
+        assert_eq!(r.deformed_all(&pose)[2][0], [300.0, 300.0], "far from the driver nothing carries it");
+        r.groups[0].strength = 0.5;
+        assert!((mole(&r)[0] - 50.0).abs() < 1e-3, "half carried");
+        // a group whose driver is gone is cleaned away
+        r.groups.push(MeshGroup { name: "Gone".into(), driver: 99, members: vec![2], strength: 1.0 });
+        assert!(r.sanitized().groups.iter().all(|g| g.driver != 99));
+    }
+
+    #[test]
     fn glue_pulls_the_seam_of_two_meshes_together() {
         let mut r = Rig::default();
         // two squares that touch along x = 100
@@ -1642,6 +2214,237 @@ mod tests {
     }
 
     #[test]
+    fn keyforms_can_be_moved_to_another_slider_or_another_changer() {
+        let mut r = Rig::default();
+        let eye_l = r.add_changer("Eye L", Kind::Rotation { pivot: [700.0, 300.0] }, None);
+        let eye_r = r.add_changer("Eye R", Kind::Rotation { pivot: [300.0, 300.0] }, None);
+        let open_l = r.add_param("Eye L open", 0.0, 1.0, 0.5);
+        let open_r = r.add_param("Eye R open", 0.0, 10.0, 5.0);
+        r.bind_rotation(eye_l, open_l, 40.0);
+        // rigged on the wrong slider: the keys are stretched to the range of the other one
+        let before = r.bindings.iter().find(|b| b.changer == eye_l).unwrap().keys[0].clone();
+        assert!(r.retarget_param(eye_l, &[open_l], 0, open_r));
+        let b = r.bindings.iter().find(|b| b.changer == eye_l).unwrap();
+        assert_eq!(b.params, vec![open_r]);
+        assert!(before.iter().zip(&b.keys[0]).all(|(o, n)| (o * 10.0 - n).abs() < 1e-4), "{before:?} {:?}", b.keys[0]);
+        assert!(!r.retarget_param(eye_l, &[open_r], 0, open_r), "the same slider is not a change");
+        // rigged on the wrong eye: it moves, mirrored when asked, and the first is left without
+        assert_eq!(r.changers_that_fit(eye_l, &[open_r]), vec![eye_r]);
+        assert!(r.move_movement(eye_l, &[open_r], eye_r, true));
+        assert!(r.bindings.iter().all(|b| b.changer != eye_l));
+        let deg = |r: &Rig| r.bindings.iter().find(|b| b.changer == eye_r).unwrap().forms.iter().filter_map(|f| if let Form::Rot { deg } = f { Some(*deg) } else { None }).last().unwrap();
+        assert!(deg(&r) < -1.0, "mirrored: it turns the other way at the high end of the slider");
+        let w = r.add_changer("Cheek", Kind::Warp { rect: [0.0, 0.0, 10.0, 10.0], cols: 1, rows: 1 }, None);
+        assert!(!r.move_movement(eye_r, &[open_r], w, false), "a warp does not fit a turn");
+        assert!(r.bindings.iter().any(|b| b.changer == eye_r), "nothing is lost when it does not fit");
+    }
+
+    #[test]
+    fn corners_are_made_from_the_edges_and_the_pivot_can_be_put_on_the_other_side() {
+        let mut r = Rig::default();
+        let c = r.add_changer("Head", Kind::Rotation { pivot: [700.0, 300.0] }, None);
+        let x = r.add_param("Angle X", -1.0, 1.0, 0.0);
+        let y = r.add_param("Angle Y", -1.0, 1.0, 0.0);
+        for (vx, vy, deg) in [(1.0, 0.0, 10.0), (-1.0, 0.0, -10.0), (0.0, 1.0, 4.0), (0.0, -1.0, -4.0), (1.0, 1.0, 0.0), (-1.0, -1.0, 0.0), (1.0, -1.0, 0.0), (-1.0, 1.0, 0.0)] {
+            r.set_keyform2(c, x, y, vx, vy, Form::Rot { deg });
+        }
+        assert_eq!(r.synthesize_corners(c, x, y), 4);
+        let b = r.bindings.iter().find(|b| b.changer == c && b.params == [x, y]).unwrap();
+        let nx = b.keys[0].len();
+        let at = |vx: f32, vy: f32| {
+            let (ix, iy) = (b.keys[0].iter().position(|k| *k == vx).unwrap(), b.keys[1].iter().position(|k| *k == vy).unwrap());
+            if let Form::Rot { deg } = b.forms[iy * nx + ix] { deg } else { f32::NAN }
+        };
+        assert!((at(1.0, 1.0) - 14.0).abs() < 1e-4 && (at(-1.0, -1.0) + 14.0).abs() < 1e-4, "{} {}", at(1.0, 1.0), at(-1.0, -1.0));
+        assert!((at(1.0, -1.0) - 6.0).abs() < 1e-4 && (at(-1.0, 1.0) + 6.0).abs() < 1e-4);
+        assert!((at(1.0, 0.0) - 10.0).abs() < 1e-4, "the edges are left as they were");
+        // the pivot on the other side of x = 500, and the turns the other way
+        assert!(r.flip_pivot(c, false, 500.0, true));
+        assert!(matches!(r.changer(c).unwrap().kind, Kind::Rotation { pivot } if pivot == [300.0, 300.0]));
+        let b = r.bindings.iter().find(|b| b.changer == c && b.params == [x, y]).unwrap();
+        assert!(b.forms.iter().any(|f| matches!(f, Form::Rot { deg } if (*deg + 10.0).abs() < 1e-4)));
+        assert!(r.flip_pivot(c, true, 100.0, false) && matches!(r.changer(c).unwrap().kind, Kind::Rotation { pivot } if pivot == [300.0, -100.0]));
+        let w = r.add_changer("Cheek", Kind::Warp { rect: [0.0, 0.0, 10.0, 10.0], cols: 1, rows: 1 }, None);
+        assert!(!r.flip_pivot(w, false, 0.0, true), "only a turning changer has a pivot");
+    }
+
+    #[test]
+    fn a_random_pose_stays_inside_the_sliders_and_differs_by_seed() {
+        let mut r = Rig::default();
+        let a = r.add_param("A", -30.0, 30.0, 0.0);
+        let b = r.add_param("B", 0.0, 1.0, 1.0);
+        let (p1, p2) = (r.random_pose(1, 1.0), r.random_pose(2, 1.0));
+        for p in [&p1, &p2] {
+            assert!(r.value(p, a).abs() <= 30.0 && (0.0..=1.0).contains(&r.value(p, b)));
+        }
+        assert_ne!(r.value(&p1, a), r.value(&p2, a));
+        let still = r.random_pose(1, 0.0);
+        assert!(r.params.iter().all(|q| (r.value(&still, q.id) - q.default).abs() < 1e-6), "nothing moves at amount 0");
+    }
+
+    #[test]
+    fn a_click_zone_follows_its_changer_and_the_one_in_front_answers_first() {
+        let mut r = Rig::default();
+        let head = r.add_changer("Head", Kind::Rotation { pivot: [100.0, 200.0] }, None);
+        let p = r.add_param("Angle", -90.0, 90.0, 0.0);
+        r.bind_rotation(head, p, 90.0);
+        let mut zone = HitArea::new("Head", [50.0, 50.0, 150.0, 150.0]);
+        zone.follow = Some(head);
+        r.hit_areas.push(zone);
+        r.hit_areas.push(HitArea { round: true, ..HitArea::new("Cheek", [80.0, 80.0, 120.0, 120.0]) });
+        let rest = r.pose(&Values::default());
+        assert_eq!(r.hit_test(&rest, [100.0, 100.0]), vec![1, 0], "the cheek is in front of the head");
+        assert_eq!(r.hit_test(&rest, [60.0, 60.0]), vec![0]);
+        assert!(r.hit_test(&rest, [10.0, 10.0]).is_empty());
+        assert!(r.hit_test(&rest, [82.0, 82.0]).iter().all(|i| *i != 1), "the corner of the box of an oval is outside the oval");
+        // the head turns a quarter round its pivot: the head zone is where the head is now, the cheek stays
+        let mut v = Values::default();
+        v.set(p, 90.0);
+        let turned = r.pose(&v);
+        assert!(r.hit_test(&turned, [60.0, 60.0]).is_empty(), "nothing is at the old place of the corner");
+        let corner = r.deform_point(&turned, Some(head), [60.0, 60.0]);
+        assert_eq!(r.hit_test(&turned, [corner[0], corner[1]]).first(), Some(&0));
+        // a project file with a broken zone is cleaned
+        r.hit_areas.push(HitArea::new("Bad", [f32::NAN, 0.0, 1.0, 1.0]));
+        assert_eq!(r.sanitized().hit_areas.len(), 2);
+    }
+
+    #[test]
+    fn what_a_changer_does_can_be_given_to_what_is_inside_it() {
+        let mut r = Rig::default();
+        let arm = r.add_changer("Arm", Kind::Rotation { pivot: [200.0, 100.0] }, None);
+        let sleeve = r.add_changer("Sleeve", Kind::Warp { rect: [150.0, 100.0, 250.0, 200.0], cols: 2, rows: 2 }, Some(arm));
+        let p = r.add_param("Arm", -1.0, 1.0, 0.0);
+        r.bind_rotation(arm, p, 30.0);
+        let layer = 7;
+        r.meshes.push(ArtMesh { id: 99, layer, verts: vec![[160.0, 110.0], [240.0, 110.0], [240.0, 190.0], [160.0, 190.0]], tris: vec![[0, 1, 2], [0, 2, 3]], parent: Some(arm) });
+        let mut v = Values::default();
+        v.set(p, 0.7);
+        let before = r.pose(&v);
+        let (a, b) = (r.deform_point(&before, Some(sleeve), [190.0, 150.0]), r.deform_point(&before, Some(arm), [240.0, 190.0]));
+        assert_eq!(r.apply_to_children(arm), Ok(2));
+        assert!(r.changer(arm).is_none() && r.changers.iter().all(|c| c.parent != Some(arm)));
+        let after = r.pose(&v);
+        let a2 = r.deform_point(&after, Some(sleeve), [190.0, 150.0]);
+        assert!((a[0] - a2[0]).abs() < 0.1 && (a[1] - a2[1]).abs() < 0.1, "{a:?} {a2:?}");
+        let holder = r.meshes[0].parent.expect("the part is inside a warp of its own now");
+        let b2 = r.deform_point(&after, Some(holder), [240.0, 190.0]);
+        assert!((b[0] - b2[0]).abs() < 0.1 && (b[1] - b2[1]).abs() < 0.1, "{b:?} {b2:?}");
+        // a turning changer inside cannot take it, and nothing is changed
+        let mut r2 = Rig::default();
+        let up = r2.add_changer("Up", Kind::Rotation { pivot: [0.0, 0.0] }, None);
+        r2.add_changer("In", Kind::Rotation { pivot: [5.0, 5.0] }, Some(up));
+        let q = r2.add_param("Q", -1.0, 1.0, 0.0);
+        r2.bind_rotation(up, q, 10.0);
+        let copy = r2.clone();
+        assert!(r2.apply_to_children(up).is_err());
+        assert_eq!(r2, copy);
+    }
+
+    #[test]
+    fn a_form_can_be_put_in_a_pose_and_read_back() {
+        let mut r = Rig::default();
+        let w = r.add_changer("Cheek", Kind::Warp { rect: [0.0, 0.0, 10.0, 10.0], cols: 1, rows: 1 }, None);
+        let l = r.add_changer("Hair", Kind::Line { pts: vec![[0.0, 0.0], [0.0, 10.0], [0.0, 20.0]], width: 10.0 }, None);
+        let mut pose = r.pose(&Values::default());
+        let shape = Form::Warp { offsets: vec![[1.0, 2.0], [0.0, 0.0], [0.0, 0.0], [3.0, 4.0]] };
+        r.apply_form(&mut pose, w, &shape);
+        assert_eq!(r.form_in_pose(&pose, w), Some(shape));
+        let at = r.deform_point(&pose, Some(w), [0.0, 0.0]);
+        assert!((at[0] - 1.0).abs() < 1e-4 && (at[1] - 2.0).abs() < 1e-4, "{at:?}");
+        let hair = Form::Line { offsets: vec![[0.0, 0.0], [5.0, 0.0], [0.0, 0.0]], turns: Vec::new() };
+        r.apply_form(&mut pose, l, &hair);
+        assert_eq!(r.form_in_pose(&pose, l), Some(hair));
+        // a changer that was not touched reads as its rest shape
+        assert_eq!(r.form_in_pose(&r.pose(&Values::default()), w), r.rest_form(w));
+    }
+
+    #[test]
+    fn a_slider_has_a_name_in_every_language_and_falls_back_to_its_own() {
+        let mut r = Rig::default();
+        let a = r.add_param("Angle X", -30.0, 30.0, 0.0);
+        r.params[0].names = vec![("ja".into(), "角度X".into()), ("lv".into(), String::new())];
+        let p = r.param(a).unwrap();
+        assert_eq!(p.shown(""), "Angle X");
+        assert_eq!(p.shown("JA"), "角度X", "the language is not case sensitive");
+        assert_eq!(p.shown("lv"), "Angle X", "an empty name falls back");
+        assert_eq!(p.shown("de"), "Angle X");
+    }
+
+    #[test]
+    fn stress_is_none_at_rest_and_full_when_the_area_doubles_or_halves() {
+        assert_eq!(stress(100.0, 100.0), 0.0);
+        assert!((stress(100.0, 200.0) - 1.0).abs() < 1e-5 && (stress(100.0, 50.0) - 1.0).abs() < 1e-5);
+        assert!(stress(100.0, 140.0) > 0.3 && stress(100.0, 140.0) < 0.6);
+        assert_eq!(stress(100.0, 0.0), 1.0, "a triangle squeezed flat is the most stressed");
+    }
+
+    #[test]
+    fn a_rig_is_written_as_text_and_read_back_the_same() {
+        let mut r = Rig::default();
+        let c = r.add_changer("Arm", Kind::Rotation { pivot: [200.0, 100.0] }, None);
+        let p = r.add_param("Arm", -1.0, 1.0, 0.0);
+        r.bind_rotation(c, p, 30.0);
+        r.hit_areas.push(HitArea::new("Hand", [0.0, 0.0, 10.0, 10.0]));
+        r.metadata = "{\"a\": 1}".into();
+        r.language = "ja".into();
+        let text = r.to_text();
+        assert!(text.contains("\"Arm\"") && text.lines().count() > 20, "it is readable text on many lines");
+        assert_eq!(Rig::from_text(&text).unwrap(), r);
+        assert!(Rig::from_text("{ not a rig").is_err());
+        assert_eq!(Rig::from_text("{}").unwrap(), Rig::default(), "a part of the fields is enough");
+    }
+
+    #[test]
+    fn three_sliders_can_drive_one_shape() {
+        let mut r = Rig::default();
+        let c = r.add_changer("Head", Kind::Rotation { pivot: [100.0, 100.0] }, None);
+        let ps: Vec<Id> = ["X", "Y", "Z"].iter().map(|n| r.add_param(n, -1.0, 1.0, 0.0)).collect();
+        for (vals, deg) in [([1.0, 0.0, 0.0], 10.0), ([0.0, 1.0, 0.0], 20.0), ([0.0, 0.0, 1.0], 30.0), ([1.0, 1.0, 1.0], 60.0), ([-1.0, 0.0, 0.0], -10.0)] {
+            r.set_keyform_n(c, &ps, &vals, Form::Rot { deg });
+        }
+        let at = |x: f32, y: f32, z: f32| {
+            let mut v = Values::default();
+            v.set(ps[0], x);
+            v.set(ps[1], y);
+            v.set(ps[2], z);
+            r.pose(&v).rot.get(&c).copied().unwrap_or(0.0)
+        };
+        assert!((at(1.0, 1.0, 1.0) - 60.0).abs() < 1e-3, "the corner that was set: {}", at(1.0, 1.0, 1.0));
+        assert!((at(0.0, 0.0, 1.0) - 30.0).abs() < 1e-3 && (at(0.0, 1.0, 0.0) - 20.0).abs() < 1e-3);
+        assert!(at(0.0, 0.0, 0.0).abs() < 1e-3, "all in the middle is the drawing");
+        assert!((at(-1.0, 0.0, 0.0) + 10.0).abs() < 1e-3);
+        assert!((at(0.0, 0.0, 0.5) - 15.0).abs() < 1e-3, "half way along one slider: {}", at(0.0, 0.0, 0.5));
+        let b = &r.bindings[0];
+        assert_eq!(b.params.len(), 3);
+        assert_eq!(b.forms.len(), b.keys.iter().map(|k| k.len()).product::<usize>(), "a shape for every cell of the grid");
+        // the same call with two sliders still works like the old one
+        let mut two = Rig::default();
+        let c2 = two.add_changer("Head", Kind::Rotation { pivot: [0.0, 0.0] }, None);
+        let (a, b2) = (two.add_param("A", -1.0, 1.0, 0.0), two.add_param("B", -1.0, 1.0, 0.0));
+        two.set_keyform_n(c2, &[a, b2], &[1.0, 1.0], Form::Rot { deg: 9.0 });
+        let mut v = Values::default();
+        v.set(a, 1.0);
+        v.set(b2, 1.0);
+        assert!((two.pose(&v).rot[&c2] - 9.0).abs() < 1e-3);
+        // wrong calls do nothing
+        two.set_keyform_n(c2, &[a, a], &[1.0, 1.0], Form::Rot { deg: 1.0 });
+        two.set_keyform_n(c2, &[a], &[1.0, 2.0], Form::Rot { deg: 1.0 });
+        assert_eq!(two.bindings.len(), 1);
+    }
+
+    #[test]
+    fn anchors_and_locks_are_kept_and_cleaned() {
+        let mut r = Rig::default();
+        let c = r.add_changer("Arm", Kind::Rotation { pivot: [0.0, 0.0] }, None);
+        r.anchors = vec![Anchor { name: "Shoulder".into(), pos: [10.0, 20.0] }, Anchor { name: "Bad".into(), pos: [f32::NAN, 0.0] }];
+        r.locked = vec![c, 999];
+        let back = r.sanitized();
+        assert_eq!(back.anchors.len(), 1, "a broken anchor is dropped");
+        assert_eq!(back.locked, vec![c], "a lock on a changer that is gone is dropped");
+    }
+
+    #[test]
     fn mirrored_movement_turns_the_other_way() {
         let mut r = Rig::default();
         let a = r.add_changer("Arm L", Kind::Rotation { pivot: [700.0, 300.0] }, None);
@@ -1711,4 +2514,29 @@ mod tests {
         }
         assert!(!r.resize_warp(c, 0, 2) && !r.resize_warp(c, 4, MAX_WARP + 1));
     }
+}
+
+/// How far the driver moves at the place `p` (a point at rest): found in the triangle of the driver that holds it, or the nearest one for a point just outside.
+fn carried_by(driver: &ArtMesh, now: &[[f32; 2]], p: [f32; 2]) -> Option<[f32; 2]> {
+    let mut best: Option<(f32, [f32; 2])> = None;
+    for t in &driver.tris {
+        let (Some(a), Some(b), Some(c)) = (driver.verts.get(t[0] as usize), driver.verts.get(t[1] as usize), driver.verts.get(t[2] as usize)) else { continue };
+        let det = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+        if det.abs() < 1e-9 {
+            continue;
+        }
+        let l1 = ((b[1] - c[1]) * (p[0] - c[0]) + (c[0] - b[0]) * (p[1] - c[1])) / det;
+        let l2 = ((c[1] - a[1]) * (p[0] - c[0]) + (a[0] - c[0]) * (p[1] - c[1])) / det;
+        let l3 = 1.0 - l1 - l2;
+        // how far outside the triangle (0 inside): the smallest weight below zero
+        let out = (-l1).max(-l2).max(-l3).max(0.0);
+        if best.is_some_and(|b| b.0 <= out) {
+            continue;
+        }
+        let (Some(na), Some(nb), Some(nc)) = (now.get(t[0] as usize), now.get(t[1] as usize), now.get(t[2] as usize)) else { continue };
+        let at = |i: usize| l1 * (na[i] - a[i]) + l2 * (nb[i] - b[i]) + l3 * (nc[i] - c[i]);
+        best = Some((out, [at(0), at(1)]));
+    }
+    // a point far outside the driver is not carried
+    best.filter(|b| b.0 < 0.25).map(|b| b.1)
 }

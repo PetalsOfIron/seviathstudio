@@ -30,6 +30,8 @@ fn op_name(b: Blend) -> &'static str {
         Blend::Color => "svg:color",
         Blend::Luminosity => "svg:luminosity",
         Blend::Add => "svg:plus",
+        Blend::DestIn => "svg:dst-in",
+        Blend::DestOut => "svg:dst-out",
     }
 }
 

@@ -29,6 +29,12 @@ pub fn from_px(p: Px) -> Color32 {
 #[inline]
 pub fn over(dst: Px, src: Px, opacity: f32, mode: Blend) -> Px {
     let sa = src[3] * opacity;
+    // these two do not put color on: they keep or cut away what is below
+    match mode {
+        Blend::DestIn => return [dst[0] * sa, dst[1] * sa, dst[2] * sa, dst[3] * sa],
+        Blend::DestOut => return [dst[0] * (1.0 - sa), dst[1] * (1.0 - sa), dst[2] * (1.0 - sa), dst[3] * (1.0 - sa)],
+        _ => {}
+    }
     if sa <= 0.0 {
         return dst;
     }
@@ -88,7 +94,7 @@ fn unpremul(p: Px) -> [f32; 3] {
 fn mix(mode: Blend, b: [f32; 3], s: [f32; 3]) -> [f32; 3] {
     let sep = |f: fn(f32, f32) -> f32| [f(b[0], s[0]), f(b[1], s[1]), f(b[2], s[2])];
     match mode {
-        Blend::Normal | Blend::PassThrough => s,
+        Blend::Normal | Blend::PassThrough | Blend::DestIn | Blend::DestOut => s,
         Blend::Multiply => sep(|b, s| b * s),
         Blend::Screen => sep(screen),
         Blend::Overlay => sep(|b, s| hard_light(s, b)),
@@ -205,6 +211,12 @@ mod tests {
         assert!(close(over(GRAY, GRAY, 1.0, Blend::Screen), [0.75, 0.75, 0.75, 1.0]));
         assert!(close(over(GRAY, WHITE, 1.0, Blend::Difference), [0.5, 0.5, 0.5, 1.0]));
         assert!(close(over(GRAY, GRAY, 1.0, Blend::Add), WHITE));
+        // destination out punches a hole, destination in keeps only what is under the paint
+        let paint = [1.0, 0.0, 0.0, 1.0];
+        assert_eq!(over(GRAY, paint, 1.0, Blend::DestOut), [0.0; 4]);
+        assert_eq!(over(GRAY, paint, 0.25, Blend::DestOut), [GRAY[0] * 0.75, GRAY[1] * 0.75, GRAY[2] * 0.75, GRAY[3] * 0.75]);
+        assert_eq!(over(GRAY, [0.0; 4], 1.0, Blend::DestIn), [0.0; 4]);
+        assert_eq!(over(GRAY, paint, 1.0, Blend::DestIn), GRAY);
         // Overlay with white backdrop stays white; with mid-gray source it's neutral.
         assert!(close(over(WHITE, GRAY, 1.0, Blend::Overlay), WHITE));
         assert!(close(over(GRAY, GRAY, 1.0, Blend::SoftLight), GRAY));
@@ -213,7 +225,8 @@ mod tests {
     #[test]
     fn blend_onto_transparent_is_plain_source() {
         let red = [1.0, 0.0, 0.0, 1.0];
-        for m in Blend::ALL {
+        // the two that cut or keep what is below put nothing on an empty backdrop
+        for m in Blend::ALL.into_iter().filter(|m| !matches!(m, Blend::DestIn | Blend::DestOut)) {
             assert!(close(over(CLEAR, red, 1.0, m), red), "{m:?}");
         }
     }

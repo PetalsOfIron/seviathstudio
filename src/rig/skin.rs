@@ -21,6 +21,9 @@ pub struct SkinBone {
 pub struct Skin {
     /// The layers that are drawn through this mesh.
     pub layers: Vec<LayerId>,
+    /// Blend the bones as whole movements (turn and shift together) instead of blending the places each one would send a point to. Joints that twist keep their volume
+    /// (no pinched elbow or candy wrapper); the default is the simple blend.
+    pub dual: bool,
     pub verts: Vec<[f32; 2]>,
     pub tris: Vec<[u32; 3]>,
     pub bones: Vec<SkinBone>,
@@ -101,7 +104,7 @@ pub const MAX_BONES: usize = 64;
 impl Skin {
     pub fn new(layers: Vec<LayerId>, verts: Vec<[f32; 2]>, tris: Vec<[u32; 3]>, doc_w: u32, doc_h: u32) -> Skin {
         let cell = (doc_w.max(doc_h)).div_ceil(MAX_GRID).max(1);
-        Skin { layers, verts, tris, bones: Vec::new(), cell, gw: doc_w.div_ceil(cell), gh: doc_h.div_ceil(cell), planes: Vec::new(), face: None, tex: Default::default(), hair: Default::default() }
+        Skin { layers, dual: false, verts, tris, bones: Vec::new(), cell, gw: doc_w.div_ceil(cell), gh: doc_h.div_ceil(cell), planes: Vec::new(), face: None, tex: Default::default(), hair: Default::default() }
     }
 
     pub fn add_bone(&mut self, changer: Id, tail: [f32; 2]) {
@@ -155,6 +158,9 @@ impl Skin {
     /// Where every mesh vertex goes for a pose: the weighted mix of what each bone would do to it; the
     /// weight that no bone claims keeps the vertex where it is.
     pub fn skinned(&self, rig: &Rig, pose: &Pose) -> Vec<[f32; 2]> {
+        if self.dual {
+            return self.skinned_dual(rig, pose);
+        }
         self.verts
             .iter()
             .map(|v| {
@@ -169,6 +175,48 @@ impl Skin {
                     }
                 }
                 p
+            })
+            .collect()
+    }
+
+    /// The same with dual quaternion skinning (in the flat: a turn as a unit complex number and a shift as its dual part). What each bone does at a vertex is read
+    /// as a turn and a shift (from where it sends the vertex and the point one pixel beside it), the turns and shifts are added up by weight, and the sum is
+    /// made a whole turn again, so the vertex goes round instead of cutting across.
+    pub fn skinned_dual(&self, rig: &Rig, pose: &Pose) -> Vec<[f32; 2]> {
+        self.verts
+            .iter()
+            .map(|v| {
+                let w = self.weights_at(v[0], v[1]);
+                let rest = (1.0 - w.iter().sum::<f32>()).max(0.0);
+                // identity: turn 1, shift 0 (the dual part is half the shift turned by the turn)
+                let (mut re, mut im, mut dre, mut dim) = (rest, 0.0f32, 0.0f32, 0.0f32);
+                for (b, wb) in self.bones.iter().zip(&w) {
+                    if *wb <= 0.0 {
+                        continue;
+                    }
+                    let q = rig.deform_point(pose, Some(b.changer), *v);
+                    let q1 = rig.deform_point(pose, Some(b.changer), [v[0] + 1.0, v[1]]);
+                    let (ex, ey) = (q1[0] - q[0], q1[1] - q[1]);
+                    let len = ex.hypot(ey).max(1e-9);
+                    let (cr, ci) = (ex / len, ey / len);
+                    // the shift: where the vertex goes, less what the turn alone does to it
+                    let (sx, sy) = (q[0] - (cr * v[0] - ci * v[1]), q[1] - (ci * v[0] + cr * v[1]));
+                    // dual part = (shift * turn) / 2
+                    let (ddr, ddi) = ((sx * cr - sy * ci) / 2.0, (sx * ci + sy * cr) / 2.0);
+                    re += cr * wb;
+                    im += ci * wb;
+                    dre += ddr * wb;
+                    dim += ddi * wb;
+                }
+                let n = re.hypot(im);
+                if n < 1e-4 {
+                    // opposite turns cancel: nothing to go round by, keep the vertex
+                    return *v;
+                }
+                let (re, im, dre, dim) = (re / n, im / n, dre / n, dim / n);
+                // shift = 2 * dual * conj(turn)
+                let (sx, sy) = (2.0 * (dre * re + dim * im), 2.0 * (dim * re - dre * im));
+                [re * v[0] - im * v[1] + sx, im * v[0] + re * v[1] + sy]
             })
             .collect()
     }
@@ -801,5 +849,59 @@ mod tests {
         let before = s.planes.clone();
         s.assign_mask(0, &[1, 2, 3], 1);
         assert_eq!(s.planes, before);
+    }
+}
+
+#[cfg(test)]
+mod dual_tests {
+    use super::*;
+    use crate::rig::{Kind, Values};
+
+    /// A two bone skin on one vertex: a bone that stays and a bone that turns 90 degrees round the origin, each with half the weight.
+    fn twisted(dual: bool) -> [f32; 2] {
+        let mut r = Rig::default();
+        let c = r.add_changer("Turn", Kind::Rotation { pivot: [0.0, 0.0] }, None);
+        let still = r.add_changer("Still", Kind::Rotation { pivot: [0.0, 0.0] }, None);
+        let p = r.add_param("Turn", 0.0, 90.0, 0.0);
+        r.bind_rotation(c, p, 90.0);
+        let mut s = Skin::new(vec![], vec![[10.0, 0.0]], vec![], 64, 64);
+        s.dual = dual;
+        s.add_bone(still, [20.0, 0.0]);
+        s.add_bone(c, [20.0, 0.0]);
+        // every cell half to each bone
+        for plane in &mut s.planes {
+            plane.iter_mut().for_each(|v| *v = 128);
+        }
+        let mut v = Values::default();
+        v.set(p, 90.0);
+        s.skinned(&r, &r.pose(&v))[0]
+    }
+
+    #[test]
+    fn dual_blending_keeps_the_size_where_the_simple_blend_pinches() {
+        let (lin, dq) = (twisted(false), twisted(true));
+        let len = |p: [f32; 2]| p[0].hypot(p[1]);
+        assert!(len(lin) < 8.0, "the simple blend cuts across: {lin:?}");
+        assert!((len(dq) - 10.0).abs() < 0.3, "the dual blend goes round: {dq:?}");
+        assert!((dq[0] - dq[1]).abs() < 0.3, "half way round is 45 degrees: {dq:?}");
+    }
+
+    #[test]
+    fn opposite_turns_that_cancel_keep_the_vertex_where_it_is() {
+        let mut r = Rig::default();
+        let a = r.add_changer("A", Kind::Rotation { pivot: [0.0, 0.0] }, None);
+        let b = r.add_changer("B", Kind::Rotation { pivot: [0.0, 0.0] }, None);
+        let p = r.add_param("T", -180.0, 180.0, 0.0);
+        r.bind_rotation(a, p, 180.0);
+        r.bind_rotation(b, p, 0.0);
+        let mut s = Skin::new(vec![], vec![[10.0, 0.0]], vec![], 64, 64);
+        s.dual = true;
+        s.add_bone(a, [20.0, 0.0]);
+        s.add_bone(b, [20.0, 0.0]);
+        s.planes.iter_mut().for_each(|pl| pl.iter_mut().for_each(|v| *v = 128));
+        let mut v = Values::default();
+        v.set(p, 180.0);
+        let out = s.skinned(&r, &r.pose(&v))[0];
+        assert!(out[0].is_finite() && out[1].is_finite());
     }
 }

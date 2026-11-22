@@ -118,7 +118,7 @@ impl SeviathApp {
     }
 
     /// The picture of a frame for the preview (kept, so playing a second time is quick).
-    fn cel_texture(&mut self, ctx: &egui::Context, frame: u32) -> Option<egui::TextureHandle> {
+    pub(super) fn cel_texture(&mut self, ctx: &egui::Context, frame: u32) -> Option<egui::TextureHandle> {
         let vis = self.cel_vis(frame);
         let key = self.cel_key(&vis);
         if let Some(t) = self.rigs.anim.cel_cache.get(&key) {
@@ -322,7 +322,6 @@ impl SeviathApp {
     pub(super) fn cel_xsheet_ui(&mut self, ui: &mut Ui) {
         let a = self.draw.doc.rig.anim.clone();
         if a.cel_tracks.is_empty() {
-            ui.label(RichText::new("The X-sheet shows the cel tracks. Make a cel track on the right first (Frame by frame).").size(12.0).color(TEXT_DIM));
             return;
         }
         let (row_h, col_w, num_w) = (20.0, 78.0, 56.0);
@@ -570,7 +569,6 @@ impl SeviathApp {
         section_title(ui, "Frame by frame");
         let a = self.draw.doc.rig.anim.clone();
         if a.cel_tracks.is_empty() {
-            ui.label(RichText::new("Draw every picture of the animation yourself. A cel track makes a folder of layers: each layer is one drawing, drawn in the Draw tab, and the track says which one shows at which frame.").size(11.5).color(TEXT_DIM));
         }
         ui.horizontal_wrapped(|ui| {
             if ui.button("New cel track").help("A folder with its first drawing").clicked() {

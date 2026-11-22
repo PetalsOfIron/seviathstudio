@@ -5,36 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{Form, Id, Kind, Rig, mesh};
+use super::{AutoGroup, AutoRig, Form, Id, Kind, Rig, mesh};
 use crate::doc::{Layer, LayerId};
 use crate::files::layer_bounds;
 use crate::parts::Part;
-
-/// What was made by the automation. Things in `locked` are left alone when it runs again.
-#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AutoGroup {
-    pub name: String,
-    pub changers: Vec<Id>,
-    pub params: Vec<Id>,
-}
-
-/// Everything the automation made (all groups together), the groups it came in, and what you locked.
-#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AutoRig {
-    pub changers: Vec<Id>,
-    pub params: Vec<Id>,
-    pub locked: Vec<Id>,
-    pub groups: Vec<AutoGroup>,
-}
-
-impl AutoRig {
-    fn refresh(&mut self) {
-        self.changers = self.groups.iter().flat_map(|g| g.changers.clone()).collect();
-        self.params = self.groups.iter().flat_map(|g| g.params.clone()).collect();
-    }
-}
 
 /// Note what a run made as one group (keeping the locked leftovers of an earlier run of the same group).
 fn record(rig: &mut Rig, group: &str, changers: Vec<Id>, params: Vec<Id>) {

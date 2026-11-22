@@ -10,9 +10,13 @@ use crate::theme::*;
 
 impl SeviathApp {
     pub(super) fn layout_menu(&mut self, ui: &mut Ui) {
+        self.hover_menu(ui, "Layout", false, |s, ui| s.layout_items(ui));
+    }
+
+    fn layout_items(&mut self, ui: &mut Ui) {
         let now = ui.ctx().input(|i| i.time);
         let mut say: Option<String> = None;
-        ui.menu_button(RichText::new("Layout").color(TEXT), |ui| {
+        {
             ui.set_min_width(250.0);
             ui.label(RichText::new("Workspaces").size(11.5).color(TEXT_DIM));
             let ls = &mut self.draw.layouts;
@@ -79,7 +83,7 @@ impl SeviathApp {
                     }
                 }
             });
-        });
+        }
         if let Some(t) = say {
             self.say(t, now);
         }

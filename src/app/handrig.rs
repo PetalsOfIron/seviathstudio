@@ -3153,7 +3153,7 @@ impl HandRig {
                         if ui.button(RichText::new("Keep it").strong()).clicked() {
                             self.attach_keep(mesh);
                         }
-                        if ui.button("Take it away").clicked() {
+                        if ui.button("Take it away").help("Takes what was made away again.").clicked() {
                             self.attach_drop(mesh);
                         }
                     });
@@ -3287,7 +3287,7 @@ impl HandRig {
                         if ui.button(RichText::new("Keep it").strong()).clicked() {
                             self.shape_keep(mesh);
                         }
-                        if ui.button("Take it away").clicked() {
+                        if ui.button("Take it away").help("Takes what was made away again.").clicked() {
                             self.shape_drop(mesh);
                         }
                     });
@@ -3503,7 +3503,7 @@ impl HandRig {
             ui.checkbox(&mut t.looping, "It loops").help("It starts again when it ends (walking, breathing)");
             ui.label(RichText::new(format!("{:.2} seconds, {} keys", t.seconds(), t.key_count())).size(11.5).color(TEXT_DIM));
         }
-        if self.takes.len() > 1 && ui.small_button("Delete this animation").clicked() {
+        if self.takes.len() > 1 && ui.small_button("Delete this animation").help("Takes the whole animation away.").clicked() {
             self.takes.remove(self.take);
             self.take = self.take.saturating_sub(1);
             changed = true;

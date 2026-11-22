@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn problems_a_game_maker_should_know_are_listed() {
         let mut r = rig();
-        r.params.push(crate::rig::Param { id: 500, name: "Angle X".into(), min: 0.0, max: 1.0, default: 0.0, cid: String::new() });
+        r.params.push(crate::rig::Param { id: 500, name: "Angle X".into(), min: 0.0, max: 1.0, default: 0.0, cid: String::new(), names: Vec::new() });
         r.own_exprs.push(OwnExpr { name: "Nothing".into(), ..Default::default() });
         let v = describe(&r, &|_| None);
         let rep = report(&v);

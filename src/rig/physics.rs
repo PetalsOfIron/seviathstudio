@@ -302,6 +302,23 @@ impl PhysSim {
         self.states.get(&(changer, path)).map(|s| &s.pos)
     }
 
+    /// How fast the points of a chain are going now (page pixels a step), for drawing arrows.
+    pub fn velocities(&self, changer: Id, path: usize) -> Option<Vec<[f32; 2]>> {
+        self.states.get(&(changer, path)).map(|s| s.pos.iter().zip(&s.prev).map(|(p, q)| [p[0] - q[0], p[1] - q[1]]).collect())
+    }
+
+    /// Take hold of one point of a chain and pull it to a place of the page (to yank hair about and see how it flutters). The rest of the chain follows.
+    pub fn grab(&mut self, changer: Id, path: usize, index: usize, to: [f32; 2]) -> bool {
+        let Some(s) = self.states.get_mut(&(changer, path)) else { return false };
+        match s.pos.get_mut(index) {
+            Some(p) => {
+                *p = to;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Advance by `dt` seconds. `base` is the pose the sliders make (without physics); `rest` the pose with every
     /// slider at its default (used to find out how things hang when nothing moves). Returns, for each Line changer
     /// with physics, the offsets to add to its pose.
@@ -475,6 +492,24 @@ mod tests {
     fn tip_len(o: &HashMap<(Id, usize), Vec<[f32; 2]>>, line: Id) -> f32 {
         let t = o[&(line, 0)].last().unwrap();
         t[0].hypot(t[1])
+    }
+
+    #[test]
+    fn a_point_can_be_grabbed_and_its_speed_is_known() {
+        let (r, _, _, line) = hair_rig();
+        let mut sim = PhysSim::default();
+        run(&mut sim, &r, &Values::default(), 0.5);
+        let before = sim.world_positions(line, 0).unwrap().clone();
+        assert!(sim.velocities(line, 0).unwrap().iter().all(|v| v[0].hypot(v[1]) < 0.5), "hanging still");
+        assert!(sim.grab(line, 0, 4, [before[4][0] + 150.0, before[4][1]]));
+        assert!(!sim.grab(line, 0, 99, [0.0, 0.0]) && !sim.grab(999, 0, 0, [0.0, 0.0]));
+        run(&mut sim, &r, &Values::default(), 0.1);
+        let v = sim.velocities(line, 0).unwrap();
+        assert!(v[4][0].hypot(v[4][1]) > 0.5, "after a yank the tip is moving: {:?}", v[4]);
+        // it swings back toward where it hung
+        run(&mut sim, &r, &Values::default(), 6.0);
+        let after = sim.world_positions(line, 0).unwrap();
+        assert!((after[4][0] - before[4][0]).abs() < 30.0, "{:?} {:?}", after[4], before[4]);
     }
 
     #[test]

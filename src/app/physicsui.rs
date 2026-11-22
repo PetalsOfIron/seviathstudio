@@ -106,6 +106,57 @@ impl super::rigtab::RigState {
 }
 
 impl SeviathApp {
+    /// The swinging of the sliders (Live2D physics) is run over the part of the animation that plays, and where its output sliders go is written as keys.
+    /// Returns how many keys were written.
+    pub fn bake_physics(&mut self, now: f64) -> usize {
+        use crate::anim::Target;
+        let rig = self.draw.doc.rig.clone();
+        if rig.param_physics.is_empty() || !rig.param_physics.on {
+            return 0;
+        }
+        let an = &rig.anim;
+        let (first, last) = an.play_range();
+        let dt = 1.0 / an.fps.max(1.0);
+        let values_at = |f: f32| {
+            let mut v = Values::default();
+            for (t, x) in an.sample(f) {
+                if let Target::Param(id) = t {
+                    v.set(id, x);
+                }
+            }
+            v
+        };
+        let mut state = rig.param_physics.rest();
+        // let it settle for a second at the first frame, so it does not start from a chain hanging still
+        let start = values_at(first as f32);
+        for _ in 0..an.fps.max(1.0) as usize {
+            let mut s = RigSliders { rig: &rig, values: &start, out: HashMap::new() };
+            rig.param_physics.step(&mut state, &mut s, dt);
+        }
+        let mut cols: HashMap<Id, Vec<(f32, f32)>> = HashMap::new();
+        for f in first..=last {
+            let vals = values_at(f as f32);
+            let mut s = RigSliders { rig: &rig, values: &vals, out: HashMap::new() };
+            rig.param_physics.step(&mut state, &mut s, dt);
+            for (id, v) in s.out {
+                cols.entry(id).or_default().push((f as f32, v));
+            }
+        }
+        let mut written = 0;
+        let mut ids: Vec<Id> = cols.keys().copied().collect();
+        ids.sort_unstable();
+        self.rig_edit("Bake the physics", now, |r| {
+            for id in ids {
+                let Some(p) = r.param(id).cloned() else { continue };
+                let samples = &cols[&id];
+                written += r.anim.set_from_samples(id, &p.name, samples, (p.max - p.min).abs() * 0.01);
+            }
+        });
+        self.rigs.phys.on = false;
+        self.rigs.phys.param_out.clear();
+        written
+    }
+
     /// Move the simulation on by `dt` seconds (also runs the test motion).
     pub fn phys_advance(&mut self, dt: f32) {
         let rig = self.draw.doc.rig.clone();
@@ -164,6 +215,7 @@ impl SeviathApp {
         self.rig_render(&ctx);
         let mut picked: Option<(LayerId, bool, bool)> = None;
         egui::Panel::top("phys_toolbar").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(8))).show(ui, |ui| self.rig_toolbar(ui, true, false));
+        self.rig_tool_panel(ui, "phys_strip");
         egui::Panel::left("phys_layers").default_size(270.0).size_range(210.0..=440.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
             picked = self.rig_left_panel(ui, &ctx, now, "phys", true, true);
         });
@@ -183,7 +235,7 @@ impl SeviathApp {
         }
     }
 
-    fn physics_side(&mut self, ui: &mut Ui, now: f64) {
+    pub(super) fn physics_side(&mut self, ui: &mut Ui, now: f64) {
         self.live2d_files_ui(ui, now);
         section_title(ui, "Physics");
         ui.horizontal_wrapped(|ui| {
@@ -288,7 +340,6 @@ impl SeviathApp {
     /// The files of a Live2D model (physics, expressions, motions, VTube Studio settings) put onto this rig.
     fn live2d_files_ui(&mut self, ui: &mut Ui, now: f64) {
         section_title(ui, "Live2D files");
-        ui.label(RichText::new("The swinging, expressions and motions of a Live2D model (a .model3.json with its files, as in a VTube Studio folder) can be put onto this rig. Sliders are matched by their Live2D ids.").size(11.5).color(TEXT_DIM));
         ui.horizontal_wrapped(|ui| {
             if ui.button("Add the files of a Live2D model...").help("Pick the .model3.json: its physics, expressions, motions and VTube Studio settings are read").clicked() {
                 if let Some(path) = rfd::FileDialog::new().set_title("A Live2D model (.model3.json)").set_directory(self.settings.projects_folder()).add_filter("Live2D model", &["json"]).pick_file() {
@@ -315,15 +366,19 @@ impl SeviathApp {
         if !rig.param_physics.is_empty() {
             let mut pp = rig.param_physics.clone();
             ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut pp.on, "Live2D physics on").help("Turn the physics of the imported Live2D model on or off.");
+                ui.checkbox(&mut pp.on, "Imported physics on").help("Turn the physics that came with an imported model on or off.");
                 ui.label(RichText::new("Strength").size(12.0).color(TEXT_DIM));
                 ui.add(egui::Slider::new(&mut pp.strength, 0.0..=2.0).show_value(false)).help("1 is as the model was set up");
                 if ui.small_button("Settle").help("The chains hang still again").clicked() {
                     self.rigs.phys.param_state = Default::default();
                 }
+                if ui.small_button("Bake into keys").help("Runs the animation (the part that plays) with the physics on and writes where every slider of the physics ends up as keys on the timeline, so the motion is fixed: it plays the same every time, in a video or a sprite sheet, with no physics running. The physics preview is turned off afterward so the swing is not added twice.").clicked() {
+                    let n = self.bake_physics(now);
+                    self.rigs.phys.message = Some(if n == 0 { "Nothing to bake: the physics has no output slider that is in the rig.".to_owned() } else { format!("Baked: {n} keys on the timeline. The physics preview is off; turn it on to see the swing again.") });
+                }
             });
             if pp != rig.param_physics {
-                self.rig_edit("Live2D physics", now, |r| r.param_physics = pp);
+                self.rig_edit("Imported physics", now, |r| r.param_physics = pp);
             }
             let names: Vec<String> = rig.param_physics.settings.iter().map(|s| s.name.clone()).collect();
             ui.label(RichText::new(format!("{} swinging settings: {}", names.len(), names.join(", "))).size(11.0).color(TEXT_DIM));

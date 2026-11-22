@@ -115,6 +115,53 @@ pub fn layer_bounds(layer: &Layer, doc_w: u32, doc_h: u32) -> Option<(i32, i32, 
     (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
 }
 
+/// The island isolator: the separate bits of paint of a layer (touching pixels, also across corners) that have fewer than `min_px` pixels. Returns the
+/// number of bits and the number of pixels in them. With `remove` they are rubbed out.
+pub fn specks(layer: &mut Layer, doc_w: u32, doc_h: u32, min_px: usize, remove: bool) -> (usize, usize) {
+    let Some((x0, y0, x1, y1)) = layer_bounds(layer, doc_w, doc_h) else { return (0, 0) };
+    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    let mut img = layer_rgba(layer, x0, y0, w as u32, h as u32);
+    let mut seen = vec![false; w * h];
+    let (mut bits, mut pixels) = (0, 0);
+    for start in 0..w * h {
+        if seen[start] || img.as_raw()[start * 4 + 3] == 0 {
+            continue;
+        }
+        // one piece of paint: everything joined to this pixel
+        let mut piece = vec![start];
+        seen[start] = true;
+        let mut at = 0;
+        while at < piece.len() {
+            let (x, y) = ((piece[at] % w) as i32, (piece[at] / w) as i32);
+            at += 1;
+            for (dx, dy) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
+                let (nx, ny) = (x + dx, y + dy);
+                if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                    continue;
+                }
+                let n = ny as usize * w + nx as usize;
+                if !seen[n] && img.as_raw()[n * 4 + 3] != 0 {
+                    seen[n] = true;
+                    piece.push(n);
+                }
+            }
+        }
+        if piece.len() < min_px {
+            bits += 1;
+            pixels += piece.len();
+            if remove {
+                for n in piece {
+                    img.as_mut()[n * 4 + 3] = 0;
+                }
+            }
+        }
+    }
+    if remove && bits > 0 {
+        layer.tiles = tiles_from_rgba(&img, x0, y0, doc_w, doc_h);
+    }
+    (bits, pixels)
+}
+
 /// The whole picture flattened (paper included when it is shown), unpremultiplied.
 pub fn flatten(doc: &Document) -> image::RgbaImage {
     let keys: Vec<TileKey> = (0..doc.tiles_y()).flat_map(|ty| (0..doc.tiles_x()).map(move |tx| (tx, ty))).collect();
@@ -241,6 +288,8 @@ pub enum Flat {
     Png,
     Jpeg,
     Webp,
+    /// Targa: uncompressed, with the full alpha (for game engines and video post).
+    Tga,
 }
 
 /// The app credit written into exported PNGs (as the *software* used — the art stays yours).
@@ -251,7 +300,7 @@ pub fn export_flat(doc: &Document, path: &Path, kind: Flat, jpeg_quality: u8, cr
     let mut img = flatten(doc);
     // wide or special profiles travel with the file (ICC) or are baked into plain sRGB pixels
     let profile = doc.meta.rgb_profile.as_str();
-    let embed = profile != "srgb" && !doc.meta.export_bake && kind != Flat::Webp;
+    let embed = profile != "srgb" && !doc.meta.export_bake && kind != Flat::Webp && kind != Flat::Tga;
     if profile != "srgb" && !embed {
         crate::colorprofiles::bake_to_srgb(&mut img, profile);
     }
@@ -279,6 +328,7 @@ pub fn export_flat(doc: &Document, path: &Path, kind: Flat, jpeg_quality: u8, cr
             wr.write_image_data(img.as_raw()).map_err(|e| e.to_string())
         }
         Flat::Webp => img.write_to(&mut w, image::ImageFormat::WebP).map_err(|e| e.to_string()),
+        Flat::Tga => img.write_to(&mut w, image::ImageFormat::Tga).map_err(|e| e.to_string()),
         Flat::Jpeg => {
             // JPEG has no transparency: put it on the paper color (white when the paper is hidden)
             let bg = if doc.paper_visible() { doc.paper } else { Color32::WHITE };
@@ -412,6 +462,37 @@ mod tests {
         export_flat(&d, &p, Flat::Png, 90, false).unwrap();
         assert!(!String::from_utf8_lossy(&std::fs::read(&p).unwrap()).contains("SnakeSeviath"));
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_targa_export_keeps_the_alpha_and_reads_back() {
+        let mut d = testdoc::sample();
+        d.layers[0].tiles = tiles_from_rgba(&image::RgbaImage::from_fn(20, 20, |x, y| image::Rgba([200, 30, 60, if x < 10 { 0 } else { 255 - y as u8 * 4 }])), 0, 0, d.w, d.h);
+        let p = std::env::temp_dir().join(format!("seviath_export_{}.tga", std::process::id()));
+        export_flat(&d, &p, Flat::Tga, 90, true).unwrap();
+        let back = read_picture(&p).expect("a targa is read back");
+        assert_eq!(back, flatten(&d), "the pixels, with their see-through parts, are the same");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn stray_specks_are_found_and_rubbed_out_and_the_big_piece_stays() {
+        let mut d = Document::new(100, 100);
+        // a big square, and two specks: one pixel far away, and two pixels touching across a corner
+        let img = image::RgbaImage::from_fn(60, 60, |x, y| {
+            let big = (10..30).contains(&x) && (10..30).contains(&y);
+            let one = x == 50 && y == 50;
+            let two = (x == 40 && y == 5) || (x == 41 && y == 6);
+            image::Rgba([200, 30, 60, if big || one || two { 255 } else { 0 }])
+        });
+        d.layers[0].tiles = tiles_from_rgba(&img, 0, 0, 100, 100);
+        let mut l = d.layers[0].clone();
+        assert_eq!(specks(&mut l, 100, 100, 4, false), (2, 3), "counting changes nothing");
+        assert_eq!(layer_bounds(&l, 100, 100).map(|b| b.2), Some(51));
+        assert_eq!(specks(&mut l, 100, 100, 4, true), (2, 3));
+        assert_eq!(specks(&mut l, 100, 100, 4, false), (0, 0));
+        let b = layer_bounds(&l, 100, 100).unwrap();
+        assert_eq!((b.0, b.1, b.2, b.3), (10, 10, 30, 30), "only the square is left");
     }
 
     #[test]

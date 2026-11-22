@@ -106,17 +106,17 @@ impl SeviathApp {
                 });
                 pad(ui, s, ctx, &self.settings, mouse_p);
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Undo line").clicked() {
+                    if ui.button("Undo line").help("Takes the last line you drew away.").clicked() {
                         s.pad.strokes.pop();
                     }
-                    if ui.button("Clear").clicked() {
+                    if ui.button("Clear").help("Empties it.").clicked() {
                         s.pad.strokes.clear();
                         s.t0 = None;
                     }
                     ui.separator();
                     ui.label(RichText::new("Clean").size(12.0).color(TEXT_DIM));
                     ui.add(egui::Slider::new(&mut s.clean, 0.0..=1.0).show_value(false)).help("Smooths the wobble and evens out the weight, but keeps your shapes");
-                    if ui.button("Clean it").clicked() && !s.pad.is_empty() {
+                    if ui.button("Clean it").help("Cleans the picture of this signature.").clicked() && !s.pad.is_empty() {
                         s.pad = s.pad.cleaned(s.clean);
                     }
                 });
@@ -135,7 +135,7 @@ impl SeviathApp {
                     if ui.button(RichText::new("Save in this slot").strong()).clicked() {
                         save = true;
                     }
-                    if ui.button("Delete this slot").clicked() {
+                    if ui.button("Delete this slot").help("Empties this signature slot.").clicked() {
                         delete = true;
                     }
                     if let Some(m) = &s.message {
