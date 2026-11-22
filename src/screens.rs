@@ -4578,7 +4578,7 @@ fn the_draw_timeline_makes_a_frame_of_every_layer_and_plays_them() {
 }
 
 #[test]
-fn dragging_a_point_without_a_slider_says_so_on_the_picture_and_with_one_it_moves() {
+fn dragging_a_point_without_a_slider_makes_one_and_moves_the_point() {
     use egui_kittest::kittest::Queryable;
     let _gpu = lock_gpu();
     let doc = crate::vrm::tests_build::character();
@@ -4600,17 +4600,43 @@ fn dragging_a_point_without_a_slider_says_so_on_the_picture_and_with_one_it_move
     let spot = h.state_mut().test_rig().test_spots().first().copied().expect("the handles of the warp are on the picture");
     stroke(&mut h, &[spot, spot + vec2(20.0, 0.0), spot + vec2(40.0, 0.0)]);
     h.run_steps(2);
-    let said = h.state_mut().test_rig().test_message().unwrap_or_default();
-    assert!(said.contains("slider"), "it says what to do: {said:?}");
-    // with a slider picked the point moves
-    let pid = h.state().draw_mut_ref().doc.rig.params[0].id;
-    h.state_mut().test_rig().sel_param = Some(pid);
-    h.run_steps(3);
-    let spot = h.state_mut().test_rig().test_spots().first().copied().unwrap();
-    stroke(&mut h, &[spot, spot + vec2(20.0, 0.0), spot + vec2(40.0, 10.0)]);
-    h.run_steps(2);
-    // letting go saves the shape: the changer is bound to the slider now
-    let moved = h.state().draw_mut_ref().doc.rig.bindings.iter().any(|b| b.params.contains(&pid) && b.forms.iter().any(|f| matches!(f, crate::rig::Form::Warp { offsets } if offsets.iter().any(|o| o[0].abs() > 0.5 || o[1].abs() > 0.5))));
-    assert!(moved, "the point followed the pointer");
+    // no slider was picked: the changer got one of its own, and the shape that was dragged is saved on it
+    let rig = h.state().draw_mut_ref().doc.rig.clone();
+    let warp = h.state_mut().test_rig().sel_changer.unwrap();
+    let b = rig.bindings.iter().find(|b| b.changer == warp).expect("the changer has a slider now");
+    let moved = b.forms.iter().any(|f| matches!(f, crate::rig::Form::Warp { offsets } if offsets.iter().any(|o| o[0].abs() > 0.5 || o[1].abs() > 0.5)));
+    assert!(moved, "the point followed the pointer: {:?}", b.forms);
     save(&mut h, "rig_drag_point");
+}
+
+#[test]
+fn dragging_the_picture_turns_a_turning_changer_through_a_slider_of_its_own() {
+    use egui_kittest::kittest::Queryable;
+    let _gpu = lock_gpu();
+    let doc = crate::vrm::tests_build::character();
+    let mut h = Harness::builder().with_size([1440.0, 1000.0]).wgpu().build_eframe(|cc| SeviathApp::new(cc));
+    h.run_steps(4);
+    h.state_mut().draw_mut().replace_document(doc);
+    h.state_mut().test_run_action_now("tab.3");
+    h.run_steps(5);
+    let layer = h.state().draw_mut_ref().doc.rig.meshes[0].layer;
+    h.state_mut().test_rig().selected = vec![layer];
+    h.run_steps(2);
+    rig_tool(&mut h, "new:Rotation");
+    h.get_by_label("Make the Rotation changer").click();
+    h.run_steps(3);
+    h.state_mut().test_rig().test_close_tool();
+    h.state_mut().test_rig().sel_param = None;
+    h.run_steps(4);
+    let before = h.state().draw_mut_ref().doc.rig.params.len();
+    // drag round the middle of the picture
+    let c = pos2(720.0, 520.0);
+    stroke(&mut h, &[c + vec2(120.0, 0.0), c + vec2(110.0, 50.0), c + vec2(80.0, 90.0), c + vec2(40.0, 115.0)]);
+    h.run_steps(2);
+    let rig = h.state().draw_mut_ref().doc.rig.clone();
+    assert_eq!(rig.params.len(), before + 1, "a slider was made for the changer");
+    let pid = rig.params.last().unwrap().id;
+    let values = h.state_mut().test_rig().values.clone();
+    let v = rig.value(&values, pid);
+    assert!(v.abs() > 3.0, "the slider turned with the pointer: {v}");
 }

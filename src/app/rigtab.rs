@@ -252,6 +252,8 @@ pub struct RigState {
     pub show_stress: bool,
     /// The animation of the rig is on: the Rig tab shows the timeline, the tracks and the clips.
     pub animate: bool,
+    /// A turning changer being turned by dragging the picture: its slider, the value it had, the angle of the pointer where it started and the degrees one step of the slider turns.
+    pub(super) rot_drag: Option<(Id, f32, f32, f32)>,
     /// The strip of tools along the top of the Rig tab is folded away.
     pub hide_tools: bool,
     /// The whole page of the physics is shown in place of the rig.
@@ -3690,18 +3692,29 @@ impl SeviathApp {
             }
         }
         if grab.blocked {
-            let own = self.rigs.sel_changer.and_then(|c| rig.bindings.iter().find(|b| b.changer == c).and_then(|b| b.params.first().copied()));
-            match own {
-                Some(pid) => {
-                    self.rigs.sel_param = Some(pid);
-                    let name = rig.param(pid).map(|p| p.name.clone()).unwrap_or_default();
-                    self.rigs.message = Some(format!("The slider {name} is picked for this changer: drag the point again."));
+            if let Some(cid) = self.rigs.sel_changer {
+                let own = rig.bindings.iter().find(|b| b.changer == cid).and_then(|b| b.params.first().copied());
+                let name = rig.changer(cid).map(|c| c.name.clone()).unwrap_or_default();
+                let pid = match own {
+                    Some(p) => p,
+                    None => {
+                        let mut made = 0;
+                        self.rig_edit("Slider for a changer", now, |r| made = r.add_param(&name, 0.0, 1.0, 0.0));
+                        made
+                    }
+                };
+                // the shape is made at the far end of the slider (the end the slider has not been at yet)
+                let hi = self.draw.doc.rig.param(pid).map(|p| (p.min, p.max, p.default)).unwrap_or((0.0, 1.0, 0.0));
+                if (rig.value(&self.rigs.values, pid) - hi.2).abs() < 1e-4 {
+                    self.rigs.values.set(pid, hi.1);
                 }
-                None => self.rigs.message = Some("Pick a slider on the left first: the shape is saved at the value of the slider.".into()),
+                self.rigs.sel_param = Some(pid);
+                self.begin_shape_edit(cid, true);
+                self.rigs.message = Some(format!("The slider {name} is made for this changer: the shape you drag is saved at its end."));
             }
         }
         if let Some(m) = self.rigs.message.clone() {
-            egui::Area::new(egui::Id::new("rig_msg")).fixed_pos(rect.min + vec2(10.0, 34.0)).order(egui::Order::Middle).show(ui.ctx(), |ui| {
+            egui::Area::new(egui::Id::new("rig_msg")).fixed_pos(rect.left_bottom() + vec2(10.0, -40.0)).order(egui::Order::Middle).show(ui.ctx(), |ui| {
                 egui::Frame::new().fill(PANEL.gamma_multiply(0.92)).corner_radius(6).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
                     ui.label(RichText::new(m).size(12.0).color(GOLD));
                 });
@@ -3753,6 +3766,50 @@ impl SeviathApp {
                     }
                 }
             }
+        }
+        // a turning changer turns when the picture is dragged: its slider follows the pointer (a slider is made when there is none)
+        if self.rigs.mode == Mode::Look && self.rigs.warp_edit.is_none() && drag_handle.is_none() && !grab.blocked && self.rigs.gdrag.is_none() {
+            let turning = self.rigs.sel_changer.and_then(|id| rig.changer(id)).and_then(|c| if let Kind::Rotation { pivot } = &c.kind { Some((c.id, c.parent, *pivot, c.name.clone())) } else { None });
+            if let Some((cid, parent, pivot, name)) = turning {
+                let at = to_screen(rig.deform_point(&pose, parent, pivot));
+                let angle = |pos: Pos2| (pos.y - at.y).atan2(pos.x - at.x);
+                if resp.drag_started_by(egui::PointerButton::Primary) && self.rigs.rot_drag.is_none() {
+                    let on_page = ui.input(|i| i.pointer.press_origin()).is_some_and(|q| page.contains(q));
+                    if let (true, Some(pos)) = (on_page, resp.interact_pointer_pos()) {
+                        let own = rig.bindings.iter().find(|b| b.changer == cid && b.params.len() == 1).map(|b| b.params[0]);
+                        let pid = match own {
+                            Some(p) => p,
+                            None => {
+                                let mut made = 0;
+                                self.rig_edit("Slider for a turning changer", now, |r| {
+                                    made = r.add_param(&format!("{name} turn"), -45.0, 45.0, 0.0);
+                                    r.bind_rotation(cid, made, 45.0);
+                                });
+                                self.rigs.message = Some(format!("The slider {name} turn is made for this changer."));
+                                made
+                            }
+                        };
+                        let slope = self.draw.doc.rig.rotation_slope(cid, pid).unwrap_or(1.0);
+                        self.rigs.rot_drag = Some((pid, rig.value(&self.rigs.values, pid), angle(pos), slope));
+                    }
+                }
+                if let (Some((pid, v0, a0, slope)), true) = (self.rigs.rot_drag, resp.dragged_by(egui::PointerButton::Primary)) {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        let mut d = (angle(pos) - a0).to_degrees();
+                        while d > 180.0 {
+                            d -= 360.0;
+                        }
+                        while d < -180.0 {
+                            d += 360.0;
+                        }
+                        let (lo, hi) = self.draw.doc.rig.param(pid).map(|p| (p.min, p.max)).unwrap_or((-1.0, 1.0));
+                        self.rigs.values.set(pid, (v0 + d / slope).clamp(lo, hi));
+                    }
+                }
+            }
+        }
+        if resp.drag_stopped() {
+            self.rigs.rot_drag = None;
         }
         // draw a path on the picture
         if self.rigs.mode == Mode::DrawPath {
@@ -4169,6 +4226,9 @@ struct Grab {
 fn grab_handle(ui: &Ui, hr: Rect, id: egui::Id, idx: usize, sc: f32, can_edit: bool, grab: &mut Grab) {
     let r = ui.interact(hr, id, Sense::drag());
     grab.spots.push(hr.center());
+    if !can_edit {
+        r.clone().on_hover_text("This point cannot move yet: pick a slider on the left first. The shape is saved at the value of the slider.");
+    }
     if r.hovered() || r.dragged() {
         ui.ctx().set_cursor_icon(if r.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
     }

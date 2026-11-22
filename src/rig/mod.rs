@@ -1445,6 +1445,16 @@ impl Rig {
         }
     }
 
+    /// How many degrees one step of a slider turns a Rotation changer (from its first and last saved turn), None when it does not turn with that slider.
+    pub fn rotation_slope(&self, changer: Id, param: Id) -> Option<f32> {
+        let b = self.bindings.iter().find(|b| b.changer == changer && b.params == [param])?;
+        let keys = b.keys.first()?;
+        let deg = |f: &Form| if let Form::Rot { deg } = f { Some(*deg) } else { None };
+        let (k0, k1) = (*keys.first()?, *keys.last()?);
+        let (d0, d1) = (deg(b.forms.first()?)?, deg(b.forms.last()?)?);
+        ((k1 - k0).abs() > 1e-6 && (d1 - d0).abs() > 1e-6).then(|| (d1 - d0) / (k1 - k0))
+    }
+
     /// Make `members` ride on `driver`. Returns false when there is nothing to do (the driver is the only member, or a mesh is missing).
     pub fn make_group(&mut self, name: &str, driver: Id, members: &[Id], strength: f32) -> bool {
         let members: Vec<Id> = members.iter().copied().filter(|m| *m != driver && self.meshes.iter().any(|x| x.id == *m)).collect();
